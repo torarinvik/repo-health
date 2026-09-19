@@ -1,0 +1,284 @@
+# rh_ingest_conformance.elisa — product-path ingestion conformance replay.
+#
+# This adapter drives the real filesystem event/index, cursor, and lease
+# primitives with a bounded page sequence. A page may persist records before a
+# simulated crash (commit=false); retries then deduplicate records while the
+# cursor remains at the last durable page. Only complete or successful-empty
+# pages advance the cursor. Failed/partial pages preserve prior evidence.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_store.elisa"
+
+const RH_IC_COMPLETE: u8 = 0
+const RH_IC_EMPTY: u8 = 1
+const RH_IC_PARTIAL: u8 = 2
+const RH_IC_FAILED: u8 = 3
+
+module IngestConformance:
+    private:
+        def rh_ic_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_ic_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, lit)
+
+        def rh_ic_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = IngestConformance::rh_ic_get(nodes, texts, obj, key)
+            return false if idx < 0
+            rh_json_str_span(nodes, idx, start_out, end_out)
+
+        def rh_ic_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = IngestConformance::rh_ic_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_ic_bool(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = IngestConformance::rh_ic_get(nodes, texts, obj, key)
+            ok_out[0] <- 0
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_BOOL
+            ok_out[0] <- 1
+            rh_json_is_true(nodes, raw, idx)
+
+        def rh_ic_status(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_IC_COMPLETE if IngestConformance::rh_ic_eq(texts, s, e, "complete")
+            return RH_IC_EMPTY if IngestConformance::rh_ic_eq(texts, s, e, "empty")
+            return RH_IC_PARTIAL if IngestConformance::rh_ic_eq(texts, s, e, "partial")
+            return RH_IC_FAILED if IngestConformance::rh_ic_eq(texts, s, e, "failed")
+            -1
+
+        def rh_ic_status_label(status: u8) -> u8&:
+            return "complete" if status == RH_IC_COMPLETE
+            return "empty" if status == RH_IC_EMPTY
+            return "partial" if status == RH_IC_PARTIAL
+            "failed"
+
+        def rh_ic_component(texts: darray[u8]&, s: i64, e: i64) -> bool:
+            return false if s < 0 or e <= s
+            while i < e - s |i: i64 = 0, texts, s|:
+                c: u8 = texts[(s + i).usize()]
+                return false if not ((c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 45 or c == 46 or c == 95)
+                i <- i + 1
+            true
+
+        def rh_ic_copy(texts: darray[u8]&, s: i64, e: i64, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while i < e - s |i: i64 = 0, texts, s, out|:
+                out.push(texts[(s + i).usize()])
+                i <- i + 1
+            out.push(0)
+
+        def rh_ic_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, s.usize(), e.usize())
+            out.push(34)
+
+        def rh_ic_path(root: cstr, texts: darray[u8]&, source_s: i64, source_e: i64, cap_s: i64, cap_e: i64, suffix: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            out <- []
+            rh_push_cstr(out, root)
+            rh_push_text(out, "/sources/")
+            while i < source_e - source_s |i: i64 = 0, texts, source_s, out|:
+                out.push(texts[(source_s + i).usize()])
+                i <- i + 1
+            rh_push_text(out, "/events/")
+            while i < cap_e - cap_s |i: i64 = 0, texts, cap_s, out|:
+                out.push(texts[(cap_s + i).usize()])
+                i <- i + 1
+            rh_push_text(out, suffix)
+            out.push(0)
+            true
+
+    public:
+        def rh_ingest_conformance_report(raw: darray[u8]&, root: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root_idx: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root_idx < 0 or nodes[root_idx.usize()].kind != RH_JSON_OBJ
+            ss: mutable i64 = 0
+            se: mutable i64 = 0
+            cs: mutable i64 = 0
+            ce: mutable i64 = 0
+            os: mutable i64 = 0
+            oe: mutable i64 = 0
+            return -1 if not IngestConformance::rh_ic_str(nodes, texts, root_idx, "schema", &ss, &se) or not IngestConformance::rh_ic_eq(texts, ss, se, "rh-ingest-input/1") or not IngestConformance::rh_ic_str(nodes, texts, root_idx, "source", &ss, &se) or not IngestConformance::rh_ic_str(nodes, texts, root_idx, "capability", &cs, &ce) or not IngestConformance::rh_ic_str(nodes, texts, root_idx, "owner", &os, &oe)
+            return -1 if not IngestConformance::rh_ic_component(texts, ss, se) or not IngestConformance::rh_ic_component(texts, cs, ce) or not IngestConformance::rh_ic_component(texts, os, oe)
+            now_ok: mutable i64 = 0
+            now: i64 = IngestConformance::rh_ic_int(nodes, raw, texts, root_idx, "lease_now", &now_ok)
+            ttl_ok: mutable i64 = 0
+            ttl: i64 = IngestConformance::rh_ic_int(nodes, raw, texts, root_idx, "lease_ttl", &ttl_ok)
+            return -1 if now_ok == 0 or ttl_ok == 0 or now < 0 or ttl <= 0
+            pages_idx: i64 = IngestConformance::rh_ic_get(nodes, texts, root_idx, "pages")
+            return -1 if pages_idx < 0 or nodes[pages_idx.usize()].kind != RH_JSON_ARR
+            owner: mutable darray[u8] = []
+            IngestConformance::rh_ic_copy(texts, os, oe, owner)
+            ownerp: u8& = (&owner[0]).cast[u8&] can Unsafe.PointerCast
+            leases: mutable darray[u8] = []
+            rh_push_cstr(leases, root)
+            rh_push_text(leases, "/leases")
+            leases.push(0)
+            return -1 if rh_ensure_dir((&leases[0]).cast[cstr] can Unsafe.PointerCast) != 0
+            lease_path: mutable darray[u8] = []
+            lease_log: mutable darray[u8] = []
+            rh_push_cstr(lease_path, root)
+            rh_push_text(lease_path, "/leases/ingest.lease")
+            lease_path.push(0)
+            rh_push_cstr(lease_log, root)
+            rh_push_text(lease_log, "/leases/ingest.log")
+            lease_log.push(0)
+            leasep: cstr = (&lease_path[0]).cast[cstr] can Unsafe.PointerCast
+            logp: cstr = (&lease_log[0]).cast[cstr] can Unsafe.PointerCast
+            token: i64 = rh_lease_acquire(leasep, logp, ownerp, now, ttl)
+            return -1 if token <= 0
+            source_dir: mutable darray[u8] = []
+            rh_push_cstr(source_dir, root)
+            rh_push_text(source_dir, "/sources/")
+            while i < se - ss |i: i64 = 0, texts, ss, source_dir|:
+                source_dir.push(texts[(ss + i).usize()])
+                i <- i + 1
+            source_dir.push(0)
+            return -1 if rh_ensure_dir((&source_dir[0]).cast[cstr] can Unsafe.PointerCast) != 0
+            events_dir: mutable darray[u8] = []
+            rh_push_cstr(events_dir, (&source_dir[0]).cast[cstr] can Unsafe.PointerCast)
+            rh_push_text(events_dir, "/events")
+            events_dir.push(0)
+            return -1 if rh_ensure_dir((&events_dir[0]).cast[cstr] can Unsafe.PointerCast) != 0
+            cursors_dir: mutable darray[u8] = []
+            rh_push_cstr(cursors_dir, (&source_dir[0]).cast[cstr] can Unsafe.PointerCast)
+            rh_push_text(cursors_dir, "/cursors")
+            cursors_dir.push(0)
+            return -1 if rh_ensure_dir((&cursors_dir[0]).cast[cstr] can Unsafe.PointerCast) != 0
+            events_path: mutable darray[u8] = []
+            index_path: mutable darray[u8] = []
+            cursor_path: mutable darray[u8] = []
+            _ = IngestConformance::rh_ic_path(root, texts, ss, se, cs, ce, ".jsonl", events_path)
+            _ = IngestConformance::rh_ic_path(root, texts, ss, se, cs, ce, ".index", index_path)
+            rh_push_cstr(cursor_path, (&cursors_dir[0]).cast[cstr] can Unsafe.PointerCast)
+            rh_push_text(cursor_path, "/")
+            while i < ce - cs |i: i64 = 0, texts, cs, cursor_path|:
+                cursor_path.push(texts[(cs + i).usize()])
+                i <- i + 1
+            rh_push_text(cursor_path, ".cursor")
+            cursor_path.push(0)
+            eventp: cstr = (&events_path[0]).cast[cstr] can Unsafe.PointerCast
+            indexp: cstr = (&index_path[0]).cast[cstr] can Unsafe.PointerCast
+            cursorp: cstr = (&cursor_path[0]).cast[cstr] can Unsafe.PointerCast
+            cursor_page: mutable i64 = 0
+            cursor_count: mutable i64 = 0
+            _ = rh_cursor_read(cursorp, &cursor_page, &cursor_count)
+            appended: mutable i64 = 0
+            duplicates: mutable i64 = 0
+            committed_pages: mutable i64 = 0
+            empty_pages: mutable i64 = 0
+            failed_pages: mutable i64 = 0
+            partial_pages: mutable i64 = 0
+            crash_replays: mutable i64 = 0
+            stale_rejected: mutable i64 = 0
+            rh_push_text(out, "{\"schema\":\"rh-ingest-result/1\",\"source\":")
+            IngestConformance::rh_ic_emit_span(out, texts, ss, se)
+            rh_push_text(out, ",\"capability\":")
+            IngestConformance::rh_ic_emit_span(out, texts, cs, ce)
+            rh_push_text(out, ",\"pages\":[")
+            while page >= 0 |page: i64 = nodes[pages_idx.usize()].first_child, nodes, texts, raw, out, token, leasep, logp, ownerp, eventp, indexp, cursorp, cursor_page, cursor_count, appended, duplicates, committed_pages, empty_pages, failed_pages, partial_pages, crash_replays, stale_rejected|:
+                return -1 if nodes[page.usize()].kind != RH_JSON_OBJ
+                page_ok: mutable i64 = 0
+                page_no: i64 = IngestConformance::rh_ic_int(nodes, raw, texts, page, "page", &page_ok)
+                return -1 if page_ok == 0 or page_no < 0
+                pss: mutable i64 = 0
+                pse: mutable i64 = 0
+                return -1 if not IngestConformance::rh_ic_str(nodes, texts, page, "status", &pss, &pse)
+                status: i64 = IngestConformance::rh_ic_status(texts, pss, pse)
+                return -1 if status < 0
+                commit_ok: mutable i64 = 0
+                commit: bool = IngestConformance::rh_ic_bool(nodes, raw, texts, page, "commit", &commit_ok)
+                return -1 if commit_ok == 0
+                stale_token: mutable i64 = token
+                supplied_idx: i64 = IngestConformance::rh_ic_get(nodes, texts, page, "token")
+                if supplied_idx >= 0:
+                    tok_ok: mutable i64 = 0
+                    stale_token <- rh_json_int(nodes, raw, supplied_idx, &tok_ok)
+                    return -1 if tok_ok == 0
+                events_idx: i64 = IngestConformance::rh_ic_get(nodes, texts, page, "events")
+                return -1 if events_idx < 0 or nodes[events_idx.usize()].kind != RH_JSON_ARR
+                page_appended: mutable i64 = 0
+                page_duplicates: mutable i64 = 0
+                if stale_token != token:
+                    stale_rejected <- stale_rejected + 1
+                elif status == RH_IC_FAILED:
+                    failed_pages <- failed_pages + 1
+                elif status == RH_IC_PARTIAL:
+                    partial_pages <- partial_pages + 1
+                else:
+                    while event >= 0 |event: i64 = nodes[events_idx.usize()].first_child, nodes, texts, raw, eventp, indexp, page_appended, page_duplicates|:
+                        return -1 if nodes[event.usize()].kind != RH_JSON_OBJ
+                        es: mutable i64 = 0
+                        ee: mutable i64 = 0
+                        ls: mutable i64 = 0
+                        le: mutable i64 = 0
+                        return -1 if not IngestConformance::rh_ic_str(nodes, texts, event, "id", &es, &ee) or not IngestConformance::rh_ic_str(nodes, texts, event, "line", &ls, &le) or es == ee or ls == le
+                        line: mutable darray[u8] = []
+                        while k < le - ls |k: i64 = 0, texts, ls, le, line|:
+                            line.push(texts[(ls + k).usize()])
+                            k <- k + 1
+                        chunk_nodes: mutable darray[RhJsonNode] = []
+                        chunk_texts: mutable darray[u8] = []
+                        return -1 if rh_json_parse(line, chunk_nodes, chunk_texts) < 0
+                        id: mutable darray[u8] = []
+                        IngestConformance::rh_ic_copy(texts, es, ee, id)
+                        idp: u8& = (&id[0]).cast[u8&] can Unsafe.PointerCast
+                        result: i64 = rh_store_event(eventp, indexp, idp, line)
+                        return -1 if result < 0
+                        page_appended <- page_appended + 1 if result == 1
+                        page_duplicates <- page_duplicates + 1 if result == 0
+                        event <- nodes[event.usize()].next_sibling
+                    if status == RH_IC_EMPTY:
+                        return -1 if page_appended != 0 or page_duplicates != 0
+                        empty_pages <- empty_pages + 1
+                    if commit:
+                        stored_count: i64 = rh_count_file_lines(eventp)
+                        return -1 if stored_count < 0 or not rh_cursor_commit(cursorp, page_no, stored_count)
+                        cursor_page <- page_no
+                        cursor_count <- stored_count
+                        committed_pages <- committed_pages + 1
+                    else:
+                        crash_replays <- crash_replays + 1
+                    appended <- appended + page_appended
+                    duplicates <- duplicates + page_duplicates
+                if page != nodes[pages_idx.usize()].first_child:
+                    out.push(44)
+                rh_push_text(out, "{\"page\":")
+                rh_push_decimal_i64(out, page_no)
+                rh_push_text(out, ",\"status\":\"")
+                rh_push_text(out, IngestConformance::rh_ic_status_label(status.u8()))
+                rh_push_text(out, "\",\"appended\":")
+                rh_push_decimal_i64(out, page_appended)
+                rh_push_text(out, ",\"duplicates\":")
+                rh_push_decimal_i64(out, page_duplicates)
+                rh_push_text(out, ",\"cursor_advanced\":")
+                rh_push_text(out, "true" if commit and stale_token == token and status == RH_IC_COMPLETE or commit and stale_token == token and status == RH_IC_EMPTY else "false")
+                rh_push_text(out, "}")
+                page <- nodes[page.usize()].next_sibling
+            return -1 if not rh_lease_release(leasep, logp, token, ownerp, now + 1, 3)
+            total_events: i64 = rh_count_file_lines(eventp)
+            return -1 if total_events < 0
+            rh_push_text(out, "],\"cursor\":{\"page\":")
+            rh_push_decimal_i64(out, cursor_page)
+            rh_push_text(out, ",\"event_count\":")
+            rh_push_decimal_i64(out, cursor_count)
+            rh_push_text(out, "},\"event_store_count\":")
+            rh_push_decimal_i64(out, total_events)
+            rh_push_text(out, ",\"conformance\":{\"appended\":")
+            rh_push_decimal_i64(out, appended)
+            rh_push_text(out, ",\"duplicates_absorbed\":")
+            rh_push_decimal_i64(out, duplicates)
+            rh_push_text(out, ",\"committed_pages\":")
+            rh_push_decimal_i64(out, committed_pages)
+            rh_push_text(out, ",\"successful_empty_pages\":")
+            rh_push_decimal_i64(out, empty_pages)
+            rh_push_text(out, ",\"failed_pages\":")
+            rh_push_decimal_i64(out, failed_pages)
+            rh_push_text(out, ",\"partial_pages\":")
+            rh_push_decimal_i64(out, partial_pages)
+            rh_push_text(out, ",\"crash_before_cursor_replays\":")
+            rh_push_decimal_i64(out, crash_replays)
+            rh_push_text(out, ",\"stale_token_rejected\":")
+            rh_push_decimal_i64(out, stale_rejected)
+            rh_push_text(out, "},\"note\":\"events persist before cursor advancement; duplicate retries converge through the immutable id index; only complete or successful-empty pages advance the cursor; failed and partial acquisition preserve prior evidence; lease fencing rejects stale publication\"}")
+            0
