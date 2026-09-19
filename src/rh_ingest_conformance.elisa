@@ -52,6 +52,13 @@ module IngestConformance:
             return "partial" if status == RH_IC_PARTIAL
             "failed"
 
+        def rh_ic_failure_kind(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return 0 if IngestConformance::rh_ic_eq(texts, s, e, "rate_limit")
+            return 1 if IngestConformance::rh_ic_eq(texts, s, e, "authorization")
+            return 2 if IngestConformance::rh_ic_eq(texts, s, e, "unsupported")
+            return 3 if IngestConformance::rh_ic_eq(texts, s, e, "transient")
+            -1
+
         def rh_ic_component(texts: darray[u8]&, s: i64, e: i64) -> bool:
             return false if s < 0 or e <= s
             while i < e - s |i: i64 = 0, texts, s|:
@@ -178,12 +185,16 @@ module IngestConformance:
             successful_pages: mutable i64 = 0
             backdated_events: mutable i64 = 0
             updates_after_start: mutable i64 = 0
+            rate_limit_failures: mutable i64 = 0
+            authorization_failures: mutable i64 = 0
+            unsupported_failures: mutable i64 = 0
+            transient_failures: mutable i64 = 0
             rh_push_text(out, "{\"schema\":\"rh-ingest-result/1\",\"source\":")
             IngestConformance::rh_ic_emit_span(out, texts, ss, se)
             rh_push_text(out, ",\"capability\":")
             IngestConformance::rh_ic_emit_span(out, texts, cs, ce)
             rh_push_text(out, ",\"pages\":[")
-            while page >= 0 |page: i64 = nodes[pages_idx.usize()].first_child, nodes, texts, raw, out, token, leasep, logp, ownerp, eventp, indexp, cursorp, cursor_page, cursor_count, appended, duplicates, committed_pages, empty_pages, failed_pages, partial_pages, crash_replays, stale_rejected, attempted_pages, successful_pages, backdated_events, updates_after_start|:
+            while page >= 0 |page: i64 = nodes[pages_idx.usize()].first_child, nodes, texts, raw, out, token, leasep, logp, ownerp, eventp, indexp, cursorp, cursor_page, cursor_count, appended, duplicates, committed_pages, empty_pages, failed_pages, partial_pages, crash_replays, stale_rejected, attempted_pages, successful_pages, backdated_events, updates_after_start, rate_limit_failures, authorization_failures, unsupported_failures, transient_failures|:
                 attempted_pages <- attempted_pages + 1
                 return -1 if nodes[page.usize()].kind != RH_JSON_OBJ
                 page_ok: mutable i64 = 0
@@ -194,6 +205,19 @@ module IngestConformance:
                 return -1 if not IngestConformance::rh_ic_str(nodes, texts, page, "status", &pss, &pse)
                 status: i64 = IngestConformance::rh_ic_status(texts, pss, pse)
                 return -1 if status < 0
+                failure_s: mutable i64 = -1
+                failure_e: mutable i64 = -1
+                has_failure: bool = IngestConformance::rh_ic_str(nodes, texts, page, "failure_kind", &failure_s, &failure_e)
+                failure_kind: i64 = IngestConformance::rh_ic_failure_kind(texts, failure_s, failure_e) if has_failure else -1
+                return -1 if has_failure and (failure_kind < 0 or status != RH_IC_FAILED)
+                if failure_kind == 0:
+                    rate_limit_failures <- rate_limit_failures + 1
+                elif failure_kind == 1:
+                    authorization_failures <- authorization_failures + 1
+                elif failure_kind == 2:
+                    unsupported_failures <- unsupported_failures + 1
+                elif failure_kind == 3:
+                    transient_failures <- transient_failures + 1
                 commit_ok: mutable i64 = 0
                 commit: bool = IngestConformance::rh_ic_bool(nodes, raw, texts, page, "commit", &commit_ok)
                 return -1 if commit_ok == 0
@@ -275,7 +299,12 @@ module IngestConformance:
                 rh_push_decimal_i64(out, page_no)
                 rh_push_text(out, ",\"status\":\"")
                 rh_push_text(out, IngestConformance::rh_ic_status_label(status.u8()))
-                rh_push_text(out, "\",\"appended\":")
+                rh_push_text(out, "\",\"failure_kind\":")
+                if has_failure:
+                    IngestConformance::rh_ic_emit_span(out, texts, failure_s, failure_e)
+                else:
+                    rh_push_text(out, "null")
+                rh_push_text(out, ",\"appended\":")
                 rh_push_decimal_i64(out, page_appended)
                 rh_push_text(out, ",\"duplicates\":")
                 rh_push_decimal_i64(out, page_duplicates)
@@ -320,5 +349,14 @@ module IngestConformance:
             rh_push_decimal_i64(out, crash_replays)
             rh_push_text(out, ",\"stale_token_rejected\":")
             rh_push_decimal_i64(out, stale_rejected)
+            rh_push_text(out, ",\"failure_kinds\":{\"rate_limit\":")
+            rh_push_decimal_i64(out, rate_limit_failures)
+            rh_push_text(out, ",\"authorization\":")
+            rh_push_decimal_i64(out, authorization_failures)
+            rh_push_text(out, ",\"unsupported\":")
+            rh_push_decimal_i64(out, unsupported_failures)
+            rh_push_text(out, ",\"transient\":")
+            rh_push_decimal_i64(out, transient_failures)
+            rh_push_text(out, "}")
             rh_push_text(out, "},\"note\":\"collection start watermark is pinned before acquisition; events persist before cursor advancement; duplicate retries converge through the immutable id index; late or backdated events require reconciliation; only complete or successful-empty pages advance the cursor; failed and partial acquisition preserve prior evidence; lease fencing rejects stale publication\"}")
             0
