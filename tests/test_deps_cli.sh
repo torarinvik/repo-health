@@ -62,6 +62,14 @@ assert m["schema"] == "rh-deps-metrics/1"
 met = m["metrics"][0]
 assert met["key"] == "dependencies.unsupported_range_count" and met["version"] == "1.0.0"
 assert met["status"] == "observed" and met["value"] == 4, met
+metrics = {item["key"]: item for item in m["metrics"]}
+assert {key: metrics[key]["value"] for key in metrics} == {
+    "dependencies.unsupported_range_count": 4,
+    "dependencies.ecosystem_count": 2,
+    "dependencies.declared_requirement_count": 15,
+    "dependencies.resolved_edge_count": 10,
+    "dependencies.unresolved_requirement_count": 3,
+}, metrics
 by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
 assert by["cargo"]["unsupported_range_count"] == 0, by["cargo"]
 assert by["npm"]["unsupported_range_count"] == 4, by["npm"]
@@ -120,6 +128,11 @@ extras = [u for u in pg["unresolved"] if u["name"] == "urllib3"]
 assert extras and extras[0]["requirement"] == "==2.0.7", extras
 by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
 assert set(by) == {"pypi"}, by
+metrics = {item["key"]: item for item in m["metrics"]}
+assert metrics["dependencies.ecosystem_count"]["value"] == 1, metrics
+assert metrics["dependencies.declared_requirement_count"]["value"] == 7, metrics
+assert metrics["dependencies.resolved_edge_count"]["value"] == 3, metrics
+assert metrics["dependencies.unresolved_requirement_count"]["value"] == 5, metrics
 assert by["pypi"]["declared_requirements"] == 7, by["pypi"]
 assert by["pypi"]["resolved_edges"] == 3, by["pypi"]
 assert by["pypi"]["unresolved_requirements"] == 5, by["pypi"]
