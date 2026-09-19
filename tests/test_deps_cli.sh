@@ -69,12 +69,19 @@ assert {key: metrics[key]["value"] for key in metrics} == {
     "dependencies.declared_requirement_count": 15,
     "dependencies.resolved_edge_count": 10,
     "dependencies.unresolved_requirement_count": 3,
+    "security.known_unique_advisories": 2,
+    "security.affected_resolved_nodes": 2,
+    "security.withdrawn_advisory_count": 2,
 }, metrics
 by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
 assert by["cargo"]["unsupported_range_count"] == 0, by["cargo"]
 assert by["npm"]["unsupported_range_count"] == 4, by["npm"]
 assert by["cargo"]["declared_requirements"] == 5, by["cargo"]
 assert by["npm"]["declared_requirements"] == 10, by["npm"]
+assert by["cargo"]["known_unique_advisories"] == 1, by["cargo"]
+assert by["npm"]["known_unique_advisories"] == 1, by["npm"]
+assert by["cargo"]["affected_resolved_nodes"] == 1, by["cargo"]
+assert by["npm"]["affected_resolved_nodes"] == 1, by["npm"]
 print("[deps] counts + unsupported-range classification OK")
 PY
 
@@ -84,6 +91,9 @@ python3 - "$T/noosv" <<'PY'
 import json, sys
 cg = json.load(open(sys.argv[1] + "/deps-cargo-graph.json"))
 assert cg["advisories"] == [], cg["advisories"]
+m = json.load(open(sys.argv[1] + "/deps-metrics.json"))
+for metric in m["metrics"][-3:]:
+    assert metric["status"] == "unavailable" and "value" not in metric, metric
 print("[deps] no --osv -> no advisories fabricated")
 PY
 
@@ -138,6 +148,10 @@ assert by["pypi"]["resolved_edges"] == 3, by["pypi"]
 assert by["pypi"]["unresolved_requirements"] == 5, by["pypi"]
 assert by["pypi"]["unsupported_range_count"] == 1, by["pypi"]
 assert m["metrics"][0]["value"] == 1, m["metrics"][0]
+metrics = {item["key"]: item for item in m["metrics"]}
+assert metrics["security.known_unique_advisories"]["value"] == 0, metrics
+assert metrics["security.affected_resolved_nodes"]["value"] == 0, metrics
+assert metrics["security.withdrawn_advisory_count"]["value"] == 1, metrics
 print("[deps] pypi graph + per-ecosystem metrics OK")
 PY
 

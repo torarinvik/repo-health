@@ -1478,6 +1478,21 @@ module Package:
             fix_e: mutable i64
             alias_count: mutable i64
 
+        # Count distinct resolved nodes represented by matched advisory groups.
+        # A shared advisory can match more than one node; the public security
+        # metric keeps that node population separate from advisory cardinality.
+        def rh_advisory_node_count(findings: mutable darray[RhAdvisory]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            seen: mutable darray[i64] = []
+            while i < findings.count |i: i64 = 0, findings, seen| -> seen.count.i64():
+                node: mutable i64 = findings[i.usize()].node
+                already: bool =
+                    while j < seen.count |already: bool = false, j: i64 = 0, seen, node| -> already:
+                        already <- true if seen[j.usize()] == node
+                        j <- j + 1
+                if not already:
+                    seen.push(node)
+                i <- i + 1
+
         # Triples (kind, vstart, vend) per range event: 0 introduced, 1 fixed,
         # 2 last_affected. Returns the triple count, -1 malformed, 0 no events.
         def rh_osv_collect_events(jnodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, range_obj: i64, out: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -2261,7 +2276,7 @@ module Package:
         # `dependencies.unsupported_range_count`, with per-ecosystem components so
         # the denominator-free count can be audited. It never claims a dependency
         # is safe or that the graph is complete (R009/F022/R030).
-        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, advisories: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
             total_declared: i64 =
                 while i < eco_codes.count.i64() |total_declared: i64 = 0, i: i64 = 0| -> total_declared:
                     total_declared <- total_declared + declared[i.usize()]
@@ -2277,6 +2292,20 @@ module Package:
             total_unsupported: i64 =
                 while i < eco_codes.count.i64() |total_unsupported: i64 = 0, i: i64 = 0| -> total_unsupported:
                     total_unsupported <- total_unsupported + unsupported[i.usize()]
+                    i <- i + 1
+            security_observed: bool = advisories.count == eco_codes.count and eco_codes.count > 0 and advisories[0] >= 0
+            total_advisories: mutable i64 = 0
+            total_affected_nodes: mutable i64 = 0
+            total_withdrawn: mutable i64 = 0
+            if security_observed:
+                total_advisories <- while i < eco_codes.count.i64() |total_advisories: i64 = 0, i: i64 = 0, advisories| -> total_advisories:
+                    total_advisories <- total_advisories + advisories[i.usize()]
+                    i <- i + 1
+                total_affected_nodes <- while i < eco_codes.count.i64() |total_affected_nodes: i64 = 0, i: i64 = 0, affected_nodes| -> total_affected_nodes:
+                    total_affected_nodes <- total_affected_nodes + affected_nodes[i.usize()]
+                    i <- i + 1
+                total_withdrawn <- while i < eco_codes.count.i64() |total_withdrawn: i64 = 0, i: i64 = 0, withdrawn| -> total_withdrawn:
+                    total_withdrawn <- total_withdrawn + withdrawn[i.usize()]
                     i <- i + 1
             Base::rh_push_text(out, "{\"schema\":\"rh-deps-metrics/1\",\"metrics\":[{\"key\":\"dependencies.unsupported_range_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, total_unsupported)
@@ -2300,8 +2329,29 @@ module Package:
             Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"dependencies.unresolved_requirement_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, total_unresolved)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]}],\"by_ecosystem\":[")
-            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, out|:
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"security.known_unique_advisories\",\"version\":\"1.0.0\",\"status\":\"")
+            if security_observed:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, total_advisories)
+            else:
+                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"security.affected_resolved_nodes\",\"version\":\"1.0.0\",\"status\":\"")
+            if security_observed:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, total_affected_nodes)
+            else:
+                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"security.withdrawn_advisory_count\",\"version\":\"1.0.0\",\"status\":\"")
+            if security_observed:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, total_withdrawn)
+            else:
+                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]}],\"by_ecosystem\":[")
+            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, advisories, affected_nodes, withdrawn, out|:
                 if k > 0:
                     out.push(44)
                 ec: i64 = eco_codes[k.usize()]
@@ -2317,6 +2367,21 @@ module Package:
                 Base::rh_push_decimal_i64(out, unresolved[k.usize()])
                 Base::rh_push_text(out, ",\"unsupported_range_count\":")
                 Base::rh_push_decimal_i64(out, unsupported[k.usize()])
+                Base::rh_push_text(out, ",\"known_unique_advisories\":")
+                if security_observed:
+                    Base::rh_push_decimal_i64(out, advisories[k.usize()])
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"affected_resolved_nodes\":")
+                if security_observed:
+                    Base::rh_push_decimal_i64(out, affected_nodes[k.usize()])
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"withdrawn_advisory_count\":")
+                if security_observed:
+                    Base::rh_push_decimal_i64(out, withdrawn[k.usize()])
+                else:
+                    Base::rh_push_text(out, "null")
                 Base::rh_push_text(out, "}")
                 k <- k + 1
             Base::rh_push_text(out, "]}")
