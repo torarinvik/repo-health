@@ -1,0 +1,172 @@
+# rh_drilldown.elisa — structured evidence drill-down join (RP-07).
+#
+# Joins a normalized findings result with its lineage result without turning
+# delivery metadata into independent corroboration. The output keeps the
+# source payload locator/digest and field-level transformation losses beside
+# typed assessment outcomes so a policy or report consumer can reach both.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module Drilldown:
+    private:
+        def rh_dd_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_dd_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, lit)
+
+        def rh_dd_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Drilldown::rh_dd_get(nodes, texts, obj, key)
+            return false if idx < 0
+            rh_json_str_span(nodes, idx, start_out, end_out)
+
+        def rh_dd_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Drilldown::rh_dd_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_dd_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, s.usize(), e.usize())
+            out.push(34)
+
+        def rh_dd_emit_count(out: mutable darray[u8]&, nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            ok: mutable i64 = 0
+            value: i64 = Drilldown::rh_dd_int(nodes, raw, texts, obj, key, &ok)
+            return false if ok == 0 or value < 0
+            rh_push_decimal_i64(out, value)
+            true
+
+    public:
+        def rh_drilldown_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            root_s: mutable i64 = 0
+            root_e: mutable i64 = 0
+            return -1 if not Drilldown::rh_dd_str(nodes, texts, root, "schema", &root_s, &root_e) or not Drilldown::rh_dd_eq(texts, root_s, root_e, "rh-drilldown-input/1")
+            lineage: i64 = Drilldown::rh_dd_get(nodes, texts, root, "lineage")
+            findings: i64 = Drilldown::rh_dd_get(nodes, texts, root, "findings")
+            return -1 if lineage < 0 or findings < 0 or nodes[lineage.usize()].kind != RH_JSON_OBJ or nodes[findings.usize()].kind != RH_JSON_OBJ
+            ls: mutable i64 = 0
+            le: mutable i64 = 0
+            fs: mutable i64 = 0
+            fe: mutable i64 = 0
+            return -1 if not Drilldown::rh_dd_str(nodes, texts, lineage, "schema", &ls, &le) or not Drilldown::rh_dd_eq(texts, ls, le, "rh-lineage-result/1") or not Drilldown::rh_dd_str(nodes, texts, findings, "schema", &fs, &fe) or not Drilldown::rh_dd_eq(texts, fs, fe, "rh-findings-result/1")
+            lineage_obj: i64 = Drilldown::rh_dd_get(nodes, texts, lineage, "lineage")
+            times_obj: i64 = Drilldown::rh_dd_get(nodes, texts, lineage, "times")
+            collection_obj: i64 = Drilldown::rh_dd_get(nodes, texts, lineage, "collection")
+            payload_obj: i64 = Drilldown::rh_dd_get(nodes, texts, lineage, "payload")
+            assessment_obj: i64 = Drilldown::rh_dd_get(nodes, texts, lineage, "assessment")
+            return -1 if lineage_obj < 0 or times_obj < 0 or collection_obj < 0 or payload_obj < 0 or assessment_obj < 0
+            locator_s: mutable i64 = 0
+            locator_e: mutable i64 = 0
+            payload_schema_s: mutable i64 = 0
+            payload_schema_e: mutable i64 = 0
+            payload_digest_s: mutable i64 = 0
+            payload_digest_e: mutable i64 = 0
+            coverage_s: mutable i64 = 0
+            coverage_e: mutable i64 = 0
+            return -1 if not Drilldown::rh_dd_str(nodes, texts, lineage_obj, "locator", &locator_s, &locator_e) or not Drilldown::rh_dd_str(nodes, texts, payload_obj, "schema", &payload_schema_s, &payload_schema_e) or not Drilldown::rh_dd_str(nodes, texts, payload_obj, "digest", &payload_digest_s, &payload_digest_e) or not Drilldown::rh_dd_str(nodes, texts, collection_obj, "scope", &coverage_s, &coverage_e)
+            delivery_obj: i64 = Drilldown::rh_dd_get(nodes, texts, assessment_obj, "delivery")
+            origin_obj: i64 = Drilldown::rh_dd_get(nodes, texts, assessment_obj, "origin")
+            return -1 if delivery_obj < 0 or origin_obj < 0
+            delivery_id_s: mutable i64 = 0
+            delivery_id_e: mutable i64 = 0
+            tool_s: mutable i64 = 0
+            tool_e: mutable i64 = 0
+            tool_version_s: mutable i64 = 0
+            tool_version_e: mutable i64 = 0
+            original_run_s: mutable i64 = 0
+            original_run_e: mutable i64 = 0
+            result_digest_s: mutable i64 = 0
+            result_digest_e: mutable i64 = 0
+            return -1 if not Drilldown::rh_dd_str(nodes, texts, delivery_obj, "id", &delivery_id_s, &delivery_id_e) or not Drilldown::rh_dd_str(nodes, texts, origin_obj, "tool", &tool_s, &tool_e) or not Drilldown::rh_dd_str(nodes, texts, origin_obj, "tool_version", &tool_version_s, &tool_version_e) or not Drilldown::rh_dd_str(nodes, texts, origin_obj, "original_run", &original_run_s, &original_run_e) or not Drilldown::rh_dd_str(nodes, texts, origin_obj, "result_digest", &result_digest_s, &result_digest_e)
+            delivery_time_ok: mutable i64 = 0
+            delivery_time: i64 = Drilldown::rh_dd_int(nodes, raw, texts, delivery_obj, "time", &delivery_time_ok)
+            return -1 if delivery_time_ok == 0 or delivery_time < 0
+            finding_assessment: i64 = Drilldown::rh_dd_get(nodes, texts, findings, "assessment")
+            finding_summary: i64 = Drilldown::rh_dd_get(nodes, texts, findings, "summary")
+            return -1 if finding_assessment < 0 or finding_summary < 0
+            assessment_id_s: mutable i64 = 0
+            assessment_id_e: mutable i64 = 0
+            finding_tool_s: mutable i64 = 0
+            finding_tool_e: mutable i64 = 0
+            finding_version_s: mutable i64 = 0
+            finding_version_e: mutable i64 = 0
+            subject_revision_s: mutable i64 = 0
+            subject_revision_e: mutable i64 = 0
+            return -1 if not Drilldown::rh_dd_str(nodes, texts, finding_assessment, "id", &assessment_id_s, &assessment_id_e) or not Drilldown::rh_dd_str(nodes, texts, finding_assessment, "tool", &finding_tool_s, &finding_tool_e) or not Drilldown::rh_dd_str(nodes, texts, finding_assessment, "tool_version", &finding_version_s, &finding_version_e) or not Drilldown::rh_dd_str(nodes, texts, finding_assessment, "subject_revision", &subject_revision_s, &subject_revision_e)
+            return -1 if not rh_bytes_equal_span(texts, tool_s, tool_e, texts, finding_tool_s, finding_tool_e) or not rh_bytes_equal_span(texts, tool_version_s, tool_version_e, texts, finding_version_s, finding_version_e)
+            assessed_at_ok: mutable i64 = 0
+            assessed_at: i64 = Drilldown::rh_dd_int(nodes, raw, texts, finding_assessment, "assessed_at", &assessed_at_ok)
+            return -1 if assessed_at_ok == 0 or assessed_at < 0
+            transformations: i64 = Drilldown::rh_dd_get(nodes, texts, lineage, "transformations")
+            return -1 if transformations < 0 or nodes[transformations.usize()].kind != RH_JSON_ARR
+            rh_push_text(out, "{\"schema\":\"rh-evidence-drilldown/1\",\"source_payload\":{\"locator\":")
+            Drilldown::rh_dd_emit_span(out, texts, locator_s, locator_e)
+            rh_push_text(out, ",\"schema\":")
+            Drilldown::rh_dd_emit_span(out, texts, payload_schema_s, payload_schema_e)
+            rh_push_text(out, ",\"digest\":")
+            Drilldown::rh_dd_emit_span(out, texts, payload_digest_s, payload_digest_e)
+            rh_push_text(out, ",\"coverage_scope\":")
+            Drilldown::rh_dd_emit_span(out, texts, coverage_s, coverage_e)
+            rh_push_text(out, "},\"origin_assessment\":{\"tool\":")
+            Drilldown::rh_dd_emit_span(out, texts, tool_s, tool_e)
+            rh_push_text(out, ",\"tool_version\":")
+            Drilldown::rh_dd_emit_span(out, texts, tool_version_s, tool_version_e)
+            rh_push_text(out, ",\"original_run\":")
+            Drilldown::rh_dd_emit_span(out, texts, original_run_s, original_run_e)
+            rh_push_text(out, ",\"result_digest\":")
+            Drilldown::rh_dd_emit_span(out, texts, result_digest_s, result_digest_e)
+            rh_push_text(out, "},\"delivery\":{\"id\":")
+            Drilldown::rh_dd_emit_span(out, texts, delivery_id_s, delivery_id_e)
+            rh_push_text(out, ",\"time\":")
+            rh_push_decimal_i64(out, delivery_time)
+            rh_push_text(out, "},\"finding_assessment\":{\"id\":")
+            Drilldown::rh_dd_emit_span(out, texts, assessment_id_s, assessment_id_e)
+            rh_push_text(out, ",\"tool\":")
+            Drilldown::rh_dd_emit_span(out, texts, finding_tool_s, finding_tool_e)
+            rh_push_text(out, ",\"tool_version\":")
+            Drilldown::rh_dd_emit_span(out, texts, finding_version_s, finding_version_e)
+            rh_push_text(out, ",\"subject_revision\":")
+            Drilldown::rh_dd_emit_span(out, texts, subject_revision_s, subject_revision_e)
+            rh_push_text(out, ",\"assessed_at\":")
+            rh_push_decimal_i64(out, assessed_at)
+            rh_push_text(out, "},\"summary\":{")
+            total: mutable bool = true
+            while key >= 0 |key: i64 = nodes[finding_summary.usize()].first_child, nodes, texts, raw, out, total|:
+                value: i64 = nodes[key.usize()].next_sibling
+                return -1 if value < 0 or nodes[key.usize()].kind != RH_JSON_STR
+                if not total:
+                    out.push(44)
+                total <- false
+                Drilldown::rh_dd_emit_span(out, texts, nodes[key.usize()].text_start, nodes[key.usize()].text_end)
+                out.push(58)
+                ok: mutable i64 = 0
+                n: i64 = rh_json_int(nodes, raw, value, &ok)
+                return -1 if ok == 0 or n < 0
+                rh_push_decimal_i64(out, n)
+                key <- nodes[value.usize()].next_sibling
+            rh_push_text(out, "},\"transformations\":[")
+            while tr >= 0 |tr: i64 = nodes[transformations.usize()].first_child, nodes, texts, out|:
+                if tr != nodes[transformations.usize()].first_child:
+                    out.push(44)
+                field_s: mutable i64 = 0
+                field_e: mutable i64 = 0
+                state_s: mutable i64 = 0
+                state_e: mutable i64 = 0
+                reason_s: mutable i64 = 0
+                reason_e: mutable i64 = 0
+                return -1 if nodes[tr.usize()].kind != RH_JSON_OBJ or not Drilldown::rh_dd_str(nodes, texts, tr, "field", &field_s, &field_e) or not Drilldown::rh_dd_str(nodes, texts, tr, "state", &state_s, &state_e) or not Drilldown::rh_dd_str(nodes, texts, tr, "reason", &reason_s, &reason_e)
+                rh_push_text(out, "{\"field\":")
+                Drilldown::rh_dd_emit_span(out, texts, field_s, field_e)
+                rh_push_text(out, ",\"state\":")
+                Drilldown::rh_dd_emit_span(out, texts, state_s, state_e)
+                rh_push_text(out, ",\"reason\":")
+                Drilldown::rh_dd_emit_span(out, texts, reason_s, reason_e)
+                rh_push_text(out, "}")
+                tr <- nodes[tr.usize()].next_sibling
+            rh_push_text(out, "],\"note\":\"drill-down keeps source payload identity, delivery identity, origin assessment identity, typed finding counts, and field-level transformation losses together; it adds no policy verdict\"}")
+            0
