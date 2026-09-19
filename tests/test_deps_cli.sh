@@ -275,6 +275,80 @@ assert by["nuget"]["unsupported_range_count"] == 1, by
 print("[deps] NuGet graph + development scope OK")
 PY
 
+echo "[deps] pom.xml resolves exact Maven coordinates and preserves scopes"
+mkdir -p "$T/mavensrc"
+cat > "$T/mavensrc/pom.xml" <<'EOF'
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>app</artifactId>
+  <version>1.0.0</version>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.managed</groupId>
+        <artifactId>managed-only</artifactId>
+        <version>9.9.9</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>2.0.9</version>
+    </dependency>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.foo</groupId>
+      <artifactId>bar</artifactId>
+      <version>${bar.version}</version>
+    </dependency>
+  </dependencies>
+</project>
+EOF
+"$ROOT/build/rh_cli" deps --repo "$T/mavensrc" --out "$T/mavenout" \
+  | grep -q "ecosystems=1 maven=2/3 unresolved=1 unsupported=1" || fail "Maven summary"
+python3 - "$T/mavenout" <<'PY'
+import json, sys
+out = sys.argv[1]
+g = json.load(open(out + "/deps-maven-graph.json"))
+m = json.load(open(out + "/deps-metrics.json"))
+assert g["ecosystem"] == "maven", g["ecosystem"]
+assert [n["name"] for n in g["nodes"]] == ["org.example:app", "org.slf4j:slf4j-api", "junit:junit"], g["nodes"]
+assert [(e["to"], e["scope"]) for e in g["edges"]] == [(1, "normal"), (2, "dev")], g["edges"]
+assert g["unresolved"][0]["name"] == "org.foo:bar", g["unresolved"]
+assert g["unresolved"][0]["requirement"] == "${bar.version}", g["unresolved"]
+by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
+assert by["maven"]["declared_requirements"] == 3, by
+assert by["maven"]["resolved_edges"] == 2, by
+assert by["maven"]["unsupported_range_count"] == 1, by
+print("[deps] Maven graph + dependency-management exclusion OK")
+PY
+
+echo "[deps] malformed pom.xml fails closed without a partial graph"
+mkdir -p "$T/bad-maven"
+cat > "$T/bad-maven/pom.xml" <<'EOF'
+<project>
+  <groupId>org.example</groupId>
+  <artifactId>broken</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>org.foo</groupId>
+      <artifactId>bar</artifactId>
+EOF
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/bad-maven" --out "$T/bad-maven-out" >/dev/null 2>&1
+rc_bad_maven=$?
+set -e
+[[ "$rc_bad_maven" -eq 4 ]] || fail "malformed pom.xml must exit 4 (got $rc_bad_maven)"
+[[ ! -f "$T/bad-maven-out/deps-maven-graph.json" ]] || fail "partial Maven graph written on parse failure"
+
 echo "[deps] malformed packages.config fails closed without a partial graph"
 mkdir -p "$T/bad-nuget"
 cat > "$T/bad-nuget/packages.config" <<'EOF'

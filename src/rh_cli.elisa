@@ -2071,7 +2071,8 @@ def rh_do_serve(root: cstr, port: i64, maxc: i64) -> i32 can[Memory.Allocate, Ab
 
 # --- M03 dependency graph execution path. ---
 # Reads a local project's Cargo.lock, package.json + package-lock.json,
-# requirements.txt, or the bounded PEP 621 pyproject.toml subset,
+# requirements.txt, bounded PEP 621 pyproject.toml, go.mod, Gemfile.lock,
+# composer.lock, packages.config, or the bounded pom.xml subset,
 # resolves the version-aware graph, and writes one rh-dep-graph/1 report per
 # ecosystem plus rh-deps-metrics/1. Requirements that do not resolve stay
 # explicit unresolved nodes with reasons (never guessed edges, R009); a
@@ -2578,6 +2579,53 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         resolved.push(nuedges.count.i64())
         unresolved_n.push(nuunres.count.i64())
         unsupported_n.push(nuunsup)
+        found <- found + 1
+
+    # --- pom.xml (Maven) ---
+    pom: mutable darray[u8] = []
+    if not rh_out_path(repo, "pom.xml", pom):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    pomp: cstr = (&pom[0]).cast[cstr] can Unsafe.PointerCast
+    if file_exists(pomp):
+        pomb: mutable darray[u8] = []
+        if rh_io_read(pomp, pomb) < 0:
+            rh_cli_err("deps: cannot read pom.xml")
+            return 4
+        mpkgs: mutable darray[RhPkgNode] = []
+        mpool: mutable darray[u8] = []
+        mreqs: mutable darray[RhRequire] = []
+        medges: mutable darray[RhDepEdge] = []
+        munres: mutable darray[RhUnresolved] = []
+        mroot: i64 = |pomb, mpkgs, mpool, mreqs, medges, munres|
+            munk: mutable i64 = 0
+            block_result: i64 = rh_maven_parse(pomb, mpkgs, mpool, mreqs, medges, munres, &munk)
+            block_result
+        if mroot < 0:
+            rh_cli_err("deps: malformed pom.xml bounded Maven subset (structured failure, no partial graph)")
+            return 4
+        munsup: i64 = rh_unsupported_range_count(mreqs, mpool)
+        mfind: mutable darray[RhAdvisory] = []
+        mwd: mutable i64 = 0
+        msk: mutable i64 = 0
+        if resolved_has_osv:
+            _ = rh_osv_match(mpkgs, mpool, osv_nodes, osv_texts, osv_root, mfind, &mwd, &msk)
+        mg: mutable darray[u8] = []
+        rh_graph_write_json(mg, 7, mpkgs, mpool, medges, munres, mfind, osv_texts, mroot)
+        mg.push(10)
+        mf2: mutable darray[u8] = []
+        if not rh_out_path(out, "deps-maven-graph.json", mf2):
+            rh_cli_err("deps: cannot stage maven graph path")
+            return 4
+        mf2p: cstr = (&mf2[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_io_write(mf2p, mg):
+            rh_cli_err("deps: cannot write maven graph")
+            return 4
+        eco_codes.push(7)
+        declared.push(mreqs.count.i64())
+        resolved.push(medges.count.i64())
+        unresolved_n.push(munres.count.i64())
+        unsupported_n.push(munsup)
         found <- found + 1
 
     if found == 0:

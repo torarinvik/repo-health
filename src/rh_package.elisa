@@ -20,6 +20,7 @@ const RH_ECO_GO: u8 = 3
 const RH_ECO_RUBYGEMS: u8 = 4
 const RH_ECO_COMPOSER: u8 = 5
 const RH_ECO_NUGET: u8 = 6
+const RH_ECO_MAVEN: u8 = 7
 
 const RH_PSRC_REGISTRY: u8 = 0
 const RH_PSRC_PATH: u8 = 1
@@ -83,6 +84,7 @@ def rh_osv_ecosystem(eco: u8) -> u8&:
     return "RubyGems" if eco == RH_ECO_RUBYGEMS
     return "Packagist" if eco == RH_ECO_COMPOSER
     return "NuGet" if eco == RH_ECO_NUGET
+    return "Maven" if eco == RH_ECO_MAVEN
     "npm"
 
 # Cargo name equality: ASCII case-insensitive, '-' and '_' equivalent
@@ -2298,6 +2300,7 @@ def rh_deps_eco(code: i64) -> u8&:
     return "rubygems" if code == 4
     return "composer" if code == 5
     return "nuget" if code == 6
+    return "maven" if code == 7
     "cargo"
 
 def rh_deps_spec(code: i64) -> u8&:
@@ -2307,6 +2310,7 @@ def rh_deps_spec(code: i64) -> u8&:
     return "Gemfile.lock" if code == 4
     return "composer.lock" if code == 5
     return "packages.config" if code == 6
+    return "pom.xml" if code == 7
     "Cargo.lock"
 
 # Root of a Cargo.lock graph: the workspace/root package has no `source`
@@ -2343,6 +2347,8 @@ def rh_graph_write_json(out: mutable darray[u8]&, eco: u8, pkgs: darray[RhPkgNod
         rh_push_text(out, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"composer\",\"nodes\":[")
     elif eco == 6:
         rh_push_text(out, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"nuget\",\"nodes\":[")
+    elif eco == 7:
+        rh_push_text(out, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"maven\",\"nodes\":[")
     else:
         rh_push_text(out, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"npm\",\"nodes\":[")
     while i < pkgs.count.i64() |i: i64 = 0, pkgs, pool, out|:
@@ -2900,6 +2906,194 @@ def rh_nuget_parse(xml: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mut
             found <- found + 1
         line_start <- line_end + 1
     return -1 if found == 0
+    0
+
+# Return one simple Maven XML tag value from a single bounded line. Nested
+# elements, entities, and multiline values are outside this metadata subset.
+def rh_maven_tag_value(line: darray[u8]&, s: usize, e: usize, tag: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    start_out[0] <- -1
+    end_out[0] <- -1
+    n: usize = strlen(tag)
+    return false if n == 0
+    while i + n + 2 <= e |i: usize = s, e, line, tag, n|:
+        if line[i] == 60 and line[i + 1] != 47 and rh_bytes_equal_literal(line, (i + 1).i64(), (i + 1 + n).i64(), tag) and line[i + 1 + n] == 62:
+            value_s: mutable usize = i + n + 2
+            while value_s < e and (line[value_s] == 32 or line[value_s] == 9):
+                value_s <- value_s + 1
+            k: mutable usize = value_s
+            while k + n + 3 <= e |k, e, line, tag, n|:
+                if line[k] == 60 and line[k + 1] == 47 and rh_bytes_equal_literal(line, (k + 2).i64(), (k + 2 + n).i64(), tag) and line[k + 2 + n] == 62:
+                    value_e: mutable usize = k
+                    while value_e > value_s and (line[value_e - 1] == 32 or line[value_e - 1] == 9):
+                        value_e <- value_e - 1
+                    return false if value_e <= value_s
+                    start_out[0] <- value_s.i64()
+                    end_out[0] <- value_e.i64()
+                    return true
+                k <- k + 1
+        i <- i + 1
+    false
+
+def rh_maven_has_open(line: darray[u8]&, s: usize, e: usize, tag: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: usize = strlen(tag)
+    return false if n == 0
+    while i + n + 2 <= e |i: usize = s, e, line, tag, n|:
+        if line[i] == 60 and line[i + 1] != 47 and rh_bytes_equal_literal(line, (i + 1).i64(), (i + 1 + n).i64(), tag):
+            after: u8 = line[i + 1 + n]
+            return true if after == 62 or after == 32 or after == 9 or after == 47
+        i <- i + 1
+    false
+
+def rh_maven_has_close(line: darray[u8]&, s: usize, e: usize, tag: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: usize = strlen(tag)
+    return false if n == 0
+    while i + n + 3 <= e |i: usize = s, e, line, tag, n|:
+        return true if line[i] == 60 and line[i + 1] == 47 and rh_bytes_equal_literal(line, (i + 2).i64(), (i + 2 + n).i64(), tag) and line[i + 2 + n] == 62
+        i <- i + 1
+    false
+
+def rh_maven_coord(pool: mutable darray[u8]&, data: darray[u8]&, gs: usize, ge: usize, arts: usize, arte: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+    start: i64 = pool.count.i64()
+    while i < ge |i: usize = gs, ge, data, pool|:
+        pool.push(data[i])
+        i <- i + 1
+    pool.push(58)
+    while i < arte |i: usize = arts, arte, data, pool|:
+        pool.push(data[i])
+        i <- i + 1
+    start
+
+def rh_maven_version_exact(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if s < 0 or e <= s
+    digits: mutable i64 = 0
+    while i < e |i: i64 = s, e, data, digits|:
+        b: u8 = data[i.usize()]
+        return false if b == 32 or b == 9 or b == 91 or b == 93 or b == 40 or b == 41 or b == 44 or b == 42 or b == 60 or b == 62 or b == 124 or b == 36 or b == 123 or b == 125
+        digits <- 1 if b >= 48 and b <= 57
+        i <- i + 1
+    digits == 1
+
+def rh_maven_add_dependency(xml: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, gs: i64, ge: i64, arts: i64, arte: i64, vs: i64, ve: i64, depctx: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
+    return -1 if gs < 0 or ge <= gs or arts < 0 or arte <= arts
+    name_s: i64 = rh_maven_coord(pool, xml, gs.usize(), ge.usize(), arts.usize(), arte.usize())
+    name_e: i64 = pool.count.i64()
+    req_s: mutable i64 = -1
+    req_e: mutable i64 = -1
+    if vs >= 0 and ve > vs:
+        req_s <- rh_pool_copy(pool, xml, vs.usize(), ve.usize())
+        req_e <- req_s + (ve - vs)
+    reqs.push(RhRequire{from: 0, name_s: name_s, name_e: name_e, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: req_s, req_e: req_e, depctx: depctx})
+    if vs >= 0 and rh_maven_version_exact(xml, vs, ve):
+        node: i64 = rh_node_add(pkgs, RH_ECO_MAVEN)
+        return -1 if node < 0
+        nd: mutable RhPkgNode = pkgs[node.usize()]
+        nd.name_s <- name_s
+        nd.name_e <- name_e
+        nd.ver_s <- req_s
+        nd.ver_e <- req_e
+        nd.src_kind <- RH_PSRC_REGISTRY
+        nd.optional <- 1 if depctx == RH_SCOPE_OPTIONAL else 0
+        nd.dev <- 1 if depctx == RH_SCOPE_DEV else 0
+        pkgs[node.usize()] <- nd
+        edges.push(RhDepEdge{from: 0, dst: node, depctx: depctx})
+    else:
+        unresolved.push(RhUnresolved{from: 0, name_s: name_s, name_e: name_e, req_s: req_s, req_e: req_e, reason: RH_UNRES_MISSING})
+    0
+
+# Parse the bounded Maven POM subset. Project and dependency coordinates use
+# `groupId:artifactId`; exact literal versions become root edges. Properties,
+# dependency management, profiles, and non-default repository resolution stay
+# explicit unresolved/unsupported instead of being evaluated.
+def rh_maven_parse(xml: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    unknown_out[0] <- 0
+    root: i64 = rh_node_add(pkgs, RH_ECO_MAVEN)
+    return -1 if root != 0
+    project_gs: mutable i64 = -1
+    project_ge: mutable i64 = -1
+    project_as: mutable i64 = -1
+    project_ae: mutable i64 = -1
+    project_vs: mutable i64 = -1
+    project_ve: mutable i64 = -1
+    in_dep: mutable bool = false
+    in_mgmt: mutable bool = false
+    dep_gs: mutable i64 = -1
+    dep_ge: mutable i64 = -1
+    dep_as: mutable i64 = -1
+    dep_ae: mutable i64 = -1
+    dep_vs: mutable i64 = -1
+    dep_ve: mutable i64 = -1
+    dep_scope: mutable u8 = RH_SCOPE_NORMAL
+    dep_optional: mutable bool = false
+    line_start: mutable usize = 0
+    while line_start <= xml.count |line_start, xml, pkgs, pool, reqs, edges, unresolved, unknown_out, project_gs, project_ge, project_as, project_ae, project_vs, project_ve, in_dep, in_mgmt, dep_gs, dep_ge, dep_as, dep_ae, dep_vs, dep_ve, dep_scope, dep_optional|:
+        line_end: usize =
+            while j < xml.count and xml[j] != 10 |j: usize = line_start| -> j:
+                j <- j + 1
+        s: mutable usize = line_start
+        e: mutable usize = line_end
+        while s < e and (xml[s] == 32 or xml[s] == 9 or xml[s] == 13):
+            s <- s + 1
+        while e > s and (xml[e - 1] == 32 or xml[e - 1] == 9 or xml[e - 1] == 13):
+            e <- e - 1
+        if rh_maven_has_open(xml, s, e, "dependencyManagement"):
+            in_mgmt <- true
+        if rh_maven_has_close(xml, s, e, "dependencyManagement"):
+            in_mgmt <- false
+        if rh_maven_has_open(xml, s, e, "dependency"):
+            return -1 if in_dep
+            in_dep <- true
+            dep_gs <- -1
+            dep_ge <- -1
+            dep_as <- -1
+            dep_ae <- -1
+            dep_vs <- -1
+            dep_ve <- -1
+            dep_scope <- RH_SCOPE_NORMAL
+            dep_optional <- false
+        if rh_maven_has_close(xml, s, e, "dependency"):
+            return -1 if not in_dep
+            if not in_mgmt:
+                return -1 if rh_maven_add_dependency(xml, pkgs, pool, reqs, edges, unresolved, dep_gs, dep_ge, dep_as, dep_ae, dep_vs, dep_ve, dep_scope) != 0
+            in_dep <- false
+        else:
+            ts: mutable i64 = -1
+            te: mutable i64 = -1
+            if in_dep:
+                if rh_maven_tag_value(xml, s, e, "groupId", &ts, &te):
+                    dep_gs <- ts
+                    dep_ge <- te
+                if rh_maven_tag_value(xml, s, e, "artifactId", &ts, &te):
+                    dep_as <- ts
+                    dep_ae <- te
+                if rh_maven_tag_value(xml, s, e, "version", &ts, &te):
+                    dep_vs <- ts
+                    dep_ve <- te
+                if rh_maven_tag_value(xml, s, e, "scope", &ts, &te):
+                    dep_scope <- RH_SCOPE_DEV if rh_span_lit(xml, ts.usize(), te.usize(), "test") or rh_span_lit(xml, ts.usize(), te.usize(), "provided")
+                if rh_maven_tag_value(xml, s, e, "optional", &ts, &te):
+                    dep_optional <- rh_span_lit(xml, ts.usize(), te.usize(), "true")
+                    dep_scope <- RH_SCOPE_OPTIONAL if dep_optional
+            else:
+                if rh_maven_tag_value(xml, s, e, "groupId", &ts, &te):
+                    project_gs <- ts
+                    project_ge <- te
+                if rh_maven_tag_value(xml, s, e, "artifactId", &ts, &te):
+                    project_as <- ts
+                    project_ae <- te
+                if rh_maven_tag_value(xml, s, e, "version", &ts, &te):
+                    project_vs <- ts
+                    project_ve <- te
+        line_start <- line_end + 1
+    return -1 if in_dep or project_gs < 0 or project_as < 0
+    root_name: i64 = rh_maven_coord(pool, xml, project_gs.usize(), project_ge.usize(), project_as.usize(), project_ae.usize())
+    root_node: mutable RhPkgNode = pkgs[0]
+    root_node.name_s <- root_name
+    root_node.name_e <- pool.count.i64()
+    if project_vs >= 0 and rh_maven_version_exact(xml, project_vs, project_ve):
+        root_node.ver_s <- rh_pool_copy(pool, xml, project_vs.usize(), project_ve.usize())
+        root_node.ver_e <- root_node.ver_s + (project_ve - project_vs)
+    root_node.src_kind <- RH_PSRC_UNKNOWN
+    pkgs[0] <- root_node
     0
 
 def rh_composer_is_platform(pool: darray[u8]&, ns: usize, ne: usize) -> bool can[Memory.Allocate, Abort.Panic]:
