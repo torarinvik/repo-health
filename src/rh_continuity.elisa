@@ -1,467 +1,468 @@
-# rh_continuity.elisa — persistence cohorts, retention censoring,
-# concentration inputs, transitions, role visibility (M04-05/06/07/08).
-#
-# Exact populations only: presence is built from qualifying events over
-# COMPLETE calendar months (the caller passes a month range that already
-# excludes the current partial month; see Temporal::rh_complete_months_between).
-# One day with three commits is one active month, never three. Cohorts
-# return their components (active months, span, recency) alongside
-# membership so a reader can inspect the rule rather than trust a label.
-# Empty populations return not_applicable (-1) for ratios and counts
-# whose semantics require events — never a synthetic zero.
+module Continuity:
+    public:
+        # rh_continuity.elisa — persistence cohorts, retention censoring,
+        # concentration inputs, transitions, role visibility (M04-05/06/07/08).
+        #
+        # Exact populations only: presence is built from qualifying events over
+        # COMPLETE calendar months (the caller passes a month range that already
+        # excludes the current partial month; see Temporal::rh_complete_months_between).
+        # One day with three commits is one active month, never three. Cohorts
+        # return their components (active months, span, recency) alongside
+        # membership so a reader can inspect the rule rather than trust a label.
+        # Empty populations return not_applicable (-1) for ratios and counts
+        # whose semantics require events — never a synthetic zero.
 
-const RH_EV_COMMIT: u8 = 0
-const RH_EV_RELEASE: u8 = 1
-const RH_EV_REVIEW: u8 = 2
+        const RH_EV_COMMIT: u8 = 0
+        const RH_EV_RELEASE: u8 = 1
+        const RH_EV_REVIEW: u8 = 2
 
-const RH_RET_RETAINED: i64 = 0
-const RH_RET_NOT_RETAINED: i64 = 1
-const RH_RET_CENSORED: i64 = 2
-const RH_RET_UNOBSERVABLE: i64 = 3
+        const RH_RET_RETAINED: i64 = 0
+        const RH_RET_NOT_RETAINED: i64 = 1
+        const RH_RET_CENSORED: i64 = 2
+        const RH_RET_UNOBSERVABLE: i64 = 3
 
-# Local arithmetic helper. Metrics::rh_gcd remains private to its module;
-# continuity owns this small reduction operation for its effective-count
-# projection instead of reaching through a private implementation detail.
-def rh_continuity_gcd(a: u64, b: u64) -> u64:
-    while y != 0 |x: u64 = a, y: u64 = b| -> x:
-        r: u64 = x % y
-        x <- y
-        y <- r
+        # Local arithmetic helper. Metrics::rh_gcd remains private to its module;
+        # continuity owns this small reduction operation for its effective-count
+        # projection instead of reaching through a private implementation detail.
+        # Actor-by-month presence matrix, row-major actor*n_months + month.
+        def rh_presence_build(actor: darray[i64]&, month: darray[i64]&, kind: darray[u8]&, kind_filter: i64, n_actors: i64, month_lo: i64, n_months: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if n_actors < 0 or n_months < 0
+            total: i64 = n_actors * n_months
+            while i < total |i: i64 = 0, out|:
+                out.push(0)
+                i <- i + 1
+            while e < actor.count |used: i64 = 0, e: usize = 0, out| -> used:
+                a: i64 = actor[e]
+                m: i64 = month[e]
+                k: u8 = kind[e]
+                e <- e + 1
+                continue if kind_filter >= 0 and k.i64() != kind_filter
+                continue if a < 0 or a >= n_actors
+                idx: i64 = m - month_lo
+                continue if idx < 0 or idx >= n_months
+                slot: i64 = a * n_months + idx
+                if out[slot.usize()] == 0:
+                    out[slot.usize()] <- 1
+                    used <- used + 1
 
-# Actor-by-month presence matrix, row-major actor*n_months + month.
-def rh_presence_build(actor: darray[i64]&, month: darray[i64]&, kind: darray[u8]&, kind_filter: i64, n_actors: i64, month_lo: i64, n_months: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return -1 if n_actors < 0 or n_months < 0
-    total: i64 = n_actors * n_months
-    while i < total |i: i64 = 0, out|:
-        out.push(0)
-        i <- i + 1
-    while e < actor.count |used: i64 = 0, e: usize = 0, out| -> used:
-        a: i64 = actor[e]
-        m: i64 = month[e]
-        k: u8 = kind[e]
-        e <- e + 1
-        continue if kind_filter >= 0 and k.i64() != kind_filter
-        continue if a < 0 or a >= n_actors
-        idx: i64 = m - month_lo
-        continue if idx < 0 or idx >= n_months
-        slot: i64 = a * n_months + idx
-        if out[slot.usize()] == 0:
-            out[slot.usize()] <- 1
-            used <- used + 1
+        def rh_actor_active_months(presence: darray[u8]&, actor: i64, n_months: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while m < n_months |total: i64 = 0, m: i64 = 0| -> total:
+                if rh_presence_get(presence, actor, n_months, m):
+                    total <- total + 1
+                m <- m + 1
 
-def rh_presence_get(presence: darray[u8]&, actor: i64, n_months: i64, month_idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    return false if actor < 0 or month_idx < 0 or month_idx >= n_months
-    slot: i64 = actor * n_months + month_idx
-    return false if slot < 0 or slot >= presence.count.i64()
-    presence[slot.usize()] != 0
+        # First-to-last active span in months, inclusive. 0 when never active.
+        def rh_actor_span(presence: darray[u8]&, actor: i64, n_months: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            first, last =
+                while m < n_months |first: i64 = -1, last: i64 = -1, m: i64 = 0| -> first, last:
+                    if rh_presence_get(presence, actor, n_months, m):
+                        if first < 0:
+                            first <- m
+                        last <- m
+                    m <- m + 1
+            return 0 if first < 0
+            last - first + 1
 
-def rh_actor_active_months(presence: darray[u8]&, actor: i64, n_months: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    while m < n_months |total: i64 = 0, m: i64 = 0| -> total:
-        if rh_presence_get(presence, actor, n_months, m):
-            total <- total + 1
-        m <- m + 1
+        def rh_actor_recent(presence: darray[u8]&, actor: i64, n_months: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_presence_get(presence, actor, n_months, n_months - 1)
 
-# First-to-last active span in months, inclusive. 0 when never active.
-def rh_actor_span(presence: darray[u8]&, actor: i64, n_months: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    first, last =
-        while m < n_months |first: i64 = -1, last: i64 = -1, m: i64 = 0| -> first, last:
-            if rh_presence_get(presence, actor, n_months, m):
-                if first < 0:
-                    first <- m
-                last <- m
-            m <- m + 1
-    return 0 if first < 0
-    last - first + 1
+        # Persistence cohort membership. Components stay separately available to
+        # callers (active months, span, recency) so explanations can show the
+        # rule's parts, not just the verdict.
+        def rh_persistent(active_months: i64, span: i64, recent: bool, min_active: i64, min_span: i64, need_recent: bool) -> bool:
+            return false if active_months < min_active
+            return false if span < min_span
+            return false if need_recent and not recent
+            true
 
-def rh_actor_recent(presence: darray[u8]&, actor: i64, n_months: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    rh_presence_get(presence, actor, n_months, n_months - 1)
+        # Count members of the persistence cohort.
+        def rh_persistent_count(presence: darray[u8]&, n_actors: i64, n_months: i64, min_active: i64, min_span: i64, need_recent: bool) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while a < n_actors |total: i64 = 0, a: i64 = 0| -> total:
+                active: i64 = rh_actor_active_months(presence, a, n_months)
+                span: i64 = rh_actor_span(presence, a, n_months)
+                recent: bool = rh_actor_recent(presence, a, n_months)
+                if rh_persistent(active, span, recent, min_active, min_span, need_recent):
+                    total <- total + 1
+                a <- a + 1
 
-# Persistence cohort membership. Components stay separately available to
-# callers (active months, span, recency) so explanations can show the
-# rule's parts, not just the verdict.
-def rh_persistent(active_months: i64, span: i64, recent: bool, min_active: i64, min_span: i64, need_recent: bool) -> bool:
-    return false if active_months < min_active
-    return false if span < min_span
-    return false if need_recent and not recent
-    true
+        # Continuity concern: NOT about one-off ratios. A project is flagged only
+        # when fewer than `min_persistent` actors meet the persistence cohort
+        # rule; a high one-off ratio with a stable core is explicitly not a
+        # concern (fixture A vs B).
+        def rh_concern(persistent_actors: i64, min_persistent: i64) -> bool:
+            return false if min_persistent <= 0
+            persistent_actors < min_persistent
 
-# Count members of the persistence cohort.
-def rh_persistent_count(presence: darray[u8]&, n_actors: i64, n_months: i64, min_active: i64, min_span: i64, need_recent: bool) -> i64 can[Memory.Allocate, Abort.Panic]:
-    while a < n_actors |total: i64 = 0, a: i64 = 0| -> total:
-        active: i64 = rh_actor_active_months(presence, a, n_months)
-        span: i64 = rh_actor_span(presence, a, n_months)
-        recent: bool = rh_actor_recent(presence, a, n_months)
-        if rh_persistent(active, span, recent, min_active, min_span, need_recent):
-            total <- total + 1
-        a <- a + 1
+        # Per-actor event counts in [from_idx, to_idx), optionally filtered by
+        # kind (-1 = all kinds). out is filled with n_actors zeros then counted.
+        def rh_actor_counts(actor: darray[i64]&, kind: darray[u8]&, kind_filter: i64, from_idx: i64, to_idx: i64, n_actors: i64, out: mutable darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if n_actors < 0
+            while i < n_actors |i: i64 = 0, out|:
+                out.push(0)
+                i <- i + 1
+            lo: i64 = from_idx if from_idx > 0 else 0
+            hi: i64 = to_idx if to_idx < actor.count.i64() else actor.count.i64()
+            while e < hi |e: i64 = lo, actor, kind, kind_filter, n_actors, out, hi|:
+                a: i64 = actor[e.usize()]
+                k: u8 = kind[e.usize()]
+                e <- e + 1
+                continue if kind_filter >= 0 and k.i64() != kind_filter
+                continue if a < 0 or a >= n_actors
+                out[a.usize()] <- out[a.usize()] + 1
+            while j < n_actors |total: i64 = 0, j: i64 = 0, out| -> total:
+                total <- total + out[j.usize()].i64()
+                j <- j + 1
 
-# Continuity concern: NOT about one-off ratios. A project is flagged only
-# when fewer than `min_persistent` actors meet the persistence cohort
-# rule; a high one-off ratio with a stable core is explicitly not a
-# concern (fixture A vs B).
-def rh_concern(persistent_actors: i64, min_persistent: i64) -> bool:
-    return false if min_persistent <= 0
-    persistent_actors < min_persistent
+        # Effective actor count = reciprocal of HHI, exact rational den/num
+        # reduced. False when the population is empty (not_applicable) or on
+        # overflow (bounded error) — never a fabricated number.
+        def rh_effective_count(counts: darray[u64]&, num_out: mutable u64&, den_out: mutable u64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            hn: mutable u64 = 0
+            hd: mutable u64 = 0
+            return false if not Metrics::rh_hhi(counts, &hn, &hd)
+            return false if hn == 0
+            g: u64 = rh_continuity_gcd(hd, hn)
+            num_out[0] <- hd / g
+            den_out[0] <- hn / g
+            true
 
-# Per-actor event counts in [from_idx, to_idx), optionally filtered by
-# kind (-1 = all kinds). out is filled with n_actors zeros then counted.
-def rh_actor_counts(actor: darray[i64]&, kind: darray[u8]&, kind_filter: i64, from_idx: i64, to_idx: i64, n_actors: i64, out: mutable darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return -1 if n_actors < 0
-    while i < n_actors |i: i64 = 0, out|:
-        out.push(0)
-        i <- i + 1
-    lo: i64 = from_idx if from_idx > 0 else 0
-    hi: i64 = to_idx if to_idx < actor.count.i64() else actor.count.i64()
-    while e < hi |e: i64 = lo, actor, kind, kind_filter, n_actors, out, hi|:
-        a: i64 = actor[e.usize()]
-        k: u8 = kind[e.usize()]
-        e <- e + 1
-        continue if kind_filter >= 0 and k.i64() != kind_filter
-        continue if a < 0 or a >= n_actors
-        out[a.usize()] <- out[a.usize()] + 1
-    while j < n_actors |total: i64 = 0, j: i64 = 0, out| -> total:
-        total <- total + out[j.usize()].i64()
-        j <- j + 1
+        # The 50% absence factor and 80% concentration over one actor-count
+        # population, returning the shared Metrics::rh_concentration contract (k>=1,
+        # -1 not_applicable, -2 bad threshold, -3 overflow).
+        def rh_absence_factor_50(counts: mutable darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            Metrics::rh_concentration(counts, 1, 2)
 
-# Effective actor count = reciprocal of HHI, exact rational den/num
-# reduced. False when the population is empty (not_applicable) or on
-# overflow (bounded error) — never a fabricated number.
-def rh_effective_count(counts: darray[u64]&, num_out: mutable u64&, den_out: mutable u64&) -> bool can[Memory.Allocate, Abort.Panic]:
-    hn: mutable u64 = 0
-    hd: mutable u64 = 0
-    return false if not Metrics::rh_hhi(counts, &hn, &hd)
-    return false if hn == 0
-    g: u64 = rh_continuity_gcd(hd, hn)
-    num_out[0] <- hd / g
-    den_out[0] <- hn / g
-    true
+        def rh_concentration_80(counts: mutable darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            Metrics::rh_concentration(counts, 4, 5)
 
-# The 50% absence factor and 80% concentration over one actor-count
-# population, returning the shared Metrics::rh_concentration contract (k>=1,
-# -1 not_applicable, -2 bad threshold, -3 overflow).
-def rh_absence_factor_50(counts: mutable darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    Metrics::rh_concentration(counts, 1, 2)
+        # Retention per actor (plan §19.3). t0 is the first observed qualifying
+        # event instant under the selected history policy; the return interval is
+        # [t0 + start_days, t0 + end_days). Censoring beats unobservability
+        # because it needs no extra data to decide.
+        def rh_retention_status(t0: i64, start_days: i64, end_days: i64, cutoff: i64, coverage_start: i64, coverage_end: i64, has_return_event: bool) -> i64:
+            w_start: i64 = t0 + start_days * 86400
+            w_end: i64 = t0 + end_days * 86400
+            return RH_RET_CENSORED if w_end > cutoff
+            return RH_RET_UNOBSERVABLE if coverage_start > w_start
+            return RH_RET_UNOBSERVABLE if coverage_end < w_end
+            return RH_RET_RETAINED if has_return_event
+            RH_RET_NOT_RETAINED
 
-def rh_concentration_80(counts: mutable darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    Metrics::rh_concentration(counts, 4, 5)
+        # Coverage basis for a continuity result (R029/R002). Distinguishes a
+        # full-history observation from one that is limited by how the source was
+        # collected:
+        #   1 full     — complete history, non-shallow: activity changes are real.
+        #   2 windowed — only the last N days were collected: earlier absence is
+        #                unknown-start, not inactivity, so a "quiet" month before
+        #                the window must never be read as a change in activity.
+        #   3 shallow  — a shallow clone: depth is unknown, so counts are a lower
+        #                bound; retention/first-seen are unsupported.
+        # A coverage-limited result is never presented as an activity decline.
+        def rh_coverage_basis(full_history: bool, shallow: bool) -> u8:
+            return 3 if shallow
+            return 1 if full_history
+            2
 
-# Retention per actor (plan §19.3). t0 is the first observed qualifying
-# event instant under the selected history policy; the return interval is
-# [t0 + start_days, t0 + end_days). Censoring beats unobservability
-# because it needs no extra data to decide.
-def rh_retention_status(t0: i64, start_days: i64, end_days: i64, cutoff: i64, coverage_start: i64, coverage_end: i64, has_return_event: bool) -> i64:
-    w_start: i64 = t0 + start_days * 86400
-    w_end: i64 = t0 + end_days * 86400
-    return RH_RET_CENSORED if w_end > cutoff
-    return RH_RET_UNOBSERVABLE if coverage_start > w_start
-    return RH_RET_UNOBSERVABLE if coverage_end < w_end
-    return RH_RET_RETAINED if has_return_event
-    RH_RET_NOT_RETAINED
+        def rh_coverage_basis_label(basis: u8) -> u8&:
+            return "full" if basis == 1
+            return "windowed" if basis == 2
+            "shallow"
 
-# Coverage basis for a continuity result (R029/R002). Distinguishes a
-# full-history observation from one that is limited by how the source was
-# collected:
-#   1 full     — complete history, non-shallow: activity changes are real.
-#   2 windowed — only the last N days were collected: earlier absence is
-#                unknown-start, not inactivity, so a "quiet" month before
-#                the window must never be read as a change in activity.
-#   3 shallow  — a shallow clone: depth is unknown, so counts are a lower
-#                bound; retention/first-seen are unsupported.
-# A coverage-limited result is never presented as an activity decline.
-def rh_coverage_basis(full_history: bool, shallow: bool) -> u8:
-    return 3 if shallow
-    return 1 if full_history
-    2
+        # Coverage change vs activity change: given the coverage basis and whether a
+        # qualifying event was observed in the period, returns:
+        #   1 observed-activity      (full basis + event: a real observation)
+        #   0 observed-quiet         (full basis + no event: a real quiet period)
+        #  -1 coverage-limited       (limited basis: absence is NOT activity evidence)
+        # This is the mechanical form of R029: a coverage gap must never be reported
+        # as an activity change.
+        def rh_coverage_vs_activity(basis: u8, event_observed: bool) -> i64:
+            return -1 if basis != 1
+            return 1 if event_observed
+            0
 
-def rh_coverage_basis_label(basis: u8) -> u8&:
-    return "full" if basis == 1
-    return "windowed" if basis == 2
-    "shallow"
+        # Monotonic count of retained actors over a per-actor status array.
+        def rh_retention_tally(status: darray[i64]&, retained_out: mutable i64&, eligible_out: mutable i64&, censored_out: mutable i64&, unobservable_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+            retained_out[0] <- 0
+            eligible_out[0] <- 0
+            censored_out[0] <- 0
+            unobservable_out[0] <- 0
+            while i < status.count |i: usize = 0, status, retained_out, eligible_out, censored_out, unobservable_out|:
+                s: i64 = status[i]
+                i <- i + 1
+                if s == RH_RET_RETAINED:
+                    retained_out[0] <- retained_out[0] + 1
+                    eligible_out[0] <- eligible_out[0] + 1
+                if s == RH_RET_NOT_RETAINED:
+                    eligible_out[0] <- eligible_out[0] + 1
+                if s == RH_RET_CENSORED:
+                    censored_out[0] <- censored_out[0] + 1
+                if s == RH_RET_UNOBSERVABLE:
+                    unobservable_out[0] <- unobservable_out[0] + 1
+            return
 
-# Coverage change vs activity change: given the coverage basis and whether a
-# qualifying event was observed in the period, returns:
-#   1 observed-activity      (full basis + event: a real observation)
-#   0 observed-quiet         (full basis + no event: a real quiet period)
-#  -1 coverage-limited       (limited basis: absence is NOT activity evidence)
-# This is the mechanical form of R029: a coverage gap must never be reported
-# as an activity change.
-def rh_coverage_vs_activity(basis: u8, event_observed: bool) -> i64:
-    return -1 if basis != 1
-    return 1 if event_observed
-    0
+        # Primary actor by event count (deterministic: highest count, lowest
+        # actor id breaks ties). -1 for an empty population.
+        def rh_primary_actor(counts: darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < counts.count.i64() |best: i64 = -1, best_count: u64 = 0, i: i64 = 0| -> best:
+                c: u64 = counts[i.usize()]
+                if c > best_count:
+                    best_count <- c
+                    best <- i
+                i <- i + 1
 
-# Monotonic count of retained actors over a per-actor status array.
-def rh_retention_tally(status: darray[i64]&, retained_out: mutable i64&, eligible_out: mutable i64&, censored_out: mutable i64&, unobservable_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-    retained_out[0] <- 0
-    eligible_out[0] <- 0
-    censored_out[0] <- 0
-    unobservable_out[0] <- 0
-    while i < status.count |i: usize = 0, status, retained_out, eligible_out, censored_out, unobservable_out|:
-        s: i64 = status[i]
-        i <- i + 1
-        if s == RH_RET_RETAINED:
-            retained_out[0] <- retained_out[0] + 1
-            eligible_out[0] <- eligible_out[0] + 1
-        if s == RH_RET_NOT_RETAINED:
-            eligible_out[0] <- eligible_out[0] + 1
-        if s == RH_RET_CENSORED:
-            censored_out[0] <- censored_out[0] + 1
-        if s == RH_RET_UNOBSERVABLE:
-            unobservable_out[0] <- unobservable_out[0] + 1
-    return
+        # Months in which BOTH actors are present (handover overlap measure).
+        def rh_overlap_months(presence: darray[u8]&, a: i64, b: i64, n_months: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while m < n_months |total: i64 = 0, m: i64 = 0| -> total:
+                if rh_presence_get(presence, a, n_months, m) and rh_presence_get(presence, b, n_months, m):
+                    total <- total + 1
+                m <- m + 1
 
-# Primary actor by event count (deterministic: highest count, lowest
-# actor id breaks ties). -1 for an empty population.
-def rh_primary_actor(counts: darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    while i < counts.count.i64() |best: i64 = -1, best_count: u64 = 0, i: i64 = 0| -> best:
-        c: u64 = counts[i.usize()]
-        if c > best_count:
-            best_count <- c
-            best <- i
-        i <- i + 1
-
-# Months in which BOTH actors are present (handover overlap measure).
-def rh_overlap_months(presence: darray[u8]&, a: i64, b: i64, n_months: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    while m < n_months |total: i64 = 0, m: i64 = 0| -> total:
-        if rh_presence_get(presence, a, n_months, m) and rh_presence_get(presence, b, n_months, m):
-            total <- total + 1
-        m <- m + 1
-
-# Top-1 share: the largest single actor's share of the qualifying event
-# population, as an exact rational (num = top count, den = total). Zero-total
-# is not_applicable (-1), never 0 (unknown != zero). Ties resolve
-# deterministically to the lowest actor id (same rule as rh_primary_actor),
-# but the COUNT is identical for any tied maximum.
-def rh_top1_share(counts: mutable darray[u64]&, num_out: mutable u64&, den_out: mutable u64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    num_out[0] <- 0
-    den_out[0] <- 0
-    total, top =
-        while i < counts.count.i64() |total: u64 = 0, top: u64 = 0, i: i64 = 0, counts| -> total, top:
-            c: u64 = counts[i.usize()]
-            total <- total + c
-            if c > top:
-                top <- c
-            i <- i + 1
-    return -1 if total == 0
-    num_out[0] <- top
-    den_out[0] <- total
-    1
+        # Top-1 share: the largest single actor's share of the qualifying event
+        # population, as an exact rational (num = top count, den = total). Zero-total
+        # is not_applicable (-1), never 0 (unknown != zero). Ties resolve
+        # deterministically to the lowest actor id (same rule as rh_primary_actor),
+        # but the COUNT is identical for any tied maximum.
+        def rh_top1_share(counts: mutable darray[u64]&, num_out: mutable u64&, den_out: mutable u64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            num_out[0] <- 0
+            den_out[0] <- 0
+            total, top =
+                while i < counts.count.i64() |total: u64 = 0, top: u64 = 0, i: i64 = 0, counts| -> total, top:
+                    c: u64 = counts[i.usize()]
+                    total <- total + c
+                    if c > top:
+                        top <- c
+                    i <- i + 1
+            return -1 if total == 0
+            num_out[0] <- top
+            den_out[0] <- total
+            1
 
 
-# Role visibility: a maintainer who reviews consistently but authors few
-# commits must remain visible through role-specific events. This is a
-# boolean statement about evidence shapes, not a score.
-def rh_role_visible(commit_count: i64, review_count: i64, min_reviews: i64) -> bool:
-    return true if review_count >= min_reviews
-    return true if commit_count >= min_reviews
-    false
+        # Role visibility: a maintainer who reviews consistently but authors few
+        # commits must remain visible through role-specific events. This is a
+        # boolean statement about evidence shapes, not a score.
+        def rh_role_visible(commit_count: i64, review_count: i64, min_reviews: i64) -> bool:
+            return true if review_count >= min_reviews
+            return true if commit_count >= min_reviews
+            false
 
-def rh_cpush_bool(out: mutable darray[u8]&, value: bool) -> void can[Memory.Allocate, Abort.Panic]:
-    if value:
-        rh_push_text(out, "true")
-    else:
-        rh_push_text(out, "false")
+        # Publish continuity metric observations (M00-04/M09):
+        #   persistence.retained_90d                      ratio retained/eligible
+        #   concentration.change_hhi                      exact HHI over commit events
+        #   concentration.change_effective_actor_count    exact reciprocal of HHI
+        #   concentration.change_absence_factor_50        actors for >=50% share
+        # first_seen_supported=false -> `unsupported` (a windowed or shallow scan
+        # cannot establish an actor's first observation). An empty/zero denominator
+        # is `not_applicable`, never 0 (unknown != zero). Censored/unobservable and
+        # the raw concentration components are reported alongside so every
+        # denominator can be audited. Raw emails never appear here.
+        def rh_continuity_metrics_write(out: mutable darray[u8]&, identity_rev: i64, actors_total: i64, retained: i64, eligible: i64, censored: i64, unobservable: i64, first_seen_supported: bool, hhi_n: u64, hhi_d: u64, eff_n: u64, eff_d: u64, fifty: i64, eighty: i64, top_n: u64, top_d: u64, gini_n: u64, gini_d: u64) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "{\"schema\":\"rh-continuity-metrics/1\",\"identity_revision\":")
+            rh_push_decimal_i64(out, identity_rev)
+            rh_push_text(out, ",\"actors_total\":")
+            rh_push_decimal_i64(out, actors_total)
+            rh_push_text(out, ",\"metrics\":[{\"key\":\"persistence.retained_90d\",\"version\":\"1.0.0\",\"status\":\"")
+            if not first_seen_supported:
+                rh_push_text(out, "unsupported\",\"reason\":\"windowed-or-shallow-history-cannot-establish-first-observation\"")
+            elif eligible <= 0:
+                rh_push_text(out, "not_applicable\",\"reason\":\"no-eligible-complete-window\"")
+            else:
+                rh_push_text(out, "observed\",\"value\":{\"num\":")
+                rh_push_decimal_i64(out, retained)
+                rh_push_text(out, ",\"den\":")
+                rh_push_decimal_i64(out, eligible)
+                rh_push_text(out, "}")
+            rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
+            # concentration.change_hhi
+            rh_push_text(out, "{\"key\":\"concentration.change_hhi\",\"version\":\"1.0.0\",\"status\":\"")
+            if hhi_d == 0:
+                rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
+            else:
+                rh_push_text(out, "observed\",\"value\":{\"num\":")
+                rh_push_decimal_u64(out, hhi_n)
+                rh_push_text(out, ",\"den\":")
+                rh_push_decimal_u64(out, hhi_d)
+                rh_push_text(out, "}")
+            rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
+            # concentration.change_effective_actor_count
+            rh_push_text(out, "{\"key\":\"concentration.change_effective_actor_count\",\"version\":\"1.0.0\",\"status\":\"")
+            if eff_d == 0:
+                rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
+            else:
+                rh_push_text(out, "observed\",\"value\":{\"num\":")
+                rh_push_decimal_u64(out, eff_n)
+                rh_push_text(out, ",\"den\":")
+                rh_push_decimal_u64(out, eff_d)
+                rh_push_text(out, "}")
+            rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
+            # concentration.change_absence_factor_50
+            rh_push_text(out, "{\"key\":\"concentration.change_absence_factor_50\",\"version\":\"1.0.0\",\"status\":\"")
+            if fifty < 0:
+                rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
+            else:
+                rh_push_text(out, "observed\",\"value\":")
+                rh_push_decimal_i64(out, fifty)
+            rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
+            # concentration.change_top1_share
+            rh_push_text(out, "{\"key\":\"concentration.change_top1_share\",\"version\":\"1.0.0\",\"status\":\"")
+            if top_d == 0:
+                rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
+            else:
+                rh_push_text(out, "observed\",\"value\":{\"num\":")
+                rh_push_decimal_u64(out, top_n)
+                rh_push_text(out, ",\"den\":")
+                rh_push_decimal_u64(out, top_d)
+                rh_push_text(out, "}")
+            rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
+            # concentration.change_gini
+            rh_push_text(out, "{\"key\":\"concentration.change_gini\",\"version\":\"1.0.0\",\"status\":\"")
+            if gini_d == 0:
+                rh_push_text(out, "not_applicable\",\"reason\":\"fewer-than-two-nonzero-actors\"")
+            else:
+                rh_push_text(out, "observed\",\"value\":{\"num\":")
+                rh_push_decimal_u64(out, gini_n)
+                rh_push_text(out, ",\"den\":")
+                rh_push_decimal_u64(out, gini_d)
+                rh_push_text(out, "}")
+            rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]}],\"retention_components\":{\"retained\":")
+            rh_push_decimal_i64(out, retained)
+            rh_push_text(out, ",\"eligible\":")
+            rh_push_decimal_i64(out, eligible)
+            rh_push_text(out, ",\"censored\":")
+            rh_push_decimal_i64(out, censored)
+            rh_push_text(out, ",\"unobservable\":")
+            rh_push_decimal_i64(out, unobservable)
+            rh_push_text(out, ",\"first_seen_supported\":")
+            rh_cpush_bool(out, first_seen_supported)
+            rh_push_text(out, "},\"concentration_components\":{\"hhi_num\":")
+            rh_push_decimal_u64(out, hhi_n)
+            rh_push_text(out, ",\"hhi_den\":")
+            rh_push_decimal_u64(out, hhi_d)
+            rh_push_text(out, ",\"effective_num\":")
+            rh_push_decimal_u64(out, eff_n)
+            rh_push_text(out, ",\"effective_den\":")
+            rh_push_decimal_u64(out, eff_d)
+            rh_push_text(out, ",\"absence_factor_50\":")
+            rh_push_decimal_i64(out, fifty)
+            rh_push_text(out, ",\"absence_factor_80\":")
+            rh_push_decimal_i64(out, eighty)
+            rh_push_text(out, "}}")
 
-# Publish continuity metric observations (M00-04/M09):
-#   persistence.retained_90d                      ratio retained/eligible
-#   concentration.change_hhi                      exact HHI over commit events
-#   concentration.change_effective_actor_count    exact reciprocal of HHI
-#   concentration.change_absence_factor_50        actors for >=50% share
-# first_seen_supported=false -> `unsupported` (a windowed or shallow scan
-# cannot establish an actor's first observation). An empty/zero denominator
-# is `not_applicable`, never 0 (unknown != zero). Censored/unobservable and
-# the raw concentration components are reported alongside so every
-# denominator can be audited. Raw emails never appear here.
-def rh_continuity_metrics_write(out: mutable darray[u8]&, identity_rev: i64, actors_total: i64, retained: i64, eligible: i64, censored: i64, unobservable: i64, first_seen_supported: bool, hhi_n: u64, hhi_d: u64, eff_n: u64, eff_d: u64, fifty: i64, eighty: i64, top_n: u64, top_d: u64, gini_n: u64, gini_d: u64) -> void can[Memory.Allocate, Abort.Panic]:
-    rh_push_text(out, "{\"schema\":\"rh-continuity-metrics/1\",\"identity_revision\":")
-    rh_push_decimal_i64(out, identity_rev)
-    rh_push_text(out, ",\"actors_total\":")
-    rh_push_decimal_i64(out, actors_total)
-    rh_push_text(out, ",\"metrics\":[{\"key\":\"persistence.retained_90d\",\"version\":\"1.0.0\",\"status\":\"")
-    if not first_seen_supported:
-        rh_push_text(out, "unsupported\",\"reason\":\"windowed-or-shallow-history-cannot-establish-first-observation\"")
-    elif eligible <= 0:
-        rh_push_text(out, "not_applicable\",\"reason\":\"no-eligible-complete-window\"")
-    else:
-        rh_push_text(out, "observed\",\"value\":{\"num\":")
-        rh_push_decimal_i64(out, retained)
-        rh_push_text(out, ",\"den\":")
-        rh_push_decimal_i64(out, eligible)
-        rh_push_text(out, "}")
-    rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-    # concentration.change_hhi
-    rh_push_text(out, "{\"key\":\"concentration.change_hhi\",\"version\":\"1.0.0\",\"status\":\"")
-    if hhi_d == 0:
-        rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-    else:
-        rh_push_text(out, "observed\",\"value\":{\"num\":")
-        rh_push_decimal_u64(out, hhi_n)
-        rh_push_text(out, ",\"den\":")
-        rh_push_decimal_u64(out, hhi_d)
-        rh_push_text(out, "}")
-    rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-    # concentration.change_effective_actor_count
-    rh_push_text(out, "{\"key\":\"concentration.change_effective_actor_count\",\"version\":\"1.0.0\",\"status\":\"")
-    if eff_d == 0:
-        rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-    else:
-        rh_push_text(out, "observed\",\"value\":{\"num\":")
-        rh_push_decimal_u64(out, eff_n)
-        rh_push_text(out, ",\"den\":")
-        rh_push_decimal_u64(out, eff_d)
-        rh_push_text(out, "}")
-    rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-    # concentration.change_absence_factor_50
-    rh_push_text(out, "{\"key\":\"concentration.change_absence_factor_50\",\"version\":\"1.0.0\",\"status\":\"")
-    if fifty < 0:
-        rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-    else:
-        rh_push_text(out, "observed\",\"value\":")
-        rh_push_decimal_i64(out, fifty)
-    rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-    # concentration.change_top1_share
-    rh_push_text(out, "{\"key\":\"concentration.change_top1_share\",\"version\":\"1.0.0\",\"status\":\"")
-    if top_d == 0:
-        rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-    else:
-        rh_push_text(out, "observed\",\"value\":{\"num\":")
-        rh_push_decimal_u64(out, top_n)
-        rh_push_text(out, ",\"den\":")
-        rh_push_decimal_u64(out, top_d)
-        rh_push_text(out, "}")
-    rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-    # concentration.change_gini
-    rh_push_text(out, "{\"key\":\"concentration.change_gini\",\"version\":\"1.0.0\",\"status\":\"")
-    if gini_d == 0:
-        rh_push_text(out, "not_applicable\",\"reason\":\"fewer-than-two-nonzero-actors\"")
-    else:
-        rh_push_text(out, "observed\",\"value\":{\"num\":")
-        rh_push_decimal_u64(out, gini_n)
-        rh_push_text(out, ",\"den\":")
-        rh_push_decimal_u64(out, gini_d)
-        rh_push_text(out, "}")
-    rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]}],\"retention_components\":{\"retained\":")
-    rh_push_decimal_i64(out, retained)
-    rh_push_text(out, ",\"eligible\":")
-    rh_push_decimal_i64(out, eligible)
-    rh_push_text(out, ",\"censored\":")
-    rh_push_decimal_i64(out, censored)
-    rh_push_text(out, ",\"unobservable\":")
-    rh_push_decimal_i64(out, unobservable)
-    rh_push_text(out, ",\"first_seen_supported\":")
-    rh_cpush_bool(out, first_seen_supported)
-    rh_push_text(out, "},\"concentration_components\":{\"hhi_num\":")
-    rh_push_decimal_u64(out, hhi_n)
-    rh_push_text(out, ",\"hhi_den\":")
-    rh_push_decimal_u64(out, hhi_d)
-    rh_push_text(out, ",\"effective_num\":")
-    rh_push_decimal_u64(out, eff_n)
-    rh_push_text(out, ",\"effective_den\":")
-    rh_push_decimal_u64(out, eff_d)
-    rh_push_text(out, ",\"absence_factor_50\":")
-    rh_push_decimal_i64(out, fifty)
-    rh_push_text(out, ",\"absence_factor_80\":")
-    rh_push_decimal_i64(out, eighty)
-    rh_push_text(out, "}}")
+        # Continuity report (rh-continuity/1). Every published number is paired
+        # with the rule or denominator that produced it: cohort thresholds,
+        # coverage months, identity revision, concentration components, retention
+        # tallies, and per-event-type totals. Empty-population ratios serialize
+        # as null, never 0 (unknown != zero).
+        def rh_continuity_write_json(out: mutable darray[u8]&, window_lo: i64, months: i64, min_active: i64, min_span: i64, need_recent: bool, identity_rev: i64, actors_total: i64, persistent: i64, hhi_n: u64, hhi_d: u64, eff_n: u64, eff_d: u64, fifty: i64, eighty: i64, retained_n: i64, eligible_n: i64, censored_n: i64, unobservable_n: i64, commits: i64, releases: i64, reviews: i64, coverage_basis: u8) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "{\"schema\":\"rh-continuity/1\",\"window\":{\"first_month_index\":")
+            rh_push_decimal_i64(out, window_lo)
+            rh_push_text(out, ",\"complete_months\":")
+            rh_push_decimal_i64(out, months)
+            rh_push_text(out, "},\"coverage\":{\"basis\":\"")
+            rh_push_text(out, rh_coverage_basis_label(coverage_basis))
+            rh_push_text(out, "\",\"activity_change_claims_supported\":")
+            rh_cpush_bool(out, coverage_basis == 1)
+            rh_push_text(out, ",\"first_observation_basis\":\"")
+            rh_push_text(out, "first-ever" if coverage_basis == 1 else "first-observed")
+            rh_push_text(out, "\"")
+            rh_push_text(out, ",\"note\":\"a coverage-limited basis (windowed/shallow) means absence is not activity evidence; a quiet period is only an observation when the basis is full\"},\"cohort_rule\":{\"min_active_months\":")
+            rh_push_decimal_i64(out, min_active)
+            rh_push_text(out, ",\"min_span_months\":")
+            rh_push_decimal_i64(out, min_span)
+            rh_push_text(out, ",\"recent_required\":")
+            rh_cpush_bool(out, need_recent)
+            rh_push_text(out, "},\"identity_revision\":")
+            rh_push_decimal_i64(out, identity_rev)
+            rh_push_text(out, ",\"coverage_months\":")
+            rh_push_decimal_i64(out, months)
+            rh_push_text(out, ",\"actors_total\":")
+            rh_push_decimal_i64(out, actors_total)
+            rh_push_text(out, ",\"persistent_actors\":")
+            rh_push_decimal_i64(out, persistent)
+            rh_push_text(out, ",\"concentration\":{\"hhi\":")
+            if hhi_d == 0:
+                rh_push_text(out, "null")
+            else:
+                rh_push_text(out, "{\"num\":")
+                rh_push_decimal_u64(out, hhi_n)
+                rh_push_text(out, ",\"den\":")
+                rh_push_decimal_u64(out, hhi_d)
+                rh_push_text(out, "}")
+            rh_push_text(out, ",\"effective\":")
+            if eff_d == 0:
+                rh_push_text(out, "null")
+            else:
+                rh_push_text(out, "{\"num\":")
+                rh_push_decimal_u64(out, eff_n)
+                rh_push_text(out, ",\"den\":")
+                rh_push_decimal_u64(out, eff_d)
+                rh_push_text(out, "}")
+            rh_push_text(out, ",\"fifty_percent_actor_count\":")
+            if fifty < 0:
+                rh_push_text(out, "null")
+            else:
+                rh_push_decimal_i64(out, fifty)
+            rh_push_text(out, ",\"eighty_percent_actor_count\":")
+            if eighty < 0:
+                rh_push_text(out, "null")
+            else:
+                rh_push_decimal_i64(out, eighty)
+            rh_push_text(out, "},\"retention\":{\"retained\":")
+            rh_push_decimal_i64(out, retained_n)
+            rh_push_text(out, ",\"eligible\":")
+            rh_push_decimal_i64(out, eligible_n)
+            rh_push_text(out, ",\"censored\":")
+            rh_push_decimal_i64(out, censored_n)
+            rh_push_text(out, ",\"unobservable\":")
+            rh_push_decimal_i64(out, unobservable_n)
+            rh_push_text(out, "},\"event_types\":{\"commit\":")
+            rh_push_decimal_i64(out, commits)
+            rh_push_text(out, ",\"release\":")
+            rh_push_decimal_i64(out, releases)
+            rh_push_text(out, ",\"review\":")
+            rh_push_decimal_i64(out, reviews)
+            rh_push_text(out, "}}")
 
-# Continuity report (rh-continuity/1). Every published number is paired
-# with the rule or denominator that produced it: cohort thresholds,
-# coverage months, identity revision, concentration components, retention
-# tallies, and per-event-type totals. Empty-population ratios serialize
-# as null, never 0 (unknown != zero).
-def rh_continuity_write_json(out: mutable darray[u8]&, window_lo: i64, months: i64, min_active: i64, min_span: i64, need_recent: bool, identity_rev: i64, actors_total: i64, persistent: i64, hhi_n: u64, hhi_d: u64, eff_n: u64, eff_d: u64, fifty: i64, eighty: i64, retained_n: i64, eligible_n: i64, censored_n: i64, unobservable_n: i64, commits: i64, releases: i64, reviews: i64, coverage_basis: u8) -> void can[Memory.Allocate, Abort.Panic]:
-    rh_push_text(out, "{\"schema\":\"rh-continuity/1\",\"window\":{\"first_month_index\":")
-    rh_push_decimal_i64(out, window_lo)
-    rh_push_text(out, ",\"complete_months\":")
-    rh_push_decimal_i64(out, months)
-    rh_push_text(out, "},\"coverage\":{\"basis\":\"")
-    rh_push_text(out, rh_coverage_basis_label(coverage_basis))
-    rh_push_text(out, "\",\"activity_change_claims_supported\":")
-    rh_cpush_bool(out, coverage_basis == 1)
-    rh_push_text(out, ",\"first_observation_basis\":\"")
-    rh_push_text(out, "first-ever" if coverage_basis == 1 else "first-observed")
-    rh_push_text(out, "\"")
-    rh_push_text(out, ",\"note\":\"a coverage-limited basis (windowed/shallow) means absence is not activity evidence; a quiet period is only an observation when the basis is full\"},\"cohort_rule\":{\"min_active_months\":")
-    rh_push_decimal_i64(out, min_active)
-    rh_push_text(out, ",\"min_span_months\":")
-    rh_push_decimal_i64(out, min_span)
-    rh_push_text(out, ",\"recent_required\":")
-    rh_cpush_bool(out, need_recent)
-    rh_push_text(out, "},\"identity_revision\":")
-    rh_push_decimal_i64(out, identity_rev)
-    rh_push_text(out, ",\"coverage_months\":")
-    rh_push_decimal_i64(out, months)
-    rh_push_text(out, ",\"actors_total\":")
-    rh_push_decimal_i64(out, actors_total)
-    rh_push_text(out, ",\"persistent_actors\":")
-    rh_push_decimal_i64(out, persistent)
-    rh_push_text(out, ",\"concentration\":{\"hhi\":")
-    if hhi_d == 0:
-        rh_push_text(out, "null")
-    else:
-        rh_push_text(out, "{\"num\":")
-        rh_push_decimal_u64(out, hhi_n)
-        rh_push_text(out, ",\"den\":")
-        rh_push_decimal_u64(out, hhi_d)
-        rh_push_text(out, "}")
-    rh_push_text(out, ",\"effective\":")
-    if eff_d == 0:
-        rh_push_text(out, "null")
-    else:
-        rh_push_text(out, "{\"num\":")
-        rh_push_decimal_u64(out, eff_n)
-        rh_push_text(out, ",\"den\":")
-        rh_push_decimal_u64(out, eff_d)
-        rh_push_text(out, "}")
-    rh_push_text(out, ",\"fifty_percent_actor_count\":")
-    if fifty < 0:
-        rh_push_text(out, "null")
-    else:
-        rh_push_decimal_i64(out, fifty)
-    rh_push_text(out, ",\"eighty_percent_actor_count\":")
-    if eighty < 0:
-        rh_push_text(out, "null")
-    else:
-        rh_push_decimal_i64(out, eighty)
-    rh_push_text(out, "},\"retention\":{\"retained\":")
-    rh_push_decimal_i64(out, retained_n)
-    rh_push_text(out, ",\"eligible\":")
-    rh_push_decimal_i64(out, eligible_n)
-    rh_push_text(out, ",\"censored\":")
-    rh_push_decimal_i64(out, censored_n)
-    rh_push_text(out, ",\"unobservable\":")
-    rh_push_decimal_i64(out, unobservable_n)
-    rh_push_text(out, "},\"event_types\":{\"commit\":")
-    rh_push_decimal_i64(out, commits)
-    rh_push_text(out, ",\"release\":")
-    rh_push_decimal_i64(out, releases)
-    rh_push_text(out, ",\"review\":")
-    rh_push_decimal_i64(out, reviews)
-    rh_push_text(out, "}}")
+        # Succession: months in which an explicit predecessor/successor pair are BOTH
+        # active (`succession.handover_overlap_months`). This is published as its own
+        # observation so the overlap of a *declared* handover is visible and never
+        # conflated with an activity-derived primary change (no motive attribution,
+        # R030). `predecessor`/`successor` are the actor indices of an explicit pair;
+        # when the caller has no declared pair (either index < 0) the metric is
+        # `not_applicable` — an absent declaration is not a claim of zero overlap.
+        # A non-positive complete-month count is `not_applicable` too (no window,
+        # nothing to measure). The count is a plain count (unit: count), not a ratio.
+        def rh_succession_metrics_write(out: mutable darray[u8]&, presence: darray[u8]&, predecessor: i64, successor: i64, n_months: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "{\"schema\":\"rh-continuity-metrics/1\",\"metric\":\"succession.handover_overlap_months\",\"version\":\"1.0.0\",\"status\":\"")
+            if predecessor < 0 or successor < 0 or n_months <= 0:
+                rh_push_text(out, "not_applicable\",\"reason\":\"no-declared-predecessor-successor-pair\"")
+            elif predecessor == successor:
+                rh_push_text(out, "not_applicable\",\"reason\":\"predecessor-and-successor-are-the-same-actor\"")
+            else:
+                ov: i64 = rh_overlap_months(presence, predecessor, successor, n_months)
+                rh_push_text(out, "observed\",\"value\":")
+                rh_push_decimal_i64(out, ov)
+            rh_push_text(out, ",\"pair\":{\"predecessor\":")
+            rh_push_decimal_i64(out, predecessor)
+            rh_push_text(out, ",\"successor\":")
+            rh_push_decimal_i64(out, successor)
+            rh_push_text(out, "},\"window_complete_months\":")
+            rh_push_decimal_i64(out, n_months)
+            rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"],\"note\":\"explicit declared handover overlap only; an activity-derived primary-change interval is a different measure and is never substituted here (no motive attribution)\"}")
 
-# Succession: months in which an explicit predecessor/successor pair are BOTH
-# active (`succession.handover_overlap_months`). This is published as its own
-# observation so the overlap of a *declared* handover is visible and never
-# conflated with an activity-derived primary change (no motive attribution,
-# R030). `predecessor`/`successor` are the actor indices of an explicit pair;
-# when the caller has no declared pair (either index < 0) the metric is
-# `not_applicable` — an absent declaration is not a claim of zero overlap.
-# A non-positive complete-month count is `not_applicable` too (no window,
-# nothing to measure). The count is a plain count (unit: count), not a ratio.
-def rh_succession_metrics_write(out: mutable darray[u8]&, presence: darray[u8]&, predecessor: i64, successor: i64, n_months: i64) -> void can[Memory.Allocate, Abort.Panic]:
-    rh_push_text(out, "{\"schema\":\"rh-continuity-metrics/1\",\"metric\":\"succession.handover_overlap_months\",\"version\":\"1.0.0\",\"status\":\"")
-    if predecessor < 0 or successor < 0 or n_months <= 0:
-        rh_push_text(out, "not_applicable\",\"reason\":\"no-declared-predecessor-successor-pair\"")
-    elif predecessor == successor:
-        rh_push_text(out, "not_applicable\",\"reason\":\"predecessor-and-successor-are-the-same-actor\"")
-    else:
-        ov: i64 = rh_overlap_months(presence, predecessor, successor, n_months)
-        rh_push_text(out, "observed\",\"value\":")
-        rh_push_decimal_i64(out, ov)
-    rh_push_text(out, ",\"pair\":{\"predecessor\":")
-    rh_push_decimal_i64(out, predecessor)
-    rh_push_text(out, ",\"successor\":")
-    rh_push_decimal_i64(out, successor)
-    rh_push_text(out, "},\"window_complete_months\":")
-    rh_push_decimal_i64(out, n_months)
-    rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"],\"note\":\"explicit declared handover overlap only; an activity-derived primary-change interval is a different measure and is never substituted here (no motive attribution)\"}")
+    private:
+        def rh_continuity_gcd(a: u64, b: u64) -> u64:
+            while y != 0 |x: u64 = a, y: u64 = b| -> x:
+                r: u64 = x % y
+                x <- y
+                y <- r
+        def rh_presence_get(presence: darray[u8]&, actor: i64, n_months: i64, month_idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if actor < 0 or month_idx < 0 or month_idx >= n_months
+            slot: i64 = actor * n_months + month_idx
+            return false if slot < 0 or slot >= presence.count.i64()
+            presence[slot.usize()] != 0
+        def rh_cpush_bool(out: mutable darray[u8]&, value: bool) -> void can[Memory.Allocate, Abort.Panic]:
+            if value:
+                rh_push_text(out, "true")
+            else:
+                rh_push_text(out, "false")
