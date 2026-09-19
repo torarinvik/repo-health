@@ -1,546 +1,554 @@
-# rh_http.elisa — bounded local HTTP listener (M06-01 wire protocol).
-#
-# A minimal, single-threaded, LOOPBACK-ONLY server that answers report GETs
-# and one bounded query POST
-# against a report directory. It is deliberately narrow:
-#   * binds 127.0.0.1 only (never 0.0.0.0), so it cannot be reached from
-#     another host (S002);
-#   * accepts one connection at a time, closes promptly, and caps the
-#     request line and header count (S012);
-#   * only GET and HEAD are allowed for report files; POST /api/query is the
-#     bounded query exception and anything else is 405;
-#   * path traversal (..), absolute paths, and NUL are rejected with 400;
-#   * only a fixed set of report files and API resources under the root may be
-#     served, plus bounded query and verified content-addressed evidence paths;
-#     an unknown path is 404, never a directory listing;
-#   * response bodies are produced by the renderer/report writer, not by
-#     interpolating request bytes (R022/S010).
-# It does not run collection, does not execute anything, and holds no
-# credentials. The socket externs are only what the libc provides.
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_render.elisa"
 include "./rh_query_report.elisa"
 include "./rh_store.elisa"
 
-# Join an allowlisted report-root name without constructing arbitrary paths.
-def rh_http_root_path(root: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
-    return false if rh_cstr_len_c(root) == 0
-    rh_push_cstr(out, root)
-    out.push(47)
-    rh_push_text(out, name)
-    out.push(0)
-    true
+module Http:
+    public:
+        # rh_http.elisa — bounded local HTTP listener (M06-01 wire protocol).
+        #
+        # A minimal, single-threaded, LOOPBACK-ONLY server that answers report GETs
+        # and one bounded query POST
+        # against a report directory. It is deliberately narrow:
+        #   * binds 127.0.0.1 only (never 0.0.0.0), so it cannot be reached from
+        #     another host (S002);
+        #   * accepts one connection at a time, closes promptly, and caps the
+        #     request line and header count (S012);
+        #   * only GET and HEAD are allowed for report files; POST /api/query is the
+        #     bounded query exception and anything else is 405;
+        #   * path traversal (..), absolute paths, and NUL are rejected with 400;
+        #   * only a fixed set of report files and API resources under the root may be
+        #     served, plus bounded query and verified content-addressed evidence paths;
+        #     an unknown path is 404, never a directory listing;
+        #   * response bodies are produced by the renderer/report writer, not by
+        #     interpolating request bytes (R022/S010).
+        # It does not run collection, does not execute anything, and holds no
+        # credentials. The socket externs are only what the libc provides.
 
-@link_name("socket")
-extern rh_sys_socket(domain: i32, kind: i32, proto: i32) -> i32
-@link_name("setsockopt")
-extern rh_sys_setsockopt(fd: i32, level: i32, optname: i32, optval: void&, optlen: u32) -> i32
-@link_name("bind")
-extern rh_sys_bind(fd: i32, addr: void&, len: u32) -> i32
-@link_name("listen")
-extern rh_sys_listen(fd: i32, backlog: i32) -> i32
-@link_name("accept")
-extern rh_sys_accept(fd: i32, addr: void&?, len: void&?) -> i32
-@link_name("read")
-extern rh_sys_read(fd: i32, buf: void&, count: usize) -> i64
-@link_name("write")
-extern rh_sys_write(fd: i32, buf: void&, count: usize) -> i64
-@link_name("close")
-extern rh_sys_close(fd: i32) -> i32
 
-const RH_HTTP_MAX_REQUEST: i64 = 8192
-const RH_HTTP_MAX_HEADERS: i64 = 64
-const RH_HTTP_MAX_BODY: i64 = 1048576
 
-const RH_HTTP_OK: i64 = 200
-const RH_HTTP_BAD_REQUEST: i64 = 400
-const RH_HTTP_NOT_FOUND: i64 = 404
-const RH_HTTP_METHOD_NOT_ALLOWED: i64 = 405
-const RH_HTTP_URI_TOO_LONG: i64 = 414
-const RH_HTTP_INTERNAL: i64 = 500
 
-const RH_CT_TEXT: i64 = 0
-const RH_CT_HTML: i64 = 1
-const RH_CT_JSON: i64 = 2
-const RH_CT_MARKDOWN: i64 = 3
-const RH_CT_BINARY: i64 = 4
 
-def rh_http_content_type(ct: i64) -> u8&:
-    return "text/html; charset=utf-8" if ct == RH_CT_HTML
-    return "application/json" if ct == RH_CT_JSON
-    return "text/markdown; charset=utf-8" if ct == RH_CT_MARKDOWN
-    return "application/octet-stream" if ct == RH_CT_BINARY
-    "text/plain; charset=utf-8"
 
-# Allowlisted paths under the report root. Returns a NUL-free name span
-# index, or -1 when the path is unknown. No directory listing, no dynamic
-# construction: only files the report writer produces plus the query endpoint.
-def rh_http_allowed_path(path: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return 0 if rh_streq(path, "/")
-    return 0 if rh_streq(path, "/index.html")
-    return 1 if rh_streq(path, "/report.json")
-    return 2 if rh_streq(path, "/report.md")
-    return 3 if rh_streq(path, "/bundle.manifest")
-    return 4 if rh_streq(path, "/health")
-    return 5 if rh_streq(path, "/_report.html")
-    return 6 if rh_streq(path, "/api/query")
-    return 7 if rh_streq(path, "/api/project")
-    return 8 if rh_streq(path, "/api/metrics")
-    return 9 if rh_streq(path, "/api/continuity")
-    return 10 if rh_streq(path, "/api/graph")
-    return 11 if rh_streq(path, "/api/findings")
-    return 12 if rh_streq(path, "/api/evidence")
-    return 13 if rh_streq(path, "/api/scan-status")
-    -1
+        # Join an allowlisted report-root name without constructing arbitrary paths.
+        def rh_http_root_path(root: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if rh_cstr_len_c(root) == 0
+            rh_push_cstr(out, root)
+            out.push(47)
+            rh_push_text(out, name)
+            out.push(0)
+            true
 
-def rh_http_file_name(idx: i64) -> u8&:
-    return "index.html" if idx == 0
-    return "report.json" if idx == 1
-    return "report.md" if idx == 2
-    return "bundle.manifest" if idx == 3
-    return "project.json" if idx == 7
-    return "metrics.json" if idx == 8
-    return "continuity.json" if idx == 9
-    return "graph.json" if idx == 10
-    return "findings.json" if idx == 11
-    return "evidence.json" if idx == 12
-    return "scan-status.json" if idx == 13
-    ""
+        @link_name("socket")
+        extern rh_sys_socket(domain: i32, kind: i32, proto: i32) -> i32
+        @link_name("setsockopt")
+        extern rh_sys_setsockopt(fd: i32, level: i32, optname: i32, optval: void&, optlen: u32) -> i32
+        @link_name("bind")
+        extern rh_sys_bind(fd: i32, addr: void&, len: u32) -> i32
+        @link_name("listen")
+        extern rh_sys_listen(fd: i32, backlog: i32) -> i32
+        @link_name("accept")
+        extern rh_sys_accept(fd: i32, addr: void&?, len: void&?) -> i32
+        @link_name("read")
+        extern rh_sys_read(fd: i32, buf: void&, count: usize) -> i64
+        @link_name("write")
+        extern rh_sys_write(fd: i32, buf: void&, count: usize) -> i64
+        @link_name("close")
+        extern rh_sys_close(fd: i32) -> i32
 
-# Request-line parse result. method is a small enum; ok 1 when parseable.
-struct RhHttpRequest:
-    ok: i64
-    method: u8
-    path_s: i64
-    path_e: i64
+        const RH_HTTP_MAX_REQUEST: i64 = 8192
+        const RH_HTTP_MAX_HEADERS: i64 = 64
+        const RH_HTTP_MAX_BODY: i64 = 1048576
 
-const RH_M_GET: u8 = 1
-const RH_M_HEAD: u8 = 2
-const RH_M_POST: u8 = 3
-const RH_M_OTHER: u8 = 4
+        const RH_HTTP_OK: i64 = 200
+        const RH_HTTP_BAD_REQUEST: i64 = 400
+        const RH_HTTP_NOT_FOUND: i64 = 404
+        const RH_HTTP_METHOD_NOT_ALLOWED: i64 = 405
+        const RH_HTTP_URI_TOO_LONG: i64 = 414
+        const RH_HTTP_INTERNAL: i64 = 500
 
-# Parse "<METHOD> <PATH> HTTP/1.1" from the first line. Rejects an empty
-# line, a second space in the method, a path that is not origin-form
-# (must start with '/'), and any embedded NUL or '..' segment. Bounded by
-# the max request size.
-def rh_http_parse_request_line(buf: darray[u8]&) -> RhHttpRequest can[Memory.Allocate, Abort.Panic]:
-    bad: RhHttpRequest = RhHttpRequest{ok: 0, method: RH_M_OTHER, path_s: -1, path_e: -1}
-    return bad if buf.count == 0 or buf.count.i64() > RH_HTTP_MAX_REQUEST
-    stop: i64 = rh_find_byte(buf, 0, 10)
-    line_end: i64 = stop if stop >= 0 else buf.count.i64()
-    # method
-    method_end: i64 =
-        while i < line_end and buf[i.usize()] != 32 |i: i64 = 0| -> i:
-            i <- i + 1
-    return bad if method_end == 0 or method_end >= line_end
-    method: mutable u8 = RH_M_OTHER
-    meth_s: i64 = 0
-    meth_e: i64 = method_end
-    if rh_span_eq_lit(buf, meth_s, meth_e, "GET"):
-        method <- RH_M_GET
-    if rh_span_eq_lit(buf, meth_s, meth_e, "HEAD"):
-        method <- RH_M_HEAD
-    if rh_span_eq_lit(buf, meth_s, meth_e, "POST"):
-        method <- RH_M_POST
-    # skip spaces
-    path_start: i64 =
-        while i < line_end and buf[i.usize()] == 32 |i: i64 = method_end| -> i:
-            i <- i + 1
-    path_end: i64 =
-        while i < line_end and buf[i.usize()] != 32 |i: i64 = path_start| -> i:
-            i <- i + 1
-    return bad if path_end <= path_start or buf[path_start.usize()] != 47
-    return bad if rh_http_has_traversal(buf, path_start, path_end)
-    RhHttpRequest{ok: 1, method: method, path_s: path_start, path_e: path_end}
+        const RH_CT_TEXT: i64 = 0
+        const RH_CT_HTML: i64 = 1
+        const RH_CT_JSON: i64 = 2
+        const RH_CT_MARKDOWN: i64 = 3
+        const RH_CT_BINARY: i64 = 4
 
-# (private to this file)
-def rh_span_eq_lit(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    rh_bytes_equal_literal(data, s, e, lit)
+        def rh_http_content_type(ct: i64) -> u8&:
+            return "text/html; charset=utf-8" if ct == RH_CT_HTML
+            return "application/json" if ct == RH_CT_JSON
+            return "text/markdown; charset=utf-8" if ct == RH_CT_MARKDOWN
+            return "application/octet-stream" if ct == RH_CT_BINARY
+            "text/plain; charset=utf-8"
 
-# Reject "..", NUL and control bytes in [s,e).
-# (private to this file)
-def rh_http_has_traversal(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    while i < e |i: i64 = s, data, s, e|:
-        b: u8 = data[i.usize()]
-        return true if b == 0 or b < 32
-        return true if b == 46 and i + 1 < e and data[(i + 1).usize()] == 46
-        i <- i + 1
-    false
+        # Allowlisted paths under the report root. Returns a NUL-free name span
+        # index, or -1 when the path is unknown. No directory listing, no dynamic
+        # construction: only files the report writer produces plus the query endpoint.
+        def rh_http_allowed_path(path: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if rh_streq(path, "/")
+            return 0 if rh_streq(path, "/index.html")
+            return 1 if rh_streq(path, "/report.json")
+            return 2 if rh_streq(path, "/report.md")
+            return 3 if rh_streq(path, "/bundle.manifest")
+            return 4 if rh_streq(path, "/health")
+            return 5 if rh_streq(path, "/_report.html")
+            return 6 if rh_streq(path, "/api/query")
+            return 7 if rh_streq(path, "/api/project")
+            return 8 if rh_streq(path, "/api/metrics")
+            return 9 if rh_streq(path, "/api/continuity")
+            return 10 if rh_streq(path, "/api/graph")
+            return 11 if rh_streq(path, "/api/findings")
+            return 12 if rh_streq(path, "/api/evidence")
+            return 13 if rh_streq(path, "/api/scan-status")
+            -1
 
-# Map a parsed request to a status code, without I/O. Pure and testable.
-# - unknown path -> 404
-# - method other than GET/HEAD -> 405
-# - "/health" -> 200 (service liveness only; carries no project verdict)
-def rh_http_status_for(req: RhHttpRequest&, raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return RH_HTTP_BAD_REQUEST if req.ok != 1
-    idx: i64 = rh_http_allowed_span(raw, req.path_s, req.path_e)
-    if req.method == RH_M_POST:
-        return RH_HTTP_OK if idx == 6
-        return RH_HTTP_METHOD_NOT_ALLOWED
-    return RH_HTTP_METHOD_NOT_ALLOWED if req.method != RH_M_GET and req.method != RH_M_HEAD
-    return RH_HTTP_METHOD_NOT_ALLOWED if idx == 6
-    return RH_HTTP_NOT_FOUND if idx < 0
-    RH_HTTP_OK
+        def rh_http_file_name(idx: i64) -> u8&:
+            return "index.html" if idx == 0
+            return "report.json" if idx == 1
+            return "report.md" if idx == 2
+            return "bundle.manifest" if idx == 3
+            return "project.json" if idx == 7
+            return "metrics.json" if idx == 8
+            return "continuity.json" if idx == 9
+            return "graph.json" if idx == 10
+            return "findings.json" if idx == 11
+            return "evidence.json" if idx == 12
+            return "scan-status.json" if idx == 13
+            ""
 
-# Allowlist by span over the request buffer. Kept separate so no copy is
-# needed when only comparing.
-def rh_http_allowed_span(data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return 0 if rh_span_eq_lit(data, s, e, "/")
-    return 0 if rh_span_eq_lit(data, s, e, "/index.html")
-    return 1 if rh_span_eq_lit(data, s, e, "/report.json")
-    return 2 if rh_span_eq_lit(data, s, e, "/report.md")
-    return 3 if rh_span_eq_lit(data, s, e, "/bundle.manifest")
-    return 4 if rh_span_eq_lit(data, s, e, "/health")
-    return 5 if rh_span_eq_lit(data, s, e, "/_report.html")
-    return 6 if rh_span_eq_lit(data, s, e, "/api/query")
-    return 7 if rh_span_eq_lit(data, s, e, "/api/project")
-    return 8 if rh_span_eq_lit(data, s, e, "/api/metrics")
-    return 9 if rh_span_eq_lit(data, s, e, "/api/continuity")
-    return 10 if rh_span_eq_lit(data, s, e, "/api/graph")
-    return 11 if rh_span_eq_lit(data, s, e, "/api/findings")
-    return 12 if rh_span_eq_lit(data, s, e, "/api/evidence")
-    return 13 if rh_span_eq_lit(data, s, e, "/api/scan-status")
-    store_s: mutable i64 = -1
-    store_e: mutable i64 = -1
-    return 14 if rh_http_store_digest(data, s, e, &store_s, &store_e)
-    -1
+        # Request-line parse result. method is a small enum; ok 1 when parseable.
+        struct RhHttpRequest:
+            ok: i64
+            method: u8
+            path_s: i64
+            path_e: i64
 
-# A store lookup is valid only for a fixed-length lowercase/uppercase hex
-# digest below the report's `evidence/` directory. No path component or
-# user-provided filename is accepted.
-def rh_http_store_digest(data: darray[u8]&, s: i64, e: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-    prefix: u8& = "/api/store/"
-    ps: i64 = strlen(prefix).i64()
-    return false if e - s != ps + 16
-    return false if not rh_bytes_equal_literal(data, s, s + ps, prefix)
-    while i < e |i: i64 = s + ps, e, data|:
-        b: u8 = data[i.usize()]
-        return false if not ((b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102))
-        i <- i + 1
-    start_out[0] <- s + ps
-    end_out[0] <- e
-    true
+        const RH_M_GET: u8 = 1
+        const RH_M_HEAD: u8 = 2
+        const RH_M_POST: u8 = 3
+        const RH_M_OTHER: u8 = 4
 
-# Return the first byte after the HTTP header terminator. A query body is
-# accepted only after a complete header block and remains bounded by the
-# request cap enforced by rh_http_read_request.
-def rh_http_body_start(raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return -1 if raw.count < 4
-    while i + 3 < raw.count |i: usize = 0, raw|:
-        return (i + 4).i64() if raw[i] == 13 and raw[i + 1] == 10 and raw[i + 2] == 13 and raw[i + 3] == 10
-        i <- i + 1
-    -1
+        # Parse "<METHOD> <PATH> HTTP/1.1" from the first line. Rejects an empty
+        # line, a second space in the method, a path that is not origin-form
+        # (must start with '/'), and any embedded NUL or '..' segment. Bounded by
+        # the max request size.
+        def rh_http_parse_request_line(buf: darray[u8]&) -> RhHttpRequest can[Memory.Allocate, Abort.Panic]:
+            bad: RhHttpRequest = RhHttpRequest{ok: 0, method: RH_M_OTHER, path_s: -1, path_e: -1}
+            return bad if buf.count == 0 or buf.count.i64() > RH_HTTP_MAX_REQUEST
+            stop: i64 = rh_find_byte(buf, 0, 10)
+            line_end: i64 = stop if stop >= 0 else buf.count.i64()
+            # method
+            method_end: i64 =
+                while i < line_end and buf[i.usize()] != 32 |i: i64 = 0| -> i:
+                    i <- i + 1
+            return bad if method_end == 0 or method_end >= line_end
+            method: mutable u8 = RH_M_OTHER
+            meth_s: i64 = 0
+            meth_e: i64 = method_end
+            if rh_span_eq_lit(buf, meth_s, meth_e, "GET"):
+                method <- RH_M_GET
+            if rh_span_eq_lit(buf, meth_s, meth_e, "HEAD"):
+                method <- RH_M_HEAD
+            if rh_span_eq_lit(buf, meth_s, meth_e, "POST"):
+                method <- RH_M_POST
+            # skip spaces
+            path_start: i64 =
+                while i < line_end and buf[i.usize()] == 32 |i: i64 = method_end| -> i:
+                    i <- i + 1
+            path_end: i64 =
+                while i < line_end and buf[i.usize()] != 32 |i: i64 = path_start| -> i:
+                    i <- i + 1
+            return bad if path_end <= path_start or buf[path_start.usize()] != 47
+            return bad if rh_http_has_traversal(buf, path_start, path_end)
+            RhHttpRequest{ok: 1, method: method, path_s: path_start, path_e: path_end}
 
-# Return the declared request body length. -1 means no Content-Length header;
-# -2 is a malformed or conflicting header. Chunked transfer is intentionally
-# unsupported in this bounded listener and therefore has no usable length.
-# (private to this file)
-def rh_http_content_length(raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    header_end: i64 = rh_http_body_start(raw)
-    return -1 if header_end < 0
-    first: i64 = rh_find_byte(raw, 0, 10)
-    return -2 if first < 0
-    line: mutable i64 = first + 1
-    headers: mutable i64 = 0
-    found: mutable i64 = -1
-    while line < header_end - 2 |line, headers, found, raw, header_end|:
-        next: i64 = rh_find_byte(raw, line.usize(), 10)
-        return -2 if next < 0 or next >= header_end
-        headers <- headers + 1
-        return -2 if headers > RH_HTTP_MAX_HEADERS
-        stop: mutable i64 = next
-        stop <- stop - 1 if stop > line and raw[(stop - 1).usize()] == 13
-        prefix: u8& = "Content-Length:"
-        if stop - line >= strlen(prefix).i64() and rh_bytes_equal_literal(raw, line, line + strlen(prefix).i64(), prefix):
-            value_start: mutable i64 = line + strlen(prefix).i64()
-            while value_start < stop and (raw[value_start.usize()] == 32 or raw[value_start.usize()] == 9):
-                value_start <- value_start + 1
-            value_end: mutable i64 = stop
-            while value_end > value_start and (raw[(value_end - 1).usize()] == 32 or raw[(value_end - 1).usize()] == 9):
-                value_end <- value_end - 1
-            ok: mutable i64 = 0
-            parsed: i64 = rh_parse_i64(raw, value_start.usize(), value_end.usize(), &ok)
-            return -2 if ok == 0 or parsed < 0 or parsed > RH_HTTP_MAX_BODY
-            return -2 if found >= 0 and found != parsed
-            found <- parsed
-        line <- next + 1
-    found
+        # (private to this file)
+        def rh_span_eq_lit(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(data, s, e, lit)
 
-# (private to this file)
-def rh_contains_bytes(hay: darray[u8]&, needle: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    n: usize = strlen(needle)
-    return false if hay.count < n or n == 0
-    while i + n <= hay.count |i: usize = 0, hay, needle, n|:
-        same: bool =
-            while k < n |same: bool = true, k: usize = 0, i| -> same:
-                if hay[i + k] != needle[k]:
-                    same <- false
+        # Reject "..", NUL and control bytes in [s,e).
+        # (private to this file)
+        def rh_http_has_traversal(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < e |i: i64 = s, data, s, e|:
+                b: u8 = data[i.usize()]
+                return true if b == 0 or b < 32
+                return true if b == 46 and i + 1 < e and data[(i + 1).usize()] == 46
+                i <- i + 1
+            false
+
+        # Map a parsed request to a status code, without I/O. Pure and testable.
+        # - unknown path -> 404
+        # - method other than GET/HEAD -> 405
+        # - "/health" -> 200 (service liveness only; carries no project verdict)
+        def rh_http_status_for(req: RhHttpRequest&, raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return RH_HTTP_BAD_REQUEST if req.ok != 1
+            idx: i64 = rh_http_allowed_span(raw, req.path_s, req.path_e)
+            if req.method == RH_M_POST:
+                return RH_HTTP_OK if idx == 6
+                return RH_HTTP_METHOD_NOT_ALLOWED
+            return RH_HTTP_METHOD_NOT_ALLOWED if req.method != RH_M_GET and req.method != RH_M_HEAD
+            return RH_HTTP_METHOD_NOT_ALLOWED if idx == 6
+            return RH_HTTP_NOT_FOUND if idx < 0
+            RH_HTTP_OK
+
+        # Allowlist by span over the request buffer. Kept separate so no copy is
+        # needed when only comparing.
+        def rh_http_allowed_span(data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if rh_span_eq_lit(data, s, e, "/")
+            return 0 if rh_span_eq_lit(data, s, e, "/index.html")
+            return 1 if rh_span_eq_lit(data, s, e, "/report.json")
+            return 2 if rh_span_eq_lit(data, s, e, "/report.md")
+            return 3 if rh_span_eq_lit(data, s, e, "/bundle.manifest")
+            return 4 if rh_span_eq_lit(data, s, e, "/health")
+            return 5 if rh_span_eq_lit(data, s, e, "/_report.html")
+            return 6 if rh_span_eq_lit(data, s, e, "/api/query")
+            return 7 if rh_span_eq_lit(data, s, e, "/api/project")
+            return 8 if rh_span_eq_lit(data, s, e, "/api/metrics")
+            return 9 if rh_span_eq_lit(data, s, e, "/api/continuity")
+            return 10 if rh_span_eq_lit(data, s, e, "/api/graph")
+            return 11 if rh_span_eq_lit(data, s, e, "/api/findings")
+            return 12 if rh_span_eq_lit(data, s, e, "/api/evidence")
+            return 13 if rh_span_eq_lit(data, s, e, "/api/scan-status")
+            store_s: mutable i64 = -1
+            store_e: mutable i64 = -1
+            return 14 if rh_http_store_digest(data, s, e, &store_s, &store_e)
+            -1
+
+        # A store lookup is valid only for a fixed-length lowercase/uppercase hex
+        # digest below the report's `evidence/` directory. No path component or
+        # user-provided filename is accepted.
+        def rh_http_store_digest(data: darray[u8]&, s: i64, e: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            prefix: u8& = "/api/store/"
+            ps: i64 = strlen(prefix).i64()
+            return false if e - s != ps + 16
+            return false if not rh_bytes_equal_literal(data, s, s + ps, prefix)
+            while i < e |i: i64 = s + ps, e, data|:
+                b: u8 = data[i.usize()]
+                return false if not ((b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102))
+                i <- i + 1
+            start_out[0] <- s + ps
+            end_out[0] <- e
+            true
+
+        # Return the first byte after the HTTP header terminator. A query body is
+        # accepted only after a complete header block and remains bounded by the
+        # request cap enforced by rh_http_read_request.
+        def rh_http_body_start(raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count < 4
+            while i + 3 < raw.count |i: usize = 0, raw|:
+                return (i + 4).i64() if raw[i] == 13 and raw[i + 1] == 10 and raw[i + 2] == 13 and raw[i + 3] == 10
+                i <- i + 1
+            -1
+
+        # Return the declared request body length. -1 means no Content-Length header;
+        # -2 is a malformed or conflicting header. Chunked transfer is intentionally
+        # unsupported in this bounded listener and therefore has no usable length.
+        # (private to this file)
+        def rh_http_content_length(raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            header_end: i64 = rh_http_body_start(raw)
+            return -1 if header_end < 0
+            first: i64 = rh_find_byte(raw, 0, 10)
+            return -2 if first < 0
+            line: mutable i64 = first + 1
+            headers: mutable i64 = 0
+            found: mutable i64 = -1
+            while line < header_end - 2 |line, headers, found, raw, header_end|:
+                next: i64 = rh_find_byte(raw, line.usize(), 10)
+                return -2 if next < 0 or next >= header_end
+                headers <- headers + 1
+                return -2 if headers > RH_HTTP_MAX_HEADERS
+                stop: mutable i64 = next
+                stop <- stop - 1 if stop > line and raw[(stop - 1).usize()] == 13
+                prefix: u8& = "Content-Length:"
+                if stop - line >= strlen(prefix).i64() and rh_bytes_equal_literal(raw, line, line + strlen(prefix).i64(), prefix):
+                    value_start: mutable i64 = line + strlen(prefix).i64()
+                    while value_start < stop and (raw[value_start.usize()] == 32 or raw[value_start.usize()] == 9):
+                        value_start <- value_start + 1
+                    value_end: mutable i64 = stop
+                    while value_end > value_start and (raw[(value_end - 1).usize()] == 32 or raw[(value_end - 1).usize()] == 9):
+                        value_end <- value_end - 1
+                    ok: mutable i64 = 0
+                    parsed: i64 = rh_parse_i64(raw, value_start.usize(), value_end.usize(), &ok)
+                    return -2 if ok == 0 or parsed < 0 or parsed > RH_HTTP_MAX_BODY
+                    return -2 if found >= 0 and found != parsed
+                    found <- parsed
+                line <- next + 1
+            found
+
+        # (private to this file)
+        def rh_contains_bytes(hay: darray[u8]&, needle: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            n: usize = strlen(needle)
+            return false if hay.count < n or n == 0
+            while i + n <= hay.count |i: usize = 0, hay, needle, n|:
+                same: bool =
+                    while k < n |same: bool = true, k: usize = 0, i| -> same:
+                        if hay[i + k] != needle[k]:
+                            same <- false
+                        k <- k + 1
+                return true if same
+                i <- i + 1
+            false
+
+        # Build the response head. Status text is fixed per code; no request bytes
+        # are echoed. Content-Length is supplied by the caller.
+        def rh_http_head(status: i64, content_type: u8&, length: i64, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "HTTP/1.1 ")
+            rh_push_decimal_i64(out, status)
+            out.push(32)
+            if status == RH_HTTP_OK:
+                rh_push_text(out, "OK")
+            elif status == RH_HTTP_BAD_REQUEST:
+                rh_push_text(out, "Bad Request")
+            elif status == RH_HTTP_NOT_FOUND:
+                rh_push_text(out, "Not Found")
+            elif status == RH_HTTP_METHOD_NOT_ALLOWED:
+                rh_push_text(out, "Method Not Allowed")
+            elif status == RH_HTTP_URI_TOO_LONG:
+                rh_push_text(out, "URI Too Long")
+            else:
+                rh_push_text(out, "Internal Server Error")
+            rh_push_text(out, "\r\nContent-Type: ")
+            rh_push_text(out, content_type)
+            rh_push_text(out, "\r\nContent-Length: ")
+            rh_push_decimal_i64(out, length)
+            rh_push_text(out, "\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n")
+
+        # --- Listener loop (loopback only) --------------------------------------
+        #
+        # bind address is a sockaddr_in for 127.0.0.1. It is built byte-by-byte so
+        # no platform struct packing is assumed beyond the documented layout:
+        #   family(2) port(2, big-endian) addr(4, network order) zero(8)
+        # The port is caller-supplied; binding 0 asks the OS for a free port.
+        # Only 127.0.0.1 is ever bound — a public interface is not reachable.
+
+        # Write a 127.0.0.1 sockaddr_in into buf; returns 16 (the length).
+        def rh_http_loopback_addr(port: i32, buf: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            # family AF_INET=2, little-endian host -> bytes 2,0 on this platform
+            buf.push(2)
+            buf.push(0)
+            # port big-endian
+            buf.push(((port >> 8) & 255).u8())
+            buf.push((port & 255).u8())
+            # 127.0.0.1 network order
+            buf.push(127)
+            buf.push(0)
+            buf.push(0)
+            buf.push(1)
+            # sin_zero[8]
+            while k < 8 |k: i64 = 0, buf|:
+                buf.push(0)
                 k <- k + 1
-        return true if same
-        i <- i + 1
-    false
+            16
 
-# Build the response head. Status text is fixed per code; no request bytes
-# are echoed. Content-Length is supplied by the caller.
-def rh_http_head(status: i64, content_type: u8&, length: i64, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-    rh_push_text(out, "HTTP/1.1 ")
-    rh_push_decimal_i64(out, status)
-    out.push(32)
-    if status == RH_HTTP_OK:
-        rh_push_text(out, "OK")
-    elif status == RH_HTTP_BAD_REQUEST:
-        rh_push_text(out, "Bad Request")
-    elif status == RH_HTTP_NOT_FOUND:
-        rh_push_text(out, "Not Found")
-    elif status == RH_HTTP_METHOD_NOT_ALLOWED:
-        rh_push_text(out, "Method Not Allowed")
-    elif status == RH_HTTP_URI_TOO_LONG:
-        rh_push_text(out, "URI Too Long")
-    else:
-        rh_push_text(out, "Internal Server Error")
-    rh_push_text(out, "\r\nContent-Type: ")
-    rh_push_text(out, content_type)
-    rh_push_text(out, "\r\nContent-Length: ")
-    rh_push_decimal_i64(out, length)
-    rh_push_text(out, "\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n")
+        # Open a loopback listener. Returns the fd or -1. SO_REUSEADDR=2 at
+        # SOL_SOCKET=1 avoids TIME_WAIT bind failures during tests.
+        def rh_http_listen(port: i32) -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            fd: i32 = rh_sys_socket(2, 1, 0)
+            return -1 if fd < 0
+            one: mutable i32 = 1
+            onep: void& = (&one).cast[void&] can Unsafe.PointerCast
+            _ = rh_sys_setsockopt(fd, 1, 2, onep, 4)
+            addr: mutable darray[u8] = []
+            n: i64 = rh_http_loopback_addr(port, addr)
+            addrp: void& = (&addr[0]).cast[void&] can Unsafe.PointerCast
+            if rh_sys_bind(fd, addrp, n.u32()) != 0:
+                _ = rh_sys_close(fd)
+                return -1
+            if rh_sys_listen(fd, 8) != 0:
+                _ = rh_sys_close(fd)
+                return -1
+            fd
 
-# --- Listener loop (loopback only) --------------------------------------
-#
-# bind address is a sockaddr_in for 127.0.0.1. It is built byte-by-byte so
-# no platform struct packing is assumed beyond the documented layout:
-#   family(2) port(2, big-endian) addr(4, network order) zero(8)
-# The port is caller-supplied; binding 0 asks the OS for a free port.
-# Only 127.0.0.1 is ever bound — a public interface is not reachable.
+        # Serve exactly one connection on an accepted fd: read a bounded request,
+        # route it, write the head and (for GET) the body bytes the caller supplies
+        # via resolve. resolve fills `body` and returns the content type; it must
+        # only read files under the report root. Returns the status code served.
+        def rh_http_serve_one(cfd: i32, raw: mutable darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            # read up to the cap in one shot (requests here are small headers only)
+            # Requests are small headers; route the already-buffered bytes. Socket
+            # reads are performed by the accept loop in the caller so this function
+            # is testable without a live socket.
+            rh_http_route(raw, root, body, ctype_out)
 
-# Write a 127.0.0.1 sockaddr_in into buf; returns 16 (the length).
-def rh_http_loopback_addr(port: i32, buf: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    # family AF_INET=2, little-endian host -> bytes 2,0 on this platform
-    buf.push(2)
-    buf.push(0)
-    # port big-endian
-    buf.push(((port >> 8) & 255).u8())
-    buf.push((port & 255).u8())
-    # 127.0.0.1 network order
-    buf.push(127)
-    buf.push(0)
-    buf.push(0)
-    buf.push(1)
-    # sin_zero[8]
-    while k < 8 |k: i64 = 0, buf|:
-        buf.push(0)
-        k <- k + 1
-    16
+        # Route a fully-buffered request. Pure w.r.t. the socket: decides status,
+        # fills body/content-type for an allowed GET/resource; it never echoes the request.
+        # Resource paths map to fixed JSON artifact names; absent artifacts
+        # remain 404.
+        def rh_http_route(raw: darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            idx: i64 = |ctype_out|
+                req: RhHttpRequest = rh_http_parse_request_line(raw)
+                status: i64 = rh_http_status_for(req, raw)
+                ctype_out[0] <- RH_CT_TEXT
+                return status if status != RH_HTTP_OK
+                value: i64 = rh_http_allowed_span(raw, req.path_s, req.path_e)
+                value
+            if idx == 4:
+                # /health: liveness only, carries no project verdict
+                rh_push_text(body, "ok\n")
+                ctype_out[0] <- RH_CT_TEXT
+                return RH_HTTP_OK
+            if idx == 5:
+                # /_report.html: server-rendered accessible page from report.json.
+                rpath: mutable darray[u8] =
+                    rpath: mutable darray[u8] = []
+                    rh_push_cstr(rpath, root)
+                    rh_push_text(rpath, "/report.json")
+                    rpath.push(0)
+                    rpath
+                rback: mutable darray[u8] = []
+                rpp: cstr = (&rpath[0]).cast[cstr] can Unsafe.PointerCast
+                return RH_HTTP_NOT_FOUND if rh_io_read(rpp, rback) < 0
+                cpath: mutable darray[u8] = []
+                mpath: mutable darray[u8] = []
+                cback: mutable darray[u8] = []
+                mback: mutable darray[u8] = []
+                rendered_with_continuity: mutable bool = false
+                if rh_http_root_path(root, "continuity.json", cpath) and rh_http_root_path(root, "continuity-metrics.json", mpath):
+                    cpp: cstr = (&cpath[0]).cast[cstr] can Unsafe.PointerCast
+                    mpp: cstr = (&mpath[0]).cast[cstr] can Unsafe.PointerCast
+                    if rh_io_read(cpp, cback) >= 0 and rh_io_read(mpp, mback) >= 0:
+                        rendered_with_continuity <- rh_render_report_html_with_continuity(rback, cback, mback, body) == 0
+                return RH_HTTP_INTERNAL if not rendered_with_continuity and rh_render_report_html(rback, body) != 0
+                ctype_out[0] <- RH_CT_HTML
+                return RH_HTTP_OK
+            if idx == 6:
+                start: i64 = rh_http_body_start(raw)
+                return RH_HTTP_BAD_REQUEST if start < 0 or start >= raw.count.i64()
+                query: mutable darray[u8] = []
+                while i < raw.count.i64() |i: i64 = start, raw, query|:
+                    query.push(raw[i.usize()])
+                    i <- i + 1
+                return RH_HTTP_BAD_REQUEST if rh_query_report(query, body) != 0
+                ctype_out[0] <- RH_CT_JSON
+                return RH_HTTP_OK
+            if idx == 14:
+                digest_s: mutable i64 = -1
+                digest_e: mutable i64 = -1
+                store_req: RhHttpRequest = rh_http_parse_request_line(raw)
+                return RH_HTTP_NOT_FOUND if not rh_http_store_digest(raw, store_req.path_s, store_req.path_e, &digest_s, &digest_e)
+                digest: mutable darray[u8] = []
+                while i < digest_e |i: i64 = digest_s, digest_e, raw, digest|:
+                    digest.push(raw[i.usize()])
+                    i <- i + 1
+                digest.push(0)
+                evidence: mutable darray[u8] = []
+                rh_push_cstr(evidence, root)
+                evidence.push(47)
+                rh_push_text(evidence, "evidence")
+                evidence.push(0)
+                evidence_path: cstr = (&evidence[0]).cast[cstr] can Unsafe.PointerCast
+                digest_path: mutable darray[u8] = []
+                rh_push_cstr(digest_path, evidence_path)
+                digest_path.push(47)
+                while i < digest_e |i: i64 = digest_s, digest_e, raw, digest_path|:
+                    digest_path.push(raw[i.usize()])
+                    i <- i + 1
+                digest_path.push(0)
+                digest_ptr: cstr = (&digest[0]).cast[cstr] can Unsafe.PointerCast
+                path_ptr: cstr = (&digest_path[0]).cast[cstr] can Unsafe.PointerCast
+                back: mutable darray[u8] = []
+                return RH_HTTP_NOT_FOUND if rh_io_read(path_ptr, back) < 0
+                return RH_HTTP_INTERNAL if back.count.i64() > RH_HTTP_MAX_BODY
+                verified: mutable i64 = 0
+                return RH_HTTP_INTERNAL if rh_store_blob_verify(evidence_path, digest_ptr, &verified) != 0 or verified != 1
+                body.extend(bytes_view(back))
+                ctype_out[0] <- RH_CT_BINARY
+                return RH_HTTP_OK
+            name: u8& = rh_http_file_name(idx)
+            if idx == 0:
+                ctype_out[0] <- RH_CT_HTML
+            elif idx == 1:
+                ctype_out[0] <- RH_CT_JSON
+            elif idx == 2:
+                ctype_out[0] <- RH_CT_MARKDOWN
+            elif idx >= 7:
+                ctype_out[0] <- RH_CT_JSON
+            else:
+                ctype_out[0] <- RH_CT_TEXT
+            path: mutable darray[u8] =
+                path: mutable darray[u8] = []
+                rh_push_cstr(path, root)
+                path.push(47)
+                rh_push_text(path, name)
+                path.push(0)
+                path
+            back: mutable darray[u8] = []
+            pathp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+            return RH_HTTP_NOT_FOUND if rh_io_read(pathp, back) < 0
+            return RH_HTTP_INTERNAL if back.count.i64() > RH_HTTP_MAX_BODY
+            body.extend(bytes_view(back))
+            RH_HTTP_OK
 
-# Open a loopback listener. Returns the fd or -1. SO_REUSEADDR=2 at
-# SOL_SOCKET=1 avoids TIME_WAIT bind failures during tests.
-def rh_http_listen(port: i32) -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-    fd: i32 = rh_sys_socket(2, 1, 0)
-    return -1 if fd < 0
-    one: mutable i32 = 1
-    onep: void& = (&one).cast[void&] can Unsafe.PointerCast
-    _ = rh_sys_setsockopt(fd, 1, 2, onep, 4)
-    addr: mutable darray[u8] = []
-    n: i64 = rh_http_loopback_addr(port, addr)
-    addrp: void& = (&addr[0]).cast[void&] can Unsafe.PointerCast
-    if rh_sys_bind(fd, addrp, n.u32()) != 0:
-        _ = rh_sys_close(fd)
-        return -1
-    if rh_sys_listen(fd, 8) != 0:
-        _ = rh_sys_close(fd)
-        return -1
-    fd
+        # Read through a complete bounded header and declared body from a socket into
+        # buf. Returns bytes read or -1. One connection may split headers/body across
+        # arbitrary read boundaries; routing starts only after the complete request is
+        # present.
+        def rh_http_read_request(cfd: i32, buf: mutable darray[u8]&, cap: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            chunk: mutable darray[u8] = []
+            while k < 1024 |k: i64 = 0, chunk|:
+                chunk.push(0)
+                k <- k + 1
+            total: mutable i64 = 0
+            while total < cap |total, cap, cfd, buf, chunk|:
+                remaining: i64 = cap - total
+                want: usize = remaining.usize() if remaining < 1024 else 1024
+                p: void& = (&chunk[0]).cast[void&] can Unsafe.PointerCast
+                n: i64 = rh_sys_read(cfd, p, want)
+                return -1 if n < 0
+                break if n == 0
+                while i < n |i: i64 = 0, n, chunk, buf|:
+                    buf.push(chunk[i.usize()])
+                    i <- i + 1
+                total <- total + n
+                header_end: i64 = rh_http_body_start(buf)
+                continue if header_end < 0
+                content_length: i64 = rh_http_content_length(buf)
+                return -1 if content_length == -2
+                expected: i64 = header_end + content_length if content_length >= 0 else header_end
+                return -1 if expected > cap
+                break if total >= expected
+            total
 
-# Serve exactly one connection on an accepted fd: read a bounded request,
-# route it, write the head and (for GET) the body bytes the caller supplies
-# via resolve. resolve fills `body` and returns the content type; it must
-# only read files under the report root. Returns the status code served.
-def rh_http_serve_one(cfd: i32, raw: mutable darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-    # read up to the cap in one shot (requests here are small headers only)
-    # Requests are small headers; route the already-buffered bytes. Socket
-    # reads are performed by the accept loop in the caller so this function
-    # is testable without a live socket.
-    rh_http_route(raw, root, body, ctype_out)
+        # Write all bytes to a socket. Returns bytes written or -1.
+        def rh_http_write_all(cfd: i32, data: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return 0 if data.count == 0
+            p: void& = (&data[0]).cast[void&] can Unsafe.PointerCast
+            rh_sys_write(cfd, p, data.count)
 
-# Route a fully-buffered request. Pure w.r.t. the socket: decides status,
-# fills body/content-type for an allowed GET/resource; it never echoes the request.
-# Resource paths map to fixed JSON artifact names; absent artifacts
-# remain 404.
-def rh_http_route(raw: darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    idx: i64 = |ctype_out|
-        req: RhHttpRequest = rh_http_parse_request_line(raw)
-        status: i64 = rh_http_status_for(req, raw)
-        ctype_out[0] <- RH_CT_TEXT
-        return status if status != RH_HTTP_OK
-        value: i64 = rh_http_allowed_span(raw, req.path_s, req.path_e)
-        value
-    if idx == 4:
-        # /health: liveness only, carries no project verdict
-        rh_push_text(body, "ok\n")
-        ctype_out[0] <- RH_CT_TEXT
-        return RH_HTTP_OK
-    if idx == 5:
-        # /_report.html: server-rendered accessible page from report.json.
-        rpath: mutable darray[u8] =
-            rpath: mutable darray[u8] = []
-            rh_push_cstr(rpath, root)
-            rh_push_text(rpath, "/report.json")
-            rpath.push(0)
-            rpath
-        rback: mutable darray[u8] = []
-        rpp: cstr = (&rpath[0]).cast[cstr] can Unsafe.PointerCast
-        return RH_HTTP_NOT_FOUND if rh_io_read(rpp, rback) < 0
-        cpath: mutable darray[u8] = []
-        mpath: mutable darray[u8] = []
-        cback: mutable darray[u8] = []
-        mback: mutable darray[u8] = []
-        rendered_with_continuity: mutable bool = false
-        if rh_http_root_path(root, "continuity.json", cpath) and rh_http_root_path(root, "continuity-metrics.json", mpath):
-            cpp: cstr = (&cpath[0]).cast[cstr] can Unsafe.PointerCast
-            mpp: cstr = (&mpath[0]).cast[cstr] can Unsafe.PointerCast
-            if rh_io_read(cpp, cback) >= 0 and rh_io_read(mpp, mback) >= 0:
-                rendered_with_continuity <- rh_render_report_html_with_continuity(rback, cback, mback, body) == 0
-        return RH_HTTP_INTERNAL if not rendered_with_continuity and rh_render_report_html(rback, body) != 0
-        ctype_out[0] <- RH_CT_HTML
-        return RH_HTTP_OK
-    if idx == 6:
-        start: i64 = rh_http_body_start(raw)
-        return RH_HTTP_BAD_REQUEST if start < 0 or start >= raw.count.i64()
-        query: mutable darray[u8] = []
-        while i < raw.count.i64() |i: i64 = start, raw, query|:
-            query.push(raw[i.usize()])
-            i <- i + 1
-        return RH_HTTP_BAD_REQUEST if rh_query_report(query, body) != 0
-        ctype_out[0] <- RH_CT_JSON
-        return RH_HTTP_OK
-    if idx == 14:
-        digest_s: mutable i64 = -1
-        digest_e: mutable i64 = -1
-        store_req: RhHttpRequest = rh_http_parse_request_line(raw)
-        return RH_HTTP_NOT_FOUND if not rh_http_store_digest(raw, store_req.path_s, store_req.path_e, &digest_s, &digest_e)
-        digest: mutable darray[u8] = []
-        while i < digest_e |i: i64 = digest_s, digest_e, raw, digest|:
-            digest.push(raw[i.usize()])
-            i <- i + 1
-        digest.push(0)
-        evidence: mutable darray[u8] = []
-        rh_push_cstr(evidence, root)
-        evidence.push(47)
-        rh_push_text(evidence, "evidence")
-        evidence.push(0)
-        evidence_path: cstr = (&evidence[0]).cast[cstr] can Unsafe.PointerCast
-        digest_path: mutable darray[u8] = []
-        rh_push_cstr(digest_path, evidence_path)
-        digest_path.push(47)
-        while i < digest_e |i: i64 = digest_s, digest_e, raw, digest_path|:
-            digest_path.push(raw[i.usize()])
-            i <- i + 1
-        digest_path.push(0)
-        digest_ptr: cstr = (&digest[0]).cast[cstr] can Unsafe.PointerCast
-        path_ptr: cstr = (&digest_path[0]).cast[cstr] can Unsafe.PointerCast
-        back: mutable darray[u8] = []
-        return RH_HTTP_NOT_FOUND if rh_io_read(path_ptr, back) < 0
-        return RH_HTTP_INTERNAL if back.count.i64() > RH_HTTP_MAX_BODY
-        verified: mutable i64 = 0
-        return RH_HTTP_INTERNAL if rh_store_blob_verify(evidence_path, digest_ptr, &verified) != 0 or verified != 1
-        body.extend(bytes_view(back))
-        ctype_out[0] <- RH_CT_BINARY
-        return RH_HTTP_OK
-    name: u8& = rh_http_file_name(idx)
-    if idx == 0:
-        ctype_out[0] <- RH_CT_HTML
-    elif idx == 1:
-        ctype_out[0] <- RH_CT_JSON
-    elif idx == 2:
-        ctype_out[0] <- RH_CT_MARKDOWN
-    elif idx >= 7:
-        ctype_out[0] <- RH_CT_JSON
-    else:
-        ctype_out[0] <- RH_CT_TEXT
-    path: mutable darray[u8] =
-        path: mutable darray[u8] = []
-        rh_push_cstr(path, root)
-        path.push(47)
-        rh_push_text(path, name)
-        path.push(0)
-        path
-    back: mutable darray[u8] = []
-    pathp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
-    return RH_HTTP_NOT_FOUND if rh_io_read(pathp, back) < 0
-    return RH_HTTP_INTERNAL if back.count.i64() > RH_HTTP_MAX_BODY
-    body.extend(bytes_view(back))
-    RH_HTTP_OK
+        # Serve one accepted connection end to end: bounded read, route, write head
+        # (and body for GET, not for HEAD). Returns the status code served.
+        def rh_http_serve_conn(cfd: i32, root: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            raw: mutable darray[u8] = []
+            got: i64 = rh_http_read_request(cfd, raw, RH_HTTP_MAX_REQUEST)
+            body: mutable darray[u8] = []
+            ct: mutable i64 = 0
+            status: i64 = rh_http_route(raw, root, body, &ct) if got > 0 else RH_HTTP_BAD_REQUEST
+            is_head: bool = |raw|
+                req: RhHttpRequest = rh_http_parse_request_line(raw)
+                req.ok == 1 and req.method == RH_M_HEAD
+            send_len: mutable i64 = body.count.i64()
+            if is_head:
+                send_len <- 0
+            head: mutable darray[u8] = []
+            rh_http_head(status, rh_http_content_type(ct), send_len, head)
+            _ = rh_http_write_all(cfd, head)
+            if not is_head:
+                _ = rh_http_write_all(cfd, body)
+            status
 
-# Read through a complete bounded header and declared body from a socket into
-# buf. Returns bytes read or -1. One connection may split headers/body across
-# arbitrary read boundaries; routing starts only after the complete request is
-# present.
-def rh_http_read_request(cfd: i32, buf: mutable darray[u8]&, cap: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-    chunk: mutable darray[u8] = []
-    while k < 1024 |k: i64 = 0, chunk|:
-        chunk.push(0)
-        k <- k + 1
-    total: mutable i64 = 0
-    while total < cap |total, cap, cfd, buf, chunk|:
-        remaining: i64 = cap - total
-        want: usize = remaining.usize() if remaining < 1024 else 1024
-        p: void& = (&chunk[0]).cast[void&] can Unsafe.PointerCast
-        n: i64 = rh_sys_read(cfd, p, want)
-        return -1 if n < 0
-        break if n == 0
-        while i < n |i: i64 = 0, n, chunk, buf|:
-            buf.push(chunk[i.usize()])
-            i <- i + 1
-        total <- total + n
-        header_end: i64 = rh_http_body_start(buf)
-        continue if header_end < 0
-        content_length: i64 = rh_http_content_length(buf)
-        return -1 if content_length == -2
-        expected: i64 = header_end + content_length if content_length >= 0 else header_end
-        return -1 if expected > cap
-        break if total >= expected
-    total
-
-# Write all bytes to a socket. Returns bytes written or -1.
-def rh_http_write_all(cfd: i32, data: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-    return 0 if data.count == 0
-    p: void& = (&data[0]).cast[void&] can Unsafe.PointerCast
-    rh_sys_write(cfd, p, data.count)
-
-# Serve one accepted connection end to end: bounded read, route, write head
-# (and body for GET, not for HEAD). Returns the status code served.
-def rh_http_serve_conn(cfd: i32, root: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    raw: mutable darray[u8] = []
-    got: i64 = rh_http_read_request(cfd, raw, RH_HTTP_MAX_REQUEST)
-    body: mutable darray[u8] = []
-    ct: mutable i64 = 0
-    status: i64 = rh_http_route(raw, root, body, &ct) if got > 0 else RH_HTTP_BAD_REQUEST
-    is_head: bool = |raw|
-        req: RhHttpRequest = rh_http_parse_request_line(raw)
-        req.ok == 1 and req.method == RH_M_HEAD
-    send_len: mutable i64 = body.count.i64()
-    if is_head:
-        send_len <- 0
-    head: mutable darray[u8] = []
-    rh_http_head(status, rh_http_content_type(ct), send_len, head)
-    _ = rh_http_write_all(cfd, head)
-    if not is_head:
-        _ = rh_http_write_all(cfd, body)
-    status
-
-# Bounded accept loop. Serves at most max_connections then returns, so the
-# process always terminates. Each connection is closed immediately.
-def rh_http_serve(root: cstr, port: i32, max_connections: i64) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    fd: i32 = rh_http_listen(port)
-    return -1 if fd < 0
-    served: mutable i64 = 0
-    cap: i64 = max_connections
-    while served < cap |served, cap, fd, root|:
-        cfd: i32 = rh_sys_accept(fd, null, null)
-        if cfd < 0:
-            break if true
-        _ = rh_http_serve_conn(cfd, root)
-        _ = rh_sys_close(cfd)
-        served <- served + 1
-    _ = rh_sys_close(fd)
-    served
+        # Bounded accept loop. Serves at most max_connections then returns, so the
+        # process always terminates. Each connection is closed immediately.
+        def rh_http_serve(root: cstr, port: i32, max_connections: i64) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            fd: i32 = rh_http_listen(port)
+            return -1 if fd < 0
+            served: mutable i64 = 0
+            cap: i64 = max_connections
+            while served < cap |served, cap, fd, root|:
+                cfd: i32 = rh_sys_accept(fd, null, null)
+                if cfd < 0:
+                    break if true
+                _ = rh_http_serve_conn(cfd, root)
+                _ = rh_sys_close(cfd)
+                served <- served + 1
+            _ = rh_sys_close(fd)
+            served
