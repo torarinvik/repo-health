@@ -1,0 +1,167 @@
+# rh_ecosystem_lookup.elisa — bounded ecosyste.ms package lookup capture (M03-10).
+#
+# The adapter consumes a reviewed, captured package lookup envelope. It keeps
+# provider identifiers and source locators as enrichment evidence; it never
+# promotes an aggregator claim to a canonical package or repository identity.
+# Unknown provider fields are ignored, while malformed observed records are
+# counted and rejected deterministically.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_ECOSYSTEM_LOOKUP_MAX_BYTES: i64 = 4194304
+const RH_ECOSYSTEM_LOOKUP_MAX_RESULTS: i64 = 1000
+
+module EcosystemLookup:
+    private:
+        def rh_ecosystem_lookup_span(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return false if idx < 0
+            node: RhJsonNode = nodes[idx.usize()]
+            return false if node.kind != RH_JSON_STR or node.text_end <= node.text_start
+            start_out[0] <- node.text_start
+            end_out[0] <- node.text_end
+            true
+
+        def rh_ecosystem_lookup_optional_span(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            if idx < 0:
+                present_out[0] <- 0
+                start_out[0] <- -1
+                end_out[0] <- -1
+                return true
+            node: RhJsonNode = nodes[idx.usize()]
+            return false if node.kind != RH_JSON_STR and node.kind != RH_JSON_NULL
+            present: mutable i64 = 0
+            present <- 1 if node.kind == RH_JSON_STR and node.text_end > node.text_start
+            present_out[0] <- present
+            start_out[0] <- node.text_start
+            end_out[0] <- node.text_end
+            true
+
+        def rh_ecosystem_lookup_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, start.usize(), end.usize())
+            out.push(34)
+
+        def rh_ecosystem_lookup_emit_optional(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64, present: bool) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_ecosystem_lookup_emit_span(out, texts, start, end) if present
+            rh_push_text(out, "null") if not present
+
+    public:
+        def rh_ecosystem_lookup_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count.i64() > RH_ECOSYSTEM_LOOKUP_MAX_BYTES
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+
+            schema_s: mutable i64 = -1
+            schema_e: mutable i64 = -1
+            provider_s: mutable i64 = -1
+            provider_e: mutable i64 = -1
+            return -1 if not EcosystemLookup::rh_ecosystem_lookup_span(nodes, texts, root, "schema", &schema_s, &schema_e)
+            schema_matches: bool = rh_bytes_equal_literal(texts, schema_s, schema_e, "rh-ecosystem-lookup-input/1")
+            return -1 if schema_matches == false
+            return -1 if not EcosystemLookup::rh_ecosystem_lookup_span(nodes, texts, root, "provider", &provider_s, &provider_e)
+            provider_matches: bool = rh_bytes_equal_literal(texts, provider_s, provider_e, "ecosyste.ms")
+            return -1 if provider_matches == false
+            query_idx: i64 = rh_json_obj_get(nodes, texts, root, "query")
+            return -1 if query_idx < 0 or nodes[query_idx.usize()].kind != RH_JSON_OBJ
+            query_eco_s: mutable i64 = -1
+            query_eco_e: mutable i64 = -1
+            query_name_s: mutable i64 = -1
+            query_name_e: mutable i64 = -1
+            return -1 if not EcosystemLookup::rh_ecosystem_lookup_span(nodes, texts, query_idx, "ecosystem", &query_eco_s, &query_eco_e)
+            return -1 if not EcosystemLookup::rh_ecosystem_lookup_span(nodes, texts, query_idx, "name", &query_name_s, &query_name_e)
+
+            results_idx: i64 = rh_json_obj_get(nodes, texts, root, "results")
+            return -1 if results_idx < 0 or nodes[results_idx.usize()].kind != RH_JSON_ARR
+            return -1 if nodes[results_idx.usize()].child_count > RH_ECOSYSTEM_LOOKUP_MAX_RESULTS
+
+            rh_push_text(out, "{\"schema\":\"rh-ecosystem-lookup-result/1\",\"provider\":\"ecosyste.ms\",\"query\":{\"ecosystem\":")
+            EcosystemLookup::rh_ecosystem_lookup_emit_span(out, texts, query_eco_s, query_eco_e)
+            rh_push_text(out, ",\"name\":")
+            EcosystemLookup::rh_ecosystem_lookup_emit_span(out, texts, query_name_s, query_name_e)
+            rh_push_text(out, "},\"results\":[")
+
+            rejected: mutable i64 = 0
+            emitted: mutable i64 = 0
+            while child >= 0 |child: i64 = nodes[results_idx.usize()].first_child, nodes, texts, out, rejected, emitted|:
+                accepted: mutable bool = nodes[child.usize()].kind == RH_JSON_OBJ
+                result_id_idx: i64 = rh_json_obj_get(nodes, texts, child, "id")
+                id_ok: mutable i64 = 0
+                provider_id: i64 = rh_json_int(nodes, raw, result_id_idx, &id_ok)
+                accepted <- false if id_ok == 0 or provider_id < 0
+                name_s: mutable i64 = -1
+                name_e: mutable i64 = -1
+                ecosystem_s: mutable i64 = -1
+                ecosystem_e: mutable i64 = -1
+                accepted <- false if not EcosystemLookup::rh_ecosystem_lookup_span(nodes, texts, child, "name", &name_s, &name_e)
+                accepted <- false if not EcosystemLookup::rh_ecosystem_lookup_span(nodes, texts, child, "ecosystem", &ecosystem_s, &ecosystem_e)
+
+                version_s: mutable i64 = -1
+                version_e: mutable i64 = -1
+                published_s: mutable i64 = -1
+                published_e: mutable i64 = -1
+                repository_s: mutable i64 = -1
+                repository_e: mutable i64 = -1
+                homepage_s: mutable i64 = -1
+                homepage_e: mutable i64 = -1
+                manifest_s: mutable i64 = -1
+                manifest_e: mutable i64 = -1
+                has_version: mutable i64 = 0
+                has_published: mutable i64 = 0
+                has_repository: mutable i64 = 0
+                has_homepage: mutable i64 = 0
+                has_manifest: mutable i64 = 0
+                accepted <- false if not EcosystemLookup::rh_ecosystem_lookup_optional_span(nodes, texts, child, "latest_release_number", &version_s, &version_e, &has_version)
+                accepted <- false if not EcosystemLookup::rh_ecosystem_lookup_optional_span(nodes, texts, child, "latest_release_published_at", &published_s, &published_e, &has_published)
+                accepted <- false if not EcosystemLookup::rh_ecosystem_lookup_optional_span(nodes, texts, child, "repository_url", &repository_s, &repository_e, &has_repository)
+                accepted <- false if not EcosystemLookup::rh_ecosystem_lookup_optional_span(nodes, texts, child, "homepage", &homepage_s, &homepage_e, &has_homepage)
+                accepted <- false if not EcosystemLookup::rh_ecosystem_lookup_optional_span(nodes, texts, child, "manifest_url", &manifest_s, &manifest_e, &has_manifest)
+                versions_idx: i64 = rh_json_obj_get(nodes, texts, child, "versions_count")
+                versions_ok: mutable i64 = 0
+                versions_count: mutable i64 = 0
+                has_versions: mutable bool = versions_idx >= 0
+                if has_versions:
+                    versions_count <- rh_json_int(nodes, raw, versions_idx, &versions_ok)
+                    accepted <- false if versions_ok == 0 or versions_count < 0
+
+                if not accepted:
+                    rejected <- rejected + 1
+                else:
+                    out.push(44) if emitted > 0
+                    emitted <- emitted + 1
+                    rh_push_text(out, "{\"provider_id\":")
+                    rh_push_decimal_i64(out, provider_id)
+                    rh_push_text(out, ",\"name\":")
+                    EcosystemLookup::rh_ecosystem_lookup_emit_span(out, texts, name_s, name_e)
+                    rh_push_text(out, ",\"ecosystem\":")
+                    EcosystemLookup::rh_ecosystem_lookup_emit_span(out, texts, ecosystem_s, ecosystem_e)
+                    rh_push_text(out, ",\"version\":")
+                    EcosystemLookup::rh_ecosystem_lookup_emit_optional(out, texts, version_s, version_e, has_version == 1)
+                    rh_push_text(out, ",\"published_at\":")
+                    EcosystemLookup::rh_ecosystem_lookup_emit_optional(out, texts, published_s, published_e, has_published == 1)
+                    rh_push_text(out, ",\"repository\":")
+                    EcosystemLookup::rh_ecosystem_lookup_emit_optional(out, texts, repository_s, repository_e, has_repository == 1)
+                    rh_push_text(out, ",\"homepage\":")
+                    EcosystemLookup::rh_ecosystem_lookup_emit_optional(out, texts, homepage_s, homepage_e, has_homepage == 1)
+                    rh_push_text(out, ",\"manifest\":")
+                    EcosystemLookup::rh_ecosystem_lookup_emit_optional(out, texts, manifest_s, manifest_e, has_manifest == 1)
+                    rh_push_text(out, ",\"versions_count\":")
+                    rh_push_decimal_i64(out, versions_count) if has_versions
+                    rh_push_text(out, "null") if not has_versions
+                    rh_push_text(out, ",\"mapping\":{\"status\":\"candidate\",\"basis\":\"provider_package_id\"},\"coverage\":{\"status\":\"observed\",\"fields\":[\"provider_id\",\"name\",\"ecosystem\"")
+                    rh_push_text(out, ",\"version\"") if has_version == 1
+                    rh_push_text(out, ",\"published_at\"") if has_published == 1
+                    rh_push_text(out, ",\"repository\"") if has_repository == 1
+                    rh_push_text(out, ",\"homepage\"") if has_homepage == 1
+                    rh_push_text(out, ",\"manifest\"") if has_manifest == 1
+                    rh_push_text(out, ",\"versions_count\"") if has_versions
+                    rh_push_text(out, "]}}")
+                child <- nodes[child.usize()].next_sibling
+            rh_push_text(out, "],\"rejected\":")
+            rh_push_decimal_i64(out, rejected)
+            rh_push_text(out, ",\"note\":\"captured ecosyste.ms metadata remains enrichment evidence; candidate mappings require independent identity and provenance review\"}")
+            0
