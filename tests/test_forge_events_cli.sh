@@ -14,6 +14,7 @@ cp "$ROOT/fixtures/connectors/forge-events-input.json" "$T/input.json"
 cp "$ROOT/fixtures/connectors/forge-events-gitlab-input.json" "$T/gitlab.json"
 cp "$ROOT/fixtures/connectors/forge-events-forgejo-input.json" "$T/forgejo.json"
 cp "$ROOT/fixtures/connectors/forge-events-gitea-input.json" "$T/gitea.json"
+cp "$ROOT/fixtures/connectors/forge-events-bitbucket-input.json" "$T/bitbucket.json"
 cp "$ROOT/fixtures/connectors/forge-events-result.json" "$T/expected.json"
 
 echo "[forge-events] valid capture reproduces the checked-in result"
@@ -64,6 +65,20 @@ assert d["provider"] == "gitea" and d["authorization"]["state"] == "unauthorized
 assert [e["native_id"] for e in d["events"]] == ["gitea:31", "gitea:13", "gitea:76", "gitea:14"], d
 assert d["events"][1]["status"] == "closed" and d["events"][3]["tag"] == "v4.0.0", d
 print("[forge-events] Gitea boundary OK")
+PY
+
+echo "[forge-events] Bitbucket captured issues/proposals keep provider IDs"
+"$ROOT/build/rh_cli" forge events --input "$T/bitbucket.json" --out "$T/bitbucket.out" >/dev/null || fail "Bitbucket capture"
+python3 - "$T/bitbucket.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["provider"] == "bitbucket", d
+assert d["capabilities"]["issues"] == {"status": "observed", "count": 1, "rejected": 0}, d
+assert d["capabilities"]["proposals"] == {"status": "observed", "count": 1, "rejected": 0}, d
+assert d["capabilities"]["reviews"]["status"] == "unsupported" and d["capabilities"]["releases"]["status"] == "unsupported", d
+assert [e["native_id"] for e in d["events"]] == ["bitbucket:301", "bitbucket:17"], d["events"]
+assert d["events"][1]["status"] == "MERGED", d["events"][1]
+print("[forge-events] Bitbucket provider identity + unsupported states OK")
 PY
 
 echo "[forge-events] rejected records are counted per capability"
@@ -118,7 +133,7 @@ printf '%s\n' '{"schema":"rh-forge-events-input/1","provider":"github","captured
 "$ROOT/build/rh_cli" forge events --input "$T/wrong-array-shape.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 printf '%s\n' '{"schema":"wrong","provider":"github","captured_at":1}' > "$T/wrong-schema.json"
 "$ROOT/build/rh_cli" forge events --input "$T/wrong-schema.json" --out "$T/x" >/dev/null 2>&1; rc_schema=$?
-printf '%s\n' '{"schema":"rh-forge-events-input/1","provider":"bitbucket","captured_at":1}' > "$T/wrong-provider.json"
+printf '%s\n' '{"schema":"rh-forge-events-input/1","provider":"bogus","captured_at":1}' > "$T/wrong-provider.json"
 "$ROOT/build/rh_cli" forge events --input "$T/wrong-provider.json" --out "$T/x" >/dev/null 2>&1; rc_provider=$?
 set -e
 [[ "$rc_missing" -eq 4 ]] || fail "wrong capability array shape must exit 4 (got $rc_missing)"
