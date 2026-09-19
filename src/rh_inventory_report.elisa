@@ -14,143 +14,146 @@ include "./rh_json.elisa"
 include "./rh_inventory.elisa"
 include "./rh_spdx.elisa"
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_inv_emit_span(out: mutable darray[u8]&, pool: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
-    if s >= 0 and e >= s and e <= pool.count.i64():
-        Base::rh_json_escape(out, pool, s.usize(), e.usize())
+module InventoryReport:
+    private:
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_inv_emit_span(out: mutable darray[u8]&, pool: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            if s >= 0 and e >= s and e <= pool.count.i64():
+                Base::rh_json_escape(out, pool, s.usize(), e.usize())
 
-# Copy a span of the decoded texts buffer into pool; returns the start
-# offset in pool. (private to this file)
-def rh_inv_pool_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    start: i64 = pool.count.i64()
-    while k < e |k: i64 = s, texts, pool, e|:
-        pool.push(texts[k.usize()])
-        k <- k + 1
-    start
+        # Copy a span of the decoded texts buffer into pool; returns the start
+        # offset in pool. (private to this file)
+        def rh_inv_pool_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            start: i64 = pool.count.i64()
+            while k < e |k: i64 = s, texts, pool, e|:
+                pool.push(texts[k.usize()])
+                k <- k + 1
+            start
 
-# Extract a top-level string field (spec version) into pool; span in pool.
-# (private to this file)
-def rh_inv_spec_version(raw: darray[u8]&, key: u8&, pool: mutable darray[u8]&, s_out: mutable i64&, e_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-    nodes: mutable darray[Json::RhJsonNode] = []
-    texts: mutable darray[u8] = []
-    idx: i64 = |s_out, e_out, nodes, texts|
-        root: i64 = Json::rh_json_parse(raw, nodes, texts)
-        s_out[0] <- -1
-        e_out[0] <- -1
-        return if root < 0
-        block_result: i64 = Json::rh_json_obj_get(nodes, texts, root, key)
-        block_result
-    return if idx < 0
-    ss: mutable i64 = 0
-    se: mutable i64 = 0
-    if Json::rh_json_str_span(nodes, idx, &ss, &se):
-        start: i64 = rh_inv_pool_copy(pool, texts, ss, se)
-        s_out[0] <- start
-        e_out[0] <- pool.count.i64()
+        # Extract a top-level string field (spec version) into pool; span in pool.
+        # (private to this file)
+        def rh_inv_spec_version(raw: darray[u8]&, key: u8&, pool: mutable darray[u8]&, s_out: mutable i64&, e_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            idx: i64 = |s_out, e_out, nodes, texts|
+                root: i64 = Json::rh_json_parse(raw, nodes, texts)
+                s_out[0] <- -1
+                e_out[0] <- -1
+                return if root < 0
+                block_result: i64 = Json::rh_json_obj_get(nodes, texts, root, key)
+                block_result
+            return if idx < 0
+            ss: mutable i64 = 0
+            se: mutable i64 = 0
+            if Json::rh_json_str_span(nodes, idx, &ss, &se):
+                start: i64 = rh_inv_pool_copy(pool, texts, ss, se)
+                s_out[0] <- start
+                e_out[0] <- pool.count.i64()
 
-# CycloneDX. Returns 0 observed, 1 unsupported-spec (report written),
-# -1 not a CycloneDX document.
-def rh_inv_cyclonedx(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    pool: mutable darray[u8] = []
-    comps: mutable darray[Inventory::RhBomComponent] = []
-    bom: mutable Inventory::RhBom = Inventory::RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
-    return -1 if Inventory::rh_bom_parse(raw, pool, comps, &bom) != 0
-    sv_s: mutable i64 = -1
-    sv_e: mutable i64 = -1
-    rh_inv_spec_version(raw, "specVersion", pool, &sv_s, &sv_e)
-    Base::rh_push_text(out, "{\"schema\":\"rh-inventory/1\",\"format\":\"cyclonedx\",\"spec_version\":\"")
-    rh_inv_emit_span(out, pool, sv_s, sv_e)
-    Base::rh_push_text(out, "\",\"status\":\"")
-    if bom.spec_unsupported == 1:
-        Base::rh_push_text(out, "unsupported\",\"reason\":\"spec-version-not-in-declared-supported-set\"")
-    else:
-        Base::rh_push_text(out, "observed\",\"counts\":{\"components\":")
-        Base::rh_push_decimal_i64(out, bom.component_count)
-        Base::rh_push_text(out, ",\"invalid\":")
-        Base::rh_push_decimal_i64(out, bom.invalid_components)
-        Base::rh_push_text(out, ",\"with_purl\":")
-        Base::rh_push_decimal_i64(out, bom.with_purl)
-        Base::rh_push_text(out, ",\"with_hash\":")
-        Base::rh_push_decimal_i64(out, bom.with_hash)
-        Base::rh_push_text(out, ",\"digest_known\":")
-        Base::rh_push_decimal_i64(out, bom.digest_known)
-        Base::rh_push_text(out, ",\"unknown_top_keys\":")
-        Base::rh_push_decimal_i64(out, bom.unknown_top_keys)
-        Base::rh_push_text(out, "},\"components\":[")
-        while i < comps.count.i64() |i: i64 = 0, comps, pool, out|:
-            c: Inventory::RhBomComponent = comps[i.usize()]
-            if i > 0:
-                out.push(44)
-            Base::rh_push_text(out, "{\"name\":\"")
-            rh_inv_emit_span(out, pool, c.name_s, c.name_e)
-            Base::rh_push_text(out, "\",\"version\":\"")
-            rh_inv_emit_span(out, pool, c.version_s, c.version_e)
-            Base::rh_push_text(out, "\",\"purl\":\"")
-            rh_inv_emit_span(out, pool, c.purl_s, c.purl_e)
-            Base::rh_push_text(out, "\",\"digest_known\":")
-            if c.valid_sha256 > 0:
-                Base::rh_push_text(out, "true")
+        # CycloneDX. Returns 0 observed, 1 unsupported-spec (report written),
+        # -1 not a CycloneDX document.
+        def rh_inv_cyclonedx(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            pool: mutable darray[u8] = []
+            comps: mutable darray[Inventory::RhBomComponent] = []
+            bom: mutable Inventory::RhBom = Inventory::RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+            return -1 if Inventory::rh_bom_parse(raw, pool, comps, &bom) != 0
+            sv_s: mutable i64 = -1
+            sv_e: mutable i64 = -1
+            rh_inv_spec_version(raw, "specVersion", pool, &sv_s, &sv_e)
+            Base::rh_push_text(out, "{\"schema\":\"rh-inventory/1\",\"format\":\"cyclonedx\",\"spec_version\":\"")
+            rh_inv_emit_span(out, pool, sv_s, sv_e)
+            Base::rh_push_text(out, "\",\"status\":\"")
+            if bom.spec_unsupported == 1:
+                Base::rh_push_text(out, "unsupported\",\"reason\":\"spec-version-not-in-declared-supported-set\"")
             else:
-                Base::rh_push_text(out, "false")
-            Base::rh_push_text(out, "}")
-            i <- i + 1
-        Base::rh_push_text(out, "]")
-    Base::rh_push_text(out, ",\"note\":\"valid != complete: a well-formed document proves it parses, not that every dependency is listed\"}")
-    return 1 if bom.spec_unsupported == 1
-    0
+                Base::rh_push_text(out, "observed\",\"counts\":{\"components\":")
+                Base::rh_push_decimal_i64(out, bom.component_count)
+                Base::rh_push_text(out, ",\"invalid\":")
+                Base::rh_push_decimal_i64(out, bom.invalid_components)
+                Base::rh_push_text(out, ",\"with_purl\":")
+                Base::rh_push_decimal_i64(out, bom.with_purl)
+                Base::rh_push_text(out, ",\"with_hash\":")
+                Base::rh_push_decimal_i64(out, bom.with_hash)
+                Base::rh_push_text(out, ",\"digest_known\":")
+                Base::rh_push_decimal_i64(out, bom.digest_known)
+                Base::rh_push_text(out, ",\"unknown_top_keys\":")
+                Base::rh_push_decimal_i64(out, bom.unknown_top_keys)
+                Base::rh_push_text(out, "},\"components\":[")
+                while i < comps.count.i64() |i: i64 = 0, comps, pool, out|:
+                    c: Inventory::RhBomComponent = comps[i.usize()]
+                    if i > 0:
+                        out.push(44)
+                    Base::rh_push_text(out, "{\"name\":\"")
+                    rh_inv_emit_span(out, pool, c.name_s, c.name_e)
+                    Base::rh_push_text(out, "\",\"version\":\"")
+                    rh_inv_emit_span(out, pool, c.version_s, c.version_e)
+                    Base::rh_push_text(out, "\",\"purl\":\"")
+                    rh_inv_emit_span(out, pool, c.purl_s, c.purl_e)
+                    Base::rh_push_text(out, "\",\"digest_known\":")
+                    if c.valid_sha256 > 0:
+                        Base::rh_push_text(out, "true")
+                    else:
+                        Base::rh_push_text(out, "false")
+                    Base::rh_push_text(out, "}")
+                    i <- i + 1
+                Base::rh_push_text(out, "]")
+            Base::rh_push_text(out, ",\"note\":\"valid != complete: a well-formed document proves it parses, not that every dependency is listed\"}")
+            return 1 if bom.spec_unsupported == 1
+            0
 
-# SPDX 2.3. Returns 0 observed, 1 unsupported-spec (report written),
-# -1 not an SPDX document.
-def rh_inv_spdx(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    pool: mutable darray[u8] = []
-    pkgs: mutable darray[Spdx::RhSpdxPackage] = []
-    spdx: mutable Spdx::RhSpdx = Spdx::RhSpdx{ok: 0, spec_unsupported: 0, packages: 0, invalid_packages: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
-    return -1 if Spdx::rh_spdx_parse(raw, pool, pkgs, &spdx) != 0
-    sv_s: mutable i64 = -1
-    sv_e: mutable i64 = -1
-    rh_inv_spec_version(raw, "spdxVersion", pool, &sv_s, &sv_e)
-    Base::rh_push_text(out, "{\"schema\":\"rh-inventory/1\",\"format\":\"spdx\",\"spec_version\":\"")
-    rh_inv_emit_span(out, pool, sv_s, sv_e)
-    Base::rh_push_text(out, "\",\"status\":\"")
-    if spdx.spec_unsupported == 1:
-        Base::rh_push_text(out, "unsupported\",\"reason\":\"spec-version-not-in-declared-supported-set\"")
-    else:
-        Base::rh_push_text(out, "observed\",\"counts\":{\"packages\":")
-        Base::rh_push_decimal_i64(out, spdx.packages)
-        Base::rh_push_text(out, ",\"invalid\":")
-        Base::rh_push_decimal_i64(out, spdx.invalid_packages)
-        Base::rh_push_text(out, ",\"with_purl\":")
-        Base::rh_push_decimal_i64(out, spdx.with_purl)
-        Base::rh_push_text(out, ",\"with_hash\":")
-        Base::rh_push_decimal_i64(out, spdx.with_hash)
-        Base::rh_push_text(out, ",\"digest_known\":")
-        Base::rh_push_decimal_i64(out, spdx.digest_known)
-        Base::rh_push_text(out, ",\"unknown_top_keys\":")
-        Base::rh_push_decimal_i64(out, spdx.unknown_top_keys)
-        Base::rh_push_text(out, "},\"components\":[")
-        while i < pkgs.count.i64() |i: i64 = 0, pkgs, pool, out|:
-            p: Spdx::RhSpdxPackage = pkgs[i.usize()]
-            if i > 0:
-                out.push(44)
-            Base::rh_push_text(out, "{\"name\":\"")
-            rh_inv_emit_span(out, pool, p.name_s, p.name_e)
-            Base::rh_push_text(out, "\",\"version\":\"")
-            rh_inv_emit_span(out, pool, p.version_s, p.version_e)
-            Base::rh_push_text(out, "\",\"purl\":\"")
-            rh_inv_emit_span(out, pool, p.purl_s, p.purl_e)
-            Base::rh_push_text(out, "\",\"digest_known\":")
-            if p.valid_sha256 > 0:
-                Base::rh_push_text(out, "true")
+        # SPDX 2.3. Returns 0 observed, 1 unsupported-spec (report written),
+        # -1 not an SPDX document.
+        def rh_inv_spdx(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            pool: mutable darray[u8] = []
+            pkgs: mutable darray[Spdx::RhSpdxPackage] = []
+            spdx: mutable Spdx::RhSpdx = Spdx::RhSpdx{ok: 0, spec_unsupported: 0, packages: 0, invalid_packages: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+            return -1 if Spdx::rh_spdx_parse(raw, pool, pkgs, &spdx) != 0
+            sv_s: mutable i64 = -1
+            sv_e: mutable i64 = -1
+            rh_inv_spec_version(raw, "spdxVersion", pool, &sv_s, &sv_e)
+            Base::rh_push_text(out, "{\"schema\":\"rh-inventory/1\",\"format\":\"spdx\",\"spec_version\":\"")
+            rh_inv_emit_span(out, pool, sv_s, sv_e)
+            Base::rh_push_text(out, "\",\"status\":\"")
+            if spdx.spec_unsupported == 1:
+                Base::rh_push_text(out, "unsupported\",\"reason\":\"spec-version-not-in-declared-supported-set\"")
             else:
-                Base::rh_push_text(out, "false")
-            Base::rh_push_text(out, "}")
-            i <- i + 1
-        Base::rh_push_text(out, "]")
-    Base::rh_push_text(out, ",\"note\":\"valid != complete: a well-formed document proves it parses, not that every dependency is listed\"}")
-    return 1 if spdx.spec_unsupported == 1
-    0
+                Base::rh_push_text(out, "observed\",\"counts\":{\"packages\":")
+                Base::rh_push_decimal_i64(out, spdx.packages)
+                Base::rh_push_text(out, ",\"invalid\":")
+                Base::rh_push_decimal_i64(out, spdx.invalid_packages)
+                Base::rh_push_text(out, ",\"with_purl\":")
+                Base::rh_push_decimal_i64(out, spdx.with_purl)
+                Base::rh_push_text(out, ",\"with_hash\":")
+                Base::rh_push_decimal_i64(out, spdx.with_hash)
+                Base::rh_push_text(out, ",\"digest_known\":")
+                Base::rh_push_decimal_i64(out, spdx.digest_known)
+                Base::rh_push_text(out, ",\"unknown_top_keys\":")
+                Base::rh_push_decimal_i64(out, spdx.unknown_top_keys)
+                Base::rh_push_text(out, "},\"components\":[")
+                while i < pkgs.count.i64() |i: i64 = 0, pkgs, pool, out|:
+                    p: Spdx::RhSpdxPackage = pkgs[i.usize()]
+                    if i > 0:
+                        out.push(44)
+                    Base::rh_push_text(out, "{\"name\":\"")
+                    rh_inv_emit_span(out, pool, p.name_s, p.name_e)
+                    Base::rh_push_text(out, "\",\"version\":\"")
+                    rh_inv_emit_span(out, pool, p.version_s, p.version_e)
+                    Base::rh_push_text(out, "\",\"purl\":\"")
+                    rh_inv_emit_span(out, pool, p.purl_s, p.purl_e)
+                    Base::rh_push_text(out, "\",\"digest_known\":")
+                    if p.valid_sha256 > 0:
+                        Base::rh_push_text(out, "true")
+                    else:
+                        Base::rh_push_text(out, "false")
+                    Base::rh_push_text(out, "}")
+                    i <- i + 1
+                Base::rh_push_text(out, "]")
+            Base::rh_push_text(out, ",\"note\":\"valid != complete: a well-formed document proves it parses, not that every dependency is listed\"}")
+            return 1 if spdx.spec_unsupported == 1
+            0
 
-# format: 0 cyclonedx, 1 spdx.
-def rh_inventory_report(raw: darray[u8]&, format: u8, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return rh_inv_cyclonedx(raw, out) if format == 0
-    rh_inv_spdx(raw, out)
+        # format: 0 cyclonedx, 1 spdx.
+    public:
+        def rh_inventory_report(raw: darray[u8]&, format: u8, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return rh_inv_cyclonedx(raw, out) if format == 0
+            rh_inv_spdx(raw, out)
