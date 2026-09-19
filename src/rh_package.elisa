@@ -1619,7 +1619,7 @@ def rh_pypi_find(pkgs: darray[RhPkgNode]&, pool: darray[u8]&, ns: usize, ne: usi
         i <- i + 1
     -1
 
-def rh_pypi_line(buf: darray[u8]&, s: usize, e: usize, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, unknown_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+def rh_pypi_line(buf: darray[u8]&, s: usize, e: usize, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, unknown_out: mutable i64&, depctx: u8) -> void can[Memory.Allocate, Abort.Panic]:
     a: mutable usize = s
     b: mutable usize = e
     while a < b and (buf[a] == 32 or buf[a] == 9) |a, b, buf|:
@@ -1703,7 +1703,7 @@ def rh_pypi_line(buf: darray[u8]&, s: usize, e: usize, pkgs: mutable darray[RhPk
         rhs <- rh_pool_copy(pool, buf, rs, re2)
         rhe <- rhs + (re2 - rs).i64()
     if not is_opt:
-        reqs.push(RhRequire{from: 0, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rhs, req_e: rhe, depctx: 0})
+        reqs.push(RhRequire{from: 0, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rhs, req_e: rhe, depctx: depctx})
     if exact and not has_extras and not has_marker and not has_url and not is_opt:
         nname: i64 = rh_pool_copy(pool, buf, ns, ne)
         nver: i64 = rh_pool_copy(pool, buf, vstart, re2)
@@ -1718,7 +1718,7 @@ def rh_pypi_line(buf: darray[u8]&, s: usize, e: usize, pkgs: mutable darray[RhPk
             nd.ver_e <- nver + (re2 - vstart).i64()
             nd.src_kind <- 0
             pkgs[existing.usize()] <- nd
-        edges.push(RhDepEdge{from: 0, dst: existing, depctx: 0})
+        edges.push(RhDepEdge{from: 0, dst: existing, depctx: depctx})
         return
     uns_name: i64 = rh_pool_copy(pool, buf, ns, ne)
     uns_req: mutable i64 = -1
@@ -1750,8 +1750,104 @@ def rh_pypi_parse(req: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: muta
             while j < req.count and req[j] != 10 |j: usize = i| -> j:
                 j <- j + 1
         if j > i:
-            rh_pypi_line(req, i, j, pkgs, pool, reqs, edges, unresolved, unknown_out)
+            rh_pypi_line(req, i, j, pkgs, pool, reqs, edges, unresolved, unknown_out, 0)
         i <- j + 1
+    0
+
+# Extract quoted dependency strings from one PEP 621 array line. The
+# supported subset is deliberately narrow: basic/literal TOML strings inside
+# `project.dependencies` or an optional-dependency table. Unsupported dynamic
+# forms fail closed instead of becoming an empty graph.
+# (private to this file)
+def rh_pypi_pep621_values(buf: darray[u8]&, s: usize, e: usize, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, unknown_out: mutable i64&, depctx: u8, close_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    close_out[0] <- 0
+    while i < e |i: usize = s, e, buf, pkgs, pool, reqs, edges, unresolved, unknown_out, depctx, close_out|:
+        b: u8 = buf[i]
+        if b == 93:
+            close_out[0] <- 1
+            return 0
+        if b == 34 or b == 39:
+            quote: u8 = b
+            i <- i + 1
+            dep: mutable darray[u8] = []
+            while i < e and buf[i] != quote |i, e, buf, dep|:
+                if buf[i] == 92:
+                    i <- i + 1
+                    return -1 if i >= e
+                dep.push(buf[i])
+                i <- i + 1
+            return -1 if i >= e
+            return -1 if dep.count == 0
+            rh_pypi_line(dep, 0, dep.count, pkgs, pool, reqs, edges, unresolved, unknown_out, depctx)
+        i <- i + 1
+    0
+
+# Parse the bounded PEP 621 project metadata subset. Requirements remain
+# declared evidence; exact pins are the only offline-resolved edges, matching
+# requirements.txt semantics. Optional arrays retain `depctx=optional`.
+def rh_pypi_parse_pep621(req: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    rroot: i64 = rh_node_add(pkgs, RH_ECO_PYPI)
+    return -1 if rroot != 0
+    root_name: mutable darray[u8] = []
+    rh_push_text(root_name, "root")
+    root_s: i64 = rh_pool_copy(pool, root_name, 0, root_name.count)
+    root_node: mutable RhPkgNode = pkgs[0]
+    root_node.name_s <- root_s
+    root_node.name_e <- root_s + root_name.count.i64()
+    root_node.src_kind <- RH_PSRC_UNKNOWN
+    pkgs[0] <- root_node
+    section: mutable i64 = 0
+    active: mutable i64 = 0
+    active_scope: mutable u8 = RH_SCOPE_NORMAL
+    saw_project: mutable i64 = 0
+    while line_start <= req.count |line_start: usize = 0, req, pkgs, pool, reqs, edges, unresolved, unknown_out, section, active, active_scope, saw_project|:
+        line_end: usize =
+            while j < req.count and req[j] != 10 |j: usize = line_start| -> j:
+                j <- j + 1
+        s: mutable usize = line_start
+        e: mutable usize = line_end
+        while s < e and (req[s] == 32 or req[s] == 9 or req[s] == 13):
+            s <- s + 1
+        while e > s and (req[e - 1] == 32 or req[e - 1] == 9 or req[e - 1] == 13):
+            e <- e - 1
+        if s < e and req[s] == 91:
+            section <- 0
+            active <- 0
+            if rh_bytes_equal_literal(req, s.i64(), e.i64(), "[project]"):
+                section <- 1
+                saw_project <- 1
+            elif rh_bytes_equal_literal(req, s.i64(), e.i64(), "[project.optional-dependencies]"):
+                section <- 2
+                saw_project <- 1
+        elif section == 1 or section == 2:
+            eq: mutable i64 = -1
+            while k < e |k: usize = s, e, req, eq|:
+                if req[k] == 61:
+                    eq <- k.i64()
+                    break
+                k <- k + 1
+            if active == 0 and eq >= 0:
+                key_end: mutable usize = eq.usize()
+                while key_end > s and (req[key_end - 1] == 32 or req[key_end - 1] == 9):
+                    key_end <- key_end - 1
+                is_dependencies: bool = section == 1 and rh_bytes_equal_literal(req, s.i64(), key_end.i64(), "dependencies")
+                is_optional: bool = section == 2
+                if is_dependencies or is_optional:
+                    array_start: mutable usize = (eq + 1).usize()
+                    while array_start < e and (req[array_start] == 32 or req[array_start] == 9):
+                        array_start <- array_start + 1
+                    return -1 if array_start >= e or req[array_start] != 91
+                    active <- 1
+                    active_scope <- RH_SCOPE_OPTIONAL if is_optional else RH_SCOPE_NORMAL
+                    closed: mutable i64 = 0
+                    return -1 if rh_pypi_pep621_values(req, array_start + 1, e, pkgs, pool, reqs, edges, unresolved, unknown_out, active_scope, &closed) != 0
+                    active <- 0 if closed == 1
+            elif active == 1:
+                closed_cont: mutable i64 = 0
+                return -1 if rh_pypi_pep621_values(req, s, e, pkgs, pool, reqs, edges, unresolved, unknown_out, active_scope, &closed_cont) != 0
+                active <- 0 if closed_cont == 1
+        line_start <- line_end + 1
+    return -1 if saw_project == 0 or active == 1
     0
 
 # --- Go modules (go.mod; M08 ecosystems lane) --------------------------

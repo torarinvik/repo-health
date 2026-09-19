@@ -2319,6 +2319,56 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         unsupported_n.push(punsup)
         found <- found + 1
 
+    # --- pyproject.toml (PEP 621 declared dependencies) ---
+    py: mutable darray[u8] = []
+    if not rh_out_path(repo, "pyproject.toml", py):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    pyp: cstr = (&py[0]).cast[cstr] can Unsafe.PointerCast
+    if file_exists(pyp):
+        if file_exists(rqp):
+            rh_cli_err("deps: requirements.txt and pyproject.toml are both present; choose one declared PyPI source")
+            return 4
+        pyb: mutable darray[u8] = []
+        if rh_io_read(pyp, pyb) < 0:
+            rh_cli_err("deps: cannot read pyproject.toml")
+            return 4
+        ypkgs: mutable darray[RhPkgNode] = []
+        ypool: mutable darray[u8] = []
+        yreqs: mutable darray[RhRequire] = []
+        yedges: mutable darray[RhDepEdge] = []
+        yunres: mutable darray[RhUnresolved] = []
+        yroot: i64 = |pyb, ypkgs, ypool, yreqs, yedges, yunres|
+            yunk: mutable i64 = 0
+            block_result: i64 = rh_pypi_parse_pep621(pyb, ypkgs, ypool, yreqs, yedges, yunres, &yunk)
+            block_result
+        if yroot < 0:
+            rh_cli_err("deps: malformed pyproject.toml PEP 621 subset (structured failure, no partial graph)")
+            return 4
+        yunsup: i64 = rh_unsupported_range_count(yreqs, ypool)
+        yfind: mutable darray[RhAdvisory] = []
+        ywd: mutable i64 = 0
+        ysk: mutable i64 = 0
+        if resolved_has_osv:
+            _ = rh_osv_match(ypkgs, ypool, osv_nodes, osv_texts, osv_root, yfind, &ywd, &ysk)
+        yg: mutable darray[u8] = []
+        rh_graph_write_json(yg, 2, ypkgs, ypool, yedges, yunres, yfind, osv_texts, yroot)
+        yg.push(10)
+        yf: mutable darray[u8] = []
+        if not rh_out_path(out, "deps-pypi-graph.json", yf):
+            rh_cli_err("deps: cannot stage pypi graph path")
+            return 4
+        yfp: cstr = (&yf[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_io_write(yfp, yg):
+            rh_cli_err("deps: cannot write pypi graph")
+            return 4
+        eco_codes.push(2)
+        declared.push(yreqs.count.i64())
+        resolved.push(yedges.count.i64())
+        unresolved_n.push(yunres.count.i64())
+        unsupported_n.push(yunsup)
+        found <- found + 1
+
     # --- go.mod (Go modules) ---
     gm: mutable darray[u8] = []
     if not rh_out_path(repo, "go.mod", gm):
@@ -2483,7 +2533,7 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         found <- found + 1
 
     if found == 0:
-        rh_cli_err("deps: no Cargo.lock, package-lock.json, requirements.txt or go.mod found in repo")
+        rh_cli_err("deps: no Cargo.lock, package-lock.json, requirements.txt, pyproject.toml or go.mod found in repo")
         return 4
     mf: mutable darray[u8] = []
     if not rh_out_path(out, "deps-metrics.json", mf):

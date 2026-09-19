@@ -128,6 +128,43 @@ assert m["metrics"][0]["value"] == 1, m["metrics"][0]
 print("[deps] pypi graph + per-ecosystem metrics OK")
 PY
 
+echo "[deps] PEP 621 pyproject.toml preserves optional dependency scope"
+mkdir -p "$T/pep621src"
+cat > "$T/pep621src/pyproject.toml" <<'EOF'
+[project]
+name = "app"
+version = "1.0.0"
+dependencies = [
+  "Django==4.2.0",
+  "requests>=2"
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest==7.4.0",
+  "coverage>=7"
+]
+EOF
+"$ROOT/build/rh_cli" deps --repo "$T/pep621src" --out "$T/pep621out" \
+  | grep -q "ecosystems=1 pypi=2/4 unresolved=2 unsupported=0" || fail "pep621 deps summary"
+python3 - "$T/pep621out/deps-pypi-graph.json" <<'PY'
+import json, sys
+g = json.load(open(sys.argv[1]))
+assert g["ecosystem"] == "pypi", g
+assert [n["name"] for n in g["nodes"]] == ["root", "Django", "pytest"], g["nodes"]
+assert [(e["to"], e["scope"]) for e in g["edges"]] == [(1, "normal"), (2, "optional")], g["edges"]
+assert sorted(u["name"] for u in g["unresolved"]) == ["coverage", "requests"], g["unresolved"]
+print("[deps] PEP 621 graph + optional scope OK")
+PY
+
+echo "[deps] duplicate PyPI declaration sources fail closed"
+cp "$T/pysrc/requirements.txt" "$T/pep621src/requirements.txt"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/pep621src" --out "$T/pep621-bad" >/dev/null 2>&1
+rc_both=$?
+set -e
+[[ "$rc_both" -eq 4 ]] || fail "requirements.txt + pyproject.toml must fail closed (got $rc_both)"
+
 echo "[deps] go.mod resolves exact pins, keeps pseudo/directives unresolved (M08)"
 mkdir -p "$T/gosrc"
 cp "$ROOT/fixtures/packages/go.mod.txt" "$T/gosrc/go.mod"
