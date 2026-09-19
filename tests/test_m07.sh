@@ -58,6 +58,9 @@ for s in d["sources"]:
 # GitHub traffic must be explicitly unauthorized, not silently scraped (P01).
 gh = [s for s in d["sources"] if s["id"] == "github"][0]
 assert "traffic" in gh["unauthorized"], "github traffic must be unauthorized"
+dd = [s for s in d["sources"] if s["id"] == "deps-dev"]
+assert len(dd) == 1 and dd[0]["redistribution"] == "metadata_only", dd
+assert "version_metadata" in dd[0]["capabilities"] and "package_execution" in dd[0]["unsupported"], dd[0]
 blob = json.dumps(d).lower()
 for bad in ("token", "password", "secret", "api_key", "bearer"):
     assert bad not in blob, ("possible credential field", bad)
