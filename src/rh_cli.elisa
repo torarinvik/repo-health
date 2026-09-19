@@ -107,7 +107,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli registry-meta (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli pep440 --input <file> --out <file>")
     rh_cli_err("       rh_cli privacy --input <file> --out <file>")
-    rh_cli_err("       rh_cli roles --input <file> --out <file>")
+    rh_cli_err("       rh_cli roles (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli experimental --input <file> --out <file>")
     rh_cli_err("       rh_cli render --report <report.json> --out <file.html>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
@@ -1427,13 +1427,19 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if pvi_idx < 0 or pvo_idx < 0
         return rh_do_privacy(slots[pvi_idx], slots[pvo_idx])
     if rh_streq(cmd, "roles"):
-        rl_idx, rlo_idx =
-            while rlq < argc |rl_idx: i64 = -1, rlo_idx: i64 = -1, rlq: i64 = 2, slots| -> rl_idx, rlo_idx:
+        rl_idx, rlu_idx, rlo_idx =
+            while rlq < argc |rl_idx: i64 = -1, rlu_idx: i64 = -1, rlo_idx: i64 = -1, rlq: i64 = 2, slots| -> rl_idx, rlu_idx, rlo_idx:
                 a23: u8& = slots[rlq].cast[u8&] can Unsafe.PointerCast
                 if rh_streq(a23, "--input"):
                     if rlq + 1 < argc:
                         rlq <- rlq + 1
                         rl_idx <- rlq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a23, "--url"):
+                    if rlq + 1 < argc:
+                        rlq <- rlq + 1
+                        rlu_idx <- rlq
                     else:
                         return rh_cli_usage(2)
                 elif rh_streq(a23, "--out"):
@@ -1445,8 +1451,10 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 else:
                     return rh_cli_usage(2)
                 rlq <- rlq + 1
-        return rh_cli_usage(2) if rl_idx < 0 or rlo_idx < 0
-        return rh_do_roles(slots[rl_idx], slots[rlo_idx])
+        return rh_cli_usage(2) if rlo_idx < 0 or (rl_idx < 0 and rlu_idx < 0) or (rl_idx >= 0 and rlu_idx >= 0)
+        if rlu_idx >= 0:
+            return rh_do_roles("", slots[rlo_idx], slots[rlu_idx], true)
+        return rh_do_roles(slots[rl_idx], slots[rlo_idx], "", false)
     if rh_streq(cmd, "experimental"):
         ex_idx, exo_idx =
             while exq < argc |ex_idx: i64 = -1, exo_idx: i64 = -1, exq: i64 = 2, slots| -> ex_idx, exo_idx:
@@ -4295,21 +4303,70 @@ def rh_do_privacy(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, 
 # --- R013 declared-roles execution path. ---
 # Reads an rh-roles-input/1 document and writes rh-roles-result/1. Declared
 # roles are time-scoped evidence, separate from observed actions; unknown
-# role strings stay unknown; revoked/not-yet-effective is inactive.
-def rh_do_roles(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+# role strings stay unknown; revoked/not-yet-effective is inactive. URL input
+# retains bounded transport evidence beside the result and never sends auth.
+def rh_do_roles(input_path: cstr, out_path: cstr, source_url: cstr, has_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(out_path):
         rh_cli_err("rejected roles argument (allowlist)")
         return 3
-    ip: mutable darray[u8] =
-        ip: mutable darray[u8] = []
-        rh_push_cstr(ip, input_path)
-        ip.push(0)
-        ip
-    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
     raw: mutable darray[u8] = []
-    if rh_io_read(ipp, raw) < 0:
-        rh_cli_err("roles: cannot read --input")
-        return 4
+    if has_url:
+        return 3 if not rh_fetch_arg_safe(source_url)
+        fetch_dir: mutable darray[u8] = []
+        if not rh_dirname(out_path, fetch_dir):
+            rh_push_text(fetch_dir, ".")
+        fetch_dir.push(0)
+        fetch_dir_ptr: cstr = (&fetch_dir[0]).cast[cstr] can Unsafe.PointerCast
+        body_path: mutable darray[u8] = []
+        code_path: mutable darray[u8] = []
+        err_path: mutable darray[u8] = []
+        if not rh_out_path(fetch_dir_ptr, "roles-fetch-body.json", body_path) or not rh_out_path(fetch_dir_ptr, "roles-fetch-status.txt", code_path) or not rh_out_path(fetch_dir_ptr, "roles-fetch.err", err_path):
+            rh_cli_err("roles: cannot stage fetch evidence")
+            return 4
+        body_path.push(0)
+        code_path.push(0)
+        err_path.push(0)
+        body_ptr: cstr = (&body_path[0]).cast[cstr] can Unsafe.PointerCast
+        code_ptr: cstr = (&code_path[0]).cast[cstr] can Unsafe.PointerCast
+        err_ptr: cstr = (&err_path[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_run_https_get(source_url, body_ptr, code_ptr, err_ptr) != 0:
+            rh_cli_err("roles: fetch failed; no result published")
+            return 4
+        code_raw: mutable darray[u8] = []
+        if rh_io_read(code_ptr, code_raw) < 0 or code_raw.count == 0:
+            rh_cli_err("roles: fetch did not produce a status")
+            return 4
+        ok_status: bool = code_raw[0] == 50
+        file_transport: bool = code_raw.count >= 3 and code_raw[0] == 48 and code_raw[1] == 48 and code_raw[2] == 48 and rh_cstr_starts_with(source_url, "file://")
+        if not ok_status and not file_transport:
+            rh_cli_err("roles: fetch returned non-2xx; no result published")
+            return 4
+        url_data: mutable darray[u8] = []
+        rh_push_cstr(url_data, source_url)
+        status: mutable darray[u8] = []
+        rh_push_text(status, "{\"schema\":\"rh-roles-fetch/1\",\"source_url\":\"")
+        rh_json_escape(status, url_data, 0, url_data.count)
+        rh_push_text(status, "\",\"status\":\"")
+        code_data: u8& = (&code_raw[0]).cast[u8&] can Unsafe.PointerCast
+        rh_push_raw(status, code_data, code_raw.count)
+        rh_push_text(status, "\",\"body_file\":\"roles-fetch-body.json\",\"state\":\"collected\",\"note\":\"bounded permission-document capture retained before role parsing\"}\n")
+        if not rh_io_write(code_ptr, status):
+            rh_cli_err("roles: cannot write fetch status")
+            return 4
+        if rh_io_read(body_ptr, raw) < 0:
+            rh_cli_err("roles: cannot read fetched body")
+            return 4
+    else:
+        return 3 if not rh_arg_safe(input_path)
+        ip: mutable darray[u8] =
+            ip: mutable darray[u8] = []
+            rh_push_cstr(ip, input_path)
+            ip.push(0)
+            ip
+        ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_io_read(ipp, raw) < 0:
+            rh_cli_err("roles: cannot read --input")
+            return 4
     body: mutable darray[u8] = []
     if rh_roles_report(raw, body) != 0:
         rh_cli_err("roles: not a valid rh-roles-input/1 document (fail closed)")

@@ -40,6 +40,28 @@ echo "[roles] determinism"
 "$ROOT/build/rh_cli" roles --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "roles output not deterministic"
 
+echo "[roles] bounded file URL capture retains transport evidence"
+file_url="file://$T/in.json"
+"$ROOT/build/rh_cli" roles --url "$file_url" --out "$T/url-out.json" >/dev/null || fail "file URL run"
+cmp -s "$T/out.json" "$T/url-out.json" || fail "URL roles output differs"
+python3 - "$T/roles-fetch-status.txt" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-roles-fetch/1", d
+assert d["state"] == "collected", d
+assert d["status"] == "000", d
+assert d["body_file"] == "roles-fetch-body.json", d
+print("[roles] URL transport evidence OK")
+PY
+cmp -s "$T/in.json" "$T/roles-fetch-body.json" || fail "URL body evidence differs"
+
+echo "[roles] blocked URL fails closed"
+set +e
+"$ROOT/build/rh_cli" roles --url "http://example.com/roles.json" --out "$T/blocked.json" >/dev/null 2>&1
+rc_blocked=$?
+set -e
+[[ "$rc_blocked" -eq 4 ]] || fail "blocked URL must exit 4 (got $rc_blocked)"
+
 echo "[roles] malformed input fails closed"
 set +e
 printf '{"schema":"rh-roles-input/2","declarations":[]}' > "$T/bschema.json"
