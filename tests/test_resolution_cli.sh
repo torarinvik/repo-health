@@ -46,13 +46,30 @@ assert len(d["instances"]) == 7, d
 first = d["instances"][0]
 assert first["package_identity"] == {"ecosystem": "cargo", "name": "app", "version": "0.1.0"}, first
 assert first["resolution_instance"] == {"graph_digest": digest, "provider_node_id": 0, "context": "lockfile", "status": "resolved"}, first
-assert first["source"] == "unknown" and first["dev"] is False and first["optional"] is False, first
+assert first["source"] == "unknown" and first["source_attestation"] == {"state": "observed", "value": "unknown"}, first
+assert first["dev"] is False and first["optional"] is False, first
+assert d["edges"][0] == {"from": 1, "to": 3, "relation": "normal"}, d["edges"]
 print("[resolution] identity + snapshot scope OK")
 PY
 
 echo "[resolution] deterministic replay"
 "$ROOT/build/rh_cli" resolution --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "resolution output not deterministic"
+
+echo "[resolution] absent provider context still serializes a complete report"
+python3 - "$T/in.json" "$T/no-provider.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d.pop("provider_graph_context", None)
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" resolution --input "$T/no-provider.json" --out "$T/no-provider.out" >/dev/null || fail "no-provider resolution"
+python3 - "$T/no-provider.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert "provider_graph_context" not in d and d["edges"], d
+print("[resolution] no-provider serialization OK")
+PY
 
 echo "[resolution] malformed graphs fail closed"
 set +e
