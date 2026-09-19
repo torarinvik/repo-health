@@ -1,0 +1,304 @@
+# rh_vcs_fossil.elisa — Fossil adapter (M08 native-VCS lane; prototype).
+#
+# Input is the documented machine format of `fossil timeline -F` (Fossil
+# help: timeline), with a pipe-delimited placeholder string. This module
+# expects exactly these seven fields per entry, in order:
+#
+#   %H | %a | %d | %b | %p | %t | %c
+#   hash | author | date | branch | phase | tags | comment
+#
+# `%H` is the check-in artifact id (the manifest's own SHA hash). It is a
+# FOSSIL artifact id, never converted to a Git hash and never treated as a
+# Git revision. `%a` is a raw author login string, not an account and not a
+# person. `%c` is documented by Fossil to have newlines/tabs replaced by
+# spaces and LF erased, so a `|`-delimited record stays single-line; `|` is
+# not produced inside `%a`/`%b`/`%p`/`%t`, and a comment containing `|` only
+# affects that last field. `%p` carries Fossil phase tokens such as
+# *CURRENT*, *MERGE*, *FORK*, *UNPUBLISHED*, *LEAF*, *BRANCH*; they are
+# counted, not interpreted.
+#
+# Honest scope (prototype): Fossil artifact ids are SHA-1 (40 hex) or
+# SHA-256 (64 hex) lowercase; any other shape is rejected, not guessed.
+# Fields the format does not provide (reviews, proposals, traffic) stay
+# unsupported in the capability manifest.
+include "./rh_base.elisa"
+include "./rh_temporal.elisa"
+
+const RH_FOSSIL_MAX_ENTRIES_DEFAULT: i64 = 20000
+
+# One normalized entry. Spans index into the caller-owned timeline pool.
+struct RhFossilEntry:
+    hash_s: mutable i64
+    hash_e: mutable i64
+    author_s: mutable i64
+    author_e: mutable i64
+    has_author: mutable i64
+    date_s: mutable i64
+    date_e: mutable i64
+    utc: mutable i64
+    has_date: mutable i64
+    branch_s: mutable i64
+    branch_e: mutable i64
+    tag_count: mutable i64
+    phase_count: mutable i64
+    comment_s: mutable i64
+    comment_e: mutable i64
+
+# Parsed timeline: ok, entries, decoded pool, rejected count.
+struct RhFossilTimeline:
+    ok: mutable i64
+    entries: mutable darray[RhFossilEntry]
+    pool: mutable darray[u8]
+    rejected: mutable i64
+
+# 40 (SHA-1) or 64 (SHA-256) lowercase hex only.
+def rh_fossil_is_hash(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+    ln: i64 = e - s
+    if s < 0 or (ln != 40 and ln != 64):
+        return false
+    i: mutable i64 = s
+    while i < e |i, e, data|:
+        b: u8 = data[i.usize()]
+        if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102)):
+            return false
+        i <- i + 1
+    return true
+
+def rh_fossil_copy(pool: mutable darray[u8]&, data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e < s:
+        return -1
+    start: i64 = pool.count.i64()
+    k: mutable i64 = s
+    while k < e |k, data, pool, e|:
+        pool.push(data[k.usize()])
+        k <- k + 1
+    return start
+
+# Count comma-separated non-empty items in [s,e).
+def rh_fossil_count_items(data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e <= s:
+        return 0
+    total: mutable i64 = 0
+    in_item: mutable bool = false
+    i: mutable i64 = s
+    while i < e |i, e, data, total, in_item|:
+        b: u8 = data[i.usize()]
+        if b == 44 or b == 32:
+            if in_item:
+                total <- total + 1
+                in_item <- false
+        else:
+            in_item <- true
+        i <- i + 1
+    if in_item:
+        total <- total + 1
+    return total
+
+# Count Fossil phase tokens: occurrences of '*' in [s,e) divided by two
+# (each token is *NAME*). A lone '*' is ignored.
+def rh_fossil_count_phases(data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e <= s:
+        return 0
+    stars: mutable i64 = 0
+    i: mutable i64 = s
+    while i < e |i, e, data, stars|:
+        if data[i.usize()] == 42:
+            stars <- stars + 1
+        i <- i + 1
+    return stars / 2
+
+# Parse two-digit decimal in [s,e) exactly; err 1 and -1 on malformed.
+def rh_fossil_num2(data: darray[u8]&, s: i64, err: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or s + 2 > data.count.i64():
+        err[0] <- 1
+        return -1
+    a: u8 = data[s.usize()]
+    b: u8 = data[(s + 1).usize()]
+    if a < 48 or a > 57 or b < 48 or b > 57:
+        err[0] <- 1
+        return -1
+    return (a.i64() - 48) * 10 + (b.i64() - 48)
+
+# Parse YYYY-MM-DDTHH:MM:SS[.frac][Z|±HH:MM] into UTC seconds. Returns -1
+# and sets err on any shape we do not accept (never guessed). Seconds
+# precision is kept; fractional seconds are ignored.
+def rh_fossil_iso(data: darray[u8]&, s: i64, e: i64, err: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    err[0] <- 1
+    if s < 0 or e - s < 19 or e > data.count.i64():
+        return -1
+    if data[(s + 4).usize()] != 45 or data[(s + 7).usize()] != 45:
+        return -1
+    if data[(s + 10).usize()] != 84:
+        return -1
+    if data[(s + 13).usize()] != 58 or data[(s + 16).usize()] != 58:
+        return -1
+    y: mutable i64 = 0
+    i: mutable i64 = s
+    while i < s + 4 |i, data, s, y|:
+        c: u8 = data[i.usize()]
+        if c < 48 or c > 57:
+            return -1
+        y <- y * 10 + (c.i64() - 48)
+        i <- i + 1
+    e1: mutable i64 = 0
+    mo: i64 = rh_fossil_num2(data, s + 5, &e1)
+    if e1 != 0:
+        return -1
+    dy: i64 = rh_fossil_num2(data, s + 8, &e1)
+    if e1 != 0:
+        return -1
+    hh: i64 = rh_fossil_num2(data, s + 11, &e1)
+    if e1 != 0:
+        return -1
+    mi: i64 = rh_fossil_num2(data, s + 14, &e1)
+    if e1 != 0:
+        return -1
+    ss: i64 = rh_fossil_num2(data, s + 17, &e1)
+    if e1 != 0:
+        return -1
+    if mo < 1 or mo > 12 or dy < 1 or dy > 31 or hh > 23 or mi > 59 or ss > 60:
+        return -1
+    tzoff: mutable i64 = 0
+    tz_ok: mutable i64 = 1
+    rest: mutable i64 = s + 19
+    if rest < e:
+        c2: u8 = data[rest.usize()]
+        if c2 == 90:
+            rest <- rest + 1
+        elif c2 == 46:
+            rest <- rest + 1
+            while rest < e and data[rest.usize()] >= 48 and data[rest.usize()] <= 57 |rest, e, data|:
+                rest <- rest + 1
+            if rest < e and data[rest.usize()] == 90:
+                rest <- rest + 1
+        elif c2 == 43 or c2 == 45:
+            sign: i64 = 1 if c2 == 43 else -1
+            oh: i64 = rh_fossil_num2(data, rest + 1, &tz_ok)
+            if tz_ok != 0 or rest + 4 > e or data[(rest + 3).usize()] != 58:
+                tz_ok <- 1
+                tzoff <- 0
+            else:
+                om: i64 = rh_fossil_num2(data, rest + 4, &tz_ok)
+                if tz_ok == 0:
+                    tzoff <- sign * (oh * 3600 + om * 60)
+                    rest <- rest + 6
+        if tz_ok != 0:
+            return -1
+    if rest != e:
+        return -1
+    base: i64 = rh_days_from_civil(y, mo, dy) * 86400 + hh * 3600 + mi * 60 + ss
+    err[0] <- 0
+    return base - tzoff
+
+# Parse a `fossil timeline -F` payload. Returns 0 on success; -1 when the
+# payload is not line-based or the entry cap is exceeded. Lines that are
+# empty or begin with '#' (comments/headers) are skipped. Records with an
+# invalid hash are skipped and counted in rejected.
+def rh_fossil_parse(raw: darray[u8]&, max_entries: i64, pool: mutable darray[u8]&, out: mutable darray[RhFossilEntry]&, reject_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    reject_out[0] <- 0
+    cap: mutable i64 = max_entries
+    if cap <= 0:
+        cap <- RH_FOSSIL_MAX_ENTRIES_DEFAULT
+    if raw.count == 0:
+        return -1
+    pos: mutable i64 = 0
+    while true |pos, raw, pool, out, reject_out, cap|:
+        break if pos >= raw.count.i64()
+        le: mutable i64 = pos
+        while le < raw.count.i64() and raw[le.usize()] != 10 |le, raw|:
+            le <- le + 1
+        if le > pos:
+            if raw[pos.usize()] != 35:
+                if out.count.i64() >= cap:
+                    return -1
+                ok: mutable i64 = 0
+                ent: RhFossilEntry = rh_fossil_line(raw, pos, le, pool, &ok)
+                if ok == 1:
+                    out.push(ent)
+                else:
+                    reject_out[0] <- reject_out[0] + 1
+        pos <- le + 1
+    return 0
+
+# Parse one pipe-delimited line [s,e). ok_out 1 = usable.
+# (private to this file)
+def rh_fossil_line(raw: darray[u8]&, s: i64, e: i64, pool: mutable darray[u8]&, ok_out: mutable i64&) -> RhFossilEntry can[Memory.Allocate, Abort.Panic]:
+    ok_out[0] <- 0
+    empty: RhFossilEntry = RhFossilEntry{hash_s: -1, hash_e: -1, author_s: -1, author_e: -1, has_author: 0, date_s: -1, date_e: -1, utc: -1, has_date: 0, branch_s: -1, branch_e: -1, tag_count: 0, phase_count: 0, comment_s: -1, comment_e: -1}
+    f0: i64 = s
+    f1: i64 = rh_fossil_pipe(raw, f0, e)
+    if f1 < 0:
+        return empty
+    if not rh_fossil_is_hash(raw, f0, f1):
+        return empty
+    hash_s: i64 = rh_fossil_copy(pool, raw, f0, f1)
+    hash_e: i64 = hash_s + (f1 - f0)
+    ok_out[0] <- 1
+    # author
+    a0: i64 = f1 + 1
+    a1: mutable i64 = rh_fossil_pipe(raw, a0, e)
+    if a1 < 0:
+        a1 <- e
+    author_s: mutable i64 = -1
+    author_e: mutable i64 = -1
+    has_author: mutable i64 = 0
+    if a1 > a0:
+        author_s <- rh_fossil_copy(pool, raw, a0, a1)
+        author_e <- author_s + (a1 - a0)
+        has_author <- 1
+    # date
+    d0: i64 = a1 + 1
+    d1: mutable i64 = rh_fossil_pipe(raw, d0, e)
+    if d1 < 0:
+        d1 <- e
+    date_s: mutable i64 = -1
+    date_e: mutable i64 = -1
+    utc: mutable i64 = -1
+    has_date: mutable i64 = 0
+    if d1 > d0:
+        date_s <- rh_fossil_copy(pool, raw, d0, d1)
+        date_e <- date_s + (d1 - d0)
+        derr: mutable i64 = 0
+        parsed: i64 = rh_fossil_iso(raw, d0, d1, &derr)
+        if derr == 0:
+            utc <- parsed
+            has_date <- 1
+    # branch
+    b0: i64 = d1 + 1
+    b1: mutable i64 = rh_fossil_pipe(raw, b0, e)
+    if b1 < 0:
+        b1 <- e
+    branch_s: mutable i64 = -1
+    branch_e: mutable i64 = -1
+    if b1 > b0:
+        branch_s <- rh_fossil_copy(pool, raw, b0, b1)
+        branch_e <- branch_s + (b1 - b0)
+    # phase
+    p0: i64 = b1 + 1
+    p1: mutable i64 = rh_fossil_pipe(raw, p0, e)
+    if p1 < 0:
+        p1 <- e
+    phase_count: i64 = rh_fossil_count_phases(raw, p0, p1)
+    # tags
+    t0: i64 = p1 + 1
+    t1: mutable i64 = rh_fossil_pipe(raw, t0, e)
+    if t1 < 0:
+        t1 <- e
+    tag_count: i64 = rh_fossil_count_items(raw, t0, t1)
+    # comment (rest of line, may contain '|')
+    c0: i64 = t1 + 1
+    comment_s: mutable i64 = -1
+    comment_e: mutable i64 = -1
+    if c0 <= e:
+        comment_s <- rh_fossil_copy(pool, raw, c0, e)
+        comment_e <- comment_s + (e - c0)
+    return RhFossilEntry{hash_s: hash_s, hash_e: hash_e, author_s: author_s, author_e: author_e, has_author: has_author, date_s: date_s, date_e: date_e, utc: utc, has_date: has_date, branch_s: branch_s, branch_e: branch_e, tag_count: tag_count, phase_count: phase_count, comment_s: comment_s, comment_e: comment_e}
+
+# Index of the next '|' in [from, e), or -1.
+def rh_fossil_pipe(data: darray[u8]&, from: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    i: mutable i64 = from
+    while i < e |i, e, data|:
+        if data[i.usize()] == 124:
+            return i
+        i <- i + 1
+    return -1

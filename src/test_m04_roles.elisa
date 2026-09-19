@@ -1,0 +1,54 @@
+# test_m04_roles.elisa — R013 declared roles vs observed actions.
+include "./rh_base.elisa"
+include "./rh_roles.elisa"
+
+def rcheck(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    if cond:
+        return
+    fails[0] <- fails[0] + 1
+    b: mutable darray[u8] = []
+    rh_push_text(b, "M04R-FAIL ")
+    rh_push_text(b, label)
+    b.push(10)
+    rh_write_stdout(b)
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fails: mutable i64 = 0
+    text: mutable darray[u8] = []
+    rh_push_text(text, "owner maintainer triager member wizard")
+    ro: u8 = rh_role_parse_role(text, 0, 5)
+    rm: u8 = rh_role_parse_role(text, 6, 16)
+    rt: u8 = rh_role_parse_role(text, 17, 24)
+    rmem: u8 = rh_role_parse_role(text, 25, 31)
+    rw: u8 = rh_role_parse_role(text, 32, 38)
+    rcheck(ro == RH_ROLE_OWNER, "role-owner", &fails)
+    rcheck(rm == RH_ROLE_MAINTAINER, "role-maintainer", &fails)
+    rcheck(rt == RH_ROLE_TRIAGER, "role-triager", &fails)
+    rcheck(rmem == RH_ROLE_MEMBER, "role-member", &fails)
+    rcheck(rw == RH_ROLE_UNKNOWN, "role-unknown-not-guessed", &fails)
+
+    decls: mutable darray[RhRoleDecl] = []
+    decls.push(RhRoleDecl{actor_id: 1, role: RH_ROLE_OWNER, permission: 1, source: RH_DECL_SOURCE_PROVIDER, declared_at: 100, revoked_at: 0})
+    decls.push(RhRoleDecl{actor_id: 2, role: RH_ROLE_TRIAGER, permission: 2, source: RH_DECL_SOURCE_FILE, declared_at: 100, revoked_at: 200})
+    decls.push(RhRoleDecl{actor_id: 3, role: RH_ROLE_MEMBER, permission: 4, source: RH_DECL_SOURCE_OPERATOR, declared_at: 300, revoked_at: 0})
+    rcheck(rh_role_declared(decls, 1, 150) == RH_ROLE_OWNER, "decl-owner-active", &fails)
+    rcheck(rh_role_declared(decls, 2, 150) == RH_ROLE_TRIAGER, "decl-triager-active", &fails)
+    rcheck(rh_role_declared(decls, 2, 250) == RH_ROLE_UNKNOWN, "decl-revoked-not-active", &fails)
+    rcheck(rh_role_declared(decls, 3, 250) == RH_ROLE_UNKNOWN, "decl-not-yet-effective", &fails)
+    rcheck(rh_role_declared(decls, 3, 350) == RH_ROLE_MEMBER, "decl-effective-time", &fails)
+    rcheck(rh_role_declared(decls, 99, 999) == RH_ROLE_UNKNOWN, "decl-unknown-actor", &fails)
+    rcheck(rh_role_permission_declared(decls, 1, 1, 150) == 1, "perm-owner-bit", &fails)
+    rcheck(rh_role_permission_declared(decls, 1, 2, 150) == 0, "perm-absent-bit", &fails)
+    p: mutable i64 = 0
+    f: mutable i64 = 0
+    o: mutable i64 = 0
+    rh_role_source_tally(decls, &p, &f, &o)
+    rcheck(p == 1 and f == 1 and o == 1, "decl-source-stratified", &fails)
+
+    if fails == 0:
+        b: mutable darray[u8] = []
+        rh_push_text(b, "M04R OK")
+        b.push(10)
+        rh_write_stdout(b)
+        return 0
+    return 1

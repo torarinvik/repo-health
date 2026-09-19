@@ -1,0 +1,248 @@
+# rh_inventory.elisa — standards-based inventory interchange (M03-07, R027).
+#
+# ONE pinned format for the first release: CycloneDX JSON, with a DECLARED
+# set of supported spec versions. A document whose spec version is not in
+# that set is reported `unsupported`, never guessed at. Parsing is
+# metadata-only: it extracts component identity (type/name/version/purl)
+# and artifact hashes, and never executes anything.
+#
+# `valid != complete`: a document that validates proves it is
+# well-formed CycloneDX, not that it lists every dependency. The returned
+# counts say exactly what the document contained, nothing about the world.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_BOM_MAX_COMPONENTS: i64 = 100000
+
+struct RhBomComponent:
+    type_s: i64
+    type_e: i64
+    name_s: i64
+    name_e: i64
+    version_s: i64
+    version_e: i64
+    purl_s: i64
+    purl_e: i64
+    hash_count: i64
+    valid_sha256: i64
+
+struct RhBom:
+    ok: mutable i64
+    spec_unsupported: mutable i64
+    component_count: mutable i64
+    invalid_components: mutable i64
+    with_purl: mutable i64
+    with_hash: mutable i64
+    digest_known: mutable i64
+    unknown_top_keys: mutable i64
+
+# (private to this file)
+def rh_bom_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e < s:
+        return -1
+    start: i64 = pool.count.i64()
+    k: mutable i64 = s
+    while k < e |k, texts, pool, e|:
+        pool.push(texts[k.usize()])
+        k <- k + 1
+    return start
+
+# (private to this file)
+def rh_bom_eq_ci(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = strlen(lit).i64()
+    if s < 0 or e - s != n:
+        return false
+    k: mutable i64 = 0
+    while k < n |k, texts, s, lit|:
+        a: mutable u8 = texts[(s + k).usize()]
+        b: mutable u8 = lit[k.usize()]
+        if a >= 65 and a <= 90:
+            a <- a + 32
+        if b >= 65 and b <= 90:
+            b <- b + 32
+        if a != b:
+            return false
+        k <- k + 1
+    return true
+
+# Declared supported CycloneDX spec versions for this release.
+def rh_bom_spec_supported(texts: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+    if rh_bom_eq_ci(texts, s, e, "1.4"):
+        return true
+    if rh_bom_eq_ci(texts, s, e, "1.5"):
+        return true
+    if rh_bom_eq_ci(texts, s, e, "1.6"):
+        return true
+    return false
+
+# A SHA-256 hash is 64 lowercase hex characters.
+# (private to this file)
+def rh_bom_sha256_hex(texts: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e - s != 64:
+        return false
+    i: mutable i64 = s
+    while i < e |i, e, texts|:
+        b: u8 = texts[i.usize()]
+        if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102)):
+            return false
+        i <- i + 1
+    return true
+
+# Count hashes and how many are a valid SHA-256.
+# (private to this file)
+def rh_bom_hash_count(nodes: darray[RhJsonNode]&, texts: darray[u8]&, arr: i64, total_out: mutable i64&, valid_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    total_out[0] <- 0
+    valid_out[0] <- 0
+    if arr < 0:
+        return
+    o: RhJsonNode = nodes[arr.usize()]
+    if o.kind != RH_JSON_ARR:
+        return
+    child: mutable i64 = o.first_child
+    while child >= 0 |child, nodes, texts, total_out, valid_out|:
+        nxt: i64 = nodes[child.usize()].next_sibling
+        total_out[0] <- total_out[0] + 1
+        alg_s: mutable i64 = -1
+        alg_e: mutable i64 = -1
+        ok_alg: bool = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "alg"), &alg_s, &alg_e)
+        cs: mutable i64 = -1
+        ce: mutable i64 = -1
+        ok_c: bool = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "content"), &cs, &ce)
+        if ok_alg and ok_c and rh_bom_eq_ci(texts, alg_s, alg_e, "SHA-256") and rh_bom_sha256_hex(texts, cs, ce):
+            valid_out[0] <- valid_out[0] + 1
+        child <- nxt
+
+# Count top-level CycloneDX keys this parser does not model, instead of
+# pretending it understood them (lossless/unknown-fields reporting, M08).
+# `$schema` and any future keys are counted; the reader can then tell that
+# the document carries more than the modeled fields.
+def rh_bom_unknown_keys(nodes: darray[RhJsonNode]&, texts: darray[u8]&, root: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    total: mutable i64 = 0
+    child: mutable i64 = nodes[root.usize()].first_child
+    is_key: mutable bool = true
+    while child >= 0 |child, nodes, texts, total, is_key|:
+        kn: RhJsonNode = nodes[child.usize()]
+        nxt: i64 = kn.next_sibling
+        if is_key and kn.kind == RH_JSON_STR:
+            ks: i64 = kn.text_start
+            ke: i64 = kn.text_end
+            known: mutable bool = false
+            if rh_bom_eq_ci(texts, ks, ke, "bomFormat"):
+                known <- true
+            if rh_bom_eq_ci(texts, ks, ke, "specVersion"):
+                known <- true
+            if rh_bom_span_eq(texts, ks, ke, "serialNumber"):
+                known <- true
+            if rh_bom_span_eq(texts, ks, ke, "version"):
+                known <- true
+            if rh_bom_span_eq(texts, ks, ke, "metadata"):
+                known <- true
+            if rh_bom_span_eq(texts, ks, ke, "components"):
+                known <- true
+            if rh_bom_span_eq(texts, ks, ke, "dependencies"):
+                known <- true
+            if rh_bom_span_eq(texts, ks, ke, "vulnerabilities"):
+                known <- true
+            if not known:
+                total <- total + 1
+        is_key <- not is_key
+        child <- nxt
+    return total
+
+# Exact byte-span equality against an ASCII literal.
+def rh_bom_span_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = strlen(lit).i64()
+    if s < 0 or e - s != n:
+        return false
+    k: mutable i64 = 0
+    while k < n |k, lit, texts, s|:
+        if texts[(s + k).usize()] != lit[k.usize()]:
+            return false
+        k <- k + 1
+    return true
+
+# Parse a CycloneDX JSON document. Returns 0 when a BOM was recognized
+# (including an unsupported spec version, which is reported in the result),
+# -1 when the payload is not JSON/not CycloneDX. Components missing a
+# non-empty name or version are counted invalid and skipped.
+def rh_bom_parse(raw: darray[u8]&, pool: mutable darray[u8]&, out: mutable darray[RhBomComponent]&, bom_out: mutable RhBom&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    bom_out[0] <- RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0:
+        return -1
+    rn: RhJsonNode = nodes[root.usize()]
+    if rn.kind != RH_JSON_OBJ:
+        return -1
+    fs: mutable i64 = -1
+    fe: mutable i64 = -1
+    if not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, root, "bomFormat"), &fs, &fe):
+        return -1
+    if not rh_bom_eq_ci(texts, fs, fe, "CycloneDX"):
+        return -1
+    vs: mutable i64 = -1
+    ve: mutable i64 = -1
+    if not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, root, "specVersion"), &vs, &ve):
+        return -1
+    supported: bool = rh_bom_spec_supported(texts, vs, ve)
+    b: RhBom = RhBom{ok: 1, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: rh_bom_unknown_keys(nodes, texts, root)}
+    if not supported:
+        b.spec_unsupported <- 1
+        bom_out[0] <- b
+        return 0
+    arr: i64 = rh_json_obj_get(nodes, texts, root, "components")
+    if arr < 0:
+        bom_out[0] <- b
+        return 0
+    an: RhJsonNode = nodes[arr.usize()]
+    if an.kind != RH_JSON_ARR:
+        return -1
+    child: mutable i64 = an.first_child
+    while child >= 0 |child, nodes, texts, pool, out, b|:
+        nxt: i64 = nodes[child.usize()].next_sibling
+        if out.count.i64() >= RH_BOM_MAX_COMPONENTS:
+            return -1
+        ns: mutable i64 = -1
+        ne: mutable i64 = -1
+        ws: mutable i64 = -1
+        we: mutable i64 = -1
+        ok_name: bool = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "name"), &ns, &ne)
+        ok_ver: bool = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "version"), &ws, &we)
+        if not ok_name or ne <= ns or not ok_ver or we <= ws:
+            b.invalid_components <- b.invalid_components + 1
+        else:
+            b.component_count <- b.component_count + 1
+            ts: mutable i64 = -1
+            te: mutable i64 = -1
+            _ = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "type"), &ts, &te)
+            ps: mutable i64 = -1
+            pe: mutable i64 = -1
+            has_purl: bool = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "purl"), &ps, &pe)
+            if has_purl and pe > ps:
+                b.with_purl <- b.with_purl + 1
+            hc: mutable i64 = 0
+            hv: mutable i64 = 0
+            rh_bom_hash_count(nodes, texts, rh_json_obj_get(nodes, texts, child, "hashes"), &hc, &hv)
+            if hc > 0:
+                b.with_hash <- b.with_hash + 1
+            b.digest_known <- b.digest_known + hv
+            t2s: i64 = rh_bom_copy(pool, texts, ts, te)
+            t2e: i64 = rh_bom_span_end_after(pool, ts, te, t2s)
+            n2s: i64 = rh_bom_copy(pool, texts, ns, ne)
+            n2e: i64 = rh_bom_span_end_after(pool, ns, ne, n2s)
+            v2s: i64 = rh_bom_copy(pool, texts, ws, we)
+            v2e: i64 = rh_bom_span_end_after(pool, ws, we, v2s)
+            p2s: i64 = rh_bom_copy(pool, texts, ps, pe)
+            p2e: i64 = rh_bom_span_end_after(pool, ps, pe, p2s)
+            out.push(RhBomComponent{type_s: t2s, type_e: t2e, name_s: n2s, name_e: n2e, version_s: v2s, version_e: v2e, purl_s: p2s, purl_e: p2e, hash_count: hc, valid_sha256: hv})
+        child <- nxt
+    bom_out[0] <- b
+    return 0
+
+# End of a copied span given its source span and copied start.
+# (private to this file)
+def rh_bom_span_end_after(pool: darray[u8]&, s: i64, e: i64, start: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if start < 0 or s < 0 or e < s:
+        return -1
+    return start + (e - s)

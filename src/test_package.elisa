@@ -1,0 +1,456 @@
+# test_package.elisa — M03 adapter tests (graphs, OSV, goldens).
+#
+# Usage: test_package <workdir> dump|check
+# dump writes canonical dep-graph goldens (hand-verified before check-in);
+# check rebuilds everything, asserts counts/witnesses/OSV outcomes, and
+# byte-compares the goldens. Exit 0 pass, 1 failure, 2 usage.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_package.elisa"
+include "./rh_git.elisa"
+include "./rh_inventory.elisa"
+include "./rh_registry_meta.elisa"
+include "./rh_spdx.elisa"
+
+def pfail(text: u8&) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    buffer: mutable darray[u8] = []
+    rh_push_text(buffer, "PACKAGE-FAIL ")
+    rh_push_text(buffer, text)
+    buffer.push(10)
+    rh_write_stdout(buffer)
+    return 1
+
+def pjoin(dir: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+    if rh_cstr_len_c(dir) == 0:
+        return false
+    rh_push_cstr(out, dir)
+    out.push(47)
+    rh_push_text(out, name)
+    out.push(0)
+    return true
+
+def pread(workdir: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    path: mutable darray[u8] = []
+    if not pjoin(workdir, name, path):
+        return false
+    pp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+    return rh_io_read(pp, out) >= 0
+
+def pbytes_equal(a: darray[u8]&, b: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+    if a.count != b.count:
+        return false
+    i: mutable usize = 0
+    while i < a.count |i, a, b|:
+        if a[i] != b[i]:
+            return false
+        i <- i + 1
+    return true
+
+def pcheck(cond: bool, label: u8&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    if cond:
+        return 0
+    buffer: mutable darray[u8] = []
+    rh_push_text(buffer, "PACKAGE-FAIL ")
+    rh_push_text(buffer, label)
+    buffer.push(10)
+    rh_write_stdout(buffer)
+    return 1
+
+def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fails: mutable i64 = 0
+    # --- cargo inventory ---
+    clock: mutable darray[u8] = []
+    if not pread(workdir, "cargo-diamond.lock", clock):
+        return pfail("read-cargo-lock")
+    cnodes: mutable darray[RhPkgNode] = []
+    cpool: mutable darray[u8] = []
+    creqs: mutable darray[RhRequire] = []
+    cunk: mutable i64 = 0
+    cn: i64 = rh_cargo_parse(clock, cnodes, cpool, creqs, &cunk)
+    if cn != 7:
+        return pfail("cargo-nodes")
+    fails <- fails + pcheck(cunk == 0, "cargo-unknown")
+    fails <- fails + pcheck(creqs.count.i64() == 5, "cargo-reqs")
+    cedges: mutable darray[RhDepEdge] = []
+    cunres: mutable darray[RhUnresolved] = []
+    cmade: i64 = rh_cargo_resolve(cnodes, cpool, creqs, cedges, cunres)
+    fails <- fails + pcheck(cmade == 3, "cargo-edges")
+    fails <- fails + pcheck(cunres.count.i64() == 2, "cargo-unres")
+    if cunres.count.i64() == 2:
+        fails <- fails + pcheck(cunres[0].reason == 0, "cargo-unres-missing")
+        fails <- fails + pcheck(cunres[1].reason == 1, "cargo-unres-ambiguous")
+    cvis: mutable darray[i64] = []
+    ctr: mutable i64 = 0
+    roots1: mutable darray[i64] = []
+    roots1.push(1)
+    fails <- fails + pcheck(rh_graph_bfs(cedges, cnodes.count.i64(), roots1, 32, 1000, cvis, &ctr) == 1, "cargo-bfs")
+    fails <- fails + pcheck(ctr == 0, "cargo-bfs-trunc")
+    cback: mutable darray[i64] = []
+    ctr2: mutable i64 = 0
+    roots3: mutable darray[i64] = []
+    roots3.push(3)
+    fails <- fails + pcheck(rh_graph_rbfs(cedges, cnodes.count.i64(), roots3, 32, 1000, cback, &ctr2) == 1, "cargo-rbfs")
+    # --- npm inventory ---
+    nlock: mutable darray[u8] = []
+    if not pread(workdir, "npm-diamond.lock.json", nlock):
+        return pfail("read-npm-lock")
+    npkg: mutable darray[u8] = []
+    if not pread(workdir, "npm-diamond.package.json", npkg):
+        return pfail("read-npm-pkg")
+    nnodes: mutable darray[RhPkgNode] = []
+    npool: mutable darray[u8] = []
+    npaths: mutable darray[i64] = []
+    nreqs: mutable darray[RhRequire] = []
+    nroot: i64 = rh_npm_lock_parse(nlock, npkg, nnodes, npool, npaths, nreqs)
+    fails <- fails + pcheck(nroot == 0, "npm-root")
+    fails <- fails + pcheck(nnodes.count.i64() == 7, "npm-nodes")
+    fails <- fails + pcheck(nreqs.count.i64() == 8, "npm-reqs")
+    nedges: mutable darray[RhDepEdge] = []
+    nunres: mutable darray[RhUnresolved] = []
+    nmade: i64 = rh_npm_resolve(nnodes, npaths, npool, nreqs, nedges, nunres)
+    fails <- fails + pcheck(nmade == 6, "npm-edges")
+    fails <- fails + pcheck(nunres.count.i64() == 1, "npm-unres")
+    if nunres.count.i64() == 1:
+        fails <- fails + pcheck(nunres[0].reason == 2, "npm-peer-reason")
+    nvis: mutable darray[i64] = []
+    ntr: mutable i64 = 0
+    nroots: mutable darray[i64] = []
+    nroots.push(0)
+    fails <- fails + pcheck(rh_graph_bfs(nedges, nnodes.count.i64(), nroots, 32, 1000, nvis, &ntr) == 6, "npm-bfs")
+    fails <- fails + pcheck(ntr == 0, "npm-bfs-trunc")
+    nvis1: mutable darray[i64] = []
+    ntr1: mutable i64 = 0
+    fails <- fails + pcheck(rh_graph_bfs(nedges, nnodes.count.i64(), nroots, 1, 1000, nvis1, &ntr1) == 4, "npm-bfs-depth1")
+    fails <- fails + pcheck(ntr1 == 1, "npm-bfs-trunc1")
+    nback: mutable darray[i64] = []
+    nbtr: mutable i64 = 0
+    nbroots: mutable darray[i64] = []
+    nbroots.push(4)
+    fails <- fails + pcheck(rh_graph_rbfs(nedges, nnodes.count.i64(), nbroots, 32, 1000, nback, &nbtr) == 1, "npm-rbfs")
+    fails <- fails + pcheck(rh_graph_in_count(nedges, 4) == 1, "npm-direct-deps")
+    # --- cycle fixture (v1 legacy): termination + exclusion + witness ---
+    clock2: mutable darray[u8] = []
+    if not pread(workdir, "npm-cycle.lock.json", clock2):
+        return pfail("read-cycle-lock")
+    empty_pkg: mutable darray[u8] = []
+    ynodes: mutable darray[RhPkgNode] = []
+    ypool: mutable darray[u8] = []
+    ypaths: mutable darray[i64] = []
+    yreqs: mutable darray[RhRequire] = []
+    yroot: i64 = rh_npm_lock_parse(clock2, empty_pkg, ynodes, ypool, ypaths, yreqs)
+    fails <- fails + pcheck(yroot == 0, "cycle-root")
+    fails <- fails + pcheck(ynodes.count.i64() == 3, "cycle-nodes")
+    yedges: mutable darray[RhDepEdge] = []
+    yunres: mutable darray[RhUnresolved] = []
+    ymade: i64 = rh_npm_resolve(ynodes, ypaths, ypool, yreqs, yedges, yunres)
+    fails <- fails + pcheck(ymade == 2, "cycle-edges")
+    yvis: mutable darray[i64] = []
+    ytr: mutable i64 = 0
+    yroots: mutable darray[i64] = []
+    yroots.push(1)
+    fails <- fails + pcheck(rh_graph_bfs(yedges, ynodes.count.i64(), yroots, 32, 1000, yvis, &ytr) == 1, "cycle-bfs")
+    fails <- fails + pcheck(ytr == 0, "cycle-trunc")
+    fails <- fails + pcheck(rh_graph_in_count(yedges, 2) == 1, "cycle-indeg")
+    wit: mutable darray[i64] = []
+    wl: i64 = rh_graph_witness(yedges, ynodes.count.i64(), 1, 2, 32, wit)
+    fails <- fails + pcheck(wl == 2, "cycle-witness-len")
+    if wl == 2:
+        fails <- fails + pcheck(wit[0] == 1 and wit[1] == 2, "cycle-witness-path")
+    # --- OSV matching over both inventories ---
+    osvraw: mutable darray[u8] = []
+    if not pread(workdir, "osv-response.json", osvraw):
+        return pfail("read-osv")
+    onodes: mutable darray[RhJsonNode] = []
+    otexts: mutable darray[u8] = []
+    oroot: i64 = rh_json_parse(osvraw, onodes, otexts)
+    if oroot < 0:
+        return pfail("parse-osv")
+    cfind: mutable darray[RhAdvisory] = []
+    cwd: mutable i64 = 0
+    csk: mutable i64 = 0
+    cnum: i64 = rh_osv_match(cnodes, cpool, onodes, otexts, oroot, cfind, &cwd, &csk)
+    fails <- fails + pcheck(cnum == 1, "osv-cargo-count")
+    fails <- fails + pcheck(cwd == 1, "osv-withdrawn")
+    if cnum == 1:
+        fails <- fails + pcheck(cfind[0].node == 3, "osv-cargo-node")
+        fails <- fails + pcheck(cfind[0].alias_count == 1, "osv-alias-merge")
+        fails <- fails + pcheck(cfind[0].fix_s >= 0, "osv-cargo-fix")
+    nfind: mutable darray[RhAdvisory] = []
+    nwd: mutable i64 = 0
+    nsk: mutable i64 = 0
+    nnum: i64 = rh_osv_match(nnodes, npool, onodes, otexts, oroot, nfind, &nwd, &nsk)
+    fails <- fails + pcheck(nnum == 1, "osv-npm-count")
+    if nnum == 1:
+        fails <- fails + pcheck(nfind[0].node == 1, "osv-npm-node")
+        fails <- fails + pcheck(nfind[0].alias_count == 0, "osv-npm-alias")
+    # --- F024: bytes changed under one label is a NEW artifact ---
+    fails <- fails + pcheck(rh_artifact_identity(1, 111, 222, 1, 111, 222) == RH_ART_MATCH, "artifact-same-bytes-match")
+    fails <- fails + pcheck(rh_artifact_identity(1, 111, 222, 1, 333, 444) == RH_ART_CHANGED, "artifact-bytes-change-new")
+    fails <- fails + pcheck(rh_artifact_identity(1, 111, 222, 0, 0, 0) == RH_ART_UNKNOWN, "artifact-no-observed-unknown")
+    fails <- fails + pcheck(rh_artifact_identity(0, 0, 0, 1, 333, 444) == RH_ART_UNKNOWN, "artifact-no-expected-unknown")
+    fails <- fails + pcheck(rh_artifact_is_distinct(RH_ART_CHANGED), "artifact-changed-is-distinct")
+    fails <- fails + pcheck(not rh_artifact_is_distinct(RH_ART_MATCH), "artifact-match-not-distinct")
+    fails <- fails + pcheck(not rh_artifact_is_distinct(RH_ART_UNKNOWN), "artifact-unknown-not-distinct")
+
+    # --- F023: a false/unverified repo claim is never identity ---
+    fails <- fails + pcheck(rh_repo_claim_state(true, false, false) == RH_CLAIM_UNVERIFIED, "claim-unverified")
+    fails <- fails + pcheck(not rh_repo_claim_is_identity(RH_CLAIM_UNVERIFIED), "claim-unverified-not-identity")
+    fails <- fails + pcheck(rh_repo_claim_state(true, true, false) == RH_CLAIM_VERIFIED, "claim-verified")
+    fails <- fails + pcheck(rh_repo_claim_is_identity(RH_CLAIM_VERIFIED), "claim-verified-is-identity")
+    fails <- fails + pcheck(rh_repo_claim_state(true, false, true) == RH_CLAIM_CONFLICTED, "claim-conflicted")
+    fails <- fails + pcheck(not rh_repo_claim_is_identity(RH_CLAIM_CONFLICTED), "claim-conflicted-not-identity")
+    fails <- fails + pcheck(rh_repo_claim_state(true, true, true) == RH_CLAIM_CONFLICTED, "claim-conflict-wins")
+    fails <- fails + pcheck(rh_repo_claim_state(false, false, false) == RH_CLAIM_NONE, "claim-none")
+
+    # --- M03/F022: declared supported range subset; unsupported syntax is
+    # not a missing dependency. ---
+    rsup1: mutable darray[u8] = []
+    rh_push_text(rsup1, "^1.2.3")
+    fails <- fails + pcheck(rh_req_range_supported(rsup1, 0, rsup1.count.i64()), "range-semver-supported")
+    rsup2: mutable darray[u8] = []
+    rh_push_text(rsup2, ">=1.2.3 <2.0.0 || 2.x")
+    fails <- fails + pcheck(rh_req_range_supported(rsup2, 0, rsup2.count.i64()), "range-compound-supported")
+    rsup3: mutable darray[u8] = []
+    rh_push_text(rsup3, "1.2.3-beta.1+build.5")
+    fails <- fails + pcheck(rh_req_range_supported(rsup3, 0, rsup3.count.i64()), "range-prerelease-supported")
+    rsup4: mutable darray[u8] = []
+    rh_push_text(rsup4, "*")
+    fails <- fails + pcheck(rh_req_range_supported(rsup4, 0, rsup4.count.i64()), "range-star-supported")
+    rbad1: mutable darray[u8] = []
+    rh_push_text(rbad1, "npm:other@^1")
+    fails <- fails + pcheck(not rh_req_range_supported(rbad1, 0, rbad1.count.i64()), "range-alias-unsupported")
+    rbad2: mutable darray[u8] = []
+    rh_push_text(rbad2, "workspace:*")
+    fails <- fails + pcheck(not rh_req_range_supported(rbad2, 0, rbad2.count.i64()), "range-workspace-unsupported")
+    rbad3: mutable darray[u8] = []
+    rh_push_text(rbad3, "file:../x")
+    fails <- fails + pcheck(not rh_req_range_supported(rbad3, 0, rbad3.count.i64()), "range-file-unsupported")
+    rbad4: mutable darray[u8] = []
+    rh_push_text(rbad4, "git+https://example.test/x.git")
+    fails <- fails + pcheck(not rh_req_range_supported(rbad4, 0, rbad4.count.i64()), "range-git-unsupported")
+    rbad5: mutable darray[u8] = []
+    rh_push_text(rbad5, "latest")
+    fails <- fails + pcheck(not rh_req_range_supported(rbad5, 0, rbad5.count.i64()), "range-dist-tag-unsupported")
+    # The diamond fixtures contain no unsupported expressions (all exact
+    # pinned Cargo versions / plain npm ranges), so the count is exactly 0.
+    fails <- fails + pcheck(rh_unsupported_range_count(creqs, cpool) == 0, "range-diamond-cargo-zero")
+    fails <- fails + pcheck(rh_unsupported_range_count(nreqs, npool) == 0, "range-diamond-npm-zero")
+
+    # --- M03-07 inventory interchange: CycloneDX with declared spec support ---
+    invraw: mutable darray[u8] = []
+    if not pread(workdir, "cyclonedx-1.5.json", invraw):
+        return pfail("read-bom")
+    ipool: mutable darray[u8] = []
+    icomp: mutable darray[RhBomComponent] = []
+    ibom: mutable RhBom = RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    if rh_bom_parse(invraw, ipool, icomp, &ibom) != 0:
+        return pfail("bom-parse")
+    fails <- fails + pcheck(ibom.ok == 1 and ibom.spec_unsupported == 0, "bom-supported-version")
+    fails <- fails + pcheck(ibom.component_count == 2, "bom-component-count")
+    fails <- fails + pcheck(ibom.invalid_components == 1, "bom-invalid-skipped")
+    fails <- fails + pcheck(ibom.with_purl == 2, "bom-with-purl")
+    fails <- fails + pcheck(ibom.with_hash == 2 and ibom.digest_known == 1, "bom-only-valid-sha256-counted")
+    fails <- fails + pcheck(ibom.unknown_top_keys == 0, "bom-known-keys-zero-unknown")
+    # unknown top-level fields are counted, not silently dropped (lossless)
+    unk: mutable darray[u8] = []
+    rh_push_text(unk, "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\",\"components\":[],\"signature\":{},\"futureField\":1}")
+    up: mutable darray[u8] = []
+    uc: mutable darray[RhBomComponent] = []
+    ub: mutable RhBom = RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    fails <- fails + pcheck(rh_bom_parse(unk, up, uc, &ub) == 0 and ub.unknown_top_keys == 2, "bom-unknown-keys-counted")
+    # unsupported spec version is reported, never guessed at
+    badver: mutable darray[u8] = []
+    rh_push_text(badver, "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"9.9\",\"components\":[]}")
+    bp: mutable darray[u8] = []
+    bc: mutable darray[RhBomComponent] = []
+    bb: mutable RhBom = RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    fails <- fails + pcheck(rh_bom_parse(badver, bp, bc, &bb) == 0 and bb.spec_unsupported == 1, "bom-unsupported-version-reported")
+    notcdx: mutable darray[u8] = []
+    rh_push_text(notcdx, "{\"bomFormat\":\"SPDX\",\"specVersion\":\"1.5\"}")
+    np: mutable darray[u8] = []
+    nc: mutable darray[RhBomComponent] = []
+    nb: mutable RhBom = RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    fails <- fails + pcheck(rh_bom_parse(notcdx, np, nc, &nb) == -1, "bom-not-cyclonedx-rejected")
+    nosp: mutable darray[u8] = []
+    rh_push_text(nosp, "{\"bomFormat\":\"CycloneDX\"}")
+    mp: mutable darray[u8] = []
+    mc: mutable darray[RhBomComponent] = []
+    mb: mutable RhBom = RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    fails <- fails + pcheck(rh_bom_parse(nosp, mp, mc, &mb) == -1, "bom-missing-spec-rejected")
+
+    # --- M03-05 registry enrichment: yanks, pub times, declared deps ---
+    rmraw: mutable darray[u8] = []
+    if not pread(workdir, "registry-meta.json", rmraw):
+        return pfail("read-regmeta")
+    rmpool: mutable darray[u8] = []
+    rmver: mutable darray[RhRegVersion] = []
+    rmeta: mutable RhRegMeta = RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+    if rh_regmeta_parse(rmraw, rmpool, rmver, &rmeta) != 0:
+        return pfail("regmeta-parse")
+    fails <- fails + pcheck(rmeta.ok == 1 and rmeta.versions == 3, "regmeta-versions")
+    fails <- fails + pcheck(rmeta.yanked_count == 1, "regmeta-yanked-count")
+    fails <- fails + pcheck(rmeta.unknown_yank_count == 1, "regmeta-unknown-yank-not-false")
+    fails <- fails + pcheck(rmeta.with_repo == 1, "regmeta-with-repo")
+    fails <- fails + pcheck(rmeta.declared_deps == 3 and rmeta.optional_deps == 1 and rmeta.dev_deps == 1, "regmeta-dep-counts")
+    v0: RhRegVersion = rmver[0]
+    fails <- fails + pcheck(v0.yanked == 0 and v0.has_published == 1 and v0.published_epoch == 1609459200, "regmeta-v0-published")
+    fails <- fails + pcheck(v0.dep_count == 3 and v0.optional_dep_count == 1 and v0.dev_dep_count == 1, "regmeta-v0-deps")
+    v1: RhRegVersion = rmver[1]
+    fails <- fails + pcheck(v1.yanked == 1, "regmeta-v1-yanked-retained")
+    v2: RhRegVersion = rmver[2]
+    fails <- fails + pcheck(v2.yanked == -1 and v2.has_published == 0, "regmeta-v2-unknown")
+    # A yanked version is retained, not deleted (yanked != deleted).
+    fails <- fails + pcheck(rmver.count == 3, "regmeta-yanked-not-deleted")
+    # A declared source link is an assertion, never identity (F023).
+    fails <- fails + pcheck(rh_repo_claim_state(v0.has_repo == 1, false, false) == RH_CLAIM_UNVERIFIED, "regmeta-repo-unverified")
+    badm: mutable darray[u8] = []
+    rh_push_text(badm, "{\"versions\":{}}")
+    bp2: mutable darray[u8] = []
+    bv2: mutable darray[RhRegVersion] = []
+    bm2: mutable RhRegMeta = RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+    fails <- fails + pcheck(rh_regmeta_parse(badm, bp2, bv2, &bm2) == -1, "regmeta-wrong-shape-rejected")
+
+    # --- M08 second inventory format: SPDX 2.3 with unknown-field awareness ---
+    spraw: mutable darray[u8] = []
+    if not pread(workdir, "spdx-2.3.json", spraw):
+        return pfail("read-spdx")
+    sppool: mutable darray[u8] = []
+    sppkgs: mutable darray[RhSpdxPackage] = []
+    spmeta: mutable RhSpdx = RhSpdx{ok: 0, spec_unsupported: 0, packages: 0, invalid_packages: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    if rh_spdx_parse(spraw, sppool, sppkgs, &spmeta) != 0:
+        return pfail("spdx-parse")
+    fails <- fails + pcheck(spmeta.ok == 1 and spmeta.spec_unsupported == 0, "spdx-supported-version")
+    fails <- fails + pcheck(spmeta.packages == 2 and spmeta.invalid_packages == 1, "spdx-package-counts")
+    fails <- fails + pcheck(spmeta.with_purl == 2, "spdx-with-purl")
+    fails <- fails + pcheck(spmeta.with_hash == 2 and spmeta.digest_known == 1, "spdx-only-valid-sha256")
+    fails <- fails + pcheck(spmeta.unknown_top_keys == 1, "spdx-unknown-keys-counted")
+    sp0: RhSpdxPackage = sppkgs[0]
+    fails <- fails + pcheck(rh_bom_eq_ci(sppool, sp0.name_s, sp0.name_e, "serde"), "spdx-name-preserved")
+    badspdx: mutable darray[u8] = []
+    rh_push_text(badspdx, "{\"spdxVersion\":\"SPDX-2.2\",\"packages\":[]}")
+    bp3: mutable darray[u8] = []
+    bpk3: mutable darray[RhSpdxPackage] = []
+    bm3: mutable RhSpdx = RhSpdx{ok: 0, spec_unsupported: 0, packages: 0, invalid_packages: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    fails <- fails + pcheck(rh_spdx_parse(badspdx, bp3, bpk3, &bm3) == 0 and bm3.spec_unsupported == 1, "spdx-unsupported-version")
+    nospec: mutable darray[u8] = []
+    rh_push_text(nospec, "{\"packages\":[]}")
+    np3: mutable darray[u8] = []
+    npk3: mutable darray[RhSpdxPackage] = []
+    nm3: mutable RhSpdx = RhSpdx{ok: 0, spec_unsupported: 0, packages: 0, invalid_packages: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    fails <- fails + pcheck(rh_spdx_parse(nospec, np3, npk3, &nm3) == -1, "spdx-missing-version-rejected")
+
+    # --- PyPI requirements.txt (declared requirements) ---
+    preq: mutable darray[u8] = []
+    if not pread(workdir, "python-requirements.txt", preq):
+        return pfail("read-python-requirements")
+    pnodes: mutable darray[RhPkgNode] = []
+    ppool: mutable darray[u8] = []
+    preqs: mutable darray[RhRequire] = []
+    pedges: mutable darray[RhDepEdge] = []
+    punres: mutable darray[RhUnresolved] = []
+    punk: mutable i64 = 0
+    proot: i64 = rh_pypi_parse(preq, pnodes, ppool, preqs, pedges, punres, &punk)
+    fails <- fails + pcheck(proot == 0, "pypi-root")
+    fails <- fails + pcheck(pnodes.count == 4, "pypi-node-count")
+    fails <- fails + pcheck(pedges.count == 3, "pypi-edge-count")
+    fails <- fails + pcheck(punres.count == 5, "pypi-unresolved-count")
+    # extras (urllib3[secure]) must NOT become an edge or a package node
+    fails <- fails + pcheck(pnodes[0].src_kind == 3 and pnodes[0].name_e > pnodes[0].name_s, "pypi-root-named")
+    fails <- fails + pcheck(rh_unsupported_range_count(preqs, ppool) == 1, "pypi-unsupported-count")
+
+    # --- Go go.mod (declared requirements) ---
+    gmod: mutable darray[u8] = []
+    if not pread(workdir, "go.mod.txt", gmod):
+        return pfail("read-go-mod")
+    gnodes: mutable darray[RhPkgNode] = []
+    gpool: mutable darray[u8] = []
+    greqs: mutable darray[RhRequire] = []
+    gedges: mutable darray[RhDepEdge] = []
+    gunres: mutable darray[RhUnresolved] = []
+    gunk: mutable i64 = 0
+    groot: i64 = rh_go_parse(gmod, gnodes, gpool, greqs, gedges, gunres, &gunk)
+    fails <- fails + pcheck(groot == 0, "go-root")
+    fails <- fails + pcheck(gnodes.count == 5, "go-node-count")
+    fails <- fails + pcheck(gedges.count == 4, "go-edge-count")
+    fails <- fails + pcheck(gunres.count == 4, "go-unresolved-count")
+    # root name is the module directive path (not "root")
+    fails <- fails + pcheck(gnodes[0].src_kind == 3 and gnodes[0].name_e > gnodes[0].name_s, "go-root-named")
+    # the exact pins resolve; pseudo-version + incompatible + directives do not
+    misses: mutable i64 = 0
+    ctxs: mutable i64 = 0
+    gi: mutable usize = 0
+    while gi < gunres.count |gi, gunres, misses, ctxs|:
+        if gunres[gi].reason == 0:
+            misses <- misses + 1
+        if gunres[gi].reason == 2:
+            ctxs <- ctxs + 1
+        gi <- gi + 1
+    fails <- fails + pcheck(misses == 2, "go-pseudo-incompatible-unresolved")
+    fails <- fails + pcheck(ctxs == 2, "go-directives-context")
+
+    # --- serialization + goldens ---
+    cg: mutable darray[u8] = []
+    rh_graph_write_json(cg, 0, cnodes, cpool, cedges, cunres, cfind, otexts, 1)
+    ng: mutable darray[u8] = []
+    rh_graph_write_json(ng, 1, nnodes, npool, nedges, nunres, nfind, otexts, 0)
+    pg: mutable darray[u8] = []
+    rh_graph_write_json(pg, 2, pnodes, ppool, pedges, punres, nfind, otexts, proot)
+    gg: mutable darray[u8] = []
+    rh_graph_write_json(gg, 3, gnodes, gpool, gedges, gunres, nfind, otexts, groot)
+    if dump:
+        if not pwrite(workdir, "cargo-graph.golden.json", cg):
+            return pfail("dump-cargo")
+        if not pwrite(workdir, "npm-graph.golden.json", ng):
+            return pfail("dump-npm")
+        if not pwrite(workdir, "python-graph.golden.json", pg):
+            return pfail("dump-python")
+        if not pwrite(workdir, "go-graph.golden.json", gg):
+            return pfail("dump-go")
+    else:
+        cgold: mutable darray[u8] = []
+        if not pread(workdir, "cargo-graph.golden.json", cgold):
+            return pfail("read-cargo-golden")
+        fails <- fails + pcheck(pbytes_equal(cg, cgold), "cargo-golden")
+        ngold: mutable darray[u8] = []
+        if not pread(workdir, "npm-graph.golden.json", ngold):
+            return pfail("read-npm-golden")
+        fails <- fails + pcheck(pbytes_equal(ng, ngold), "npm-golden")
+        pgold: mutable darray[u8] = []
+        if not pread(workdir, "python-graph.golden.json", pgold):
+            return pfail("read-python-golden")
+        fails <- fails + pcheck(pbytes_equal(pg, pgold), "python-golden")
+        ggold: mutable darray[u8] = []
+        if not pread(workdir, "go-graph.golden.json", ggold):
+            return pfail("read-go-golden")
+        fails <- fails + pcheck(pbytes_equal(gg, ggold), "go-golden")
+    if fails != 0:
+        return 1
+    okbuf: mutable darray[u8] = []
+    rh_push_text(okbuf, "PACKAGE OK")
+    okbuf.push(10)
+    rh_write_stdout(okbuf)
+    return 0
+
+def pwrite(workdir: cstr, name: u8&, data: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    path: mutable darray[u8] = []
+    if not pjoin(workdir, name, path):
+        return false
+    pp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+    return rh_io_write(pp, data)
+
+def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if argc < 3:
+        buffer: mutable darray[u8] = []
+        rh_push_text(buffer, "usage: test_package <workdir> dump|check")
+        buffer.push(10)
+        rh_write_stderr(buffer)
+        return 2
+    slots: mutable cstr&& = argv.cast[mutable cstr&&]
+    workdir: cstr = slots[1]
+    mode: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+    if rh_streq(mode, "dump"):
+        return pmain(workdir, true)
+    if rh_streq(mode, "check"):
+        return pmain(workdir, false)
+    return 2

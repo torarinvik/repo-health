@@ -1,0 +1,175 @@
+# rh_gerrit.elisa — Gerrit review-workflow parser (M08 review lane).
+#
+# Gerrit is a non-PR review workflow: a *change* accumulates re-pushed
+# patch-sets over its life. The plan's non-PR criterion (R025) is explicit:
+# "3x-revised patch series != 3 changes". This module folds a change to
+# exactly one logical change and reports its patch-set (revision) count, so
+# a change reviewed three times is never inflated into three changes.
+#
+# Gerrit timestamps are `YYYY-MM-DD HH:MM:SS.fffffffff` (a space, not `T`,
+# with nanosecond fractional seconds). They are converted to epoch seconds by
+# dropping the fraction and substituting `T`, then reusing the strict ISO8601
+# parser (fail closed: an unparseable time fails the change, never guessed).
+# Only fields that exist are mapped; anything absent is null, never invented.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+# Count the members of a JSON object (a Gerrit `revisions` map is keyed by
+# commit SHA; each member is one patch-set). Object children alternate
+# key,value,key,value..., so only value nodes (every second child) are
+# counted. Returns -1 when not an object.
+def rh_gerrit_obj_count(nodes: darray[RhJsonNode]&, idx: i64) -> i64:
+    if idx < 0 or nodes[idx.usize()].kind != RH_JSON_OBJ:
+        return -1
+    n: mutable i64 = 0
+    child: mutable i64 = nodes[idx.usize()].first_child
+    while child >= 0 |child, nodes, n|:
+        # skip the key node; the value node is next_sibling
+        child <- nodes[child.usize()].next_sibling
+        if child < 0:
+            break
+        n <- n + 1
+        child <- nodes[child.usize()].next_sibling
+    return n
+
+# Parse a Gerrit timestamp at text span [s,e). Returns epoch seconds; ok_out
+# is set to 1 only on success. The space separator is replaced by `T` and the
+# fractional part is dropped before strict ISO parsing.
+def rh_gerrit_time(texts: darray[u8]&, s: i64, e: i64, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    ok_out[0] <- 0
+    if e <= s:
+        return 0
+    buf: mutable darray[u8] = []
+    k: mutable i64 = s
+    while k < e |k, e, texts, buf|:
+        b: u8 = texts[k.usize()]
+        if b == 32:
+            buf.push(84)
+        elif b == 46:
+            # drop the fractional seconds; keep the timezone marker if any
+            j: mutable i64 = k
+            while j < e |j, e, texts, buf|:
+                tb: u8 = texts[j.usize()]
+                break if tb == 43 or tb == 45
+                j <- j + 1
+            k <- j
+            continue
+        else:
+            buf.push(b)
+        k <- k + 1
+    if buf.count == 0:
+        return 0
+    # A Gerrit bare timestamp has no timezone; append Z so the ISO parser
+    # reads it as UTC rather than failing on the missing tz marker.
+    has_tz: mutable bool = false
+    m: mutable usize = 0
+    while m < buf.count |m, buf, has_tz|:
+        if buf[m] == 43 or buf[m] == 45:
+            if m > 11:
+                has_tz <- true
+        m <- m + 1
+    if not has_tz:
+        buf.push(90)
+    return rh_parse_iso8601(buf, 0, buf.count, ok_out)
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_gerrit_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        return false
+    return rh_json_str_span(nodes, idx, s_out, e_out)
+
+# Parse a Gerrit `QueryChanges` JSON document and write `rh-gerrit/1`. Returns
+# 0 ok, -1 malformed. An empty list is valid (zero changes). Each change
+# contributes exactly one entry with `revision_count` = the number of members
+# of its `revisions` object (1 when absent, since a change has at least its
+# initial patch-set).
+def rh_gerrit_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_ARR:
+        return -1
+    arr: RhJsonNode = nodes[root.usize()]
+    total: mutable i64 = 0
+    revisions_total: mutable i64 = 0
+    body: mutable darray[u8] = []
+    child: mutable i64 = arr.first_child
+    first: mutable bool = true
+    while child >= 0 |child, nodes, texts, raw, out, body, first, total, revisions_total|:
+        if nodes[child.usize()].kind != RH_JSON_OBJ:
+            return -1
+        oknum: mutable i64 = 0
+        num: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, child, "_number"), &oknum)
+        if oknum == 0:
+            return -1
+        ps: mutable i64 = 0
+        pe: mutable i64 = 0
+        if not rh_gerrit_str(nodes, texts, child, "project", &ps, &pe):
+            return -1
+        bs: mutable i64 = 0
+        be: mutable i64 = 0
+        if not rh_gerrit_str(nodes, texts, child, "branch", &bs, &be):
+            return -1
+        ss: mutable i64 = 0
+        se: mutable i64 = 0
+        if not rh_gerrit_str(nodes, texts, child, "subject", &ss, &se):
+            return -1
+        sts: mutable i64 = 0
+        ste: mutable i64 = 0
+        if not rh_gerrit_str(nodes, texts, child, "status", &sts, &ste):
+            return -1
+        cs: mutable i64 = 0
+        ce: mutable i64 = 0
+        if not rh_gerrit_str(nodes, texts, child, "created", &cs, &ce):
+            return -1
+        us: mutable i64 = 0
+        ue: mutable i64 = 0
+        if not rh_gerrit_str(nodes, texts, child, "updated", &us, &ue):
+            return -1
+        cok: mutable i64 = 0
+        created: i64 = rh_gerrit_time(texts, cs, ce, &cok)
+        if cok == 0:
+            return -1
+        uok: mutable i64 = 0
+        updated: i64 = rh_gerrit_time(texts, us, ue, &uok)
+        if uok == 0:
+            return -1
+        ridx: i64 = rh_json_obj_get(nodes, texts, child, "revisions")
+        revs: mutable i64 = rh_gerrit_obj_count(nodes, ridx)
+        if revs < 0:
+            revs <- 1
+        if revs < 1:
+            revs <- 1
+        revisions_total <- revisions_total + revs
+        total <- total + 1
+        if not first:
+            body.push(44)
+        first <- false
+        rh_push_text(body, "{\"change_number\":")
+        rh_push_decimal_i64(body, num)
+        rh_push_text(body, ",\"project\":\"")
+        rh_json_escape(body, texts, ps.usize(), pe.usize())
+        rh_push_text(body, "\",\"branch\":\"")
+        rh_json_escape(body, texts, bs.usize(), be.usize())
+        rh_push_text(body, "\",\"subject\":\"")
+        rh_json_escape(body, texts, ss.usize(), se.usize())
+        rh_push_text(body, "\",\"status\":\"")
+        rh_json_escape(body, texts, sts.usize(), ste.usize())
+        rh_push_text(body, "\",\"created_at\":")
+        rh_push_decimal_i64(body, created)
+        rh_push_text(body, ",\"updated_at\":")
+        rh_push_decimal_i64(body, updated)
+        rh_push_text(body, ",\"revision_count\":")
+        rh_push_decimal_i64(body, revs)
+        rh_push_text(body, "}")
+        child <- nodes[child.usize()].next_sibling
+    rh_push_text(out, "{\"schema\":\"rh-gerrit/1\",\"format\":\"gerrit\",\"change_count\":")
+    rh_push_decimal_i64(out, total)
+    rh_push_text(out, ",\"revision_count\":")
+    rh_push_decimal_i64(out, revisions_total)
+    rh_push_text(out, ",\"changes\":[")
+    _ = rh_absorb_bytes(body, out)
+    rh_push_text(out, "],\"note\":\"a change is one logical unit even when it is re-pushed many times; revision_count is the patch-set count, so 3x-revised is one change, not three; a Gerrit change is not a merged release\"}")
+    return 0

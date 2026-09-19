@@ -1,0 +1,3933 @@
+# rh_cli.elisa — command entry point (M01-01, M01-07, M01-08, M06-01 lite).
+#
+# Subcommands: scan, replay, sign, verify, serve, registry, version, help.
+# Exit codes: 0 ok (or replay/signature verified), 1 internal/test failure,
+# 2 usage, 3 rejected input (unknown/unsafe/unsupported), 4 collection/
+# computation failure, 5 replay mismatch or signature mismatch. stdout
+# carries reports; stderr carries diagnostics.
+
+include "./rh_base.elisa"
+include "./rh_domain.elisa"
+include "./rh_temporal.elisa"
+include "./rh_observation.elisa"
+include "./rh_registry.elisa"
+include "./rh_evidence.elisa"
+include "./rh_metrics.elisa"
+include "./rh_git.elisa"
+include "./rh_scan.elisa"
+include "./rh_report.elisa"
+include "./rh_http.elisa"
+include "./rh_sha256.elisa"
+include "./rh_json.elisa"
+include "./rh_continuity.elisa"
+include "./rh_continuity_scan.elisa"
+include "./rh_package.elisa"
+include "./rh_downstream_report.elisa"
+include "./rh_policy.elisa"
+include "./rh_policy_parse.elisa"
+include "./rh_correction_report.elisa"
+include "./rh_store.elisa"
+include "./rh_ops.elisa"
+include "./rh_forge.elisa"
+include "./rh_connector.elisa"
+include "./rh_job.elisa"
+include "./rh_reconcile.elisa"
+include "./rh_worker.elisa"
+include "./rh_inventory_report.elisa"
+include "./rh_vcs_report.elisa"
+include "./rh_gerrit.elisa"
+include "./rh_notify_report.elisa"
+include "./rh_query_report.elisa"
+include "./rh_identity_report.elisa"
+include "./rh_release_feed_report.elisa"
+include "./rh_registry_meta_report.elisa"
+include "./rh_pep440_report.elisa"
+include "./rh_ops_report.elisa"
+include "./rh_privacy_report.elisa"
+include "./rh_roles_report.elisa"
+include "./rh_experimental_report.elisa"
+include "./rh_render.elisa"
+include "./rh_lease_report.elisa"
+
+
+def rh_cli_err(text: u8&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    buffer: mutable darray[u8] = []
+    rh_push_text(buffer, "rh_cli: ")
+    rh_push_text(buffer, text)
+    buffer.push(10)
+    rh_write_stderr(buffer)
+
+def rh_cli_out(text: u8&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    buffer: mutable darray[u8] = []
+    rh_push_text(buffer, text)
+    buffer.push(10)
+    rh_write_stdout(buffer)
+
+def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    rh_cli_err("usage: rh_cli scan --repo <local-path|https-url> --out <dir> [--full-history] [--window-days N]")
+    rh_cli_err("       rh_cli replay --bundle <manifest> --out <dir>")
+    rh_cli_err("       rh_cli continuity --bundle <manifest> --out <dir>")
+    rh_cli_err("       rh_cli succession --input <file> --out <file>")
+    rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file>]")
+    rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
+    rh_cli_err("            [--max-nodes N] [--max-depth D] [--unavailable <id>] [--private <id>]...")
+    rh_cli_err("       rh_cli policy --policy <file> --input <file> --out <dir> [--state <file>]")
+    rh_cli_err("       rh_cli correct --corrections <file> --out <dir> [--state <file>]")
+    rh_cli_err("       rh_cli store put --root <dir> --file <path> | store verify --root <dir> --name <hex>")
+    rh_cli_err("       rh_cli store lease --root <dir> --job <name> --input <file> --out <file>")
+    rh_cli_err("       rh_cli ops backup --root <dir> --manifest <path> --names <file>")
+    rh_cli_err("       rh_cli ops verify --root <dir> --manifest <path>")
+    rh_cli_err("       rh_cli ops restore --root <dir> --dest <dir> --manifest <path>")
+    rh_cli_err("       rh_cli ops monitor --input <file> --out <file> | ops quota --input <file> --out <file>")
+    rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket --input <file> --out <file> [--fetched-at N]")
+    rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
+    rh_cli_err("       rh_cli job classify --input <file> --out <file> | job run --input <file> --out <file>")
+    rh_cli_err("       rh_cli reconcile --input <file> --out <file>")
+    rh_cli_err("       rh_cli worker tick --input <file> --out <file>")
+    rh_cli_err("       rh_cli inventory --format cyclonedx|spdx --input <file> --out <file>")
+    rh_cli_err("       rh_cli vcs --format hg|svn|fossil|patch --input <file> --out <file>")
+    rh_cli_err("       rh_cli notify --input <file> --out <file>")
+    rh_cli_err("       rh_cli query --input <file> --out <file>")
+    rh_cli_err("       rh_cli identity --input <file> --out <file>")
+    rh_cli_err("       rh_cli release-feed --input <file> --out <file>")
+    rh_cli_err("       rh_cli registry-meta --input <file> --out <file>")
+    rh_cli_err("       rh_cli pep440 --input <file> --out <file>")
+    rh_cli_err("       rh_cli privacy --input <file> --out <file>")
+    rh_cli_err("       rh_cli roles --input <file> --out <file>")
+    rh_cli_err("       rh_cli experimental --input <file> --out <file>")
+    rh_cli_err("       rh_cli render --report <report.json> --out <file.html>")
+    rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
+    rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
+    rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
+    rh_cli_err("       rh_cli registry | version | help")
+    return code
+
+# Integer argv value: copy to scratch, then parse (argv is cstr).
+def rh_parse_cstr_int(s: cstr, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    scratch: mutable darray[u8] = []
+    rh_push_cstr(scratch, s)
+    return rh_parse_i64(scratch, 0, scratch.count, ok_out)
+
+# Directory part of a path (bytes before the last '/'). False when none.
+def rh_dirname(path: cstr, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: usize = rh_cstr_len_c(path)
+    if n == 0:
+        return false
+    last: mutable i64 = -1
+    i: mutable usize = 0
+    while i < n |i, path, last|:
+        if path[i] == 47:
+            last <- i.i64()
+        i <- i + 1
+    if last < 0:
+        return false
+    j: mutable usize = 0
+    while j < last.usize() |j, path, out|:
+        out.push(path[j])
+        j <- j + 1
+    return true
+
+def rh_cli_version() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    rh_cli_out("rh_cli 0.1.0 (M01 slice; Elisa reference implementation)")
+    return 0
+
+def rh_cli_registry() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    rh_cli_out("registry: 12 implemented, 1 prototype of 360 architecture candidates (remainder planned)")
+    i: mutable i64 = 0
+    while i < rh_reg_count() |i|:
+        line: mutable darray[u8] = []
+        rh_push_text(line, rh_reg_key(i))
+        rh_push_text(line, " ")
+        rh_push_text(line, rh_reg_version(i))
+        rh_push_text(line, " ")
+        rh_push_text(line, rh_reg_unit(i))
+        rh_push_text(line, " ")
+        rh_push_text(line, rh_reg_status(i))
+        line.push(10)
+        rh_write_stdout(line)
+        i <- i + 1
+    return 0
+
+# Join dir + "/" + name as a NUL-terminated cstr buffer. False on empty dir.
+def rh_out_path(dir: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+    if rh_cstr_len_c(dir) == 0:
+        return false
+    rh_push_cstr(out, dir)
+    out.push(47)
+    rh_push_text(out, name)
+    out.push(0)
+    return true
+
+def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    kind: u8 = rh_url_kind(repo)
+    if kind == RH_URL_UNSUPPORTED:
+        rh_cli_err("unsupported repository (want local path or public https URL)")
+        return 3
+    if not rh_arg_safe(repo):
+        rh_cli_err("rejected repository argument (allowlist)")
+        return 3
+    if not rh_arg_safe(out):
+        rh_cli_err("rejected output argument (allowlist)")
+        return 3
+    cutoff: i64 = rh_now()
+    if cutoff < 0:
+        rh_cli_err("no clock available; refusing windowed scan")
+        return 4
+    window_start: mutable i64 = 0
+    if not full:
+        window_start <- cutoff - window_days * 86400
+    evdir: mutable darray[u8] = []
+    if not rh_out_path(out, "evidence", evdir):
+        rh_cli_err("bad output directory")
+        return 3
+    evc: cstr = (&evdir[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_ensure_dir(out) != 0:
+        rh_cli_err("cannot create output directory")
+        return 4
+    if rh_ensure_dir(evc) != 0:
+        rh_cli_err("cannot create evidence directory")
+        return 4
+    scan_repo: mutable cstr = repo
+    clone_here: mutable darray[u8] = []
+    if kind == RH_URL_HTTPS:
+        if not rh_out_path(evc, "remote.git", clone_here):
+            rh_cli_err("cannot stage clone path")
+            return 4
+        dest: cstr = (&clone_here[0]).cast[cstr] can Unsafe.PointerCast
+        clerr: mutable darray[u8] = []
+        if not rh_out_path(evc, "git-clone.err", clerr):
+            rh_cli_err("cannot stage clone log")
+            return 4
+        clerrp: cstr = (&clerr[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_run_git_clone(repo, dest, clerrp, full) != 0:
+            rh_cli_err("clone failed; see evidence/git-clone.err (no partial report)")
+            return 4
+        scan_repo <- dest
+    is_local: bool = kind == RH_URL_LOCAL
+    logf: mutable darray[u8] = []
+    shaf: mutable darray[u8] = []
+    verf: mutable darray[u8] = []
+    loge: mutable darray[u8] = []
+    shae: mutable darray[u8] = []
+    vere: mutable darray[u8] = []
+    if not rh_out_path(evc, "git-log.bin", logf):
+        rh_cli_err("cannot stage log path")
+        return 4
+    if not rh_out_path(evc, "git-shallow.txt", shaf):
+        rh_cli_err("cannot stage shallow path")
+        return 4
+    if not rh_out_path(evc, "git-version.txt", verf):
+        rh_cli_err("cannot stage version path")
+        return 4
+    partf: mutable darray[u8] = []
+    parte: mutable darray[u8] = []
+    if not rh_out_path(evc, "git-partial.txt", partf):
+        rh_cli_err("cannot stage partial path")
+        return 4
+    if not rh_out_path(evc, "git-partial.err", parte):
+        rh_cli_err("cannot stage partial error path")
+        return 4
+    if not rh_out_path(evc, "git-log.err", loge):
+        rh_cli_err("cannot stage log error path")
+        return 4
+    if not rh_out_path(evc, "git-shallow.err", shae):
+        rh_cli_err("cannot stage shallow error path")
+        return 4
+    if not rh_out_path(evc, "git-version.err", vere):
+        rh_cli_err("cannot stage version error path")
+        return 4
+    logp: cstr = (&logf[0]).cast[cstr] can Unsafe.PointerCast
+    shap: cstr = (&shaf[0]).cast[cstr] can Unsafe.PointerCast
+    verp: cstr = (&verf[0]).cast[cstr] can Unsafe.PointerCast
+    verep: cstr = (&vere[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_run_git_version(verp, verep) != 0:
+        rh_cli_err("git --version failed")
+        return 4
+    partp: cstr = (&partf[0]).cast[cstr] can Unsafe.PointerCast
+    partep: cstr = (&parte[0]).cast[cstr] can Unsafe.PointerCast
+    _ = rh_run_git_partial(scan_repo, partp, partep)
+    shaep: cstr = (&shae[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_run_git_shallow(scan_repo, shap, shaep) != 0:
+        rh_cli_err("rev-parse failed (not a repository?)")
+        return 4
+    logep: cstr = (&loge[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_run_git_log(scan_repo, logp, logep, full) != 0:
+        headerr: mutable darray[u8] = []
+        if not rh_out_path(evc, "git-head.err", headerr):
+            rh_cli_err("cannot stage head error path")
+            return 4
+        if rh_run_git_head(scan_repo, (&headerr[0]).cast[cstr] can Unsafe.PointerCast) != 0:
+            rh_cli_err("note: repository has no commits yet; reporting observed-empty history")
+            empty_log: mutable darray[u8] = []
+            if not rh_io_write(logp, empty_log):
+                rh_cli_err("cannot write empty log evidence")
+                return 4
+        else:
+            rh_cli_err("git log failed; see evidence/git-log.err (no partial report)")
+            return 4
+    shab: mutable darray[u8] = []
+    if rh_io_read(shap, shab) < 0:
+        rh_cli_err("cannot read shallow evidence")
+        return 4
+    shallow: mutable i64 = 1
+    if shab.count >= 5:
+        if shab[0] == 102 and shab[1] == 97 and shab[2] == 108 and shab[3] == 115 and shab[4] == 101:
+            shallow <- 0
+    logb: mutable darray[u8] = []
+    if rh_io_read(logp, logb) < 0:
+        rh_cli_err("cannot read log evidence (over size cap?)")
+        return 4
+    snap: mutable RhSnapshot = RhSnapshot{commits_all: 0, commits: 0, rejected: 0, merges: 0, future: 0, skew: 0, has_commits: 0, min_at: 0, max_at: 0, min_ct: 0, max_ct: 0, oldest_at: 0, email_lines: 0, shallow: 0, truncated: 0, manifest: 0, digest: 0}
+    rh_snapshot_init(&snap)
+    months: mutable darray[i64] = []
+    emails: mutable darray[u8] = []
+    _ = rh_parse_log(logb, window_start, cutoff, &snap, months, emails)
+    snap.shallow <- shallow
+    partb: mutable darray[u8] = []
+    partial_clone: mutable i64 = 0
+    if rh_io_read(partp, partb) >= 0:
+        if partb.count > 0:
+            partial_clone <- 1
+    bound_hit: mutable bool = false
+    if not full:
+        if snap.commits_all >= RH_DEFAULT_MAX_COMMITS:
+            bound_hit <- true
+        if kind == RH_URL_HTTPS and snap.commits_all >= 5000:
+            bound_hit <- true
+        # S012 test hook: RH_SCAN_MAX_COMMITS lets the suite exercise the
+        # truncation path with a small fixture. It can only lower the bound,
+        # never remove it, and the real bound is the constant above.
+        env_cap: u8&? = getenv("RH_SCAN_MAX_COMMITS")
+        if env_cap != null:
+            scratch: mutable darray[u8] = []
+            rh_push_cstr(scratch, env_cap.cast[cstr] can Unsafe.PointerCast)
+            ok_cap: mutable i64 = 0
+            capv: i64 = rh_parse_i64(scratch, 0, scratch.count, &ok_cap)
+            if ok_cap == 1 and capv > 0 and capv < RH_DEFAULT_MAX_COMMITS:
+                if snap.commits_all >= capv:
+                    bound_hit <- true
+    if bound_hit:
+        snap.truncated <- 1
+    maill: mutable darray[u8] = []
+    if not rh_out_path(evc, "emails.txt", maill):
+        rh_cli_err("cannot stage emails path")
+        return 4
+    mailp: cstr = (&maill[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(mailp, emails):
+        rh_cli_err("cannot write emails evidence")
+        return 4
+    uniq: mutable darray[u8] = []
+    if not rh_out_path(evc, "emails.uniq", uniq):
+        rh_cli_err("cannot stage uniq path")
+        return 4
+    uniqp: cstr = (&uniq[0]).cast[cstr] can Unsafe.PointerCast
+    sorterr: mutable darray[u8] = []
+    if not rh_out_path(evc, "sort.err", sorterr):
+        rh_cli_err("cannot stage sort error path")
+        return 4
+    sorterrp: cstr = (&sorterr[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_run_sort_uniq(mailp, uniqp, sorterrp) != 0:
+        rh_cli_err("sort -u failed")
+        return 4
+    uniqb: mutable darray[u8] = []
+    if rh_io_read(uniqp, uniqb) < 0:
+        rh_cli_err("cannot read uniq evidence")
+        return 4
+    identities: i64 = rh_count_lines(uniqb)
+    bots: i64 = rh_count_bot_lines(uniqb)
+    snap.manifest <- rh_manifest_probe(repo, is_local)
+    cov_n: mutable i64 = 0
+    cov_d: mutable i64 = 0
+    cov_s: mutable i64 = 0
+    rh_coverage(&snap, window_start, cutoff, &cov_n, &cov_d, &cov_s)
+    fresh: mutable i64 = -1
+    if snap.has_commits == 1:
+        top: mutable i64 = snap.max_at
+        if snap.max_ct > top:
+            top <- snap.max_ct
+        fresh <- (cutoff - top) / 3600
+        if fresh < 0:
+            fresh <- 0
+    kind_num: mutable i64 = 0
+    if kind == RH_URL_HTTPS:
+        kind_num <- 1
+    full_num: mutable i64 = 0
+    if full:
+        full_num <- 1
+    ctx: RhReportCtx = rh_report_ctx_make(identities, bots, months.count.i64(), cov_n, cov_d, cov_s, fresh, window_days, full_num, kind_num, cutoff, partial_clone)
+    repj: mutable darray[u8] = []
+    repm: mutable darray[u8] = []
+    manf: mutable darray[u8] = []
+    if not rh_out_path(out, "report.json", repj):
+        rh_cli_err("cannot stage report path")
+        return 4
+    if not rh_out_path(out, "report.md", repm):
+        rh_cli_err("cannot stage markdown path")
+        return 4
+    if not rh_out_path(out, "bundle.manifest", manf):
+        rh_cli_err("cannot stage manifest path")
+        return 4
+    repjp: cstr = (&repj[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_write_report_json(repjp, repo, &snap, &ctx):
+        rh_cli_err("cannot write report.json")
+        return 4
+    repmp: cstr = (&repm[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_write_report_md(repmp, repo, &snap, &ctx):
+        rh_cli_err("cannot write report.md")
+        return 4
+    manp: cstr = (&manf[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_write_manifest(manp, repo, &snap, &ctx):
+        rh_cli_err("cannot write bundle.manifest")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "scan: commits=")
+    rh_push_decimal_i64(done, snap.commits)
+    rh_push_text(done, " identities=")
+    rh_push_decimal_i64(done, identities)
+    rh_push_text(done, " months=")
+    rh_push_decimal_i64(done, months.count.i64())
+    rh_push_text(done, " digest=fnv1a64:")
+    rh_push_hex_u64(done, snap.digest)
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(bundle):
+        rh_cli_err("rejected bundle argument (allowlist)")
+        return 3
+    if not rh_arg_safe(out):
+        rh_cli_err("rejected output argument (allowlist)")
+        return 3
+    manb: mutable darray[u8] = []
+    bpath: mutable darray[u8] = []
+    rh_push_cstr(bpath, bundle)
+    bpath.push(0)
+    bp: cstr = (&bpath[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_io_read(bp, manb) < 0:
+        rh_cli_err("cannot read bundle manifest")
+        return 4
+    pinned: mutable u64 = 0
+    if not rh_manifest_digest(manb, &pinned):
+        rh_cli_err("manifest has no parseable digest (fails closed)")
+        return 4
+    ok_commits: mutable i64 = 0
+    want_commits: i64 = rh_manifest_int(manb, "commits: ", &ok_commits)
+    if ok_commits == 0:
+        rh_cli_err("manifest has no parseable commits count")
+        return 4
+    ok_rej: mutable i64 = 0
+    want_rejected: i64 = rh_manifest_int(manb, "rejected: ", &ok_rej)
+    if ok_rej == 0:
+        rh_cli_err("manifest has no parseable rejected count")
+        return 4
+    ok_days: mutable i64 = 0
+    days: i64 = rh_manifest_int(manb, "window-days: ", &ok_days)
+    if ok_days == 0:
+        rh_cli_err("manifest has no parseable window-days")
+        return 4
+    full: bool = rh_manifest_flag(manb, "full-history: ") == 1
+    ok_cut: mutable i64 = 0
+    cutoff: i64 = rh_manifest_int(manb, "evidence-cutoff: ", &ok_cut)
+    if ok_cut == 0 or cutoff <= 0:
+        rh_cli_err("manifest has no parseable evidence-cutoff")
+        return 4
+    logpath: mutable darray[u8] = []
+    has_dir: bool = rh_dirname(bundle, logpath)
+    if has_dir:
+        logpath.push(47)
+    rh_push_text(logpath, "evidence/git-log.bin")
+    logpath.push(0)
+    lp: cstr = (&logpath[0]).cast[cstr] can Unsafe.PointerCast
+    logb: mutable darray[u8] = []
+    if rh_io_read(lp, logb) < 0:
+        rh_cli_err("cannot read retained log evidence (no live data substituted)")
+        return 4
+    window_start: mutable i64 = 0
+    if not full:
+        window_start <- cutoff - days * 86400
+    snap: mutable RhSnapshot = RhSnapshot{commits_all: 0, commits: 0, rejected: 0, merges: 0, future: 0, skew: 0, has_commits: 0, min_at: 0, max_at: 0, min_ct: 0, max_ct: 0, oldest_at: 0, email_lines: 0, shallow: 0, truncated: 0, manifest: 0, digest: 0}
+    rh_snapshot_init(&snap)
+    months: mutable darray[i64] = []
+    emails: mutable darray[u8] = []
+    _ = rh_parse_log(logb, window_start, cutoff, &snap, months, emails)
+    if rh_ensure_dir(out) != 0:
+        rh_cli_err("cannot create output directory")
+        return 4
+    rep: mutable darray[u8] = []
+    if not rh_out_path(out, "replay.json", rep):
+        rh_cli_err("cannot stage replay path")
+        return 4
+    rb: mutable darray[u8] = []
+    rh_push_text(rb, "{\"bundle\":\"")
+    rh_push_cstr(rb, bundle)
+    rh_push_text(rb, "\",\"verified\":")
+    counts_match: bool = snap.commits == want_commits and snap.rejected == want_rejected
+    verified: bool = snap.digest == pinned and counts_match
+    if verified:
+        rh_push_text(rb, "true")
+    else:
+        rh_push_text(rb, "false")
+    rh_push_text(rb, ",\"commits\":")
+    rh_push_decimal_i64(rb, snap.commits)
+    rh_push_text(rb, ",\"rejected\":")
+    rh_push_decimal_i64(rb, snap.rejected)
+    rh_push_text(rb, ",\"digest\":\"fnv1a64:")
+    rh_push_hex_u64(rb, snap.digest)
+    rh_push_text(rb, "\"}\n")
+    repp: cstr = (&rep[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(repp, rb):
+        rh_cli_err("cannot write replay.json")
+        return 4
+    verdict: mutable darray[u8] = []
+    if verified:
+        rh_push_text(verdict, "replay: verified (")
+        rh_push_decimal_i64(verdict, snap.commits)
+        rh_push_text(verdict, " commits)")
+    else:
+        rh_push_text(verdict, "replay: MISMATCH manifest=")
+        rh_push_hex_u64(verdict, pinned)
+        rh_push_text(verdict, " recomputed=")
+        rh_push_hex_u64(verdict, snap.digest)
+    verdict.push(10)
+    rh_write_stdout(verdict)
+    if verified:
+        return 0
+    return 5
+
+def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if argc < 2:
+        return rh_cli_usage(2)
+    slots: mutable cstr&& = argv.cast[mutable cstr&&]
+    cmd: u8& = slots[1].cast[u8&] can Unsafe.PointerCast
+    if rh_streq(cmd, "version"):
+        return rh_cli_version()
+    if rh_streq(cmd, "help"):
+        return rh_cli_usage(0)
+    if rh_streq(cmd, "registry"):
+        return rh_cli_registry()
+    if rh_streq(cmd, "scan"):
+        repo_idx: mutable i64 = -1
+        out_idx: mutable i64 = -1
+        full: mutable bool = false
+        days: mutable i64 = 365
+        i: mutable i64 = 2
+        while i < argc |i, slots, repo_idx, out_idx, full, days|:
+            arg: u8& = slots[i].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(arg, "--full-history"):
+                full <- true
+            elif rh_streq(arg, "--repo"):
+                if i + 1 < argc:
+                    i <- i + 1
+                    repo_idx <- i
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arg, "--out"):
+                if i + 1 < argc:
+                    i <- i + 1
+                    out_idx <- i
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arg, "--window-days"):
+                if i + 1 < argc:
+                    i <- i + 1
+                    ok: mutable i64 = 0
+                    parsed: i64 = rh_parse_cstr_int(slots[i], &ok)
+                    if ok == 0 or parsed <= 0 or parsed > 36500:
+                        return rh_cli_usage(2)
+                    days <- parsed
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            i <- i + 1
+        if repo_idx < 0 or out_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_scan(slots[repo_idx], slots[out_idx], full, days)
+    if rh_streq(cmd, "replay"):
+        bundle_idx: mutable i64 = -1
+        out_idx: mutable i64 = -1
+        j: mutable i64 = 2
+        while j < argc |j, slots, bundle_idx, out_idx|:
+            arg2: u8& = slots[j].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(arg2, "--bundle"):
+                if j + 1 < argc:
+                    j <- j + 1
+                    bundle_idx <- j
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arg2, "--out"):
+                if j + 1 < argc:
+                    j <- j + 1
+                    out_idx <- j
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            j <- j + 1
+        if bundle_idx < 0 or out_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_replay(slots[bundle_idx], slots[out_idx])
+    if rh_streq(cmd, "continuity"):
+        cb_idx: mutable i64 = -1
+        co_idx: mutable i64 = -1
+        cc: mutable i64 = 2
+        while cc < argc |cc, slots, cb_idx, co_idx|:
+            arg6: u8& = slots[cc].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(arg6, "--bundle"):
+                if cc + 1 < argc:
+                    cc <- cc + 1
+                    cb_idx <- cc
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arg6, "--out"):
+                if cc + 1 < argc:
+                    cc <- cc + 1
+                    co_idx <- cc
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            cc <- cc + 1
+        if cb_idx < 0 or co_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_continuity(slots[cb_idx], slots[co_idx])
+
+    if rh_streq(cmd, "succession"):
+        ssi: mutable i64 = -1
+        sso: mutable i64 = -1
+        ssq: mutable i64 = 2
+        while ssq < argc |ssq, slots, ssi, sso|:
+            ass: u8& = slots[ssq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(ass, "--input"):
+                if ssq + 1 < argc:
+                    ssq <- ssq + 1
+                    ssi <- ssq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(ass, "--out"):
+                if ssq + 1 < argc:
+                    ssq <- ssq + 1
+                    sso <- ssq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            ssq <- ssq + 1
+        if ssi < 0 or sso < 0:
+            return rh_cli_usage(2)
+        return rh_do_succession(slots[ssi], slots[sso])
+    if rh_streq(cmd, "deps"):
+        dr_idx: mutable i64 = -1
+        do_idx: mutable i64 = -1
+        dov_idx: mutable i64 = -1
+        dc: mutable i64 = 2
+        while dc < argc |dc, slots, dr_idx, do_idx, dov_idx|:
+            arg7: u8& = slots[dc].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(arg7, "--repo"):
+                if dc + 1 < argc:
+                    dc <- dc + 1
+                    dr_idx <- dc
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arg7, "--out"):
+                if dc + 1 < argc:
+                    dc <- dc + 1
+                    do_idx <- dc
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arg7, "--osv"):
+                if dc + 1 < argc:
+                    dc <- dc + 1
+                    dov_idx <- dc
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            dc <- dc + 1
+        if dr_idx < 0 or do_idx < 0:
+            return rh_cli_usage(2)
+        if dov_idx >= 0:
+            return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dov_idx], true)
+        return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false)
+    if rh_streq(cmd, "downstream"):
+        g_idx: mutable i64 = -1
+        s_idx: mutable i64 = -1
+        dw_idx: mutable i64 = -1
+        un_idx: mutable i64 = -1
+        in_idx: mutable i64 = -1
+        maxn: mutable i64 = 1000
+        maxd: mutable i64 = 32
+        priv: mutable darray[i64] = []
+        mirrors: mutable darray[RhAssertion] = []
+        dd: mutable i64 = 2
+        while dd < argc |dd, slots, g_idx, s_idx, dw_idx, un_idx, in_idx, maxn, maxd, priv, mirrors|:
+            a8: u8& = slots[dd].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a8, "--graph"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    g_idx <- dd
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a8, "--subject"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    oks: mutable i64 = 0
+                    sv: i64 = rh_parse_cstr_int(slots[dd], &oks)
+                    if oks == 0 or sv < 0:
+                        return rh_cli_usage(2)
+                    s_idx <- sv
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a8, "--out"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    dw_idx <- dd
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a8, "--unavailable"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    oku: mutable i64 = 0
+                    uv: i64 = rh_parse_cstr_int(slots[dd], &oku)
+                    if oku == 0 or uv < 0:
+                        return rh_cli_usage(2)
+                    un_idx <- uv
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a8, "--max-nodes"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    okn: mutable i64 = 0
+                    nv: i64 = rh_parse_cstr_int(slots[dd], &okn)
+                    if okn == 0 or nv <= 0 or nv > 1000000:
+                        return rh_cli_usage(2)
+                    maxn <- nv
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a8, "--max-depth"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    okd: mutable i64 = 0
+                    dv: i64 = rh_parse_cstr_int(slots[dd], &okd)
+                    if okd == 0 or dv < 0 or dv > 1000:
+                        return rh_cli_usage(2)
+                    maxd <- dv
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a8, "--private"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    okp: mutable i64 = 0
+                    pv: i64 = rh_parse_cstr_int(slots[dd], &okp)
+                    if okp == 0 or pv < 0:
+                        return rh_cli_usage(2)
+                    priv.push(pv)
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a8, "--mirror"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    v8: u8& = slots[dd].cast[u8&] can Unsafe.PointerCast
+                    ma: mutable i64 = -1
+                    mb: mutable i64 = -1
+                    if not rh_ds_parse_pair(v8, &ma, &mb):
+                        return rh_cli_usage(2)
+                    mirrors.push(RhAssertion{a: ma, b: mb, state: RH_ASSERT_ACCEPTED})
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a8, "--intrinsics"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    in_idx <- dd
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            dd <- dd + 1
+        if g_idx < 0 or s_idx < 0 or dw_idx < 0:
+            return rh_cli_usage(2)
+        if in_idx >= 0:
+            return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, slots[in_idx], true)
+        return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, "", false)
+    if rh_streq(cmd, "policy"):
+        p_idx: mutable i64 = -1
+        i_idx: mutable i64 = -1
+        po_idx: mutable i64 = -1
+        ps_idx: mutable i64 = -1
+        pp: mutable i64 = 2
+        while pp < argc |pp, slots, p_idx, i_idx, po_idx, ps_idx|:
+            a9: u8& = slots[pp].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a9, "--policy"):
+                if pp + 1 < argc:
+                    pp <- pp + 1
+                    p_idx <- pp
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a9, "--input"):
+                if pp + 1 < argc:
+                    pp <- pp + 1
+                    i_idx <- pp
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a9, "--out"):
+                if pp + 1 < argc:
+                    pp <- pp + 1
+                    po_idx <- pp
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a9, "--state"):
+                if pp + 1 < argc:
+                    pp <- pp + 1
+                    ps_idx <- pp
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            pp <- pp + 1
+        if p_idx < 0 or i_idx < 0 or po_idx < 0:
+            return rh_cli_usage(2)
+        if ps_idx >= 0:
+            return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[ps_idx], true)
+        return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[p_idx], false)
+    if rh_streq(cmd, "correct"):
+        cr_idx: mutable i64 = -1
+        co_idx2: mutable i64 = -1
+        cs_idx: mutable i64 = -1
+        cw: mutable i64 = 2
+        while cw < argc |cw, slots, cr_idx, co_idx2, cs_idx|:
+            a10: u8& = slots[cw].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a10, "--corrections"):
+                if cw + 1 < argc:
+                    cw <- cw + 1
+                    cr_idx <- cw
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a10, "--out"):
+                if cw + 1 < argc:
+                    cw <- cw + 1
+                    co_idx2 <- cw
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a10, "--state"):
+                if cw + 1 < argc:
+                    cw <- cw + 1
+                    cs_idx <- cw
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            cw <- cw + 1
+        if cr_idx < 0 or co_idx2 < 0:
+            return rh_cli_usage(2)
+        if cs_idx >= 0:
+            return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cs_idx], true)
+        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false)
+    if rh_streq(cmd, "store"):
+        if argc < 3:
+            return rh_cli_usage(2)
+        sub11: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        srt_idx: mutable i64 = -1
+        sfile_idx: mutable i64 = -1
+        sname_idx: mutable i64 = -1
+        sjob_idx: mutable i64 = -1
+        sin_idx: mutable i64 = -1
+        sout_idx: mutable i64 = -1
+        si: mutable i64 = 3
+        while si < argc |si, slots, srt_idx, sfile_idx, sname_idx, sjob_idx, sin_idx, sout_idx|:
+            a11: u8& = slots[si].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a11, "--root"):
+                if si + 1 < argc:
+                    si <- si + 1
+                    srt_idx <- si
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a11, "--file"):
+                if si + 1 < argc:
+                    si <- si + 1
+                    sfile_idx <- si
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a11, "--name"):
+                if si + 1 < argc:
+                    si <- si + 1
+                    sname_idx <- si
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a11, "--job"):
+                if si + 1 < argc:
+                    si <- si + 1
+                    sjob_idx <- si
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a11, "--input"):
+                if si + 1 < argc:
+                    si <- si + 1
+                    sin_idx <- si
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a11, "--out"):
+                if si + 1 < argc:
+                    si <- si + 1
+                    sout_idx <- si
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            si <- si + 1
+        if srt_idx < 0:
+            return rh_cli_usage(2)
+        if rh_streq(sub11, "put"):
+            if sfile_idx < 0:
+                return rh_cli_usage(2)
+            return rh_do_store_put(slots[srt_idx], slots[sfile_idx])
+        if rh_streq(sub11, "verify"):
+            if sname_idx < 0:
+                return rh_cli_usage(2)
+            return rh_do_store_verify(slots[srt_idx], slots[sname_idx])
+        if rh_streq(sub11, "lease"):
+            if sjob_idx < 0 or sin_idx < 0 or sout_idx < 0:
+                return rh_cli_usage(2)
+            return rh_do_store_lease(slots[srt_idx], slots[sjob_idx], slots[sin_idx], slots[sout_idx])
+        return rh_cli_usage(2)
+    if rh_streq(cmd, "ops"):
+        if argc < 3:
+            return rh_cli_usage(2)
+        sub12: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        or_idx: mutable i64 = -1
+        om_idx: mutable i64 = -1
+        on_idx: mutable i64 = -1
+        od_idx: mutable i64 = -1
+        oin_idx: mutable i64 = -1
+        oo_idx: mutable i64 = -1
+        oi: mutable i64 = 3
+        while oi < argc |oi, slots, or_idx, om_idx, on_idx, od_idx, oin_idx, oo_idx|:
+            a12: u8& = slots[oi].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a12, "--root"):
+                if oi + 1 < argc:
+                    oi <- oi + 1
+                    or_idx <- oi
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a12, "--manifest"):
+                if oi + 1 < argc:
+                    oi <- oi + 1
+                    om_idx <- oi
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a12, "--names"):
+                if oi + 1 < argc:
+                    oi <- oi + 1
+                    on_idx <- oi
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a12, "--dest"):
+                if oi + 1 < argc:
+                    oi <- oi + 1
+                    od_idx <- oi
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a12, "--input"):
+                if oi + 1 < argc:
+                    oi <- oi + 1
+                    oin_idx <- oi
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a12, "--out"):
+                if oi + 1 < argc:
+                    oi <- oi + 1
+                    oo_idx <- oi
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            oi <- oi + 1
+        if rh_streq(sub12, "monitor"):
+            if oin_idx < 0 or oo_idx < 0:
+                return rh_cli_usage(2)
+            return rh_do_ops_monitor(slots[oin_idx], slots[oo_idx])
+        if rh_streq(sub12, "quota"):
+            if oin_idx < 0 or oo_idx < 0:
+                return rh_cli_usage(2)
+            return rh_do_ops_quota(slots[oin_idx], slots[oo_idx])
+        if or_idx < 0 or om_idx < 0:
+            return rh_cli_usage(2)
+        if rh_streq(sub12, "backup"):
+            if on_idx < 0:
+                return rh_cli_usage(2)
+            return rh_do_ops_backup(slots[or_idx], slots[om_idx], slots[on_idx])
+        if rh_streq(sub12, "verify"):
+            return rh_do_ops_verify(slots[or_idx], slots[om_idx])
+        if rh_streq(sub12, "restore"):
+            if od_idx < 0:
+                return rh_cli_usage(2)
+            return rh_do_ops_restore(slots[or_idx], slots[od_idx], slots[om_idx])
+        return rh_cli_usage(2)
+    if rh_streq(cmd, "forge"):
+        if argc < 3:
+            return rh_cli_usage(2)
+        fsub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        if not rh_streq(fsub, "normalize"):
+            return rh_cli_usage(2)
+        fconn_idx: mutable i64 = -1
+        fin_idx: mutable i64 = -1
+        fout_idx: mutable i64 = -1
+        fts: mutable i64 = 0
+        fhas: mutable bool = false
+        fi: mutable i64 = 3
+        while fi < argc |fi, slots, fconn_idx, fin_idx, fout_idx, fts, fhas|:
+            a13: u8& = slots[fi].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a13, "--connector"):
+                if fi + 1 < argc:
+                    fi <- fi + 1
+                    fconn_idx <- fi
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a13, "--input"):
+                if fi + 1 < argc:
+                    fi <- fi + 1
+                    fin_idx <- fi
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a13, "--out"):
+                if fi + 1 < argc:
+                    fi <- fi + 1
+                    fout_idx <- fi
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a13, "--fetched-at"):
+                if fi + 1 < argc:
+                    fi <- fi + 1
+                    okft: mutable i64 = 0
+                    ftv: i64 = rh_parse_cstr_int(slots[fi], &okft)
+                    if okft == 0 or ftv < 0:
+                        return rh_cli_usage(2)
+                    fts <- ftv
+                    fhas <- true
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            fi <- fi + 1
+        if fconn_idx < 0 or fin_idx < 0 or fout_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_forge_normalize(slots[fconn_idx], slots[fin_idx], slots[fout_idx], fts, fhas)
+    if rh_streq(cmd, "connector"):
+        if argc < 3:
+            return rh_cli_usage(2)
+        csub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        if not rh_streq(csub, "check"):
+            return rh_cli_usage(2)
+        cnin_idx: mutable i64 = -1
+        cnout_idx: mutable i64 = -1
+        ci: mutable i64 = 3
+        while ci < argc |ci, slots, cnin_idx, cnout_idx|:
+            a14: u8& = slots[ci].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a14, "--instance"):
+                if ci + 1 < argc:
+                    ci <- ci + 1
+                    cnin_idx <- ci
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a14, "--out"):
+                if ci + 1 < argc:
+                    ci <- ci + 1
+                    cnout_idx <- ci
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            ci <- ci + 1
+        if cnin_idx < 0 or cnout_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_connector_check(slots[cnin_idx], slots[cnout_idx])
+    if rh_streq(cmd, "inventory"):
+        iv_idx: mutable i64 = -1
+        ii_idx: mutable i64 = -1
+        io_idx: mutable i64 = -1
+        iv: mutable i64 = 2
+        while iv < argc |iv, slots, iv_idx, ii_idx, io_idx|:
+            a14: u8& = slots[iv].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a14, "--format"):
+                if iv + 1 < argc:
+                    iv <- iv + 1
+                    iv_idx <- iv
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a14, "--input"):
+                if iv + 1 < argc:
+                    iv <- iv + 1
+                    ii_idx <- iv
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a14, "--out"):
+                if iv + 1 < argc:
+                    iv <- iv + 1
+                    io_idx <- iv
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            iv <- iv + 1
+        if iv_idx < 0 or ii_idx < 0 or io_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_inventory(slots[iv_idx], slots[ii_idx], slots[io_idx])
+    if rh_streq(cmd, "vcs"):
+        vc_idx: mutable i64 = -1
+        vi_idx: mutable i64 = -1
+        vo_idx: mutable i64 = -1
+        vv: mutable i64 = 2
+        while vv < argc |vv, slots, vc_idx, vi_idx, vo_idx|:
+            a15: u8& = slots[vv].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a15, "--format"):
+                if vv + 1 < argc:
+                    vv <- vv + 1
+                    vc_idx <- vv
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a15, "--input"):
+                if vv + 1 < argc:
+                    vv <- vv + 1
+                    vi_idx <- vv
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a15, "--out"):
+                if vv + 1 < argc:
+                    vv <- vv + 1
+                    vo_idx <- vv
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            vv <- vv + 1
+        if vc_idx < 0 or vi_idx < 0 or vo_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_vcs(slots[vc_idx], slots[vi_idx], slots[vo_idx])
+    if rh_streq(cmd, "notify"):
+        nf_idx: mutable i64 = -1
+        no_idx: mutable i64 = -1
+        ns_idx: mutable i64 = -1
+        nf: mutable i64 = 2
+        while nf < argc |nf, slots, nf_idx, no_idx, ns_idx|:
+            a16: u8& = slots[nf].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a16, "--input"):
+                if nf + 1 < argc:
+                    nf <- nf + 1
+                    nf_idx <- nf
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a16, "--out"):
+                if nf + 1 < argc:
+                    nf <- nf + 1
+                    no_idx <- nf
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a16, "--state"):
+                if nf + 1 < argc:
+                    nf <- nf + 1
+                    ns_idx <- nf
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            nf <- nf + 1
+        if nf_idx < 0 or no_idx < 0:
+            return rh_cli_usage(2)
+        if ns_idx >= 0:
+            return rh_do_notify_state(slots[nf_idx], slots[no_idx], slots[ns_idx], true)
+        return rh_do_notify_state(slots[nf_idx], slots[no_idx], slots[nf_idx], false)
+    if rh_streq(cmd, "query"):
+        qi_idx: mutable i64 = -1
+        qo_idx: mutable i64 = -1
+        qq: mutable i64 = 2
+        while qq < argc |qq, slots, qi_idx, qo_idx|:
+            a17: u8& = slots[qq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a17, "--input"):
+                if qq + 1 < argc:
+                    qq <- qq + 1
+                    qi_idx <- qq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a17, "--out"):
+                if qq + 1 < argc:
+                    qq <- qq + 1
+                    qo_idx <- qq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            qq <- qq + 1
+        if qi_idx < 0 or qo_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_query(slots[qi_idx], slots[qo_idx])
+    if rh_streq(cmd, "identity"):
+        idi_idx: mutable i64 = -1
+        ido_idx: mutable i64 = -1
+        idq: mutable i64 = 2
+        while idq < argc |idq, slots, idi_idx, ido_idx|:
+            a18: u8& = slots[idq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a18, "--input"):
+                if idq + 1 < argc:
+                    idq <- idq + 1
+                    idi_idx <- idq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a18, "--out"):
+                if idq + 1 < argc:
+                    idq <- idq + 1
+                    ido_idx <- idq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            idq <- idq + 1
+        if idi_idx < 0 or ido_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_identity(slots[idi_idx], slots[ido_idx])
+    if rh_streq(cmd, "release-feed"):
+        rfi_idx: mutable i64 = -1
+        rfo_idx: mutable i64 = -1
+        rfq: mutable i64 = 2
+        while rfq < argc |rfq, slots, rfi_idx, rfo_idx|:
+            a19: u8& = slots[rfq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a19, "--input"):
+                if rfq + 1 < argc:
+                    rfq <- rfq + 1
+                    rfi_idx <- rfq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a19, "--out"):
+                if rfq + 1 < argc:
+                    rfq <- rfq + 1
+                    rfo_idx <- rfq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            rfq <- rfq + 1
+        if rfi_idx < 0 or rfo_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_release_feed(slots[rfi_idx], slots[rfo_idx])
+    if rh_streq(cmd, "registry-meta"):
+        rmi_idx: mutable i64 = -1
+        rmo_idx: mutable i64 = -1
+        rmq: mutable i64 = 2
+        while rmq < argc |rmq, slots, rmi_idx, rmo_idx|:
+            a20: u8& = slots[rmq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a20, "--input"):
+                if rmq + 1 < argc:
+                    rmq <- rmq + 1
+                    rmi_idx <- rmq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a20, "--out"):
+                if rmq + 1 < argc:
+                    rmq <- rmq + 1
+                    rmo_idx <- rmq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            rmq <- rmq + 1
+        if rmi_idx < 0 or rmo_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_registry_meta(slots[rmi_idx], slots[rmo_idx])
+    if rh_streq(cmd, "pep440"):
+        ppi_idx: mutable i64 = -1
+        ppo_idx: mutable i64 = -1
+        ppq: mutable i64 = 2
+        while ppq < argc |ppq, slots, ppi_idx, ppo_idx|:
+            a21: u8& = slots[ppq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a21, "--input"):
+                if ppq + 1 < argc:
+                    ppq <- ppq + 1
+                    ppi_idx <- ppq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a21, "--out"):
+                if ppq + 1 < argc:
+                    ppq <- ppq + 1
+                    ppo_idx <- ppq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            ppq <- ppq + 1
+        if ppi_idx < 0 or ppo_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_pep440(slots[ppi_idx], slots[ppo_idx])
+    if rh_streq(cmd, "job"):
+        if argc < 3:
+            return rh_cli_usage(2)
+        jsub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        if not rh_streq(jsub, "classify") and not rh_streq(jsub, "run"):
+            return rh_cli_usage(2)
+        ji_idx: mutable i64 = -1
+        jo_idx: mutable i64 = -1
+        jq: mutable i64 = 3
+        while jq < argc |jq, slots, ji_idx, jo_idx|:
+            a23: u8& = slots[jq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a23, "--input"):
+                if jq + 1 < argc:
+                    jq <- jq + 1
+                    ji_idx <- jq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a23, "--out"):
+                if jq + 1 < argc:
+                    jq <- jq + 1
+                    jo_idx <- jq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            jq <- jq + 1
+        if ji_idx < 0 or jo_idx < 0:
+            return rh_cli_usage(2)
+        if rh_streq(jsub, "run"):
+            return rh_do_job_run(slots[ji_idx], slots[jo_idx])
+        return rh_do_job_classify(slots[ji_idx], slots[jo_idx])
+    if rh_streq(cmd, "reconcile"):
+        rci: mutable i64 = -1
+        rco: mutable i64 = -1
+        rcq: mutable i64 = 2
+        while rcq < argc |rcq, slots, rci, rco|:
+            arc: u8& = slots[rcq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(arc, "--input"):
+                if rcq + 1 < argc:
+                    rcq <- rcq + 1
+                    rci <- rcq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arc, "--out"):
+                if rcq + 1 < argc:
+                    rcq <- rcq + 1
+                    rco <- rcq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            rcq <- rcq + 1
+        if rci < 0 or rco < 0:
+            return rh_cli_usage(2)
+        return rh_do_reconcile(slots[rci], slots[rco])
+    if rh_streq(cmd, "worker"):
+        if argc < 3:
+            return rh_cli_usage(2)
+        wsub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        if not rh_streq(wsub, "tick"):
+            return rh_cli_usage(2)
+        wi: mutable i64 = -1
+        wo: mutable i64 = -1
+        wq: mutable i64 = 3
+        while wq < argc |wq, slots, wi, wo|:
+            aw: u8& = slots[wq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(aw, "--input"):
+                if wq + 1 < argc:
+                    wq <- wq + 1
+                    wi <- wq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(aw, "--out"):
+                if wq + 1 < argc:
+                    wq <- wq + 1
+                    wo <- wq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            wq <- wq + 1
+        if wi < 0 or wo < 0:
+            return rh_cli_usage(2)
+        return rh_do_worker_tick(slots[wi], slots[wo])
+    if rh_streq(cmd, "privacy"):
+        pvi_idx: mutable i64 = -1
+        pvo_idx: mutable i64 = -1
+        pvq: mutable i64 = 2
+        while pvq < argc |pvq, slots, pvi_idx, pvo_idx|:
+            a22: u8& = slots[pvq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a22, "--input"):
+                if pvq + 1 < argc:
+                    pvq <- pvq + 1
+                    pvi_idx <- pvq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a22, "--out"):
+                if pvq + 1 < argc:
+                    pvq <- pvq + 1
+                    pvo_idx <- pvq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            pvq <- pvq + 1
+        if pvi_idx < 0 or pvo_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_privacy(slots[pvi_idx], slots[pvo_idx])
+    if rh_streq(cmd, "roles"):
+        rl_idx: mutable i64 = -1
+        rlo_idx: mutable i64 = -1
+        rlq: mutable i64 = 2
+        while rlq < argc |rlq, slots, rl_idx, rlo_idx|:
+            a23: u8& = slots[rlq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a23, "--input"):
+                if rlq + 1 < argc:
+                    rlq <- rlq + 1
+                    rl_idx <- rlq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a23, "--out"):
+                if rlq + 1 < argc:
+                    rlq <- rlq + 1
+                    rlo_idx <- rlq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            rlq <- rlq + 1
+        if rl_idx < 0 or rlo_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_roles(slots[rl_idx], slots[rlo_idx])
+    if rh_streq(cmd, "experimental"):
+        ex_idx: mutable i64 = -1
+        exo_idx: mutable i64 = -1
+        exq: mutable i64 = 2
+        while exq < argc |exq, slots, ex_idx, exo_idx|:
+            a24: u8& = slots[exq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a24, "--input"):
+                if exq + 1 < argc:
+                    exq <- exq + 1
+                    ex_idx <- exq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a24, "--out"):
+                if exq + 1 < argc:
+                    exq <- exq + 1
+                    exo_idx <- exq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            exq <- exq + 1
+        if ex_idx < 0 or exo_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_experimental(slots[ex_idx], slots[exo_idx])
+    if rh_streq(cmd, "render"):
+        rr_idx: mutable i64 = -1
+        ro_idx: mutable i64 = -1
+        rrq: mutable i64 = 2
+        while rrq < argc |rrq, slots, rr_idx, ro_idx|:
+            a25: u8& = slots[rrq].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(a25, "--report"):
+                if rrq + 1 < argc:
+                    rrq <- rrq + 1
+                    rr_idx <- rrq
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a25, "--out"):
+                if rrq + 1 < argc:
+                    rrq <- rrq + 1
+                    ro_idx <- rrq
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            rrq <- rrq + 1
+        if rr_idx < 0 or ro_idx < 0:
+            return rh_cli_usage(2)
+        return rh_do_render(slots[rr_idx], slots[ro_idx])
+    if rh_streq(cmd, "sign") or rh_streq(cmd, "verify"):
+        key_idx: mutable i64 = -1
+        sub_idx: mutable i64 = -1
+        sig_idx: mutable i64 = -1
+        m: mutable i64 = 2
+        while m < argc |m, slots, key_idx, sub_idx, sig_idx|:
+            arg4: u8& = slots[m].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(arg4, "--key"):
+                if m + 1 < argc:
+                    m <- m + 1
+                    key_idx <- m
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arg4, "--subject"):
+                if m + 1 < argc:
+                    m <- m + 1
+                    sub_idx <- m
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arg4, "--sig"):
+                if m + 1 < argc:
+                    m <- m + 1
+                    sig_idx <- m
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            m <- m + 1
+        if key_idx < 0 or sub_idx < 0 or sig_idx < 0:
+            return rh_cli_usage(2)
+        # sign/verify read local files directly and never build a shell
+        # command, so the shell-arg allowlist does not apply. Reject only
+        # empty and control-character paths.
+        if not rh_path_arg_ok(slots[key_idx]) or not rh_path_arg_ok(slots[sub_idx]) or not rh_path_arg_ok(slots[sig_idx]):
+            rh_cli_err("rejected sign/verify argument (path)")
+            return 3
+        if rh_streq(cmd, "sign"):
+            return rh_do_sign(slots[key_idx], slots[sub_idx], slots[sig_idx])
+        return rh_do_verify(slots[key_idx], slots[sub_idx], slots[sig_idx])
+    if rh_streq(cmd, "serve"):
+        root_idx: mutable i64 = -1
+        port: mutable i64 = 8080
+        maxc: mutable i64 = 100
+        k: mutable i64 = 2
+        while k < argc |k, slots, root_idx, port, maxc|:
+            arg3: u8& = slots[k].cast[u8&] can Unsafe.PointerCast
+            if rh_streq(arg3, "--root"):
+                if k + 1 < argc:
+                    k <- k + 1
+                    root_idx <- k
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arg3, "--port"):
+                if k + 1 < argc:
+                    k <- k + 1
+                    okp: mutable i64 = 0
+                    pv: i64 = rh_parse_cstr_int(slots[k], &okp)
+                    if okp == 0 or pv <= 0 or pv > 65535:
+                        return rh_cli_usage(2)
+                    port <- pv
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(arg3, "--max"):
+                if k + 1 < argc:
+                    k <- k + 1
+                    okm: mutable i64 = 0
+                    mv: i64 = rh_parse_cstr_int(slots[k], &okm)
+                    if okm == 0 or mv <= 0 or mv > 100000:
+                        return rh_cli_usage(2)
+                    maxc <- mv
+                else:
+                    return rh_cli_usage(2)
+            else:
+                return rh_cli_usage(2)
+            k <- k + 1
+        if root_idx < 0:
+            return rh_cli_usage(2)
+        if not rh_arg_safe(slots[root_idx]):
+            rh_cli_err("rejected root argument (allowlist)")
+            return 3
+        return rh_do_serve(slots[root_idx], port, maxc)
+    return rh_cli_usage(2)
+
+def rh_do_serve(root: cstr, port: i64, maxc: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    notice: mutable darray[u8] = []
+    rh_push_text(notice, "serve: loopback 127.0.0.1 port ")
+    rh_push_decimal_i64(notice, port)
+    rh_push_text(notice, " root ")
+    rh_push_cstr(notice, root)
+    notice.push(10)
+    rh_write_stdout(notice)
+    n: i64 = rh_http_serve(root, port.i32(), maxc)
+    done: mutable darray[u8] = []
+    if n < 0:
+        rh_push_text(done, "serve: could not bind loopback port")
+    else:
+        rh_push_text(done, "serve: served ")
+        rh_push_decimal_i64(done, n)
+        rh_push_text(done, " connection(s)")
+    done.push(10)
+    rh_write_stdout(done)
+    if n < 0:
+        return 4
+    return 0
+
+# --- M07-04 publication integrity: sign/verify a release artifact. ---
+# A signature file is a small JSON object:
+#   {"algorithm":"hmac-sha256","subject_sha256":"<hex>","signature":"<hex>"}
+# The key is a raw byte file held separately from workers. Verification
+# proves integrity of the subject bytes and possession of the shared key;
+# it is NOT a claim that the subject is correct, safe, or trustworthy (S011).
+
+# --- M03 dependency graph execution path. ---
+# Reads a local project's Cargo.lock and/or package.json + package-lock.json,
+# resolves the version-aware graph, and writes one rh-dep-graph/1 report per
+# ecosystem plus rh-deps-metrics/1. Requirements that do not resolve stay
+# explicit unresolved nodes with reasons (never guessed edges, R009); a
+# malformed lockfile fails closed with no partial graph (M07-03). An
+# optional offline OSV JSON supplies advisories; without it, advisories are
+# simply not collected (never fabricated).
+def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(repo) or not rh_arg_safe(out):
+        rh_cli_err("rejected deps argument (allowlist)")
+        return 3
+    if has_osv and not rh_arg_safe(osv_path):
+        rh_cli_err("rejected osv argument (allowlist)")
+        return 3
+    osv_nodes: mutable darray[RhJsonNode] = []
+    osv_texts: mutable darray[u8] = []
+    osv_root: mutable i64 = -1
+    if has_osv:
+        op: mutable darray[u8] = []
+        rh_push_cstr(op, osv_path)
+        op.push(0)
+        oreadp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+        oraw: mutable darray[u8] = []
+        if rh_io_read(oreadp, oraw) < 0:
+            rh_cli_err("deps: cannot read --osv file")
+            return 4
+        parsed_osv: i64 = rh_json_parse(oraw, osv_nodes, osv_texts)
+        if parsed_osv < 0:
+            rh_cli_err("deps: --osv file is not valid JSON")
+            return 4
+        osv_root <- parsed_osv
+    if rh_ensure_dir(out) != 0:
+        rh_cli_err("deps: cannot create output directory")
+        return 4
+    eco_codes: mutable darray[i64] = []
+    declared: mutable darray[i64] = []
+    resolved: mutable darray[i64] = []
+    unresolved_n: mutable darray[i64] = []
+    unsupported_n: mutable darray[i64] = []
+    found: mutable i64 = 0
+
+    # --- Cargo.lock ---
+    cl: mutable darray[u8] = []
+    if not rh_out_path(repo, "Cargo.lock", cl):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    clp: cstr = (&cl[0]).cast[cstr] can Unsafe.PointerCast
+    if file_exists(clp):
+        lockb: mutable darray[u8] = []
+        if rh_io_read(clp, lockb) < 0:
+            rh_cli_err("deps: cannot read Cargo.lock")
+            return 4
+        cpkgs: mutable darray[RhPkgNode] = []
+        cpool: mutable darray[u8] = []
+        creqs: mutable darray[RhRequire] = []
+        cunk: mutable i64 = 0
+        cn: i64 = rh_cargo_parse(lockb, cpkgs, cpool, creqs, &cunk)
+        if cn < 0:
+            rh_cli_err("deps: malformed Cargo.lock (structured failure, no partial graph)")
+            return 4
+        cedges: mutable darray[RhDepEdge] = []
+        cunres: mutable darray[RhUnresolved] = []
+        _ = rh_cargo_resolve(cpkgs, cpool, creqs, cedges, cunres)
+        cunsup: i64 = rh_unsupported_range_count(creqs, cpool)
+        cfind: mutable darray[RhAdvisory] = []
+        cwd: mutable i64 = 0
+        csk: mutable i64 = 0
+        if has_osv:
+            _ = rh_osv_match(cpkgs, cpool, osv_nodes, osv_texts, osv_root, cfind, &cwd, &csk)
+        croot: i64 = rh_deps_cargo_root(cpkgs, cedges)
+        gb: mutable darray[u8] = []
+        rh_graph_write_json(gb, 0, cpkgs, cpool, cedges, cunres, cfind, osv_texts, croot)
+        gb.push(10)
+        gf: mutable darray[u8] = []
+        if not rh_out_path(out, "deps-cargo-graph.json", gf):
+            rh_cli_err("deps: cannot stage cargo graph path")
+            return 4
+        gfp: cstr = (&gf[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_io_write(gfp, gb):
+            rh_cli_err("deps: cannot write cargo graph")
+            return 4
+        eco_codes.push(0)
+        declared.push(creqs.count.i64())
+        resolved.push(cedges.count.i64())
+        unresolved_n.push(cunres.count.i64())
+        unsupported_n.push(cunsup)
+        found <- found + 1
+
+    # --- package.json + package-lock.json ---
+    pl: mutable darray[u8] = []
+    if not rh_out_path(repo, "package-lock.json", pl):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    plp: cstr = (&pl[0]).cast[cstr] can Unsafe.PointerCast
+    if file_exists(plp):
+        nlock: mutable darray[u8] = []
+        if rh_io_read(plp, nlock) < 0:
+            rh_cli_err("deps: cannot read package-lock.json")
+            return 4
+        pj: mutable darray[u8] = []
+        if not rh_out_path(repo, "package.json", pj):
+            rh_cli_err("deps: bad repo path")
+            return 3
+        pjp: cstr = (&pj[0]).cast[cstr] can Unsafe.PointerCast
+        npkg: mutable darray[u8] = []
+        if file_exists(pjp):
+            if rh_io_read(pjp, npkg) < 0:
+                rh_cli_err("deps: cannot read package.json")
+                return 4
+        npkgs: mutable darray[RhPkgNode] = []
+        npool: mutable darray[u8] = []
+        npaths: mutable darray[i64] = []
+        nreqs: mutable darray[RhRequire] = []
+        nroot: i64 = rh_npm_lock_parse(nlock, npkg, npkgs, npool, npaths, nreqs)
+        if nroot < 0:
+            rh_cli_err("deps: malformed package-lock.json (structured failure, no partial graph)")
+            return 4
+        nedges: mutable darray[RhDepEdge] = []
+        nunres: mutable darray[RhUnresolved] = []
+        _ = rh_npm_resolve(npkgs, npaths, npool, nreqs, nedges, nunres)
+        nunsup: i64 = rh_unsupported_range_count(nreqs, npool)
+        nfind: mutable darray[RhAdvisory] = []
+        nwd: mutable i64 = 0
+        nsk: mutable i64 = 0
+        if has_osv:
+            _ = rh_osv_match(npkgs, npool, osv_nodes, osv_texts, osv_root, nfind, &nwd, &nsk)
+        ng: mutable darray[u8] = []
+        rh_graph_write_json(ng, 1, npkgs, npool, nedges, nunres, nfind, osv_texts, nroot)
+        ng.push(10)
+        nf: mutable darray[u8] = []
+        if not rh_out_path(out, "deps-npm-graph.json", nf):
+            rh_cli_err("deps: cannot stage npm graph path")
+            return 4
+        nfp: cstr = (&nf[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_io_write(nfp, ng):
+            rh_cli_err("deps: cannot write npm graph")
+            return 4
+        eco_codes.push(1)
+        declared.push(nreqs.count.i64())
+        resolved.push(nedges.count.i64())
+        unresolved_n.push(nunres.count.i64())
+        unsupported_n.push(nunsup)
+        found <- found + 1
+
+    # --- requirements.txt (PyPI) ---
+    rq: mutable darray[u8] = []
+    if not rh_out_path(repo, "requirements.txt", rq):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    rqp: cstr = (&rq[0]).cast[cstr] can Unsafe.PointerCast
+    if file_exists(rqp):
+        rb: mutable darray[u8] = []
+        if rh_io_read(rqp, rb) < 0:
+            rh_cli_err("deps: cannot read requirements.txt")
+            return 4
+        ppkgs: mutable darray[RhPkgNode] = []
+        ppool: mutable darray[u8] = []
+        preqs: mutable darray[RhRequire] = []
+        pedges: mutable darray[RhDepEdge] = []
+        punres: mutable darray[RhUnresolved] = []
+        punk: mutable i64 = 0
+        proot: i64 = rh_pypi_parse(rb, ppkgs, ppool, preqs, pedges, punres, &punk)
+        if proot < 0:
+            rh_cli_err("deps: malformed requirements.txt (structured failure, no partial graph)")
+            return 4
+        punsup: i64 = rh_unsupported_range_count(preqs, ppool)
+        pfind: mutable darray[RhAdvisory] = []
+        pwd: mutable i64 = 0
+        psk: mutable i64 = 0
+        if has_osv:
+            _ = rh_osv_match(ppkgs, ppool, osv_nodes, osv_texts, osv_root, pfind, &pwd, &psk)
+        pg: mutable darray[u8] = []
+        rh_graph_write_json(pg, 2, ppkgs, ppool, pedges, punres, pfind, osv_texts, proot)
+        pg.push(10)
+        pf: mutable darray[u8] = []
+        if not rh_out_path(out, "deps-pypi-graph.json", pf):
+            rh_cli_err("deps: cannot stage pypi graph path")
+            return 4
+        pfp: cstr = (&pf[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_io_write(pfp, pg):
+            rh_cli_err("deps: cannot write pypi graph")
+            return 4
+        eco_codes.push(2)
+        declared.push(preqs.count.i64())
+        resolved.push(pedges.count.i64())
+        unresolved_n.push(punres.count.i64())
+        unsupported_n.push(punsup)
+        found <- found + 1
+
+    # --- go.mod (Go modules) ---
+    gm: mutable darray[u8] = []
+    if not rh_out_path(repo, "go.mod", gm):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    gmp: cstr = (&gm[0]).cast[cstr] can Unsafe.PointerCast
+    if file_exists(gmp):
+        gb: mutable darray[u8] = []
+        if rh_io_read(gmp, gb) < 0:
+            rh_cli_err("deps: cannot read go.mod")
+            return 4
+        gpkgs: mutable darray[RhPkgNode] = []
+        gpool: mutable darray[u8] = []
+        greqs: mutable darray[RhRequire] = []
+        gedges: mutable darray[RhDepEdge] = []
+        gunres: mutable darray[RhUnresolved] = []
+        gunk: mutable i64 = 0
+        groot: i64 = rh_go_parse(gb, gpkgs, gpool, greqs, gedges, gunres, &gunk)
+        if groot < 0:
+            rh_cli_err("deps: malformed go.mod (structured failure, no partial graph)")
+            return 4
+        gunsup: i64 = rh_unsupported_range_count(greqs, gpool)
+        gfind: mutable darray[RhAdvisory] = []
+        gwd: mutable i64 = 0
+        gsk: mutable i64 = 0
+        if has_osv:
+            _ = rh_osv_match(gpkgs, gpool, osv_nodes, osv_texts, osv_root, gfind, &gwd, &gsk)
+        gg: mutable darray[u8] = []
+        rh_graph_write_json(gg, 3, gpkgs, gpool, gedges, gunres, gfind, osv_texts, groot)
+        gg.push(10)
+        gf2: mutable darray[u8] = []
+        if not rh_out_path(out, "deps-go-graph.json", gf2):
+            rh_cli_err("deps: cannot stage go graph path")
+            return 4
+        gf2p: cstr = (&gf2[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_io_write(gf2p, gg):
+            rh_cli_err("deps: cannot write go graph")
+            return 4
+        eco_codes.push(3)
+        declared.push(greqs.count.i64())
+        resolved.push(gedges.count.i64())
+        unresolved_n.push(gunres.count.i64())
+        unsupported_n.push(gunsup)
+        found <- found + 1
+
+    # --- Gemfile.lock (RubyGems) ---
+    gl: mutable darray[u8] = []
+    if not rh_out_path(repo, "Gemfile.lock", gl):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    glp: cstr = (&gl[0]).cast[cstr] can Unsafe.PointerCast
+    if file_exists(glp):
+        gemb: mutable darray[u8] = []
+        if rh_io_read(glp, gemb) < 0:
+            rh_cli_err("deps: cannot read Gemfile.lock")
+            return 4
+        gempkgs: mutable darray[RhPkgNode] = []
+        gempool: mutable darray[u8] = []
+        gemreqs: mutable darray[RhRequire] = []
+        gemedges: mutable darray[RhDepEdge] = []
+        gemunres: mutable darray[RhUnresolved] = []
+        gemunk: mutable i64 = 0
+        gemroot: i64 = rh_gemfile_parse(gemb, gempkgs, gempool, gemreqs, gemedges, gemunres, &gemunk)
+        if gemroot < 0:
+            rh_cli_err("deps: malformed Gemfile.lock (structured failure, no partial graph)")
+            return 4
+        gemunsup: i64 = rh_unsupported_range_count(gemreqs, gempool)
+        gemfind: mutable darray[RhAdvisory] = []
+        gemwd: mutable i64 = 0
+        gemsk: mutable i64 = 0
+        if has_osv:
+            _ = rh_osv_match(gempkgs, gempool, osv_nodes, osv_texts, osv_root, gemfind, &gemwd, &gemsk)
+        geg: mutable darray[u8] = []
+        rh_graph_write_json(geg, 4, gempkgs, gempool, gemedges, gemunres, gemfind, osv_texts, gemroot)
+        geg.push(10)
+        gef: mutable darray[u8] = []
+        if not rh_out_path(out, "deps-rubygems-graph.json", gef):
+            rh_cli_err("deps: cannot stage rubygems graph path")
+            return 4
+        gefp: cstr = (&gef[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_io_write(gefp, geg):
+            rh_cli_err("deps: cannot write rubygems graph")
+            return 4
+        eco_codes.push(4)
+        declared.push(gemreqs.count.i64())
+        resolved.push(gemedges.count.i64())
+        unresolved_n.push(gemunres.count.i64())
+        unsupported_n.push(gemunsup)
+        found <- found + 1
+
+    # --- composer.lock (Composer/Packagist) ---
+    cl2: mutable darray[u8] = []
+    if not rh_out_path(repo, "composer.lock", cl2):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    cl2p: cstr = (&cl2[0]).cast[cstr] can Unsafe.PointerCast
+    if file_exists(cl2p):
+        cpb: mutable darray[u8] = []
+        if rh_io_read(cl2p, cpb) < 0:
+            rh_cli_err("deps: cannot read composer.lock")
+            return 4
+        cjnodes: mutable darray[RhJsonNode] = []
+        cjtexts: mutable darray[u8] = []
+        cproot2: i64 = rh_json_parse(cpb, cjnodes, cjtexts)
+        if cproot2 < 0:
+            rh_cli_err("deps: malformed composer.lock (structured failure, no partial graph)")
+            return 4
+        cppkgs: mutable darray[RhPkgNode] = []
+        cppool: mutable darray[u8] = []
+        cpreqs: mutable darray[RhRequire] = []
+        cpedges: mutable darray[RhDepEdge] = []
+        cpunres: mutable darray[RhUnresolved] = []
+        cpunk: mutable i64 = 0
+        cproot3: i64 = rh_composer_parse(cpb, cjnodes, cjtexts, cppkgs, cppool, cpreqs, cpedges, cpunres, &cpunk)
+        if cproot3 < 0:
+            rh_cli_err("deps: malformed composer.lock (structured failure, no partial graph)")
+            return 4
+        cpunsup: i64 = rh_unsupported_range_count(cpreqs, cppool)
+        cpfind: mutable darray[RhAdvisory] = []
+        cpwd: mutable i64 = 0
+        cpsk: mutable i64 = 0
+        if has_osv:
+            _ = rh_osv_match(cppkgs, cppool, osv_nodes, osv_texts, osv_root, cpfind, &cpwd, &cpsk)
+        cpg: mutable darray[u8] = []
+        rh_graph_write_json(cpg, 5, cppkgs, cppool, cpedges, cpunres, cpfind, osv_texts, cproot3)
+        cpg.push(10)
+        cpf: mutable darray[u8] = []
+        if not rh_out_path(out, "deps-composer-graph.json", cpf):
+            rh_cli_err("deps: cannot stage composer graph path")
+            return 4
+        cpfp: cstr = (&cpf[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_io_write(cpfp, cpg):
+            rh_cli_err("deps: cannot write composer graph")
+            return 4
+        eco_codes.push(5)
+        declared.push(cpreqs.count.i64())
+        resolved.push(cpedges.count.i64())
+        unresolved_n.push(cpunres.count.i64())
+        unsupported_n.push(cpunsup)
+        found <- found + 1
+
+    if found == 0:
+        rh_cli_err("deps: no Cargo.lock, package-lock.json, requirements.txt or go.mod found in repo")
+        return 4
+    mf: mutable darray[u8] = []
+    if not rh_out_path(out, "deps-metrics.json", mf):
+        rh_cli_err("deps: cannot stage metrics path")
+        return 4
+    mb: mutable darray[u8] = []
+    rh_deps_metrics_emit(mb, eco_codes, declared, resolved, unresolved_n, unsupported_n)
+    mb.push(10)
+    mfp: cstr = (&mf[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(mfp, mb):
+        rh_cli_err("deps: cannot write deps-metrics.json")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "deps: ecosystems=")
+    rh_push_decimal_i64(done, found)
+    i: mutable i64 = 0
+    while i < eco_codes.count.i64() |i, eco_codes, declared, resolved, unresolved_n, unsupported_n, done|:
+        rh_push_text(done, " ")
+        rh_push_text(done, rh_deps_eco(eco_codes[i.usize()]))
+        rh_push_text(done, "=")
+        rh_push_decimal_i64(done, resolved[i.usize()])
+        rh_push_text(done, "/")
+        rh_push_decimal_i64(done, declared[i.usize()])
+        rh_push_text(done, " unresolved=")
+        rh_push_decimal_i64(done, unresolved_n[i.usize()])
+        rh_push_text(done, " unsupported=")
+        rh_push_decimal_i64(done, unsupported_n[i.usize()])
+        i <- i + 1
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+def rh_path_arg_ok(s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    if rh_cstr_len_c(s) == 0:
+        return false
+    i: mutable usize = 0
+    while true |i, s|:
+        b: u8 = s[i]
+        break if b == 0
+        if b < 32 or b == 127:
+            return false
+        i <- i + 1
+    return true
+
+def rh_span_is(texts: darray[u8]&, start: i64, end: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: mutable i64 = 0
+    i: mutable i64 = start
+    while i < end |i, texts, lit, n|:
+        b: u8 = texts[i.usize()]
+        l: u8 = lit[n.usize()]
+        if l == 0:
+            return false
+        if b != l:
+            return false
+        n <- n + 1
+        i <- i + 1
+    return lit[n.usize()] == 0
+
+def rh_span_copy(texts: darray[u8]&, start: i64, end: i64) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
+    out: mutable darray[u8] = []
+    i: mutable i64 = start
+    while i < end |i, texts, out|:
+        out.push(texts[i.usize()])
+        i <- i + 1
+    return out
+
+def rh_do_sign(key_path: cstr, subject_path: cstr, sig_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    key: mutable darray[u8] = []
+    if rh_io_read(key_path, key) < 0:
+        rh_cli_err("sign: cannot read key file")
+        return 4
+    if key.count == 0:
+        rh_cli_err("sign: refusing to sign with an empty key")
+        return 3
+    subject: mutable darray[u8] = []
+    if rh_io_read(subject_path, subject) < 0:
+        rh_cli_err("sign: cannot read subject file")
+        return 4
+    sig: mutable darray[u8] = []
+    rh_hmac_sha256(key, subject, sig)
+    subj_hash: mutable darray[u8] = []
+    rh_sha256(subject, subj_hash)
+    out: mutable darray[u8] = []
+    rh_push_text(out, "{\"format\":\"rh-release-signature/1\",\"algorithm\":\"hmac-sha256\",\"subject_sha256\":\"")
+    _ = rh_absorb_bytes(subj_hash, out)
+    rh_push_text(out, "\",\"signature\":\"")
+    _ = rh_absorb_bytes(sig, out)
+    rh_push_text(out, "\"}\n")
+    if not rh_io_write(sig_path, out):
+        rh_cli_err("sign: cannot write signature file")
+        return 4
+    rh_cli_out("signed hmac-sha256 (integrity + key possession; not a code-safety claim)")
+    return 0
+
+def rh_do_verify(key_path: cstr, subject_path: cstr, sig_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    key: mutable darray[u8] = []
+    if rh_io_read(key_path, key) < 0:
+        rh_cli_err("verify: cannot read key file")
+        return 4
+    if key.count == 0:
+        rh_cli_err("verify: empty key cannot verify")
+        return 3
+    subject: mutable darray[u8] = []
+    if rh_io_read(subject_path, subject) < 0:
+        rh_cli_err("verify: cannot read subject file")
+        return 4
+    sigbytes: mutable darray[u8] = []
+    if rh_io_read(sig_path, sigbytes) < 0:
+        rh_cli_err("verify: cannot read signature file")
+        return 4
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(sigbytes, nodes, texts)
+    if root < 0:
+        rh_cli_err("verify: signature file is not valid JSON")
+        return 3
+    algo: i64 = rh_json_obj_get(nodes, texts, root, "algorithm")
+    a_start: mutable i64 = 0
+    a_end: mutable i64 = 0
+    if algo < 0 or not rh_json_str_span(nodes, algo, &a_start, &a_end):
+        rh_cli_err("verify: signature missing string algorithm")
+        return 3
+    if not rh_span_is(texts, a_start, a_end, "hmac-sha256"):
+        rh_cli_err("verify: unsupported signature algorithm")
+        return 3
+    sig_idx: i64 = rh_json_obj_get(nodes, texts, root, "signature")
+    s_start: mutable i64 = 0
+    s_end: mutable i64 = 0
+    if sig_idx < 0 or not rh_json_str_span(nodes, sig_idx, &s_start, &s_end):
+        rh_cli_err("verify: signature missing string signature")
+        return 3
+    want: mutable darray[u8] = []
+    rh_hmac_sha256(key, subject, want)
+    got: darray[u8] = rh_span_copy(texts, s_start, s_end)
+    if not rh_hex_eq(want, got):
+        rh_cli_err("verify: signature does not match subject (integrity FAILED)")
+        return 5
+    subj_idx: i64 = rh_json_obj_get(nodes, texts, root, "subject_sha256")
+    h_start: mutable i64 = 0
+    h_end: mutable i64 = 0
+    if subj_idx < 0 or not rh_json_str_span(nodes, subj_idx, &h_start, &h_end):
+        rh_cli_err("verify: signature missing string subject_sha256")
+        return 3
+    actual_subj: mutable darray[u8] = []
+    rh_sha256(subject, actual_subj)
+    claimed_subj: darray[u8] = rh_span_copy(texts, h_start, h_end)
+    if not rh_hex_eq(actual_subj, claimed_subj):
+        rh_cli_err("verify: subject digest mismatch (signature paired with different bytes)")
+        return 5
+    rh_cli_out("signature ok: integrity + key possession verified (not a code-safety claim)")
+    return 0
+
+# --- M04 continuity execution path: publish continuity + persistence. ---
+# Reads the pinned bundle written by `scan` (no live data), builds raw
+# project-local author identity presence over complete months, and writes
+# continuity.json (rh-continuity/1) plus continuity-metrics.json
+# (persistence.retained_90d). Retention requires full, non-shallow history:
+# a windowed or shallow scan cannot establish an actor's first observation,
+# so it reports `unsupported` rather than a misleading rate.
+def rh_do_continuity(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(bundle):
+        rh_cli_err("rejected bundle argument (allowlist)")
+        return 3
+    if not rh_arg_safe(out):
+        rh_cli_err("rejected output argument (allowlist)")
+        return 3
+    manb: mutable darray[u8] = []
+    bpath: mutable darray[u8] = []
+    rh_push_cstr(bpath, bundle)
+    bpath.push(0)
+    bp: cstr = (&bpath[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_io_read(bp, manb) < 0:
+        rh_cli_err("cannot read bundle manifest")
+        return 4
+    ok_days: mutable i64 = 0
+    days: i64 = rh_manifest_int(manb, "window-days: ", &ok_days)
+    if ok_days == 0 or days <= 0:
+        rh_cli_err("manifest has no parseable window-days")
+        return 4
+    full: bool = rh_manifest_flag(manb, "full-history: ") == 1
+    ok_cut: mutable i64 = 0
+    cutoff: i64 = rh_manifest_int(manb, "evidence-cutoff: ", &ok_cut)
+    if ok_cut == 0 or cutoff <= 0:
+        rh_cli_err("manifest has no parseable evidence-cutoff")
+        return 4
+    dir: mutable darray[u8] = []
+    has_dir: bool = rh_dirname(bundle, dir)
+    logpath: mutable darray[u8] = []
+    if has_dir:
+        rh_push_cstr(logpath, (&dir[0]).cast[cstr] can Unsafe.PointerCast)
+        logpath.push(47)
+    rh_push_text(logpath, "evidence/git-log.bin")
+    logpath.push(0)
+    logb: mutable darray[u8] = []
+    logp: cstr = (&logpath[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_io_read(logp, logb) < 0:
+        rh_cli_err("cannot read retained log evidence (no live data substituted)")
+        return 4
+    shapath: mutable darray[u8] = []
+    if has_dir:
+        rh_push_cstr(shapath, (&dir[0]).cast[cstr] can Unsafe.PointerCast)
+        shapath.push(47)
+    rh_push_text(shapath, "evidence/git-shallow.txt")
+    shapath.push(0)
+    shab: mutable darray[u8] = []
+    shallow: mutable bool = false
+    shap: cstr = (&shapath[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_io_read(shap, shab) >= 0:
+        if shab.count >= 4:
+            if shab[0] == 116 and shab[1] == 114 and shab[2] == 117 and shab[3] == 101:
+                shallow <- true
+    window_start: mutable i64 = 0
+    if not full:
+        window_start <- cutoff - days * 86400
+    actor: mutable darray[i64] = []
+    month: mutable darray[i64] = []
+    inst: mutable darray[i64] = []
+    kind: mutable darray[u8] = []
+    n_actors: mutable i64 = 0
+    accepted: i64 = rh_cs_parse(logb, window_start, cutoff, actor, month, inst, kind, &n_actors)
+    if accepted < 0:
+        rh_cli_err("continuity: invalid window inputs")
+        return 4
+    first_seen_supported: bool = full and not shallow
+    identity_rev: i64 = 0
+    min_active: i64 = 6
+    min_span: i64 = 6
+    recent_required: bool = false
+    presence: mutable darray[u8] = []
+    n_months: mutable i64 = 0
+    mlo: mutable i64 = 0
+    if accepted > 0:
+        min_at: mutable i64 = inst[0]
+        e: mutable usize = 1
+        while e < inst.count |e, inst, min_at|:
+            t: i64 = inst[e]
+            if t < min_at:
+                min_at <- t
+            e <- e + 1
+        lo_src: mutable i64 = window_start
+        if full:
+            lo_src <- min_at
+        mhi: mutable i64 = 0
+        rh_month_of_instant(lo_src, &mlo)
+        rh_month_of_instant(cutoff, &mhi)
+        n_months <- mhi - mlo + 1
+        if n_months < 0:
+            n_months <- 0
+        _ = rh_presence_build(actor, month, kind, -1, n_actors, mlo, n_months, presence)
+    persistent: i64 = rh_persistent_count(presence, n_actors, n_months, min_active, min_span, recent_required)
+    counts: mutable darray[u64] = []
+    _ = rh_actor_counts(actor, kind, -1, 0, actor.count.i64(), n_actors, counts)
+    fifty: i64 = rh_absence_factor_50(counts)
+    eighty: i64 = rh_concentration_80(counts)
+    hhi_n: mutable u64 = 0
+    hhi_d: mutable u64 = 0
+    _ = rh_hhi(counts, &hhi_n, &hhi_d)
+    eff_n: mutable u64 = 0
+    eff_d: mutable u64 = 0
+    _ = rh_effective_count(counts, &eff_n, &eff_d)
+    top_n: mutable u64 = 0
+    top_d: mutable u64 = 0
+    _ = rh_top1_share(counts, &top_n, &top_d)
+    gini_n: mutable u64 = 0
+    gini_d: mutable u64 = 0
+    if not rh_gini(counts, &gini_n, &gini_d):
+        gini_n <- 0
+        gini_d <- 0
+    statuses: mutable darray[i64] = []
+    rh_cs_retention(actor, inst, n_actors, cutoff, window_start, cutoff, 90, 120, first_seen_supported, statuses)
+    retained: mutable i64 = 0
+    eligible: mutable i64 = 0
+    censored: mutable i64 = 0
+    unobservable: mutable i64 = 0
+    rh_retention_tally(statuses, &retained, &eligible, &censored, &unobservable)
+    if rh_ensure_dir(out) != 0:
+        rh_cli_err("cannot create output directory")
+        return 4
+    cj: mutable darray[u8] = []
+    cm: mutable darray[u8] = []
+    if not rh_out_path(out, "continuity.json", cj):
+        rh_cli_err("cannot stage continuity path")
+        return 4
+    if not rh_out_path(out, "continuity-metrics.json", cm):
+        rh_cli_err("cannot stage continuity-metrics path")
+        return 4
+    body: mutable darray[u8] = []
+    basis: u8 = rh_coverage_basis(full, shallow)
+    rh_continuity_write_json(body, mlo, n_months, min_active, min_span, recent_required, identity_rev, n_actors, persistent, hhi_n, hhi_d, eff_n, eff_d, fifty, eighty, retained, eligible, censored, unobservable, accepted, 0, 0, basis)
+    body.push(10)
+    cjp: cstr = (&cj[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(cjp, body):
+        rh_cli_err("cannot write continuity.json")
+        return 4
+    mbody: mutable darray[u8] = []
+    rh_continuity_metrics_write(mbody, identity_rev, n_actors, retained, eligible, censored, unobservable, first_seen_supported, hhi_n, hhi_d, eff_n, eff_d, fifty, eighty, top_n, top_d, gini_n, gini_d)
+    mbody.push(10)
+    cmp: cstr = (&cm[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(cmp, mbody):
+        rh_cli_err("cannot write continuity-metrics.json")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "continuity: actors=")
+    rh_push_decimal_i64(done, n_actors)
+    rh_push_text(done, " events=")
+    rh_push_decimal_i64(done, accepted)
+    rh_push_text(done, " persistent=")
+    rh_push_decimal_i64(done, persistent)
+    rh_push_text(done, " retention=")
+    rh_push_decimal_i64(done, retained)
+    rh_push_text(done, "/")
+    rh_push_decimal_i64(done, eligible)
+    rh_push_text(done, " first_seen_supported=")
+    if first_seen_supported:
+        rh_push_text(done, "true")
+    else:
+        rh_push_text(done, "false")
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# --- M04-08 succession execution path. ---
+# Reads an `rh-succession-input/1` document (a per-actor complete-month
+# presence matrix, an explicit declared predecessor/successor pair, and the
+# complete-month count) and writes `rh-continuity-metrics/1` for
+# `succession.handover_overlap_months`. An absent declared pair is
+# `not_applicable` (not zero overlap), so an activity-derived primary change
+# is never passed off as a declared handover (no motive attribution).
+def rh_do_succession(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected succession argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("succession: cannot read --input")
+        return 4
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        rh_cli_err("succession: not a valid rh-succession-input/1 document (fail closed)")
+        return 4
+    ss: mutable i64 = 0
+    se: mutable i64 = 0
+    sidx: i64 = rh_json_obj_get(nodes, texts, root, "schema")
+    if sidx < 0 or not rh_json_str_span(nodes, sidx, &ss, &se):
+        rh_cli_err("succession: not a valid rh-succession-input/1 document (fail closed)")
+        return 4
+    if not rh_job_lit_eq(texts, ss, se, "rh-succession-input/1"):
+        rh_cli_err("succession: not a valid rh-succession-input/1 document (fail closed)")
+        return 4
+    okm: mutable i64 = 0
+    months: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, root, "complete_months"), &okm)
+    if okm == 0 or months < 0:
+        rh_cli_err("succession: missing/invalid complete_months (fail closed)")
+        return 4
+    # Declared pair is optional; a missing pair is not_applicable, not an error.
+    pred: mutable i64 = -1
+    succ: mutable i64 = -1
+    pidx: i64 = rh_json_obj_get(nodes, texts, root, "predecessor")
+    if pidx >= 0:
+        okp: mutable i64 = 0
+        pv: i64 = rh_json_int(nodes, raw, pidx, &okp)
+        if okp == 0 or pv < -1:
+            rh_cli_err("succession: invalid predecessor (fail closed)")
+            return 4
+        pred <- pv
+    ridx2: i64 = rh_json_obj_get(nodes, texts, root, "successor")
+    if ridx2 >= 0:
+        okr: mutable i64 = 0
+        rv: i64 = rh_json_int(nodes, raw, ridx2, &okr)
+        if okr == 0 or rv < -1:
+            rh_cli_err("succession: invalid successor (fail closed)")
+            return 4
+        succ <- rv
+    midx: i64 = rh_json_obj_get(nodes, texts, root, "presence")
+    if midx < 0 or nodes[midx.usize()].kind != RH_JSON_ARR:
+        rh_cli_err("succession: missing presence matrix (fail closed)")
+        return 4
+    rows: mutable darray[u8] = []
+    row: mutable i64 = nodes[midx.usize()].first_child
+    while row >= 0 |row, nodes, rows|:
+        if nodes[row.usize()].kind != RH_JSON_ARR:
+            rh_cli_err("succession: presence row is not an array (fail closed)")
+            return 4
+        col: mutable i64 = nodes[row.usize()].first_child
+        while col >= 0 |col, nodes, raw, months, rows|:
+            if nodes[col.usize()].kind != RH_JSON_BOOL:
+                rh_cli_err("succession: presence cell is not a boolean (fail closed)")
+                return 4
+            if rh_json_is_true(nodes, raw, col):
+                rows.push(1)
+            else:
+                rows.push(0)
+            col <- nodes[col.usize()].next_sibling
+        if months > 0 and rows.count.i64() % months != 0:
+            rh_cli_err("succession: presence matrix is not complete_months wide (fail closed)")
+            return 4
+        row <- nodes[row.usize()].next_sibling
+    body: mutable darray[u8] = []
+    rh_succession_metrics_write(body, rows, pred, succ, months)
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("succession: cannot write --out")
+        return 4
+    rh_cli_out("succession: ok")
+    return 0
+
+# --- M05 downstream execution path. ---
+# Reads an rh-dep-graph/1 document and writes an rh-downstream/1 report:
+# direct + bounded transitive dependents under a labeled public projection,
+# SCC count, optional simulated-unavailability scenario, explicit truncation
+# (never a total), and private-node exclusion (S007/F030).
+def rh_do_downstream(graph: cstr, subject: i64, out: cstr, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, private_ids: darray[i64]&, asserts: darray[RhAssertion]&, intr_path: cstr, has_intr: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(graph) or not rh_arg_safe(out):
+        rh_cli_err("rejected downstream argument (allowlist)")
+        return 3
+    if has_intr:
+        if not rh_arg_safe(intr_path):
+            rh_cli_err("rejected downstream argument (allowlist)")
+            return 3
+    gp: mutable darray[u8] = []
+    rh_push_cstr(gp, graph)
+    gp.push(0)
+    gpp: cstr = (&gp[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(gpp, raw) < 0:
+        rh_cli_err("downstream: cannot read graph file")
+        return 4
+    intr_raw: mutable darray[u8] = []
+    if has_intr:
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, intr_path)
+        ip.push(0)
+        ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_io_read(ipp, intr_raw) < 0:
+            rh_cli_err("downstream: cannot read intrinsics file")
+            return 4
+    if rh_ensure_dir(out) != 0:
+        rh_cli_err("downstream: cannot create output directory")
+        return 4
+    body: mutable darray[u8] = []
+    rc: i64 = rh_downstream_report(raw, graph, subject, private_ids, asserts, intr_raw, has_intr, max_nodes, max_depth, unavailable, has_unavailable, body)
+    if rc == -1:
+        rh_cli_err("downstream: graph is not a valid rh-dep-graph/1 document")
+        return 4
+    if rc == -2:
+        rh_cli_err("downstream: subject id not present in graph")
+        return 3
+    if rc == -3:
+        rh_cli_err("downstream: intrinsics is not a valid rh-intrinsics/1 document")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    if not rh_out_path(out, "downstream.json", op):
+        rh_cli_err("downstream: bad output directory")
+        return 3
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("downstream: cannot write downstream.json")
+        return 4
+    rh_cli_out("downstream: ok")
+    return 0
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_emit_i64_array(out: mutable darray[u8]&, values: darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+    out.push(91)
+    i: mutable usize = 0
+    while i < values.count |i, values, out|:
+        if i > 0:
+            out.push(44)
+        rh_push_decimal_i64(out, values[i])
+        i <- i + 1
+    out.push(93)
+
+# --- M06 policy execution path. ---
+# Parses an rh-policy/1 rule set and an rh-policy-input/1 observation file,
+# aligns inputs to rules by id, evaluates the four-valued lattice, and
+# writes rh-policy-result/1 bound to the policy/context/artifact/time
+# digests. Unknown is never permission; warn never overrides deny; a rule
+# with no input is unknown. Structured failure, never a default allow.
+#
+# With --state <file>, durable exception state (`rh-policy-state/1`) is
+# loaded before evaluation and rewritten afterward: a rule-scoped exception
+# supplied inline in the policy document takes precedence over the persisted
+# row for the same (rule_id, subject_id, digest); an exception whose
+# `expires_at` is at or before `now` is expired and never grants permission
+# (the engine already enforces this). A missing state file is a fresh state.
+def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_path: cstr, has_state: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(policy_path) or not rh_arg_safe(input_path) or not rh_arg_safe(out):
+        rh_cli_err("rejected policy argument (allowlist)")
+        return 3
+    if has_state and not rh_arg_safe(state_path):
+        rh_cli_err("rejected policy state argument (allowlist)")
+        return 3
+    ppath: mutable darray[u8] = []
+    rh_push_cstr(ppath, policy_path)
+    ppath.push(0)
+    praw: mutable darray[u8] = []
+    prawwp: cstr = (&ppath[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_io_read(prawwp, praw) < 0:
+        rh_cli_err("policy: cannot read --policy file")
+        return 4
+    rules: mutable darray[RhRule] = []
+    excs: mutable darray[RhException] = []
+    if rh_policy_parse(praw, rules, excs) != 0:
+        rh_cli_err("policy: not a valid rh-policy/1 document (fail closed)")
+        return 4
+    spath: mutable darray[u8] = []
+    spp: mutable cstr = prawwp
+    prior: mutable darray[RhException] = []
+    if has_state:
+        rh_push_cstr(spath, state_path)
+        spath.push(0)
+        spp <- (&spath[0]).cast[cstr] can Unsafe.PointerCast
+        sraw: mutable darray[u8] = []
+        if file_exists(spp):
+            if rh_io_read(spp, sraw) < 0:
+                rh_cli_err("policy: cannot read --state file")
+                return 4
+        if rh_policy_state_parse(sraw, prior) != 0:
+            rh_cli_err("policy: not a valid rh-policy-state/1 document (fail closed)")
+            return 4
+        # Persisted rows supplement inline exceptions: a row whose
+        # (rule_id, subject_id, digest) is already declared inline is
+        # dropped so inline (current) intent wins over stale state.
+        ri: mutable usize = 0
+        while ri < prior.count |ri, prior, excs|:
+            p: RhException = prior[ri]
+            dup: mutable bool = false
+            xi: mutable usize = 0
+            while xi < excs.count |xi, excs, p, dup|:
+                e: RhException = excs[xi]
+                if e.rule_id == p.rule_id and e.subject_id == p.subject_id and e.digest_high == p.digest_high and e.digest_low == p.digest_low:
+                    dup <- true
+                xi <- xi + 1
+            if not dup:
+                excs.push(p)
+            ri <- ri + 1
+    ipath: mutable darray[u8] = []
+    rh_push_cstr(ipath, input_path)
+    ipath.push(0)
+    iraw: mutable darray[u8] = []
+    irawp: cstr = (&ipath[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_io_read(irawp, iraw) < 0:
+        rh_cli_err("policy: cannot read --input file")
+        return 4
+    in_ids: mutable darray[i64] = []
+    inputs: mutable darray[RhPolicyInput] = []
+    subject: mutable i64 = 0
+    artifact: mutable u64 = 0
+    context: mutable u64 = 0
+    now: mutable i64 = 0
+    if rh_policy_input_parse(iraw, in_ids, inputs, &subject, &artifact, &context, &now) != 0:
+        rh_cli_err("policy: not a valid rh-policy-input/1 document (fail closed)")
+        return 4
+    aligned: mutable darray[RhPolicyInput] = []
+    missing: mutable darray[i64] = []
+    rh_policy_align(rules, in_ids, inputs, aligned, missing)
+    digest: u64 = rh_policy_digest(rules, context, subject, artifact, now)
+    fired: mutable darray[i64] = []
+    excepted: mutable darray[i64] = []
+    decision: u8 = rh_policy_eval(rules, aligned, excs, subject, digest, 0, now, fired, excepted)
+    if rh_ensure_dir(out) != 0:
+        rh_cli_err("policy: cannot create output directory")
+        return 4
+    body: mutable darray[u8] = []
+    rh_push_text(body, "{\"schema\":\"rh-policy-result/1\",\"subject_id\":")
+    rh_push_decimal_i64(body, subject)
+    rh_push_text(body, ",\"binding\":{\"policy_digest\":\"")
+    rh_push_hex_u64(body, digest)
+    rh_push_text(body, "\",\"context_digest\":\"")
+    rh_push_hex_u64(body, context)
+    rh_push_text(body, "\",\"artifact_digest\":\"")
+    rh_push_hex_u64(body, artifact)
+    rh_push_text(body, "\",\"now\":")
+    rh_push_decimal_i64(body, now)
+    rh_push_text(body, "},\"decision\":\"")
+    rh_push_text(body, rh_decision_label(decision))
+    rh_push_text(body, "\",\"fired_rule_ids\":")
+    rh_emit_i64_array(body, fired)
+    rh_push_text(body, ",\"excepted_rule_ids\":")
+    rh_emit_i64_array(body, excepted)
+    rh_push_text(body, ",\"missing_input_rule_ids\":")
+    rh_emit_i64_array(body, missing)
+    rh_push_text(body, ",\"explanation\":")
+    rh_policy_explain(body, rules, decision, fired, excepted)
+    rh_push_text(body, ",\"note\":\"unknown is never permission; warn never overrides deny; this decision is bound to the digests above (TOCTOU)\"}")
+    body.push(10)
+    op: mutable darray[u8] = []
+    if not rh_out_path(out, "policy-result.json", op):
+        rh_cli_err("policy: bad output directory")
+        return 3
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("policy: cannot write policy-result.json")
+        return 4
+    if has_state:
+        sb: mutable darray[u8] = []
+        rh_policy_state_emit(excs, sb)
+        sb.push(10)
+        if not rh_io_write(spp, sb):
+            rh_cli_err("policy: cannot write --state file")
+            return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "policy: decision=")
+    rh_push_text(done, rh_decision_label(decision))
+    rh_push_text(done, " fired=")
+    rh_push_decimal_i64(done, fired.count.i64())
+    rh_push_text(done, " excepted=")
+    rh_push_decimal_i64(done, excepted.count.i64())
+    rh_push_text(done, " missing_inputs=")
+    rh_push_decimal_i64(done, missing.count.i64())
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# --- M06 correction execution path. ---
+# Reads an rh-corrections/1 document, applies corrections in order, and
+# writes rh-corrections-result/1. Accepted corrections advance the revision
+# and supersede only that subject's older derived results; raw replay inputs
+# are never rewritten. Malformed/unknown kind/state/combine fails closed.
+#
+# With --state <file>, an `rh-corrections-state/1` document carries the
+# revision floor, the greatest target_id already folded in (watermark), and
+# the subjects superseded so far; it is loaded before the run and rewritten
+# after. Replaying the same corrections file is therefore idempotent (no
+# second advance, no re-supersede), matching S005. A corrupt or wrong-schema
+# state file fails closed (exit 4), never defaults to permission.
+def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has_state: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(corrections_path) or not rh_arg_safe(out):
+        rh_cli_err("rejected correct argument (allowlist)")
+        return 3
+    if has_state and not rh_arg_safe(state_path):
+        rh_cli_err("rejected correct state argument (allowlist)")
+        return 3
+    cp: mutable darray[u8] = []
+    rh_push_cstr(cp, corrections_path)
+    cp.push(0)
+    cpp: cstr = (&cp[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(cpp, raw) < 0:
+        rh_cli_err("correct: cannot read --corrections file")
+        return 4
+    spath: mutable darray[u8] = []
+    spp: mutable cstr = cpp
+    p_rev: mutable i64 = 0
+    p_wm: mutable i64 = 0
+    prior_sup: mutable darray[i64] = []
+    if has_state:
+        rh_push_cstr(spath, state_path)
+        spath.push(0)
+        spp <- (&spath[0]).cast[cstr] can Unsafe.PointerCast
+        sraw: mutable darray[u8] = []
+        if file_exists(spp):
+            if rh_io_read(spp, sraw) < 0:
+                rh_cli_err("correct: cannot read --state file")
+                return 4
+        if rh_correction_state_parse(sraw, &p_rev, &p_wm, prior_sup) != 0:
+            rh_cli_err("correct: not a valid rh-corrections-state/1 document (fail closed)")
+            return 4
+    body: mutable darray[u8] = []
+    new_sup: mutable darray[i64] = []
+    final_rev: mutable i64 = 0
+    final_wm: mutable i64 = 0
+    if rh_correction_report_state(raw, p_rev, p_wm, new_sup, &final_rev, &final_wm, body) != 0:
+        rh_cli_err("correct: not a valid rh-corrections/1 document (fail closed)")
+        return 4
+    body.push(10)
+    if rh_ensure_dir(out) != 0:
+        rh_cli_err("correct: cannot create output directory")
+        return 4
+    op: mutable darray[u8] = []
+    if not rh_out_path(out, "corrections-result.json", op):
+        rh_cli_err("correct: bad output directory")
+        return 3
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("correct: cannot write corrections-result.json")
+        return 4
+    if has_state:
+        merged: mutable darray[i64] = []
+        mi: mutable usize = 0
+        while mi < prior_sup.count |mi, prior_sup, merged|:
+            merged.push(prior_sup[mi])
+            mi <- mi + 1
+        ni: mutable usize = 0
+        while ni < new_sup.count |ni, new_sup, merged|:
+            v: i64 = new_sup[ni]
+            present: mutable bool = false
+            mj: mutable usize = 0
+            while mj < merged.count |mj, merged, v, present|:
+                if merged[mj] == v:
+                    present <- true
+                mj <- mj + 1
+            if not present:
+                merged.push(v)
+            ni <- ni + 1
+        sb: mutable darray[u8] = []
+        rh_correction_state_emit(final_rev, final_wm, merged, sb)
+        sb.push(10)
+        if not rh_io_write(spp, sb):
+            rh_cli_err("correct: cannot write --state file")
+            return 4
+    rh_cli_out("correct: ok")
+    return 0
+
+# --- M02 store + M07 ops execution paths. ---
+# Content-addressed evidence store: put is idempotent for identical bytes
+# and refuses to overwrite a different blob under the same digest; verify
+# recomputes the digest and fails closed on missing/corrupt evidence.
+def rh_do_store_put(root: cstr, file: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(root) or not rh_arg_safe(file):
+        rh_cli_err("rejected store argument (allowlist)")
+        return 3
+    buf: mutable darray[u8] = []
+    if rh_io_read(file, buf) < 0:
+        rh_cli_err("store: cannot read --file")
+        return 4
+    if rh_ensure_dir(root) != 0:
+        rh_cli_err("store: cannot create root")
+        return 4
+    hex: mutable darray[u8] = []
+    if rh_store_blob(root, buf, hex) != 0:
+        rh_cli_err("store: refusing to overwrite a different blob under the same digest")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "store: put ")
+    _ = rh_absorb_bytes(hex, done)
+    rh_push_text(done, " bytes=")
+    rh_push_decimal_i64(done, buf.count.i64())
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+def rh_do_store_verify(root: cstr, name: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(root) or not rh_arg_safe(name):
+        rh_cli_err("rejected store argument (allowlist)")
+        return 3
+    ok: mutable i64 = 0
+    if rh_store_blob_verify(root, name, &ok) != 0 or ok != 1:
+        rh_cli_err("store: verification FAILED (missing or corrupt evidence blocks publication)")
+        return 5
+    done: mutable darray[u8] = []
+    rh_push_text(done, "store: verified ")
+    rh_push_cstr(done, name)
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# Backup manifest from a names file (one blob hex name per line).
+def rh_do_ops_backup(root: cstr, manifest: cstr, names_file: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(root) or not rh_arg_safe(manifest) or not rh_arg_safe(names_file):
+        rh_cli_err("rejected ops argument (allowlist)")
+        return 3
+    names: mutable darray[u8] = []
+    if rh_io_read(names_file, names) < 0:
+        rh_cli_err("ops: cannot read --names")
+        return 4
+    if not rh_backup_write(manifest, names):
+        rh_cli_err("ops: cannot write backup manifest")
+        return 4
+    rh_cli_out("ops: backup manifest written")
+    return 0
+
+# Verify every object named in a manifest: present+digest-verified vs
+# missing vs corrupt. Any missing/corrupt is exit 5 (not a clean restore).
+def rh_do_ops_verify(root: cstr, manifest: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(root) or not rh_arg_safe(manifest):
+        rh_cli_err("rejected ops argument (allowlist)")
+        return 3
+    p: mutable i64 = 0
+    m: mutable i64 = 0
+    c: mutable i64 = 0
+    if rh_backup_verify(root, manifest, &p, &m, &c) != 0:
+        rh_cli_err("ops: cannot read backup manifest (fail closed)")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "ops verify: verified=")
+    rh_push_decimal_i64(done, p)
+    rh_push_text(done, " missing=")
+    rh_push_decimal_i64(done, m)
+    rh_push_text(done, " corrupt=")
+    rh_push_decimal_i64(done, c)
+    done.push(10)
+    rh_write_stdout(done)
+    if m > 0 or c > 0:
+        return 5
+    return 0
+
+# Restore only digest-verified objects; an unverified name is skipped and
+# never silently becomes live evidence.
+def rh_do_ops_restore(root: cstr, dest: cstr, manifest: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(root) or not rh_arg_safe(dest) or not rh_arg_safe(manifest):
+        rh_cli_err("rejected ops argument (allowlist)")
+        return 3
+    if rh_ensure_dir(dest) != 0:
+        rh_cli_err("ops: cannot create restore destination")
+        return 4
+    r: mutable i64 = 0
+    if rh_backup_restore(root, dest, manifest, &r) != 0:
+        rh_cli_err("ops: cannot read backup manifest (fail closed)")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "ops restore: restored=")
+    rh_push_decimal_i64(done, r)
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# --- M02 forge normalization execution path. ---
+# Normalizes a captured forge payload into the canonical-repo/1 form with a
+# real connector id and a caller-supplied (or current) collection time.
+# Only connectors with an implemented normalizer are accepted; an unknown
+# connector is rejected, never guessed. Malformed payloads fail closed.
+def rh_do_forge_normalize(conn: cstr, input_path: cstr, out_path: cstr, fetched_at: i64, has_fetched: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(conn) or not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected forge argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("forge: cannot read --input")
+        return 4
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0:
+        rh_cli_err("forge: --input is not valid JSON")
+        return 4
+    ts: mutable i64 = fetched_at
+    if not has_fetched:
+        ts <- rh_now()
+        if ts < 0:
+            rh_cli_err("forge: no clock; pass --fetched-at")
+            return 4
+    produced: mutable darray[u8] = []
+    ok: mutable bool = false
+    if rh_streq(conn, "github"):
+        ok <- rh_github_repo_canonical(nodes, texts, raw, root, ts, produced)
+    elif rh_streq(conn, "gitlab"):
+        ok <- rh_gitlab_project_canonical(nodes, texts, raw, root, ts, produced)
+    elif rh_streq(conn, "gitea"):
+        ok <- rh_gitea_repo_canonical(nodes, texts, raw, root, ts, "gitea", produced)
+    elif rh_streq(conn, "forgejo"):
+        ok <- rh_gitea_repo_canonical(nodes, texts, raw, root, ts, "forgejo", produced)
+    elif rh_streq(conn, "bitbucket"):
+        ok <- rh_bitbucket_repo_canonical(nodes, texts, raw, root, ts, produced)
+    else:
+        rh_cli_err("forge: unsupported connector (implemented normalizers: github, gitlab, gitea, forgejo)")
+        return 3
+    if not ok:
+        rh_cli_err("forge: input does not match the connector payload shape (fail closed)")
+        return 4
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, produced):
+        rh_cli_err("forge: cannot write --out")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "forge: normalized ")
+    rh_push_cstr(done, conn)
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# --- M02-04/05 connector instance execution path. ---
+# Reads an rh-connector-instance/1 document and writes
+# rh-connector-instance-result/1: the connector's capability table (with
+# unsupported stated, never omitted), the operator-declared capabilities,
+# and a usability verdict. Approval and transport are separate gates:
+# an unapproved instance is `unapproved`, and an approved instance whose
+# base URL fails the transport guard is `transport-rejected` regardless of
+# approval (S002). Unknown connector ids, unknown capability keys, and a
+# capability the connector does not declare all fail closed (exit 4).
+def rh_do_connector_check(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected connector argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("connector: cannot read --instance")
+        return 4
+    inst: mutable RhConnectorInstance = RhConnectorInstance{id_start: 0, id_end: 0, url_start: 0, url_end: 0, approved: false}
+    caps: mutable darray[i64] = []
+    if rh_connector_instance_parse(raw, &inst, caps) != 0:
+        rh_cli_err("connector: not a valid rh-connector-instance/1 document (fail closed)")
+        return 4
+    # Re-parse to recover the text buffer spans referenced by the instance.
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    _ = rh_json_parse(raw, nodes, texts)
+    verdict: i64 = rh_connector_instance_verdict(&inst, texts)
+    body: mutable darray[u8] = []
+    rh_connector_instance_emit(&inst, texts, caps, verdict, body)
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("connector: cannot write --out")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "connector: ok verdict=")
+    if verdict == 0:
+        rh_push_text(done, "usable")
+    elif verdict == 1:
+        rh_push_text(done, "unapproved")
+    else:
+        rh_push_text(done, "transport-rejected")
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# --- M02-03 job classification execution path. ---
+# Reads an rh-job-event/1 document (kind, attempt, now, max_attempts,
+# backoff_cap_secs) and writes rh-job-next/1: the disposition, the next
+# phase, the wake time for retries, and the incremented attempt. Failure
+# kinds are distinct and never collapsed; an unknown kind fails closed
+# (exit 4), an exhausted retryable failure dead-letters (never success).
+def rh_do_job_classify(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected job argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("job: cannot read --input")
+        return 4
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        rh_cli_err("job: not a valid rh-job-event/1 document (fail closed)")
+        return 4
+    ss: mutable i64 = 0
+    se: mutable i64 = 0
+    sidx: i64 = rh_json_obj_get(nodes, texts, root, "schema")
+    if sidx < 0 or not rh_json_str_span(nodes, sidx, &ss, &se):
+        rh_cli_err("job: not a valid rh-job-event/1 document (fail closed)")
+        return 4
+    if not rh_job_lit_eq(texts, ss, se, "rh-job-event/1"):
+        rh_cli_err("job: not a valid rh-job-event/1 document (fail closed)")
+        return 4
+    ks: mutable i64 = 0
+    ke: mutable i64 = 0
+    kidx: i64 = rh_json_obj_get(nodes, texts, root, "kind")
+    if kidx < 0 or not rh_json_str_span(nodes, kidx, &ks, &ke):
+        rh_cli_err("job: missing kind (fail closed)")
+        return 4
+    kind: i64 = rh_job_classify(texts, ks, ke)
+    if kind < 0:
+        rh_cli_err("job: unknown failure kind (fail closed)")
+        return 4
+    ok_att: mutable i64 = 0
+    ok_now: mutable i64 = 0
+    atte: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, root, "attempt"), &ok_att)
+    nowi: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, root, "now"), &ok_now)
+    if ok_att == 0 or ok_now == 0 or atte < 1 or nowi < 0:
+        rh_cli_err("job: missing/invalid attempt or now (fail closed)")
+        return 4
+    maxa: mutable i64 = 0
+    cap: mutable i64 = 3600
+    mi: i64 = rh_json_obj_get(nodes, texts, root, "max_attempts")
+    if mi >= 0:
+        ok_m: mutable i64 = 0
+        mv: i64 = rh_json_int(nodes, raw, mi, &ok_m)
+        if ok_m == 0 or mv < 0:
+            rh_cli_err("job: invalid max_attempts (fail closed)")
+            return 4
+        maxa <- mv
+    ci: i64 = rh_json_obj_get(nodes, texts, root, "backoff_cap_secs")
+    if ci >= 0:
+        ok_c: mutable i64 = 0
+        cv: i64 = rh_json_int(nodes, raw, ci, &ok_c)
+        if ok_c == 0 or cv < 0:
+            rh_cli_err("job: invalid backoff_cap_secs (fail closed)")
+            return 4
+        cap <- cv
+    nxt: RhJobNext = rh_job_on_failure(kind, atte, nowi, maxa, cap)
+    body: mutable darray[u8] = []
+    rh_push_text(body, "{\"schema\":\"rh-job-next/1\",\"kind\":\"")
+    rh_push_text(body, rh_job_kind_label(kind))
+    rh_push_text(body, "\",\"disposition\":\"")
+    if nxt.phase == 4:
+        rh_push_text(body, "terminal")
+    elif nxt.phase == 7:
+        rh_push_text(body, "dead_letter")
+    else:
+        rh_push_text(body, "retry")
+    rh_push_text(body, "\",\"next_phase\":\"")
+    rh_push_text(body, rh_job_phase_label(nxt.phase))
+    rh_push_text(body, "\",\"wake_at\":")
+    rh_push_decimal_i64(body, nxt.wake_at)
+    rh_push_text(body, ",\"next_attempt\":")
+    rh_push_decimal_i64(body, nxt.attempt)
+    rh_push_text(body, ",\"note\":\"failure kinds are distinct and never collapsed; auth/unsupported are terminal, malformed dead-letters, transient/rate-limit/budget retry with backoff, and an exhausted retry dead-letters rather than succeeding\"}")
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("job: cannot write --out")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "job: kind=")
+    rh_push_text(done, rh_job_kind_label(kind))
+    rh_push_text(done, " next=")
+    rh_push_text(done, rh_job_phase_label(nxt.phase))
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# --- M02-03 scheduler execution path. ---
+# Reads an rh-sched-input/1 document (queue capacity, host quota policy, and
+# an ordered op sequence) and writes rh-sched-result/1 with the outcome of
+# every op, the final per-slot phases, and the host quota/backoff state.
+# Ops are applied in order, so the same input replays identically. A
+# malformed/unknown op or invalid policy fails closed (exit 4).
+def rh_do_job_run(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected job argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("job: cannot read --input")
+        return 4
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        rh_cli_err("job: not a valid rh-sched-input/1 document (fail closed)")
+        return 4
+    ss: mutable i64 = 0
+    se: mutable i64 = 0
+    sidx: i64 = rh_json_obj_get(nodes, texts, root, "schema")
+    if sidx < 0 or not rh_json_str_span(nodes, sidx, &ss, &se):
+        rh_cli_err("job: not a valid rh-sched-input/1 document (fail closed)")
+        return 4
+    if not rh_job_lit_eq(texts, ss, se, "rh-sched-input/1"):
+        rh_cli_err("job: not a valid rh-sched-input/1 document (fail closed)")
+        return 4
+    ok_cap: mutable i64 = 0
+    cap: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, root, "capacity"), &ok_cap)
+    if ok_cap == 0 or cap <= 0 or cap > 100000:
+        rh_cli_err("job: missing/invalid capacity (fail closed)")
+        return 4
+    # Host policy (optional; defaults are conservative).
+    hq: mutable i64 = 1
+    hb: mutable i64 = 2
+    hm: mutable i64 = 60
+    hidx: i64 = rh_json_obj_get(nodes, texts, root, "quota")
+    if hidx >= 0:
+        if nodes[hidx.usize()].kind != RH_JSON_OBJ:
+            rh_cli_err("job: invalid quota (fail closed)")
+            return 4
+        okq: mutable i64 = 0
+        okb: mutable i64 = 0
+        okm: mutable i64 = 0
+        qv: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, hidx, "refill_per_second"), &okq)
+        if okq == 1:
+            hq <- qv
+        bv: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, hidx, "base_backoff_seconds"), &okb)
+        if okb == 1:
+            hb <- bv
+        mv: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, hidx, "max_backoff_seconds"), &okm)
+        if okm == 1:
+            hm <- mv
+        if hq < 0 or hb < 0 or hm < 0:
+            rh_cli_err("job: invalid quota value (fail closed)")
+            return 4
+    qidx: i64 = rh_json_obj_get(nodes, texts, root, "ops")
+    if qidx < 0 or nodes[qidx.usize()].kind != RH_JSON_ARR:
+        rh_cli_err("job: missing ops (fail closed)")
+        return 4
+    slots: mutable darray[RhSlot] = rh_sched_slots(cap)
+    h: mutable RhHost = rh_sched_host(1000000, hq, hb, hm)
+    opts_n: i64 = nodes[qidx.usize()].child_count
+    if opts_n > 100000:
+        rh_cli_err("job: op sequence too large (fail closed)")
+        return 4
+    op_idx: mutable darray[i64] = []
+    op_code: mutable darray[i64] = []
+    op_out: mutable darray[i64] = []
+    child: mutable i64 = nodes[qidx.usize()].first_child
+    oi: mutable i64 = 0
+    while child >= 0 |child, nodes, texts, raw, slots, h, op_idx, op_code, op_out, oi|:
+        if nodes[child.usize()].kind != RH_JSON_OBJ:
+            rh_cli_err("job: op is not an object (fail closed)")
+            return 4
+        cs: mutable i64 = 0
+        ce: mutable i64 = 0
+        cidx: i64 = rh_json_obj_get(nodes, texts, child, "op")
+        if cidx < 0 or not rh_json_str_span(nodes, cidx, &cs, &ce):
+            rh_cli_err("job: op has no code (fail closed)")
+            return 4
+        code: i64 = rh_job_op_code(texts, cs, ce)
+        if code < 0:
+            rh_cli_err("job: unknown op (fail closed)")
+            return 4
+        op: RhSchedOp = RhSchedOp{code: code, a: 0, b: 0, c: 0, d: 0, e: 0, f: 0}
+        if code == 0:
+            op.a <- rh_opt_int(nodes, raw, texts, child, "now", 0)
+        elif code == 1:
+            op.a <- rh_opt_int(nodes, raw, texts, child, "owner", 0)
+            op.b <- rh_opt_int(nodes, raw, texts, child, "now", 0)
+            op.c <- rh_opt_int(nodes, raw, texts, child, "ttl", 0)
+        elif code == 2:
+            op.a <- rh_opt_int(nodes, raw, texts, child, "slot", 0)
+            op.b <- rh_opt_int(nodes, raw, texts, child, "token", 0)
+        elif code == 3:
+            op.a <- rh_opt_int(nodes, raw, texts, child, "slot", 0)
+            op.b <- rh_opt_int(nodes, raw, texts, child, "token", 0)
+            kind_s: mutable i64 = 0
+            kind_e: mutable i64 = 0
+            kidx2: i64 = rh_json_obj_get(nodes, texts, child, "kind")
+            if kidx2 < 0 or not rh_json_str_span(nodes, kidx2, &kind_s, &kind_e):
+                rh_cli_err("job: fail op has no kind (fail closed)")
+                return 4
+            op.c <- rh_job_classify(texts, kind_s, kind_e)
+            if op.c < 0:
+                rh_cli_err("job: unknown failure kind (fail closed)")
+                return 4
+            op.d <- rh_opt_int(nodes, raw, texts, child, "now", 0)
+            op.e <- rh_opt_int(nodes, raw, texts, child, "max_attempts", 0)
+            op.f <- rh_opt_int(nodes, raw, texts, child, "backoff_cap_secs", 3600)
+        elif code == 4:
+            op.a <- rh_opt_int(nodes, raw, texts, child, "slot", 0)
+        elif code == 5:
+            op.a <- rh_opt_int(nodes, raw, texts, child, "slot", 0)
+            op.b <- rh_opt_int(nodes, raw, texts, child, "now", 0)
+        outv: i64 = rh_sched_apply(slots, &h, &op)
+        op_idx.push(oi)
+        op_code.push(code)
+        op_out.push(outv)
+        oi <- oi + 1
+        child <- nodes[child.usize()].next_sibling
+    # Emit.
+    body: mutable darray[u8] = []
+    rh_push_text(body, "{\"schema\":\"rh-sched-result/1\",\"capacity\":")
+    rh_push_decimal_i64(body, cap)
+    rh_push_text(body, ",\"ops\":[")
+    k: mutable usize = 0
+    while k < op_idx.count |k, op_idx, op_code, op_out, body|:
+        if k > 0:
+            body.push(44)
+        rh_push_text(body, "{\"index\":")
+        rh_push_decimal_i64(body, op_idx[k])
+        rh_push_text(body, ",\"op\":\"")
+        rh_push_text(body, rh_job_op_label(op_code[k]))
+        rh_push_text(body, "\",\"outcome\":")
+        rh_push_decimal_i64(body, op_out[k])
+        rh_push_text(body, "}")
+        k <- k + 1
+    rh_push_text(body, "],\"slots\":[")
+    s2: mutable usize = 0
+    while s2 < slots.count |s2, slots, body|:
+        if s2 > 0:
+            body.push(44)
+        sl: RhSlot = slots[s2]
+        rh_push_text(body, "{\"slot\":")
+        rh_push_decimal_i64(body, s2.i64())
+        rh_push_text(body, ",\"used\":")
+        if sl.used:
+            rh_push_text(body, "true")
+        else:
+            rh_push_text(body, "false")
+        rh_push_text(body, ",\"phase\":\"")
+        if sl.used:
+            rh_push_text(body, rh_job_phase_label(sl.phase))
+        else:
+            rh_push_text(body, "empty")
+        rh_push_text(body, "\",\"attempt\":")
+        rh_push_decimal_i64(body, sl.attempt)
+        rh_push_text(body, ",\"token\":")
+        rh_push_decimal_i64(body, sl.token)
+        rh_push_text(body, "}")
+        s2 <- s2 + 1
+    rh_push_text(body, "],\"host\":{\"tokens\":")
+    rh_push_decimal_i64(body, h.tokens)
+    rh_push_text(body, ",\"backoff_until\":")
+    rh_push_decimal_i64(body, h.backoff_until)
+    rh_push_text(body, ",\"consecutive_failures\":")
+    rh_push_decimal_i64(body, h.consecutive_failures)
+    rh_push_text(body, "},\"note\":\"ops are applied in order and replay identically; the queue is bounded (enqueue past capacity is refused), claims consume a host token, and a failed job retries with backoff, dead-letters, or goes terminal by classification, never silent success\"}")
+    body.push(10)
+    op2: mutable darray[u8] = []
+    rh_push_cstr(op2, out_path)
+    op2.push(0)
+    opp: cstr = (&op2[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("job: cannot write --out")
+        return 4
+    rh_cli_out("job: run ok")
+    return 0
+
+# --- M02-06 reconciliation execution path. ---
+# Reads an `rh-reconcile-input/1` document (last successful full reconcile
+# time, reconcile interval, optional last incremental cursor time, overlap
+# window, and now) and writes `rh-reconcile-result/1` with the tick mode, the
+# look-back horizon a full reconcile must cover, the incremental overlap
+# start, and the schedule debt. A missing/invalid interval fails closed
+# (exit 4), so a misconfigured zero interval can never cause a tight loop.
+def rh_do_reconcile(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected reconcile argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("reconcile: cannot read --input")
+        return 4
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        rh_cli_err("reconcile: not a valid rh-reconcile-input/1 document (fail closed)")
+        return 4
+    ss: mutable i64 = 0
+    se: mutable i64 = 0
+    sidx: i64 = rh_json_obj_get(nodes, texts, root, "schema")
+    if sidx < 0 or not rh_json_str_span(nodes, sidx, &ss, &se):
+        rh_cli_err("reconcile: not a valid rh-reconcile-input/1 document (fail closed)")
+        return 4
+    if not rh_job_lit_eq(texts, ss, se, "rh-reconcile-input/1"):
+        rh_cli_err("reconcile: not a valid rh-reconcile-input/1 document (fail closed)")
+        return 4
+    ok_iv: mutable i64 = 0
+    interval: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, root, "interval_secs"), &ok_iv)
+    if ok_iv == 0 or interval <= 0:
+        rh_cli_err("reconcile: missing/invalid interval_secs (fail closed)")
+        return 4
+    ok_now: mutable i64 = 0
+    now: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, root, "now"), &ok_now)
+    if ok_now == 0 or now < 0:
+        rh_cli_err("reconcile: missing/invalid now (fail closed)")
+        return 4
+    last_full: mutable i64 = -1
+    lf: i64 = rh_json_obj_get(nodes, texts, root, "last_full_reconcile")
+    if lf >= 0:
+        ok_lf: mutable i64 = 0
+        v: i64 = rh_json_int(nodes, raw, lf, &ok_lf)
+        if ok_lf == 0 or v < -1:
+            rh_cli_err("reconcile: invalid last_full_reconcile (fail closed)")
+            return 4
+        last_full <- v
+    cursor: mutable i64 = -1
+    ci: i64 = rh_json_obj_get(nodes, texts, root, "cursor_time")
+    if ci >= 0:
+        ok_c: mutable i64 = 0
+        cv: i64 = rh_json_int(nodes, raw, ci, &ok_c)
+        if ok_c == 0 or cv < -1:
+            rh_cli_err("reconcile: invalid cursor_time (fail closed)")
+            return 4
+        cursor <- cv
+    overlap: mutable i64 = 3600
+    oi: i64 = rh_json_obj_get(nodes, texts, root, "overlap_secs")
+    if oi >= 0:
+        ok_o: mutable i64 = 0
+        ov: i64 = rh_json_int(nodes, raw, oi, &ok_o)
+        if ok_o == 0 or ov < 0:
+            rh_cli_err("reconcile: invalid overlap_secs (fail closed)")
+            return 4
+        overlap <- ov
+    mode: u8 = rh_reconcile_mode(last_full, interval, cursor >= 0, now)
+    horizon: i64 = rh_reconcile_horizon(last_full, now)
+    debt: i64 = rh_reconcile_debt(last_full, interval, now)
+    next_due: i64 = rh_reconcile_next_due(last_full, interval)
+    ovl_start: i64 = rh_cursor_overlap_start(cursor, overlap)
+    body: mutable darray[u8] = []
+    rh_push_text(body, "{\"schema\":\"rh-reconcile-result/1\",\"mode\":\"")
+    if mode == RH_RECON_DUE:
+        rh_push_text(body, "full")
+    else:
+        rh_push_text(body, "incremental")
+    rh_push_text(body, "\",\"interval_secs\":")
+    rh_push_decimal_i64(body, interval)
+    rh_push_text(body, ",\"last_full_reconcile\":")
+    rh_push_decimal_i64(body, last_full)
+    rh_push_text(body, ",\"next_due_at\":")
+    rh_push_decimal_i64(body, next_due)
+    rh_push_text(body, ",\"horizon_secs\":")
+    rh_push_decimal_i64(body, horizon)
+    rh_push_text(body, ",\"schedule_debt\":")
+    rh_push_decimal_i64(body, debt)
+    rh_push_text(body, ",\"cursor_time\":")
+    rh_push_decimal_i64(body, cursor)
+    rh_push_text(body, ",\"overlap_start\":")
+    rh_push_decimal_i64(body, ovl_start)
+    rh_push_text(body, ",\"note\":\"only a completed full reconcile advances the full-reconcile clock; incremental cursors never do; a due full reconcile covers the whole interval since the last full reconcile because a cursor proves which updates were seen, not what was deleted; schedule debt raises a service-health signal and never silently skips reconciles\"}")
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("reconcile: cannot write --out")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "reconcile: mode=")
+    if mode == RH_RECON_DUE:
+        rh_push_text(done, "full")
+    else:
+        rh_push_text(done, "incremental")
+    rh_push_text(done, " debt=")
+    rh_push_decimal_i64(done, debt)
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# --- M02-03/M02-06 unattended worker pass. ---
+# Reads an `rh-worker-input/1` document (queue capacity, host quota policy,
+# the source table, and now) and writes `rh-worker-plan/1`: one decision per
+# source (full reconcile / incremental / skipped), the reconcile horizon and
+# overlap start, the schedule debt, and an aggregate service-health summary.
+# The pass is deterministic and bounded (no loop), so replaying it at the
+# same `now` yields the identical plan. Malformed/invalid input fails closed.
+def rh_do_worker_tick(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected worker argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("worker: cannot read --input")
+        return 4
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        rh_cli_err("worker: not a valid rh-worker-input/1 document (fail closed)")
+        return 4
+    ss: mutable i64 = 0
+    se: mutable i64 = 0
+    sidx: i64 = rh_json_obj_get(nodes, texts, root, "schema")
+    if sidx < 0 or not rh_json_str_span(nodes, sidx, &ss, &se):
+        rh_cli_err("worker: not a valid rh-worker-input/1 document (fail closed)")
+        return 4
+    if not rh_job_lit_eq(texts, ss, se, "rh-worker-input/1"):
+        rh_cli_err("worker: not a valid rh-worker-input/1 document (fail closed)")
+        return 4
+    ok_cap: mutable i64 = 0
+    cap: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, root, "capacity"), &ok_cap)
+    if ok_cap == 0 or cap <= 0 or cap > 100000:
+        rh_cli_err("worker: missing/invalid capacity (fail closed)")
+        return 4
+    ok_now: mutable i64 = 0
+    now: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, root, "now"), &ok_now)
+    if ok_now == 0 or now < 0:
+        rh_cli_err("worker: missing/invalid now (fail closed)")
+        return 4
+    # Host quota (optional; conservative defaults).
+    hq: mutable i64 = 1
+    hb: mutable i64 = 2
+    hm: mutable i64 = 60
+    hidx: i64 = rh_json_obj_get(nodes, texts, root, "quota")
+    if hidx >= 0:
+        if nodes[hidx.usize()].kind != RH_JSON_OBJ:
+            rh_cli_err("worker: invalid quota (fail closed)")
+            return 4
+        okq: mutable i64 = 0
+        okb: mutable i64 = 0
+        okm: mutable i64 = 0
+        qv: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, hidx, "refill_per_second"), &okq)
+        if okq == 1:
+            hq <- qv
+        bv: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, hidx, "base_backoff_seconds"), &okb)
+        if okb == 1:
+            hb <- bv
+        mv: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, hidx, "max_backoff_seconds"), &okm)
+        if okm == 1:
+            hm <- mv
+        if hq < 0 or hb < 0 or hm < 0:
+            rh_cli_err("worker: invalid quota value (fail closed)")
+            return 4
+    sid: i64 = rh_json_obj_get(nodes, texts, root, "sources")
+    if sid < 0 or nodes[sid.usize()].kind != RH_JSON_ARR:
+        rh_cli_err("worker: missing sources (fail closed)")
+        return 4
+    srcs: mutable darray[RhSourceJob] = []
+    child: mutable i64 = nodes[sid.usize()].first_child
+    while child >= 0 |child, nodes, texts, raw, srcs|:
+        if nodes[child.usize()].kind != RH_JSON_OBJ:
+            rh_cli_err("worker: source is not an object (fail closed)")
+            return 4
+        oksi: mutable i64 = 0
+        oki: mutable i64 = 0
+        source_id: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, child, "source_id"), &oksi)
+        interval: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, child, "interval_secs"), &oki)
+        if oksi == 0 or oki == 0 or interval <= 0:
+            rh_cli_err("worker: source missing/invalid source_id or interval_secs (fail closed)")
+            return 4
+        last_full: mutable i64 = -1
+        lfi: i64 = rh_json_obj_get(nodes, texts, child, "last_full_reconcile")
+        if lfi >= 0:
+            okl: mutable i64 = 0
+            lv: i64 = rh_json_int(nodes, raw, lfi, &okl)
+            if okl == 0 or lv < -1:
+                rh_cli_err("worker: invalid last_full_reconcile (fail closed)")
+                return 4
+            last_full <- lv
+        cursor: mutable i64 = -1
+        ci: i64 = rh_json_obj_get(nodes, texts, child, "cursor_time")
+        if ci >= 0:
+            okc: mutable i64 = 0
+            cv: i64 = rh_json_int(nodes, raw, ci, &okc)
+            if okc == 0 or cv < -1:
+                rh_cli_err("worker: invalid cursor_time (fail closed)")
+                return 4
+            cursor <- cv
+        overlap: mutable i64 = 3600
+        oi: i64 = rh_json_obj_get(nodes, texts, child, "overlap_secs")
+        if oi >= 0:
+            oko: mutable i64 = 0
+            ov: i64 = rh_json_int(nodes, raw, oi, &oko)
+            if oko == 0 or ov < 0:
+                rh_cli_err("worker: invalid overlap_secs (fail closed)")
+                return 4
+            overlap <- ov
+        srcs.push(rh_worker_source(source_id, interval, last_full, cursor >= 0, cursor, overlap))
+        child <- nodes[child.usize()].next_sibling
+    slots: mutable darray[RhSlot] = rh_sched_slots(cap)
+    h: mutable RhHost = rh_sched_host(1000000, hq, hb, hm)
+    dec: mutable darray[RhWorkerDecision] = []
+    enq: i64 = rh_worker_pass(srcs, &h, slots, now, 1, dec)
+    hl: RhWorkerHealth = rh_worker_health(dec, enq)
+    body: mutable darray[u8] = []
+    rh_push_text(body, "{\"schema\":\"rh-worker-plan/1\",\"capacity\":")
+    rh_push_decimal_i64(body, cap)
+    rh_push_text(body, ",\"now\":")
+    rh_push_decimal_i64(body, now)
+    rh_push_text(body, ",\"decisions\":[")
+    k: mutable usize = 0
+    while k < dec.count |k, dec, body|:
+        if k > 0:
+            body.push(44)
+        d: RhWorkerDecision = dec[k]
+        rh_push_text(body, "{\"source_id\":")
+        rh_push_decimal_i64(body, d.source_id)
+        rh_push_text(body, ",\"mode\":\"")
+        if d.mode == 1:
+            rh_push_text(body, "full")
+        elif d.mode == 2:
+            rh_push_text(body, "incremental")
+        else:
+            rh_push_text(body, "skipped")
+        rh_push_text(body, "\",\"slot\":")
+        rh_push_decimal_i64(body, d.slot)
+        rh_push_text(body, ",\"horizon_secs\":")
+        rh_push_decimal_i64(body, d.horizon_secs)
+        rh_push_text(body, ",\"overlap_start\":")
+        rh_push_decimal_i64(body, d.overlap_start)
+        rh_push_text(body, ",\"schedule_debt\":")
+        rh_push_decimal_i64(body, d.debt)
+        rh_push_text(body, "}")
+        k <- k + 1
+    rh_push_text(body, "],\"health\":{\"enqueued\":")
+    rh_push_decimal_i64(body, hl.enqueued)
+    rh_push_text(body, ",\"skipped\":")
+    rh_push_decimal_i64(body, hl.skipped)
+    rh_push_text(body, ",\"overdue\":")
+    rh_push_decimal_i64(body, hl.overdue)
+    rh_push_text(body, ",\"max_debt\":")
+    rh_push_decimal_i64(body, hl.max_debt)
+    rh_push_text(body, "},\"note\":\"one bounded, deterministic scheduling pass; a due full reconcile takes priority over an incremental; a skipped source keeps its schedule debt visible so the next tick retries and never silently drops it\"}")
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("worker: cannot write --out")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "worker: enqueued=")
+    rh_push_decimal_i64(done, hl.enqueued)
+    rh_push_text(done, " skipped=")
+    rh_push_decimal_i64(done, hl.skipped)
+    rh_push_text(done, " overdue=")
+    rh_push_decimal_i64(done, hl.overdue)
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# Parses a CycloneDX or SPDX-2.3 document and writes rh-inventory/1. An
+# unsupported declared spec version is reported (exit 3), never interpreted;
+# a document of the wrong format fails closed (exit 4). The notice states
+# that validity does not imply completeness.
+def rh_do_inventory(format: cstr, input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(format) or not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected inventory argument (allowlist)")
+        return 3
+    fmt: mutable u8 = 0
+    if rh_streq(format, "cyclonedx"):
+        fmt <- 0
+    elif rh_streq(format, "spdx"):
+        fmt <- 1
+    else:
+        rh_cli_err("inventory: unsupported --format (cyclonedx|spdx)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("inventory: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    rc: i64 = rh_inventory_report(raw, fmt, body)
+    if rc == -1:
+        rh_cli_err("inventory: input is not a valid document for the requested format (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("inventory: cannot write --out")
+        return 4
+    if rc == 1:
+        rh_cli_err("inventory: declared spec version is unsupported (reported, not interpreted)")
+        return 3
+    done: mutable darray[u8] = []
+    rh_push_text(done, "inventory: normalized ")
+    rh_push_cstr(done, format)
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# --- M08 native-VCS / non-PR execution path. ---
+# `--format hg` parses `hg log -Tjson` into rh-vcs/1 (native node id, local
+# rev, raw author, tags-not-releases, rejected-not-guessed). `--format patch`
+# parses an mbox-like series into rh-patch/1 (logical-change collapse,
+# trailer counts, Fixes: is a claim). Wrong shape / unknown format fails
+# closed.
+def rh_do_vcs(format: cstr, input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(format) or not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected vcs argument (allowlist)")
+        return 3
+    fmt: mutable u8 = 0
+    if rh_streq(format, "hg"):
+        fmt <- 0
+    elif rh_streq(format, "patch"):
+        fmt <- 1
+    elif rh_streq(format, "svn"):
+        fmt <- 2
+    elif rh_streq(format, "fossil"):
+        fmt <- 3
+    elif rh_streq(format, "gerrit"):
+        fmt <- 4
+    else:
+        rh_cli_err("vcs: unsupported --format (hg|svn|fossil|patch|gerrit)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("vcs: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_vcs_report(raw, fmt, body) != 0:
+        rh_cli_err("vcs: input does not parse for the requested format (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("vcs: cannot write --out")
+        return 4
+    done: mutable darray[u8] = []
+    rh_push_text(done, "vcs: normalized ")
+    rh_push_cstr(done, format)
+    done.push(10)
+    rh_write_stdout(done)
+    return 0
+
+# --- M06-08 notification execution path. ---
+# Reads an rh-notify-input/1 event stream and writes rh-notify-result/1.
+# An upstream maintainer destination is refused unless subscribed; the
+# refusal records nothing (no phantom cooldown). Dedup/cooldown on
+# (rule, subject, artifact digest); outage suppresses; ack/resolve silence.
+# With --state <file>, prior state is loaded (missing file = fresh) and the
+# updated state is written back, so cooldowns/acks/resolutions persist
+# across runs.
+def rh_do_notify_state(input_path: cstr, out_path: cstr, state_path: cstr, has_state: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected notify argument (allowlist)")
+        return 3
+    if has_state and not rh_arg_safe(state_path):
+        rh_cli_err("rejected notify state argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("notify: cannot read --input")
+        return 4
+    state_bytes: mutable darray[u8] = []
+    spath: mutable darray[u8] = []
+    sp: mutable cstr = ipp
+    if has_state:
+        rh_push_cstr(spath, state_path)
+        spath.push(0)
+        sp <- (&spath[0]).cast[cstr] can Unsafe.PointerCast
+        if file_exists(sp):
+            if rh_io_read(sp, state_bytes) < 0:
+                rh_cli_err("notify: cannot read --state file")
+                return 4
+    body: mutable darray[u8] = []
+    state_body: mutable darray[u8] = []
+    if rh_notify_report_state(raw, state_bytes, body, state_body) != 0:
+        rh_cli_err("notify: not a valid rh-notify-input/1 document or state (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("notify: cannot write --out")
+        return 4
+    if has_state:
+        state_body.push(10)
+        if not rh_io_write(sp, state_body):
+            rh_cli_err("notify: cannot write --state file")
+            return 4
+    rh_cli_out("notify: ok")
+    return 0
+
+# --- M06-01 query execution path. ---
+# Reads an rh-query-input/1 request and writes rh-query-result/1: cursor
+# pagination, per-capability scan-status breakdown, and an optional bounded
+# job lease sequence. Malformed requests fail closed.
+def rh_do_query(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected query argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("query: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_query_report(raw, body) != 0:
+        rh_cli_err("query: not a valid rh-query-input/1 document (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("query: cannot write --out")
+        return 4
+    rh_cli_out("query: ok")
+    return 0
+
+# --- M04-03 reversible identity-link execution path. ---
+# Reads an rh-identity-input/1 link ledger and writes rh-identity-result/1:
+# identity revision, clusters over ACCEPTED links only, and a per-actor
+# cluster map. Rejected/revoked links change nothing; malformed input fails
+# closed.
+def rh_do_identity(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected identity argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("identity: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_identity_report(raw, body) != 0:
+        rh_cli_err("identity: not a valid rh-identity-input/1 document (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("identity: cannot write --out")
+        return 4
+    rh_cli_out("identity: ok")
+    return 0
+
+# --- M08 release-only source execution path. ---
+# Reads an rh-release-feed-input/1 document ({"first_seen":N,"releases":[...]})
+# and writes rh-release-feed-result/1. No history/identity is derived; valid
+# time (published) and known time (first-seen) are kept separate.
+def rh_do_release_feed(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected release-feed argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("release-feed: cannot read --input")
+        return 4
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        rh_cli_err("release-feed: --input must be a JSON object (fail closed)")
+        return 4
+    fs_idx: i64 = rh_json_obj_get(nodes, texts, root, "first_seen")
+    if fs_idx < 0:
+        rh_cli_err("release-feed: missing first_seen (fail closed)")
+        return 4
+    fs_ok: mutable i64 = 0
+    first_seen: i64 = rh_json_int(nodes, raw, fs_idx, &fs_ok)
+    if fs_ok == 0:
+        rh_cli_err("release-feed: first_seen must be an integer (fail closed)")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_rfr_report(raw, first_seen, body) != 0:
+        rh_cli_err("release-feed: input is not a valid release feed (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("release-feed: cannot write --out")
+        return 4
+    rh_cli_out("release-feed: ok")
+    return 0
+
+# --- M03-05 registry enrichment execution path. ---
+# Reads an rh-registry-meta/1 document and writes rh-registry-meta-result/1.
+# Yanked versions are retained; absent yank/date fields stay null (unknown);
+# repository links are assertions, not identity; declared deps are counts.
+def rh_do_registry_meta(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected registry-meta argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("registry-meta: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_registry_meta_report(raw, body) != 0:
+        rh_cli_err("registry-meta: not a valid rh-registry-meta/1 document (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("registry-meta: cannot write --out")
+        return 4
+    rh_cli_out("registry-meta: ok")
+    return 0
+
+# --- M08 PEP 440 version-semantics execution path. ---
+# Reads an rh-pep440-input/1 document and writes rh-pep440-result/1 with
+# per-version parse details and an ascending order over valid versions only.
+def rh_do_pep440(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected pep440 argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("pep440: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_pep440_report(raw, body) != 0:
+        rh_cli_err("pep440: not a valid rh-pep440-input/1 document (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("pep440: cannot write --out")
+        return 4
+    rh_cli_out("pep440: ok")
+    return 0
+
+# --- M07-11 / M07-12 ops execution paths. ---
+# monitor: service vs project series are separate; a rate with no
+# denominator is null, never 0. quota: token bucket + backoff + stop +
+# cancel refund.
+def rh_do_ops_monitor(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected ops monitor argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("ops monitor: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_monitor_report(raw, body) != 0:
+        rh_cli_err("ops monitor: not a valid rh-monitor-input/1 document (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("ops monitor: cannot write --out")
+        return 4
+    rh_cli_out("ops monitor: ok")
+    return 0
+
+def rh_do_ops_quota(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected ops quota argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("ops quota: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_quota_report(raw, body) != 0:
+        rh_cli_err("ops quota: not a valid rh-quota-input/1 document (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("ops quota: cannot write --out")
+        return 4
+    rh_cli_out("ops quota: ok")
+    return 0
+
+# --- M07-07 publication suppression execution path. ---
+# Reads an rh-privacy-input/1 document and writes rh-privacy-result/1. A
+# cell publishes only when every contributing subject is public and the
+# threshold is met; private/unknown members withhold; small cells suppress.
+def rh_do_privacy(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected privacy argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("privacy: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_privacy_report(raw, body) != 0:
+        rh_cli_err("privacy: not a valid rh-privacy-input/1 document (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("privacy: cannot write --out")
+        return 4
+    rh_cli_out("privacy: ok")
+    return 0
+
+# --- R013 declared-roles execution path. ---
+# Reads an rh-roles-input/1 document and writes rh-roles-result/1. Declared
+# roles are time-scoped evidence, separate from observed actions; unknown
+# role strings stay unknown; revoked/not-yet-effective is inactive.
+def rh_do_roles(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected roles argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("roles: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_roles_report(raw, body) != 0:
+        rh_cli_err("roles: not a valid rh-roles-input/1 document (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("roles: cannot write --out")
+        return 4
+    rh_cli_out("roles: ok")
+    return 0
+
+# --- M11 experimental isolation execution path. ---
+# Reads an rh-experimental-input/1 document and writes
+# rh-experimental-result/1. Admissibility gate (opt-in + wave G + cost +
+# explicit limits) is enforced; the sample discontinuity metric is an
+# observable horizon outcome, labelled experimental, never abandonment.
+def rh_do_experimental(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected experimental argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("experimental: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_experimental_report(raw, body) != 0:
+        rh_cli_err("experimental: not a valid rh-experimental-input/1 document (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("experimental: cannot write --out")
+        return 4
+    rh_cli_out("experimental: ok")
+    return 0
+
+# --- M06-03 accessible server-rendered report page. ---
+# Renders an M01 report.json into a self-contained accessible HTML page
+# (metric table + capabilities table + mandatory caveats). It computes
+# nothing and adds no verdict; every dynamic string is HTML-escaped.
+def rh_do_render(report_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(report_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected render argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, report_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("render: cannot read --report")
+        return 4
+    html: mutable darray[u8] = []
+    if rh_render_report_html(raw, html) != 0:
+        rh_cli_err("render: --report is not a renderable report.json (fail closed)")
+        return 4
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, html):
+        rh_cli_err("render: cannot write --out")
+        return 4
+    rh_cli_out("render: ok")
+    return 0
+
+# --- M02-03 job-lease execution path. ---
+# Applies a lease op sequence (claim/heartbeat/release/status) to a real
+# filesystem lease under <root>/leases/<job>.lease, enforcing fencing.
+def rh_do_store_lease(root: cstr, job: cstr, input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(root) or not rh_arg_safe(job) or not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected store lease argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] = []
+    rh_push_cstr(ip, input_path)
+    ip.push(0)
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("store lease: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if rh_lease_report(raw, root, job, body) != 0:
+        rh_cli_err("store lease: not a valid rh-store-lease-input/1 document or lease dir (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] = []
+    rh_push_cstr(op, out_path)
+    op.push(0)
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("store lease: cannot write --out")
+        return 4
+    rh_cli_out("store lease: ok")
+    return 0

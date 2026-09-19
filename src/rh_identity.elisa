@@ -1,0 +1,115 @@
+# rh_identity.elisa — reversible identity links + revisioned clusters +
+# automation classification (M04-02/03/04).
+#
+# Raw author identities are index-identified (actor ids are positions in
+# the caller's raw-identity ledger). Links are explicit assertions with a
+# lifecycle: proposed(0) accepted(1) rejected(2) revoked(3). Clusters are
+# DERIVED from accepted links only and are recomputed on every change, so
+# revocation is reversible by construction: the raw ledger is never
+# mutated here (the API cannot even see it), which is what makes the
+# "revocation changes only derived cluster-sensitive results" guarantee
+# structural rather than procedural. No automatic merging by display name
+# or email domain exists in this module — there is no such function.
+
+const RH_LINK_PROPOSED: u8 = 0
+const RH_LINK_ACCEPTED: u8 = 1
+const RH_LINK_REJECTED: u8 = 2
+const RH_LINK_REVOKED: u8 = 3
+
+const RH_ACTOR_HUMAN: u8 = 0
+const RH_ACTOR_BOT_KNOWN: u8 = 1
+const RH_ACTOR_UNRESOLVED: u8 = 2
+
+struct RhIdentityLink:
+    a: mutable i64
+    b: mutable i64
+    state: mutable u8
+    revision_added: mutable i64
+
+# Identity revision: advances on every accepted-state change so that
+# cluster-sensitive results can be keyed to it. Equal content yields the
+# same revision (deterministic), and revision 0 means "no links".
+def rh_identity_revision(links: darray[RhIdentityLink]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    rev: mutable i64 = 0
+    i: mutable usize = 0
+    while i < links.count |i, links, rev|:
+        l: RhIdentityLink = links[i]
+        i <- i + 1
+        if l.state == RH_LINK_ACCEPTED:
+            rev <- rev + 1
+    return rev
+
+# Union-find over accepted links. parent must be pre-filled 0..n-1 in the
+# caller buffer. Returns the number of distinct clusters.
+def rh_find_root(parent: mutable darray[i64]&, x: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    cur: mutable i64 = x
+    hops: mutable i64 = 0
+    while parent[cur.usize()] != cur |cur, parent, hops|:
+        cur <- parent[cur.usize()]
+        hops <- hops + 1
+        if hops > 1000000:
+            return -1
+    return cur
+
+def rh_identity_clusters(links: darray[RhIdentityLink]&, actor_count: i64, parent: mutable darray[i64]&, cluster_out: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    i: mutable i64 = 0
+    while i < actor_count |i, parent|:
+        parent.push(i)
+        i <- i + 1
+    j: mutable usize = 0
+    while j < links.count |j, links, parent|:
+        l: RhIdentityLink = links[j]
+        j <- j + 1
+        if l.state != RH_LINK_ACCEPTED:
+            continue
+        ra: i64 = rh_find_root(parent, l.a)
+        rb: i64 = rh_find_root(parent, l.b)
+        if ra < 0 or rb < 0:
+            continue
+        if ra != rb:
+            # Deterministic merge: lower index becomes the root.
+            lo: i64 = ra if ra < rb else rb
+            hi: i64 = rb if ra < rb else ra
+            parent[hi.usize()] <- lo
+    # Materialize cluster id per actor (root index), then count distinct.
+    k: mutable i64 = 0
+    while k < actor_count |k, parent, cluster_out|:
+        cluster_out.push(rh_find_root(parent, k))
+        k <- k + 1
+    distinct: mutable i64 = 0
+    m: mutable i64 = 0
+    while m < cluster_out.count.i64() |m, cluster_out, distinct|:
+        seen: mutable bool = false
+        n: mutable i64 = 0
+        while n < m |n, cluster_out, m, seen|:
+            if cluster_out[n.usize()] == cluster_out[m.usize()]:
+                seen <- true
+            n <- n + 1
+        if not seen:
+            distinct <- distinct + 1
+        m <- m + 1
+    return distinct
+
+# One actor's cluster id from a materialized map. -1 when out of range.
+def rh_cluster_of(cluster_map: darray[i64]&, actor: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if actor < 0 or actor >= cluster_map.count.i64():
+        return -1
+    return cluster_map[actor.usize()]
+
+# Stratified actor-kind counts over the ledger. bots_out counts
+# provider-declared bots, unresolved_out counts accounts with no
+# classification — "unknown never forced human" is the shape here.
+def rh_actor_kinds(kinds: darray[u8]&, humans_out: mutable i64&, bots_out: mutable i64&, unresolved_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    humans_out[0] <- 0
+    bots_out[0] <- 0
+    unresolved_out[0] <- 0
+    i: mutable usize = 0
+    while i < kinds.count |i, kinds, humans_out, bots_out, unresolved_out|:
+        k: u8 = kinds[i]
+        i <- i + 1
+        if k == RH_ACTOR_HUMAN:
+            humans_out[0] <- humans_out[0] + 1
+        if k == RH_ACTOR_BOT_KNOWN:
+            bots_out[0] <- bots_out[0] + 1
+        if k == RH_ACTOR_UNRESOLVED:
+            unresolved_out[0] <- unresolved_out[0] + 1

@@ -1,0 +1,119 @@
+# test_m07_sha.elisa — M07-04 integrity primitive: SHA-256 + HMAC-SHA256
+# checked against published vectors (FIPS 180-4 examples, RFC 4231 test
+# cases). These oracles are independent of the implementation: the expected
+# digests are copied from the standards, not from this program's output.
+#
+# Exit 0 when all checks pass, 1 otherwise.
+
+include "./rh_base.elisa"
+include "./rh_sha256.elisa"
+
+def hex_of(text: u8&) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
+    data: mutable darray[u8] = []
+    rh_push_text(data, text)
+    out: mutable darray[u8] = []
+    rh_sha256(data, out)
+    return out
+
+def check_hex(got: darray[u8]&, want: u8&, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    want_buf: mutable darray[u8] = []
+    rh_push_text(want_buf, want)
+    if rh_hex_eq(got, want_buf):
+        return
+    fails[0] <- fails[0] + 1
+    line: mutable darray[u8] = []
+    rh_push_text(line, "FAIL ")
+    rh_push_text(line, label)
+    rh_push_text(line, " got=")
+    for b in got:
+        rh_push_hexdigit(line, b.u64())
+    line.push(10)
+    rh_write_stdout(line)
+
+def check(condition: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    if condition:
+        return
+    fails[0] <- fails[0] + 1
+    line: mutable darray[u8] = []
+    rh_push_text(line, "FAIL ")
+    rh_push_text(line, label)
+    line.push(10)
+    rh_write_stdout(line)
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fails: mutable i64 = 0
+
+# --- FIPS 180-4 SHA-256 vectors ---
+    empty: mutable darray[u8] = []
+    e_out: mutable darray[u8] = []
+    rh_sha256(empty, e_out)
+    check_hex(e_out, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "sha-empty", &fails)
+
+    check_hex(hex_of("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha-abc", &fails)
+    check_hex(hex_of("The quick brown fox jumps over the lazy dog"), "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592", "sha-fox", &fails)
+
+# 448-bit message exercises multi-block padding (the 56-byte boundary):
+# SHA-256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+    check_hex(hex_of("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "sha-448bit", &fails)
+
+# --- RFC 4231 HMAC-SHA256 vectors ---
+# Test Case 1: key = 20 x 0x0b, data = "Hi There".
+    k1: mutable darray[u8] = []
+    i: mutable i64 = 0
+    while i < 20 |i, k1|:
+        k1.push(11)
+        i <- i + 1
+    d1: mutable darray[u8] = []
+    rh_push_text(d1, "Hi There")
+    h1: mutable darray[u8] = []
+    rh_hmac_sha256(k1, d1, h1)
+    check_hex(h1, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7", "hmac-rfc4231-1", &fails)
+    check(rh_hmac_verify(k1, d1, h1), "hmac-verify-true", &fails)
+
+# Test Case 2: key = "Jefe", data = "what do ya want for nothing?".
+    k2: mutable darray[u8] = []
+    rh_push_text(k2, "Jefe")
+    d2: mutable darray[u8] = []
+    rh_push_text(d2, "what do ya want for nothing?")
+    h2: mutable darray[u8] = []
+    rh_hmac_sha256(k2, d2, h2)
+    check_hex(h2, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", "hmac-rfc4231-2", &fails)
+    check(rh_hmac_verify(k2, d2, h2), "hmac-verify-true-2", &fails)
+
+# Wrong key, wrong message, and tampered signature must all fail to verify.
+    kbad: mutable darray[u8] = []
+    rh_push_text(kbad, "Jef3")
+    check(not rh_hmac_verify(kbad, d2, h2), "hmac-wrong-key-refused", &fails)
+    check(not rh_hmac_verify(k2, d1, h2), "hmac-wrong-msg-refused", &fails)
+    tampered: mutable darray[u8] = []
+    j: mutable usize = 0
+    while j < h2.count |j, h2, tampered|:
+        tampered.push(h2[j])
+        j <- j + 1
+    tampered[0] <- (tampered[0] ^ 1)
+    check(not rh_hmac_verify(k2, d2, tampered), "hmac-tampered-sig-refused", &fails)
+    check(not rh_hex_eq(h2, tampered), "hex-ne-tampered", &fails)
+
+# Key longer than the 64-byte block must be hashed first (RFC 2104); this
+# vector is the well-known 131-byte key test (RFC 4231 Test Case 6, key =
+# 131 x 0xaa, data = "Test Using Larger Than Block-Size Key - Hash Key First").
+    k6: mutable darray[u8] = []
+    m: mutable i64 = 0
+    while m < 131 |m, k6|:
+        k6.push(170)
+        m <- m + 1
+    d6: mutable darray[u8] = []
+    rh_push_text(d6, "Test Using Larger Than Block-Size Key - Hash Key First")
+    h6: mutable darray[u8] = []
+    rh_hmac_sha256(k6, d6, h6)
+    check_hex(h6, "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54", "hmac-rfc4231-6", &fails)
+
+    if fails == 0:
+        rh_print_line("M07 SHA OK")
+        return 0
+    summary: mutable darray[u8] = []
+    rh_push_text(summary, "M07 SHA FAIL count=")
+    rh_push_decimal_i64(summary, fails)
+    summary.push(10)
+    rh_write_stdout(summary)
+    return 1

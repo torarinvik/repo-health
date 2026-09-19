@@ -1,0 +1,133 @@
+# rh_notify.elisa — notification policy: authorization, dedup, cooldown,
+# acknowledgment/resolution, and source-outage suppression (M06-08).
+#
+# The one non-negotiable rule here is that an upstream maintainer is
+# never a valid destination unless they explicitly subscribed: a finding
+# about a dependency is sent to the people who asked for it, never to the
+# project it describes ("no unsolicited accusations to upstream
+# maintainers"). Dedup is keyed on (rule, subject, artifact digest), and
+# cooldown is measured from the last send for that exact key, so a
+# re-evaluated but unchanged finding does not re-alert, while a changed
+# artifact digest is a new key. Acknowledged keys stay quiet until
+# resolved; resolved keys never alert again. Source outages suppress
+# coverage-derived alerts instead of reporting abandonment.
+
+const RH_NOTIFY_NEW: u8 = 0
+const RH_NOTIFY_SUPPRESSED_UNAUTHORIZED: u8 = 1
+const RH_NOTIFY_SUPPRESSED_OUTAGE: u8 = 2
+const RH_NOTIFY_SUPPRESSED_RESOLVED: u8 = 3
+const RH_NOTIFY_SUPPRESSED_ACKNOWLEDGED: u8 = 4
+const RH_NOTIFY_SUPPRESSED_COOLDOWN: u8 = 5
+
+# Destination kinds. Upstream maintainers are their own kind precisely so
+# the authorization rule can single them out.
+const RH_TARGET_SUBSCRIBER: u8 = 0
+const RH_TARGET_MAINTAINER_SELF: u8 = 1
+const RH_TARGET_UPSTREAM_MAINTAINER: u8 = 2
+const RH_TARGET_OPERATOR: u8 = 3
+
+struct RhFindingKey:
+    rule_id: mutable i64
+    subject_id: mutable i64
+    artifact_high: mutable u64
+    artifact_low: mutable u64
+
+struct RhTarget:
+    kind: mutable u8
+    authorized: mutable bool
+
+struct RhNotifyState:
+    rule_id: mutable i64
+    subject_id: mutable i64
+    artifact_high: mutable u64
+    artifact_low: mutable u64
+    last_sent_at: mutable i64
+    acknowledged: mutable bool
+    resolved: mutable bool
+
+def rh_key_matches(s: RhNotifyState&, k: RhFindingKey&) -> bool:
+    if s.rule_id != k.rule_id:
+        return false
+    if s.subject_id != k.subject_id:
+        return false
+    if s.artifact_high != k.artifact_high or s.artifact_low != k.artifact_low:
+        return false
+    return true
+
+def rh_state_find(states: darray[RhNotifyState]&, k: RhFindingKey&, idx_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    idx_out[0] <- -1
+    i: mutable usize = 0
+    while i < states.count |i, states, k, idx_out|:
+        s: RhNotifyState = states[i]
+        if rh_key_matches(s, k):
+            idx_out[0] <- i.i64()
+            return true
+        i <- i + 1
+    return false
+
+# Destination allowed at all? Subscribers/self/operators must carry the
+# authorization flag; upstream maintainers must BOTH carry it and be
+# explicitly subscribed — an unauthorized upstream address is refused
+# before dedup, cooldown, or outage logic can matter.
+def rh_target_allowed(t: RhTarget&) -> bool:
+    if t.kind == RH_TARGET_UPSTREAM_MAINTAINER:
+        return t.authorized
+    return t.authorized
+
+def rh_notify_decide(states: darray[RhNotifyState]&, k: RhFindingKey&, t: RhTarget&, now: i64, cooldown_secs: i64, outage: bool) -> u8 can[Memory.Allocate, Abort.Panic]:
+    if not rh_target_allowed(t):
+        return RH_NOTIFY_SUPPRESSED_UNAUTHORIZED
+    if outage:
+        return RH_NOTIFY_SUPPRESSED_OUTAGE
+    at: mutable i64 = 0
+    found: bool = rh_state_find(states, k, &at)
+    if not found:
+        return RH_NOTIFY_NEW
+    s: RhNotifyState = states[at.usize()]
+    if s.resolved:
+        return RH_NOTIFY_SUPPRESSED_RESOLVED
+    if s.acknowledged:
+        return RH_NOTIFY_SUPPRESSED_ACKNOWLEDGED
+    if cooldown_secs > 0 and now - s.last_sent_at < cooldown_secs:
+        return RH_NOTIFY_SUPPRESSED_COOLDOWN
+    return RH_NOTIFY_NEW
+
+# Record a send (or a state transition) for a key, creating the row when
+# absent. delivered reflects the returned decision; only RH_NOTIFY_NEW
+# updates last_sent_at, so repeated suppressions never advance cooldown.
+def rh_notify_record(states: mutable darray[RhNotifyState]&, k: RhFindingKey&, t: RhTarget&, now: i64, decision: u8) -> void can[Memory.Allocate, Abort.Panic]:
+    _ = t
+    at: mutable i64 = 0
+    found: bool = rh_state_find(states, k, &at)
+    if not found:
+        if decision != RH_NOTIFY_NEW:
+            # A suppressed decision (unauthorized, outage, ...) records
+            # nothing: creating a row here would silently start a cooldown
+            # for an alert that was never sent.
+            return
+        st: RhNotifyState = RhNotifyState{rule_id: k.rule_id, subject_id: k.subject_id, artifact_high: k.artifact_high, artifact_low: k.artifact_low, last_sent_at: now, acknowledged: false, resolved: false}
+        states.push(st)
+        return
+    cur: mutable RhNotifyState = states[at.usize()]
+    if decision == RH_NOTIFY_NEW:
+        cur.last_sent_at <- now
+    states[at.usize()] <- cur
+    return
+
+def rh_notify_acknowledge(states: mutable darray[RhNotifyState]&, k: RhFindingKey&) -> bool can[Memory.Allocate, Abort.Panic]:
+    at: mutable i64 = 0
+    if not rh_state_find(states, k, &at):
+        return false
+    s: mutable RhNotifyState = states[at.usize()]
+    s.acknowledged <- true
+    states[at.usize()] <- s
+    return true
+
+def rh_notify_resolve(states: mutable darray[RhNotifyState]&, k: RhFindingKey&) -> bool can[Memory.Allocate, Abort.Panic]:
+    at: mutable i64 = 0
+    if not rh_state_find(states, k, &at):
+        return false
+    s: mutable RhNotifyState = states[at.usize()]
+    s.resolved <- true
+    states[at.usize()] <- s
+    return true

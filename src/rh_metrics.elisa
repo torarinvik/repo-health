@@ -1,0 +1,175 @@
+# rh_metrics.elisa — deterministic metric formulas (M00/M04).
+#
+# Plan §19.1: integer event counts, rational arithmetic, deterministic
+# descending order. Concentration k for threshold a/b:
+#   remove zeros; empty -> not_applicable (-1); cumulative*b >= total*a -> k.
+# Overflow-safe via gcd reduction: cum*b vs total*a is compared as
+# (cum/g1)*(b/g1) vs (tot/g2)*(a/g2); if the reduced products still exceed
+# u64, -3 (bounded error) is returned instead of a wrapped answer.
+# HHI is sum(xi^2)/total^2 as a reduced exact fraction; the effective actor
+# count is its reciprocal. Display rounding must never become stored state,
+# so no floats appear anywhere in this file.
+#
+# Return codes for rh_concentration: k >= 1 on success; -1 not_applicable;
+# -2 bad threshold; -3 overflow (bounded error, S012).
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+const RH_U64MAX: u64 = 18446744073709551615
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_gcd(a: u64, b: u64) -> u64:
+    x: mutable u64 = a
+    y: mutable u64 = b
+    while y != 0 |x, y|:
+        r: u64 = x % y
+        x <- y
+        y <- r
+    return x
+
+# In-place descending insertion sort (deterministic; equal counts keep
+# input order, which callers pre-sort by actor id for witness stability).
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_sort_desc(values: mutable darray[u64]&) -> void can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = 1
+    while i < values.count |i, values|:
+        key: u64 = values[i]
+        j: mutable usize = i
+        while j > 0 |j, values, key|:
+            if values[j - 1] >= key:
+                break
+            values[j] <- values[j - 1]
+            j <- j - 1
+        values[j] <- key
+        i <- i + 1
+
+# Exact overflow-checked a*b >= c*d via gcd reduction.
+# Both sides are divided by common factors (never one product alone):
+# g1 divides a and c, g2 divides b and d, preserving the comparison.
+# Returns 1 when a*b >= c*d, 0 when below, -1 on overflow (bounded error).
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_cross_ge(a: u64, b: u64, c: u64, d: u64) -> i64:
+    g1: u64 = rh_gcd(a, c)
+    a1: u64 = a / g1
+    c1: u64 = c / g1
+    g2: u64 = rh_gcd(b, d)
+    b1: u64 = b / g2
+    d1: u64 = d / g2
+    if a1 > RH_U64MAX / b1:
+        return -1
+    if c1 > RH_U64MAX / d1:
+        return -1
+    if a1 * b1 >= c1 * d1:
+        return 1
+    return 0
+
+def rh_concentration(counts: mutable darray[u64]&, threshold_num: u64, threshold_den: u64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if threshold_den == 0:
+        return -2
+    if threshold_num == 0:
+        return -2
+    if threshold_num > threshold_den:
+        return -2
+    total: mutable u64 = 0
+    positives: mutable u64 = 0
+    for i in 0..<counts.count |counts, total, positives|:
+        v: u64 = counts[i]
+        if v > 0:
+            if total > RH_U64MAX - v:
+                return -3
+            total <- total + v
+            positives <- positives + 1
+    if positives == 0:
+        return -1
+    rh_sort_desc(counts)
+    cumulative: mutable u64 = 0
+    position: mutable u64 = 0
+    for i in 0..<counts.count |counts, cumulative, position, total, threshold_num, threshold_den|:
+        v: u64 = counts[i]
+        if v > 0:
+            cumulative <- cumulative + v
+            position <- position + 1
+            verdict: i64 = rh_cross_ge(cumulative, threshold_den, total, threshold_num)
+            if verdict < 0:
+                return -3
+            if verdict == 1:
+                return position.i64()
+    return -1
+
+# HHI as reduced exact fraction num/den. Returns false when the population
+# is empty (caller reports not_applicable) or on overflow (bounded error).
+def rh_hhi(counts: darray[u64]&, num_out: mutable u64&, den_out: mutable u64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    total: mutable u64 = 0
+    for i in 0..<counts.count |counts, total|:
+        v: u64 = counts[i]
+        if v > 0:
+            if total > RH_U64MAX - v:
+                return false
+            total <- total + v
+    if total == 0:
+        return false
+    if total > RH_U64MAX / total:
+        return false
+    den: u64 = total * total
+    acc: mutable u64 = 0
+    for i in 0..<counts.count |counts, acc|:
+        v: u64 = counts[i]
+        if v > 0:
+            if v > RH_U64MAX / v:
+                return false
+            sq: u64 = v * v
+            if acc > RH_U64MAX - sq:
+                return false
+            acc <- acc + sq
+    g: u64 = rh_gcd(acc, den)
+    num_out[0] <- acc / g
+    den_out[0] <- den / g
+    return true
+
+# Gini coefficient as a reduced exact fraction num/den:
+#   G = sum_i sum_j |x_i - x_j| / (2 * n * sum_i x_i)
+# The double sum is computed exactly over nonzero actor counts. Returns
+# false when the population is empty (caller reports not_applicable) or on
+# overflow (bounded error) — never a fabricated number. A single nonzero
+# actor yields 0/1 (perfect equality is impossible with n=1, but Gini is
+# undefined for n<2; callers must treat n<2 as not_applicable, which the
+# zero denominator of the 2*n factor would produce anyway). Display
+# rounding is never stored here.
+def rh_gini(counts: darray[u64]&, num_out: mutable u64&, den_out: mutable u64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    total: mutable u64 = 0
+    nonzero: mutable u64 = 0
+    for i in 0..<counts.count |counts, total, nonzero|:
+        v: u64 = counts[i]
+        if v > 0:
+            if total > RH_U64MAX - v:
+                return false
+            total <- total + v
+            nonzero <- nonzero + 1
+    if total == 0 or nonzero < 2:
+        return false
+    # S = sum_{j<k} |x_j - x_k| over nonzero counts (unordered pairs)
+    pair: mutable u64 = 0
+    j: mutable usize = 0
+    while j < counts.count |j, counts, pair|:
+        a: u64 = counts[j]
+        j <- j + 1
+        if a == 0:
+            continue
+        k: mutable usize = j
+        while k < counts.count |k, counts, pair, a|:
+            b: u64 = counts[k]
+            k <- k + 1
+            if b == 0:
+                continue
+            diff: u64 = (a if a >= b else b) - (b if a >= b else a)
+            if pair > RH_U64MAX - diff:
+                return false
+            pair <- pair + diff
+    # Gini = S / (n * total)
+    num: u64 = pair
+    if nonzero > RH_U64MAX / total:
+        return false
+    den: u64 = nonzero * total
+    g: u64 = rh_gcd(num, den)
+    num_out[0] <- num / g
+    den_out[0] <- den / g
+    return true

@@ -1,0 +1,104 @@
+# rh_reconcile.elisa — incremental fetch + reconciliation policy (M02-06).
+#
+# M02-06 requires that connectors fetch incrementally (updated-since cursors
+# with a small overlap) AND periodically run a full reconcile to catch
+# deletions, missed updates and collection gaps. Webhooks are only a
+# freshness hint, never the source of truth, so a reconcile must still be
+# scheduled on a wall-clock cadence.
+#
+# This module is the pure scheduling policy: given the last successful full
+# reconcile time, the reconcile interval, the last incremental cursor time
+# and `now`, it decides whether a full reconcile is due, and how far back the
+# reconcile must look. Two rules keep it honest:
+#
+#   * An incremental cursor never advances the full-reconcile clock; only a
+#     *completed* full reconcile does. A failing/partial reconcile leaves the
+#     clock where it was, so the next run tries again.
+#   * The reconcile horizon covers the whole interval since the last full
+#     reconcile (not just since the last cursor), because the cursor only
+#     proves which *updates* were seen, not what was deleted.
+#
+# All arithmetic is integer seconds; no floats, no clock reads (callers pass
+# `now`), so results replay deterministically.
+
+include "./rh_base.elisa"
+
+# Mode returned by the policy.
+const RH_RECON_NONE: u8 = 0
+const RH_RECON_DUE: u8 = 1
+# An incremental pass is always allowed; it is not mutually exclusive with a
+# full reconcile, but callers usually prefer one per tick.
+const RH_RECON_INCREMENTAL: u8 = 2
+
+# Nearest multiple of `interval` at or after `since`, clamped into the
+# interval ending at `now`. Returns the earliest time >= since at which a
+# reconcile would next be due.
+def rh_reconcile_next_due(last_full: i64, interval: i64) -> i64:
+    if interval <= 0:
+        return -1
+    return last_full + interval
+
+# Is a full reconcile due at `now`? A non-positive interval means "never
+# scheduled" (not "always") so a misconfigured zero interval cannot cause a
+# tight reconcile loop.
+def rh_reconcile_due(last_full: i64, interval: i64, now: i64) -> bool:
+    if interval <= 0:
+        return false
+    if last_full < 0:
+        # Never reconciled: due immediately (a fresh source must be seeded).
+        return true
+    return now >= last_full + interval
+
+# The look-back horizon (seconds) a full reconcile must cover at `now`.
+# It spans from the last full reconcile to now. A never-reconciled source
+# returns 0, meaning "unbounded / full history" is the caller's decision; the
+# policy reports 0 and callers must treat 0 as "no lower bound".
+def rh_reconcile_horizon(last_full: i64, now: i64) -> i64:
+    if last_full < 0 or now <= last_full:
+        return 0
+    return now - last_full
+
+# How many reconcile intervals have been missed as of `now` (0 when on
+# schedule). This is the "schedule debt" used to raise a service-health
+# signal; it is never allowed to silently skip reconciles. A never-reconciled
+# source reports 1 (one overdue window), not 0.
+def rh_reconcile_debt(last_full: i64, interval: i64, now: i64) -> i64:
+    if interval <= 0:
+        return 0
+    if last_full < 0:
+        return 1
+    if now < last_full + interval:
+        return 0
+    return (now - last_full) / interval
+
+# The cursor overlap: an incremental fetch re-reads a small window before the
+# last successful cursor so an update committed just after the previous page
+# boundary is not lost. Returns the look-back start time, clamped at 0.
+def rh_cursor_overlap_start(cursor_time: i64, overlap_secs: i64) -> i64:
+    if cursor_time <= 0:
+        return 0
+    if overlap_secs <= 0:
+        return cursor_time
+    start: i64 = cursor_time - overlap_secs
+    if start < 0:
+        return 0
+    return start
+
+# Decide the mode for this tick. Preferred order: a due full reconcile wins;
+# otherwise an incremental pass (when there is a usable cursor); otherwise
+# nothing. A missing cursor with no due reconcile yields INCREMENTAL with
+# start 0 (the caller must do a lowest-possible initial fetch).
+def rh_reconcile_mode(last_full: i64, interval: i64, has_cursor: bool, now: i64) -> u8:
+    if rh_reconcile_due(last_full, interval, now):
+        return RH_RECON_DUE
+    if has_cursor:
+        return RH_RECON_INCREMENTAL
+    return RH_RECON_INCREMENTAL
+
+# Apply a *completed* full reconcile: advance the full-reconcile clock to now.
+# Returns the new last_full. An incomplete reconcile must NOT call this.
+def rh_reconcile_complete(last_full: i64, now: i64) -> i64:
+    if now < last_full:
+        # A clock that moves backwards is rejected; keep the later value.
+        return last_full
+    return now

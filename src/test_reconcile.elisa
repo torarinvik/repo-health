@@ -1,0 +1,82 @@
+# test_reconcile.elisa — M02-06 reconciliation scheduling policy: due-window
+# math, horizon, schedule debt, cursor overlap, and the mode decision. Only a
+# completed full reconcile advances the clock; a never-reconciled source is
+# due immediately and carries debt 1, not 0.
+include "./rh_base.elisa"
+include "./rh_reconcile.elisa"
+
+def rcheck(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    if cond:
+        return
+    fails[0] <- fails[0] + 1
+    b: mutable darray[u8] = []
+    rh_push_text(b, "RECON-FAIL ")
+    rh_push_text(b, label)
+    b.push(10)
+    rh_write_stdout(b)
+
+def check_due(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    # never reconciled -> due immediately
+    rcheck(rh_reconcile_due(-1, 1000, 0), "due-never", fails)
+    # exactly on the boundary -> due
+    rcheck(rh_reconcile_due(1000, 1000, 2000), "due-boundary", fails)
+    # one second before -> not due
+    rcheck(not rh_reconcile_due(1000, 1000, 1999), "due-before", fails)
+    # zero/negative interval means never scheduled (never a tight loop)
+    rcheck(not rh_reconcile_due(1000, 0, 999999), "due-zero-interval", fails)
+    rcheck(not rh_reconcile_due(1000, -5, 999999), "due-negative-interval", fails)
+    return
+
+def check_horizon(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    # never reconciled -> 0 (caller must treat as unbounded)
+    rcheck(rh_reconcile_horizon(-1, 5000) == 0, "horizon-never", fails)
+    # spans full interval since last full reconcile
+    rcheck(rh_reconcile_horizon(1000, 4000) == 3000, "horizon-span", fails)
+    # now <= last -> 0
+    rcheck(rh_reconcile_horizon(5000, 5000) == 0, "horizon-equal", fails)
+    rcheck(rh_reconcile_horizon(5000, 4000) == 0, "horizon-past", fails)
+    return
+
+def check_debt(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    rcheck(rh_reconcile_debt(-1, 1000, 0) == 1, "debt-never", fails)
+    rcheck(rh_reconcile_debt(1000, 1000, 1500) == 0, "debt-on-time", fails)
+    rcheck(rh_reconcile_debt(1000, 1000, 2000) == 1, "debt-one", fails)
+    rcheck(rh_reconcile_debt(1000, 1000, 3000) == 2, "debt-two", fails)
+    rcheck(rh_reconcile_debt(1000, 1000, 4500) == 3, "debt-three-floor", fails)
+    rcheck(rh_reconcile_debt(1000, 0, 999999) == 0, "debt-zero-interval", fails)
+    return
+
+def check_overlap(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    rcheck(rh_cursor_overlap_start(10000, 3600) == 6400, "overlap-normal", fails)
+    rcheck(rh_cursor_overlap_start(1000, 3600) == 0, "overlap-clamp", fails)
+    rcheck(rh_cursor_overlap_start(0, 3600) == 0, "overlap-zero-cursor", fails)
+    rcheck(rh_cursor_overlap_start(5000, 0) == 5000, "overlap-none", fails)
+    return
+
+def check_mode(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    rcheck(rh_reconcile_mode(1000, 1000, true, 2500) == RH_RECON_DUE, "mode-due-wins", fails)
+    rcheck(rh_reconcile_mode(1000, 1000, true, 1500) == RH_RECON_INCREMENTAL, "mode-incremental", fails)
+    rcheck(rh_reconcile_mode(-1, 1000, false, 0) == RH_RECON_DUE, "mode-fresh-due", fails)
+    return
+
+def check_complete(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    rcheck(rh_reconcile_complete(1000, 2000) == 2000, "complete-advance", fails)
+    # a backwards clock is rejected; the later value is kept
+    rcheck(rh_reconcile_complete(2000, 1000) == 2000, "complete-backward-rejected", fails)
+    return
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fails: mutable i64 = 0
+    check_due(&fails)
+    check_horizon(&fails)
+    check_debt(&fails)
+    check_overlap(&fails)
+    check_mode(&fails)
+    check_complete(&fails)
+    if fails == 0:
+        b: mutable darray[u8] = []
+        rh_push_text(b, "RECONCILE OK")
+        b.push(10)
+        rh_write_stdout(b)
+        return 0
+    return 1

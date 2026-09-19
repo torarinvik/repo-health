@@ -1,0 +1,318 @@
+# rh_base.elisa — shared foundation (M00).
+#
+# Standard-library first: the Elisa standard library (elisacore_std)
+# provides the libc declarations and core services used here — strlen,
+# strcmp, puts, write, getenv, file_exists, arenas, string views. This
+# file declares NO extern that the standard library already provides.
+# Remaining direct `extern`s are only what the standard library lacks:
+# `system` (subprocess, allowlisted in rh_git), `mkdir`, and `time`.
+# The bounded fopen/fread/fwrite wrappers below use the standard
+# library's own extern declarations; the std `error[...]` file functions
+# stay unused until a re-seed teaches stage1 to lower error-payload
+# catch (see CHANGELOG "Known limitations").
+#
+# Layout assumption (same default as tools/*.sh): Elisa-compiler is a
+# sibling directory of this repository.
+include "../../Elisa-compiler/elisacore_std/elisacore_runtime.elisa"
+include "../../Elisa-compiler/elisacore_std/elisacore_fileio.elisa"
+
+extern system(command: cstr) -> i32
+extern mkdir(path: cstr, mode: u16) -> i32
+# Environment read for explicit test hooks (e.g. lowering the history bound
+# to exercise the truncation path). NULL when unset.
+extern getenv(name: cstr) -> u8&?
+
+@link_name("time")
+extern c_time(arg: void&?) -> i64
+
+
+# Current Unix time (seconds). -1 on failure; callers treat -1 as unknown,
+# never as an epoch value.
+def rh_now() -> i64:
+    return c_time(null)
+
+# strlen as i64 (-1 on null).
+def rh_cstr_len(text: u8&?) -> i64:
+    0 return if text == null
+    src: u8& = text
+    return strlen(src).i64()
+
+# C-string equality via strcmp.
+def rh_streq(a: u8&, b: u8&) -> bool:
+    return strcmp(a, b) == 0
+
+# Byte helpers on NUL-terminated cstr.
+def rh_cstr_starts_with(s: cstr, prefix: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: usize = strlen(prefix)
+    i: mutable usize = 0
+    while i < n |i, s, prefix|:
+        if s[i] != prefix[i]:
+            return false
+        i <- i + 1
+    return true
+
+def rh_cstr_len_c(s: cstr) -> usize can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = 0
+    while true |i, s|:
+        break if s[i] == 0
+        i <- i + 1
+    return i
+
+# True when a "scheme://" prefix precedes any '/'. Used to reject
+# non-https remotes without parsing URLs.
+def rh_cstr_has_scheme(s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = 0
+    while true |i, s|:
+        b: u8 = s[i]
+        break if b == 0
+        if b == 58:
+            if s[i + 1] == 47 and s[i + 2] == 47:
+                return true
+            return false
+        if b == 47:
+            return false
+        i <- i + 1
+    return false
+
+# Append NUL-terminated text bytes to buffer.
+def rh_push_text(buffer: mutable darray[u8]&, text: u8&) -> void can[Memory.Allocate, Abort.Panic]:
+    n: usize = strlen(text)
+    i: mutable usize = 0
+    while i < n |i, buffer, text|:
+        buffer.push(text[i])
+        i <- i + 1
+
+# Append raw bytes 0..count-1 of data to buffer.
+def rh_push_raw(buffer: mutable darray[u8]&, data: u8&, count: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = 0
+    while i < count |i, buffer, data|:
+        buffer.push(data[i])
+        i <- i + 1
+
+# Unsigned decimal of a u64 value.
+def rh_push_decimal_u64(buffer: mutable darray[u8]&, value: u64) -> void can[Memory.Allocate, Abort.Panic]:
+    if value == 0:
+        buffer.push(48)
+        return
+    digits: mutable darray[u8] = []
+    remaining: mutable u64 = value
+    for _step in 0..<64 |digits, remaining|:
+        break if remaining == 0
+        digits.push((48 + (remaining % 10)).u8())
+        remaining <- remaining / 10
+    for reverse_index in 0..<digits.count |buffer, digits|:
+        buffer.push(digits[digits.count - 1.usize() - reverse_index])
+
+# Signed decimal of an i64 value (INT64_MIN spelled explicitly).
+def rh_push_decimal_i64(buffer: mutable darray[u8]&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    if value == -9223372036854775807 - 1:
+        rh_push_text(buffer, "-9223372036854775808")
+        return
+    negative: bool = value < 0
+    magnitude: mutable i64 = -value if negative else value
+    buffer.push(45) if negative
+    if magnitude == 0:
+        buffer.push(48)
+        return
+    digits: mutable darray[u8] = []
+    while magnitude > 0 |digits, magnitude|:
+        digits.push((48 + (magnitude % 10)).u8())
+        magnitude <- magnitude / 10
+    for reverse_index in 0..<digits.count |buffer, digits|:
+        buffer.push(digits[digits.count - 1.usize() - reverse_index])
+
+# Lowercase hex of a u64 value, exactly 16 nibbles (digest rendering).
+def rh_push_hex_u64(buffer: mutable darray[u8]&, value: u64) -> void can[Memory.Allocate, Abort.Panic]:
+    shift: mutable i64 = 60
+    while shift >= 0 |shift, buffer, value|:
+        nibble: u64 = (value >> shift.usize()) & 15
+        buffer.push((48 + nibble).u8()) if nibble < 10
+        buffer.push((87 + nibble).u8()) if nibble >= 10
+        shift <- shift - 4
+
+# Write buffer bytes to fd 1 (stdout) or 2 (stderr). Empty buffers are a no-op
+# (never index buffer[0] when count is 0).
+def rh_write_fd(fd: i32, buffer: darray[u8]&) -> void can[Console, Abort.Panic, Unsafe.PointerCast]:
+    return if buffer.count == 0
+    raw: void& = (&buffer[0]).cast[void&] can Unsafe.PointerCast
+    _ = write(fd, raw, buffer.count)
+
+def rh_write_stdout(buffer: darray[u8]&) -> void can[Console, Abort.Panic, Unsafe.PointerCast]:
+    rh_write_fd(1, buffer)
+
+def rh_write_stderr(buffer: darray[u8]&) -> void can[Console, Abort.Panic, Unsafe.PointerCast]:
+    rh_write_fd(2, buffer)
+
+# Convenience: single line to stdout (text + newline).
+def rh_print_line(text: u8&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    buffer: mutable darray[u8] = []
+    rh_push_text(buffer, text)
+    buffer.push(10)
+    rh_write_stdout(buffer)
+
+# --- Path helpers (M01). ---
+
+# Append NUL-terminated cstr bytes to buffer.
+def rh_push_cstr(buffer: mutable darray[u8]&, s: cstr) -> void can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = 0
+    while true |i, buffer, s|:
+        b: u8 = s[i]
+        break if b == 0
+        buffer.push(b)
+        i <- i + 1
+
+# NUL-terminate a path buffer IN PLACE for libc calls. Returns false when
+# the buffer is empty (never fabricate a path).
+def rh_terminate(buffer: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+    if buffer.count == 0:
+        return false
+    buffer.push(0)
+    return true
+
+# --- File I/O through the standard library (M01). The bounded wrappers
+# below are the only file functions in this codebase: std
+# `read_entire_file` / `write_entire_file` (arena-backed, error unions)
+# with engine-style expression `catch`. Reads refuse files larger than
+# RH_MAX_READ instead of growing without limit (S012). ---
+
+const RH_MAX_READ: i64 = 67108864
+
+# File size via std `file_size`. -1 when unknown (missing/unreadable).
+def rh_file_size(path: cstr) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic]:
+    got: i64 = catch file_size(path):
+        value: value
+        FileIoError.OpenFailed: -1
+        FileIoError.ReadFailed: -1
+        FileIoError.SeekFailed: -1
+        FileIoError.WriteFailed: -1
+    return got
+
+# Append src bytes to dst; returns the appended count.
+def rh_absorb_bytes(src: darray[u8]&, dst: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = 0
+    while i < src.count |i, src, dst|:
+        dst.push(src[i])
+        i <- i + 1
+    return src.count.i64()
+
+# Read the whole file, appended into buffer. Returns the byte count, or -1
+# on any failure or when the file exceeds RH_MAX_READ.
+def rh_io_read(path: cstr, buffer: mutable darray[u8]&) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic]:
+    if rh_file_size(path) > RH_MAX_READ:
+        return -1
+    got: i64 = catch read_entire_file(&perm_arena, path):
+        value: rh_absorb_bytes(value, buffer)
+        FileIoError.OpenFailed: -1
+        FileIoError.ReadFailed: -1
+        FileIoError.SeekFailed: -1
+        FileIoError.WriteFailed: -1
+    return got
+
+# Write buffer bytes to path (truncate). True only on a full write.
+def rh_io_write(path: cstr, data: mutable darray[u8]&) -> bool can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+    if data.count == 0:
+        empty: sview = sview("", 0, 0)
+        wrote_empty: bool = catch write_entire_file(path, empty):
+            value: value == 0
+            FileIoError.OpenFailed: false
+            FileIoError.ReadFailed: false
+            FileIoError.SeekFailed: false
+            FileIoError.WriteFailed: false
+        return wrote_empty
+    raw: mutable u8& = (&data[0]).cast[mutable u8&] can Unsafe.PointerCast
+    view: sview = StringView{data: raw, len: data.count.i64()}
+    wrote: bool = catch write_entire_file(path, view):
+        value: value == data.count.i64()
+        FileIoError.OpenFailed: false
+        FileIoError.ReadFailed: false
+        FileIoError.SeekFailed: false
+        FileIoError.WriteFailed: false
+    return wrote
+
+def rh_make_dir(path: cstr) -> bool:
+    return mkdir(path, 493) == 0
+
+# Parse decimal [start, end) from byte buffer. ok_out: 1 valid, 0 invalid.
+# Optional leading '-'; empty span or any other byte is invalid.
+def rh_parse_i64(data: darray[u8]&, start: usize, end: usize, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    ok_out[0] <- 0
+    if start >= end:
+        return 0
+    if end > data.count:
+        return 0
+    negative: mutable bool = false
+    cursor: mutable usize = start
+    if data[cursor] == 45:
+        negative <- true
+        cursor <- cursor + 1
+        if cursor >= end:
+            return 0
+    acc: mutable i64 = 0
+    while cursor < end |cursor, data, acc|:
+        digit: u8 = data[cursor]
+        if digit < 48 or digit > 57:
+            return 0
+        place: i64 = (digit - 48).i64()
+        if acc > 9223372036854775807 / 10:
+            return 0
+        acc <- acc * 10
+        if acc > 9223372036854775807 - place:
+            return 0
+        acc <- acc + place
+        cursor <- cursor + 1
+    ok_out[0] <- 1
+    if negative:
+        return -acc
+    return acc
+
+# Index of byte value at or after start; -1 when absent.
+def rh_find_byte(data: darray[u8]&, start: usize, target: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = start
+    while i < data.count |i, data, target|:
+        if data[i] == target:
+            return i.i64()
+        i <- i + 1
+    return -1
+
+# Count non-empty lines.
+def rh_count_lines(data: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    total: mutable i64 = 0
+    start: mutable usize = 0
+    while start < data.count |start, data, total|:
+        stop: i64 = rh_find_byte(data, start, 10)
+        line_end: mutable usize = data.count
+        if stop >= 0:
+            line_end <- stop.usize()
+        if line_end > start:
+            total <- total + 1
+        if stop < 0:
+            start <- data.count
+        else:
+            start <- stop.usize() + 1
+    return total
+
+# JSON string escaping (shared writer primitive).
+def rh_push_hexdigit(buffer: mutable darray[u8]&, nibble: u64) -> void can[Memory.Allocate, Abort.Panic]:
+    if nibble < 10:
+        buffer.push((48 + nibble).u8())
+    else:
+        buffer.push((87 + nibble).u8())
+
+
+def rh_json_escape(buffer: mutable darray[u8]&, texts: darray[u8]&, start: usize, end: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = start
+    while i < end |i, buffer, texts, end|:
+        b: u8 = texts[i]
+        if b == 34:
+            rh_push_text(buffer, "\\\"")
+        elif b == 92:
+            rh_push_text(buffer, "\\\\")
+        elif b < 32:
+            v: u64 = b.u64()
+            rh_push_text(buffer, "\\u00")
+            rh_push_hexdigit(buffer, v / 16)
+            rh_push_hexdigit(buffer, v % 16)
+        else:
+            buffer.push(b)
+        i <- i + 1
+

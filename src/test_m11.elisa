@@ -1,0 +1,89 @@
+# test_m11.elisa — experimental-metric isolation (R024):
+# admissibility gate, observable-outcome semantics, censoring, and the
+# not_applicable rule when nothing is observable.
+include "./rh_base.elisa"
+include "./rh_experimental.elisa"
+
+def xcheck(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    if cond:
+        return
+    fails[0] <- fails[0] + 1
+    b: mutable darray[u8] = []
+    rh_push_text(b, "M11-FAIL ")
+    rh_push_text(b, label)
+    b.push(10)
+    rh_write_stdout(b)
+
+def spec(wave: u8, cost: u8, limits: i64, opt: i64) -> RhExperimentalSpec:
+    return RhExperimentalSpec{key_s: 0, key_e: 0, wave: wave, cost: cost, limit_count: limits, opt_in: opt}
+
+def check_admissible(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    xcheck(rh_exp_admissible(spec(RH_EXP_WAVE_G, 2, 3, 1)) == 1, "exp-admissible", fails)
+    xcheck(rh_exp_admissible(spec(1, 2, 3, 1)) == 0, "exp-reject-wrong-wave", fails)
+    xcheck(rh_exp_admissible(spec(RH_EXP_WAVE_G, 0, 3, 1)) == 0, "exp-reject-no-cost", fails)
+    xcheck(rh_exp_admissible(spec(RH_EXP_WAVE_G, 2, 0, 1)) == 0, "exp-reject-no-limits", fails)
+    xcheck(rh_exp_admissible(spec(RH_EXP_WAVE_G, 2, 3, 0)) == 0, "exp-reject-no-optin", fails)
+    return
+
+def check_outcome(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    # complete follow-up + release = 1
+    xcheck(rh_exp_discontinuity_outcome(1, 1) == 1, "exp-outcome-with-release", fails)
+    # complete follow-up + no release in horizon = 0 (observable fact)
+    xcheck(rh_exp_discontinuity_outcome(1, 0) == 0, "exp-outcome-without-release", fails)
+    # incomplete follow-up is censored, never counted either way
+    xcheck(rh_exp_discontinuity_outcome(0, 1) == -1, "exp-outcome-censored", fails)
+    xcheck(rh_exp_discontinuity_outcome(0, 0) == -1, "exp-outcome-censored-no-release", fails)
+    return
+
+def check_aggregate(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    xs: mutable darray[i64] = []
+    xs.push(1)
+    xs.push(0)
+    xs.push(0)
+    xs.push(-1)
+    w: mutable i64 = 0
+    wo: mutable i64 = 0
+    c: mutable i64 = 0
+    d: mutable i64 = 0
+    rh_exp_discontinuity_aggregate(xs, &w, &wo, &c, &d)
+    xcheck(w == 1 and wo == 2, "exp-agg-counts", fails)
+    xcheck(c == 1, "exp-agg-censored", fails)
+    xcheck(d == 3, "exp-agg-denominator-excludes-censored", fails)
+    # all censored -> zero denominator -> caller must report not_applicable
+    only_censored: mutable darray[i64] = []
+    only_censored.push(-1)
+    only_censored.push(-1)
+    w2: mutable i64 = 0
+    wo2: mutable i64 = 0
+    c2: mutable i64 = 0
+    d2: mutable i64 = 0
+    rh_exp_discontinuity_aggregate(only_censored, &w2, &wo2, &c2, &d2)
+    xcheck(d2 == 0, "exp-none-observable-zero-denominator", fails)
+    xcheck(c2 == 2, "exp-none-observable-all-censored", fails)
+    return
+
+def check_label(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    lab: u8& = rh_exp_label()
+    # must warn it is experimental and must not assert a reliability label
+    has_exp: mutable bool = false
+    i: mutable usize = 0
+    while lab[i] != 0 |i, lab|:
+        if lab[i] == 101:
+            has_exp <- true
+        i <- i + 1
+    xcheck(has_exp, "exp-label-present", fails)
+    return
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fails: mutable i64 = 0
+    check_admissible(&fails)
+    check_outcome(&fails)
+    check_aggregate(&fails)
+    check_label(&fails)
+    if fails == 0:
+        b: mutable darray[u8] = []
+        rh_push_text(b, "M11 OK")
+        b.push(10)
+        rh_write_stdout(b)
+        return 0
+    return 1

@@ -1,0 +1,57 @@
+# rh_release_feed_report.elisa — release-only source execution path
+# (M08 archive/releases lane).
+#
+# Turns an `rh-release-feed-input/1` feed into `rh-release-feed-result/1`:
+# each release keeps its published time (valid time) and the collector's
+# first-seen time (known time) separately, counts assets and how many carry
+# a digest, and is keyed by (tag, first-seen) — a tag is a label, not a
+# release event. No history or author identity is derived from this family;
+# the report says so explicitly. A missing published time stays unknown
+# rather than being replaced by first-seen. Malformed input fails closed.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_release_feed.elisa"
+
+def rh_rfr_report(raw: darray[u8]&, first_seen: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    pool: mutable darray[u8] = []
+    releases: mutable darray[RhRelease] = []
+    rej: mutable i64 = 0
+    if rh_release_feed_parse(raw, first_seen, 0, pool, releases, &rej) != 0:
+        return -1
+    rh_push_text(out, "{\"schema\":\"rh-release-feed-result/1\",\"releases\":[")
+    i: mutable i64 = 0
+    while i < releases.count.i64() |i, releases, pool, out|:
+        r: RhRelease = releases[i.usize()]
+        if i > 0:
+            out.push(44)
+        rh_push_text(out, "{\"tag\":\"")
+        if r.tag_s >= 0 and r.tag_e >= r.tag_s and r.tag_e <= pool.count.i64():
+            rh_json_escape(out, pool, r.tag_s.usize(), r.tag_e.usize())
+        rh_push_text(out, "\",\"published_at\":")
+        if r.has_published == 1:
+            rh_push_decimal_i64(out, r.published)
+        else:
+            rh_push_text(out, "null")
+        rh_push_text(out, ",\"first_seen\":")
+        rh_push_decimal_i64(out, r.first_seen)
+        rh_push_text(out, ",\"asset_count\":")
+        rh_push_decimal_i64(out, r.asset_count)
+        rh_push_text(out, ",\"digest_known_count\":")
+        rh_push_decimal_i64(out, r.digest_known_count)
+        rh_push_text(out, "}")
+        i <- i + 1
+    rh_push_text(out, "],\"rejected\":")
+    rh_push_decimal_i64(out, rej)
+    rh_push_text(out, ",\"source\":{\"history_supported\":")
+    if rh_release_feed_history_supported() == 1:
+        rh_push_text(out, "true")
+    else:
+        rh_push_text(out, "false")
+    rh_push_text(out, ",\"identity_supported\":")
+    if rh_release_feed_identity_supported() == 1:
+        rh_push_text(out, "true")
+    else:
+        rh_push_text(out, "false")
+    rh_push_text(out, "},\"note\":\"release-only source: a tag is a label, not a release event; published time is valid time and first-seen is known time (both retained); a missing published time stays unknown; no history or author identity is derived\"}")
+    return 0

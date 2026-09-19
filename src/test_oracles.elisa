@@ -1,0 +1,275 @@
+# test_oracles.elisa — M00 acceptance oracles (independent of prod code paths
+# except through the published function contracts; expected values below are
+# hand-computed from the plan, not copied from implementation output).
+#
+# Exit 0 when every check passes, 1 otherwise. Prints one line per failure
+# plus a final summary line.
+
+include "./rh_base.elisa"
+include "./rh_domain.elisa"
+include "./rh_temporal.elisa"
+include "./rh_observation.elisa"
+include "./rh_registry.elisa"
+include "./rh_evidence.elisa"
+include "./rh_metrics.elisa"
+include "./rh_git.elisa"
+include "./rh_json.elisa"
+include "./rh_forge.elisa"
+
+
+def check(condition: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    if condition:
+        return
+    fails[0] <- fails[0] + 1
+    buffer: mutable darray[u8] = []
+    rh_push_text(buffer, "FAIL ")
+    rh_push_text(buffer, label)
+    buffer.push(10)
+    rh_write_stdout(buffer)
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fails: mutable i64 = 0
+
+# --- M00-02 identity invariants ---
+    check(RH_KIND_ACCOUNT != RH_KIND_PERSON, "account-kind-ne-person", &fails)
+    check(RH_KIND_PROJECT != RH_KIND_ACCOUNT, "project-kind-ne-account", &fails)
+    check(RH_KIND_PACKAGE_VERSION != RH_KIND_ARTIFACT, "version-kind-ne-artifact", &fails)
+    a: RhId = rh_id_make(RH_KIND_ACCOUNT, 7, 9)
+    p: RhId = rh_id_make(RH_KIND_PERSON, 7, 9)
+    check(rh_id_equal(a, a), "id-self-equal", &fails)
+    check(not rh_id_equal(a, p), "cross-kind-never-equal", &fails)
+    check(RH_REF_TAG != RH_REF_RELEASE, "tag-ne-release", &fails)
+    check(RH_EDGE_REQUIREMENT != RH_EDGE_RESOLVED, "requirement-ne-resolved", &fails)
+    check(RH_FIND_REACHABLE != RH_FIND_EXPLOITABLE, "reachability-ne-exploitability", &fails)
+    check(RH_FIND_SIG_VERIFIED != RH_FIND_CODE_SAFE, "signature-ne-safe", &fails)
+
+# --- M00-04 observation states ---
+    check(rh_streq(rh_status_label(RH_ST_OBSERVED), "observed"), "label-observed", &fails)
+    check(rh_streq(rh_status_label(RH_ST_NOT_APPLICABLE), "not_applicable"), "label-na", &fails)
+    check(rh_streq(rh_status_label(RH_ST_UNSUPPORTED), "unsupported"), "label-unsupported", &fails)
+    check(not rh_streq(rh_status_label(RH_ST_NOT_APPLICABLE), "false"), "na-ne-false", &fails)
+    i: mutable i64 = 0
+    distinct: mutable bool = true
+    while i < 11 |i, distinct|:
+        j: mutable i64 = i + 1
+        while j < 11 |i, j, distinct|:
+            if rh_streq(rh_status_label(i.u8()), rh_status_label(j.u8())):
+                distinct <- false
+            j <- j + 1
+        i <- i + 1
+    check(distinct, "eleven-distinct-labels", &fails)
+    check(rh_observation_consistent(RH_ST_OBSERVED, true), "obs-with-value", &fails)
+    check(not rh_observation_consistent(RH_ST_OBSERVED, false), "obs-without-value-rejected", &fails)
+    check(rh_observation_consistent(RH_ST_UNAVAILABLE, false), "unavailable-bare", &fails)
+    check(not rh_observation_consistent(RH_ST_UNAVAILABLE, true), "unavailable-with-value-rejected", &fails)
+    check(rh_observation_consistent(RH_ST_NOT_APPLICABLE, false), "na-bare", &fails)
+    check(rh_observation_consistent(RH_ST_PARTIAL, true), "partial-with-value", &fails)
+    check(not rh_ratio_valid(0, 0), "zero-denominator-rejected", &fails)
+    check(rh_ratio_valid(0, 5), "zero-numerator-allowed", &fails)
+    check(rh_ratio_valid(3, 4), "share-valid", &fails)
+    check(not rh_ratio_valid(5, 4), "overfull-ratio-rejected", &fails)
+
+# --- M00-03 temporal primitives ---
+    check(rh_interval_valid(10, 20), "interval-valid", &fails)
+    check(not rh_interval_valid(20, 20), "empty-interval-rejected", &fails)
+    check(not rh_interval_valid(30, 20), "inverted-interval-rejected", &fails)
+    check(rh_signed_duration(10, 4) == -6, "signed-negative-preserved", &fails)
+    check(rh_interval_contains(10, 20, 10), "contains-start", &fails)
+    check(not rh_interval_contains(10, 20, 20), "half-open-end", &fails)
+    check(rh_intervals_overlap(10, 20, 15, 25), "overlap", &fails)
+    check(not rh_intervals_overlap(10, 20, 20, 30), "adjacent-not-overlap", &fails)
+    leap: i64 = rh_unix_from_civil(2024, 2, 29)
+    ly: mutable i64 = 0
+    lm: mutable i64 = 0
+    ld: mutable i64 = 0
+    rh_civil_from_days(leap / 86400, &ly, &lm, &ld)
+    check(ly == 2024 and lm == 2 and ld == 29, "leap-day-roundtrip", &fails)
+    jan: i64 = rh_unix_from_civil(2024, 1, 1)
+    mar: i64 = rh_unix_from_civil(2024, 3, 1)
+    check(rh_complete_months_between(jan, mar) == 2, "jan-to-mar-two-months", &fails)
+    jan31: i64 = rh_unix_from_civil(2024, 1, 31)
+    feb1: i64 = rh_unix_from_civil(2024, 2, 1)
+    m1: mutable i64 = 0
+    m2: mutable i64 = 0
+    rh_month_of_instant(jan31, &m1)
+    rh_month_of_instant(feb1, &m2)
+    check(m2 - m1 == 1, "month-boundary", &fails)
+    intro: RhBitemporal = rh_bitemporal_make(rh_unix_from_civil(2024, 6, 1), rh_unix_from_civil(2024, 6, 2), rh_unix_from_civil(2026, 1, 10), rh_unix_from_civil(2026, 1, 10))
+    check(not rh_visible_as_of(intro, rh_unix_from_civil(2025, 1, 1)), "2026-discovery-hidden-in-2025", &fails)
+    check(rh_visible_as_of(intro, rh_unix_from_civil(2026, 6, 1)), "2026-discovery-visible-retrospective", &fails)
+
+# --- M04-07 numerical oracles (plan §9.4), computed here first ---
+    c1: mutable darray[u64] = []
+    c1.push(9)
+    c1.push(3)
+    check(rh_concentration(c1, 1, 2) == 1, "c93-half-is-1", &fails)
+    check(rh_concentration(c1, 4, 5) == 2, "c93-80pct-is-2", &fails)
+    n1: mutable u64 = 0
+    d1: mutable u64 = 0
+    check(rh_hhi(c1, &n1, &d1), "hhi93-ok", &fails)
+    check(n1 == 5 and d1 == 8, "hhi93-is-5-8", &fails)
+    c2: mutable darray[u64] = []
+    c2.push(25)
+    c2.push(25)
+    c2.push(25)
+    c2.push(25)
+    check(rh_concentration(c2, 1, 2) == 2, "c25-half-is-2", &fails)
+    check(rh_concentration(c2, 4, 5) == 4, "c25-80pct-is-4", &fails)
+    n2: mutable u64 = 0
+    d2: mutable u64 = 0
+    check(rh_hhi(c2, &n2, &d2), "hhi25-ok", &fails)
+    check(n2 == 1 and d2 == 4, "hhi25-is-1-4", &fails)
+    c0: mutable darray[u64] = []
+    check(rh_concentration(c0, 1, 2) == -1, "empty-is-not-applicable", &fails)
+    check(not rh_hhi(c0, &n1, &d1), "empty-hhi-refused", &fails)
+    check(rh_concentration(c1, 0, 1) == -2, "zero-threshold-rejected", &fails)
+    check(rh_concentration(c1, 2, 1) == -2, "overfull-threshold-rejected", &fails)
+    check(rh_concentration(c1, 1, 0) == -2, "zero-denominator-threshold-rejected", &fails)
+
+# --- M00-06 FNV-1a vectors ---
+    check(rh_fnv_begin() == 14695981039346656037, "fnv-offset", &fails)
+    ha: u64 = rh_fnv_byte_value(rh_fnv_begin(), 97)
+    check(ha == 12638187200555641996, "fnv-a", &fails)
+    hf: mutable u64 = rh_fnv_begin()
+    hf <- rh_fnv_byte_value(hf, 102)
+    hf <- rh_fnv_byte_value(hf, 111)
+    hf <- rh_fnv_byte_value(hf, 111)
+    hf <- rh_fnv_byte_value(hf, 98)
+    hf <- rh_fnv_byte_value(hf, 97)
+    hf <- rh_fnv_byte_value(hf, 114)
+    check(hf == 9625390261332436968, "fnv-foobar", &fails)
+
+# --- M00-05 registry ---
+    check(rh_reg_count() == 19, "registry-count-19", &fails)
+    check(rh_reg_implemented_count() == 18, "registry-implemented-18", &fails)
+    check(rh_reg_lint() == 0, "registry-lint-clean", &fails)
+    check(rh_reg_find("history.commit_count") == 0, "registry-find-first", &fails)
+    check(rh_reg_find("source.manifest_presence") == 9, "registry-find-last", &fails)
+    check(rh_reg_find("persistence.retained_90d") == 11, "registry-find-retention", &fails)
+    check(rh_reg_find("dependencies.unsupported_range_count") == 12, "registry-find-unsupported", &fails)
+    check(rh_reg_find("concentration.change_hhi") == 13, "registry-find-hhi", &fails)
+    check(rh_reg_find("no.such.metric") == -1, "registry-find-absent", &fails)
+    # F038: the same key at two versions is two definitions, not a rewrite.
+    v1: i64 = rh_reg_find_versioned("coverage.window_completeness", "1.0.0")
+    v2: i64 = rh_reg_find_versioned("coverage.window_completeness", "2.0.0")
+    check(v1 == 7 and v2 == 10, "registry-versioned-distinct", &fails)
+    check(rh_reg_denom_rule_for("coverage.window_completeness", "1.0.0") == 1, "registry-v1-denominator", &fails)
+    check(rh_reg_denom_rule_for("coverage.window_completeness", "2.0.0") == 2, "registry-v2-denominator-differs", &fails)
+    check(rh_reg_denom_rule_for("coverage.window_completeness", "9.9.9") == -1, "registry-unknown-version-no-fallback", &fails)
+    check(rh_streq(rh_reg_status(10), "prototype"), "registry-v2-not-implemented", &fails)
+    check(rh_reg_denom_rule_for("persistence.retained_90d", "1.0.0") == 3, "registry-retention-denominator", &fails)
+    check(rh_reg_denom_rule_for("concentration.change_hhi", "1.0.0") == 4, "registry-concentration-denominator", &fails)
+
+# --- M02-04 capability manifests (distinct connectors, honest gaps) ---
+    check(rh_conn_capabilities(RH_CONN_GITHUB) == 63, "github-all-six", &fails)
+    check(rh_conn_capabilities(RH_CONN_GITLAB) == 63, "gitlab-all-six", &fails)
+    check(rh_conn_capabilities(RH_CONN_GIT) == 1, "git-history-only", &fails)
+    check(rh_conn_capabilities(RH_CONN_FORGEJO) == 15, "forgejo-no-traffic-perms", &fails)
+    check(rh_conn_capabilities(RH_CONN_GITEA) == 15, "gitea-no-traffic-perms", &fails)
+    check(RH_CONN_FORGEJO != RH_CONN_GITEA, "forgejo-ne-gitea", &fails)
+    check(rh_conn_has(RH_CONN_GITHUB, RH_CAP_ISSUES), "github-issues", &fails)
+    check(not rh_conn_has(RH_CONN_GIT, RH_CAP_ISSUES), "git-no-issues", &fails)
+    check(not rh_conn_has(RH_CONN_FORGEJO, RH_CAP_TRAFFIC), "forgejo-no-traffic", &fails)
+    check(rh_capability_status(0, false, false, false) == 0, "cap-observed", &fails)
+    check(rh_capability_status(7, true, false, false) == 5, "cap-stale", &fails)
+    check(rh_capability_status(7, false, false, false) == 2, "cap-unavailable", &fails)
+    check(rh_capability_status(0, false, false, true) == 3, "cap-unauthorized-wins", &fails)
+
+# --- M02 fetch guard (S002/S003) ---
+    check(rh_fetch_guard("https://api.github.com/repos/o/r"), "guard-github", &fails)
+    check(rh_fetch_guard("https://example.com"), "guard-host-only", &fails)
+    check(rh_fetch_guard("https://8.8.8.8/x"), "guard-public-v4", &fails)
+    check(rh_fetch_guard("file:///tmp/fixture.json"), "guard-file-fixture", &fails)
+    check(not rh_fetch_guard("http://example.com/"), "guard-http", &fails)
+    check(not rh_fetch_guard("https://example.com:8080/"), "guard-port", &fails)
+    check(not rh_fetch_guard("https://user@example.com/"), "guard-userinfo", &fails)
+    check(not rh_fetch_guard("https://127.0.0.1/"), "guard-loopback", &fails)
+    check(not rh_fetch_guard("https://10.0.0.1/"), "guard-rfc1918-10", &fails)
+    check(not rh_fetch_guard("https://192.168.1.1/"), "guard-rfc1918-192", &fails)
+    check(not rh_fetch_guard("https://172.20.5.5/"), "guard-rfc1918-172", &fails)
+    check(not rh_fetch_guard("https://169.254.169.254/"), "guard-linklocal", &fails)
+    check(not rh_fetch_guard("https://[::1]/"), "guard-v6", &fails)
+    check(not rh_fetch_guard("https://localhost/"), "guard-localhost", &fails)
+    check(not rh_fetch_guard("https://example%2ecom/"), "guard-encoded-host", &fails)
+    check(not rh_fetch_guard("https://"), "guard-empty-host", &fails)
+    check(not rh_fetch_guard(""), "guard-empty", &fails)
+    check(rh_fetch_arg_safe("https://a.com/x?y=1&z=2"), "fetcharg-query", &fails)
+    check(not rh_fetch_arg_safe("a'b"), "fetcharg-quote", &fails)
+    check(not rh_fetch_arg_safe("a$b"), "fetcharg-dollar", &fails)
+    check(not rh_fetch_arg_safe("a`b"), "fetcharg-backtick", &fails)
+    check(not rh_fetch_arg_safe("a\\b"), "fetcharg-backslash", &fails)
+    check(not rh_fetch_arg_safe(""), "fetcharg-empty", &fails)
+
+# --- M02 ISO8601 ---
+    iso_ok: mutable i64 = 0
+    iso_doc: mutable darray[u8] = []
+    rh_push_text(iso_doc, "2024-03-10T12:00:00Z")
+    check(rh_parse_iso8601(iso_doc, 0, iso_doc.count, &iso_ok) == 1710072000 and iso_ok == 1, "iso-zulu", &fails)
+    iso2: mutable darray[u8] = []
+    rh_push_text(iso2, "2024-03-10T14:00:00+02:00")
+    iso_ok2: mutable i64 = 0
+    check(rh_parse_iso8601(iso2, 0, iso2.count, &iso_ok2) == 1710072000 and iso_ok2 == 1, "iso-offset", &fails)
+    bad_iso: mutable darray[u8] = []
+    rh_push_text(bad_iso, "2024-02-30T00:00:00Z")
+    bad_ok: mutable i64 = 0
+    rh_parse_iso8601(bad_iso, 0, bad_iso.count, &bad_ok)
+    check(bad_ok == 0, "iso-feb30", &fails)
+    bad_iso2: mutable darray[u8] = []
+    rh_push_text(bad_iso2, "2024-03-10T24:00:00Z")
+    bad_ok2: mutable i64 = 0
+    rh_parse_iso8601(bad_iso2, 0, bad_iso2.count, &bad_ok2)
+    check(bad_ok2 == 0, "iso-hour24", &fails)
+    bad_iso3: mutable darray[u8] = []
+    rh_push_text(bad_iso3, "2024-03-10 12:00:00Z")
+    bad_ok3: mutable i64 = 0
+    rh_parse_iso8601(bad_iso3, 0, bad_iso3.count, &bad_ok3)
+    check(bad_ok3 == 0, "iso-space", &fails)
+
+# --- M02 JSON inline vectors ---
+    jdoc: mutable darray[u8] = []
+    rh_push_text(jdoc, "{\"id\": 7288, \"ok\": true, \"tags\": []}")
+    jn: mutable darray[RhJsonNode] = []
+    jt: mutable darray[u8] = []
+    jroot: i64 = rh_json_parse(jdoc, jn, jt)
+    check(jroot >= 0, "json-root", &fails)
+    jid_ok: mutable i64 = 0
+    check(rh_json_int(jn, jdoc, rh_json_obj_get(jn, jt, jroot, "id"), &jid_ok) == 7288 and jid_ok == 1, "json-int", &fails)
+    check(rh_json_is_true(jn, jdoc, rh_json_obj_get(jn, jt, jroot, "ok")), "json-true", &fails)
+    check(rh_json_obj_get(jn, jt, jroot, "missing") == -1, "json-absent", &fails)
+    jbad: mutable darray[u8] = []
+    rh_push_text(jbad, "{\"a\": }")
+    jn2: mutable darray[RhJsonNode] = []
+    jt2: mutable darray[u8] = []
+    check(rh_json_parse(jbad, jn2, jt2) == -1, "json-malformed", &fails)
+
+# --- M01-01/M01-02 URL classification + allowlist (S002/S003) ---
+    check(rh_url_kind("/tmp/repo") == RH_URL_LOCAL, "url-local-abs", &fails)
+    check(rh_url_kind("./rel/repo") == RH_URL_LOCAL, "url-local-rel", &fails)
+    check(rh_url_kind("https://example.com/a/b") == RH_URL_HTTPS, "url-https", &fails)
+    check(rh_url_kind("http://example.com/a") == RH_URL_UNSUPPORTED, "url-http-rejected", &fails)
+    check(rh_url_kind("ssh://example.com/a") == RH_URL_UNSUPPORTED, "url-ssh-rejected", &fails)
+    check(rh_url_kind("git@example.com:a/b") == RH_URL_UNSUPPORTED, "url-scp-rejected", &fails)
+    check(rh_url_kind("file:///tmp/x") == RH_URL_UNSUPPORTED, "url-file-rejected", &fails)
+    check(rh_url_kind("") == RH_URL_UNSUPPORTED, "url-empty-rejected", &fails)
+    check(rh_arg_safe("/tmp/rh-out-1"), "allow-path", &fails)
+    check(rh_arg_safe("https://example.com/a/b"), "allow-https", &fails)
+    check(not rh_arg_safe("a;b"), "deny-semicolon", &fails)
+    check(not rh_arg_safe("a b"), "deny-space", &fails)
+    check(not rh_arg_safe("a'b"), "deny-quote", &fails)
+    check(not rh_arg_safe("a$b"), "deny-dollar", &fails)
+    check(not rh_arg_safe("a`b"), "deny-backtick", &fails)
+    check(not rh_arg_safe("a|b"), "deny-pipe", &fails)
+    check(not rh_arg_safe("a&b"), "deny-amp", &fails)
+    check(not rh_arg_safe("a@b"), "deny-at", &fails)
+    check(not rh_arg_safe(""), "deny-empty", &fails)
+    check(not rh_arg_safe("$(id)"), "deny-subst", &fails)
+
+    if fails == 0:
+        rh_print_line("ORACLES OK")
+        return 0
+    summary: mutable darray[u8] = []
+    rh_push_text(summary, "ORACLES FAIL count=")
+    rh_push_decimal_i64(summary, fails)
+    summary.push(10)
+    rh_write_stdout(summary)
+    return 1

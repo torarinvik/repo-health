@@ -1,0 +1,162 @@
+# rh_registry_meta.elisa — registry enrichment (M03-05).
+#
+# Parses captured registry version metadata into per-version records:
+# version label, yanked flag, published time (epoch or raw string span),
+# a declared source link, and declared dependency counts (normal/optional/
+# dev). None of this is fetched live in this slice.
+#
+# Invariants:
+#  * yanked is NOT deleted: a yanked version is retained with the flag; an
+#    absent yanked field is unknown (-1), never silently false.
+#  * a declared source link is an ASSERTION, not identity (F023): only its
+#    presence is recorded here; callers pass it through
+#    `rh_repo_claim_state`, which keeps it unverified without evidence.
+#  * declared dependencies are NOT resolved edges (R009): counts only.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_REGMETA_MAX_VERSIONS: i64 = 10000
+
+struct RhRegVersion:
+    ver_s: i64
+    ver_e: i64
+    yanked: i64
+    has_published: i64
+    published_epoch: i64
+    published_s: i64
+    published_e: i64
+    has_repo: i64
+    repo_s: i64
+    repo_e: i64
+    dep_count: i64
+    optional_dep_count: i64
+    dev_dep_count: i64
+
+struct RhRegMeta:
+    ok: mutable i64
+    versions: mutable i64
+    yanked_count: mutable i64
+    unknown_yank_count: mutable i64
+    with_repo: mutable i64
+    declared_deps: mutable i64
+    optional_deps: mutable i64
+    dev_deps: mutable i64
+
+# (private to this file)
+def rh_regmeta_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e < s:
+        return -1
+    start: i64 = pool.count.i64()
+    k: mutable i64 = s
+    while k < e |k, texts, pool, e|:
+        pool.push(texts[k.usize()])
+        k <- k + 1
+    return start
+
+# Deps array: count all, optional (optional==true), dev (kind=="dev").
+# (private to this file)
+def rh_regmeta_deps(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, arr: i64, total_out: mutable i64&, opt_out: mutable i64&, dev_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    total_out[0] <- 0
+    opt_out[0] <- 0
+    dev_out[0] <- 0
+    if arr < 0:
+        return
+    o: RhJsonNode = nodes[arr.usize()]
+    if o.kind != RH_JSON_ARR:
+        return
+    child: mutable i64 = o.first_child
+    while child >= 0 |child, nodes, texts, total_out, opt_out, dev_out|:
+        nxt: i64 = nodes[child.usize()].next_sibling
+        total_out[0] <- total_out[0] + 1
+        if rh_json_is_true(nodes, raw, rh_json_obj_get(nodes, texts, child, "optional")):
+            opt_out[0] <- opt_out[0] + 1
+        ks: mutable i64 = -1
+        ke: mutable i64 = -1
+        if rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "kind"), &ks, &ke):
+            if ke - ks == 3 and texts[ks.usize()] == 100 and texts[(ks + 1).usize()] == 101 and texts[(ks + 2).usize()] == 118:
+                dev_out[0] <- dev_out[0] + 1
+        child <- nxt
+
+# Parse `{"versions":[...]}`. Returns 0 on success, -1 when the document is
+# not parseable or lacks a versions array. Versions missing a non-empty
+# label are skipped and counted in `versions` only when retained.
+def rh_regmeta_parse(raw: darray[u8]&, pool: mutable darray[u8]&, out: mutable darray[RhRegVersion]&, meta_out: mutable RhRegMeta&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    meta_out[0] <- RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0:
+        return -1
+    rn: RhJsonNode = nodes[root.usize()]
+    if rn.kind != RH_JSON_OBJ:
+        return -1
+    arr: i64 = rh_json_obj_get(nodes, texts, root, "versions")
+    if arr < 0:
+        return -1
+    an: RhJsonNode = nodes[arr.usize()]
+    if an.kind != RH_JSON_ARR:
+        return -1
+    m: RhRegMeta = RhRegMeta{ok: 1, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+    child: mutable i64 = an.first_child
+    while child >= 0 |child, nodes, texts, pool, out, m|:
+        nxt: i64 = nodes[child.usize()].next_sibling
+        if out.count.i64() >= RH_REGMETA_MAX_VERSIONS:
+            return -1
+        vs: mutable i64 = -1
+        ve: mutable i64 = -1
+        if not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "num"), &vs, &ve) or ve <= vs:
+            m.versions <- m.versions + 1
+        else:
+            m.versions <- m.versions + 1
+            yank: mutable i64 = -1
+            ynode: i64 = rh_json_obj_get(nodes, texts, child, "yanked")
+            if ynode >= 0:
+                if nodes[ynode.usize()].kind == RH_JSON_BOOL:
+                    yank <- 0
+                    if rh_json_is_true(nodes, raw, ynode):
+                        yank <- 1
+            if yank == 1:
+                m.yanked_count <- m.yanked_count + 1
+            if yank == -1:
+                m.unknown_yank_count <- m.unknown_yank_count + 1
+            has_pub: mutable i64 = 0
+            pub: mutable i64 = -1
+            ps: mutable i64 = -1
+            pe: mutable i64 = -1
+            pnode: i64 = rh_json_obj_get(nodes, texts, child, "published_at")
+            if pnode >= 0:
+                if nodes[pnode.usize()].kind == RH_JSON_NUM:
+                    pok: mutable i64 = 0
+                    pub <- rh_json_int(nodes, raw, pnode, &pok)
+                    if pok == 1:
+                        has_pub <- 1
+                if nodes[pnode.usize()].kind == RH_JSON_STR:
+                    if rh_json_str_span(nodes, pnode, &ps, &pe):
+                        has_pub <- 1
+            rs: mutable i64 = -1
+            re: i64 = -1
+            has_repo: mutable i64 = 0
+            if rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "repository"), &rs, &re):
+                if re > rs:
+                    has_repo <- 1
+                    m.with_repo <- m.with_repo + 1
+            dt: mutable i64 = 0
+            do_: mutable i64 = 0
+            dd: mutable i64 = 0
+            rh_regmeta_deps(nodes, raw, texts, rh_json_obj_get(nodes, texts, child, "deps"), &dt, &do_, &dd)
+            m.declared_deps <- m.declared_deps + dt
+            m.optional_deps <- m.optional_deps + do_
+            m.dev_deps <- m.dev_deps + dd
+            v2: i64 = rh_regmeta_copy(pool, texts, vs, ve)
+            r2: i64 = rh_regmeta_copy(pool, texts, rs, re)
+            p2: i64 = rh_regmeta_copy(pool, texts, ps, pe)
+            out.push(RhRegVersion{ver_s: v2, ver_e: rh_regmeta_end(v2, vs, ve), yanked: yank, has_published: has_pub, published_epoch: pub, published_s: p2, published_e: rh_regmeta_end(p2, ps, pe), has_repo: has_repo, repo_s: r2, repo_e: rh_regmeta_end(r2, rs, re), dep_count: dt, optional_dep_count: do_, dev_dep_count: dd})
+        child <- nxt
+    meta_out[0] <- m
+    return 0
+
+# (private to this file)
+def rh_regmeta_end(start: i64, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if start < 0 or s < 0 or e < s:
+        return -1
+    return start + (e - s)

@@ -1,0 +1,357 @@
+# rh_query_report.elisa — query contract execution path (M06-01).
+#
+# Turns an `rh-query-input/1` request into `rh-query-result/1`: cursor
+# pagination over an ascending id list, a per-capability scan-status
+# breakdown (so one failed capability cannot read as a failed project), and
+# an optional bounded-job lease sequence (claim/renew/finish/budget) with
+# fencing tokens. Malformed requests fail closed.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_query.elisa"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_qr_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = e - s
+    k: mutable i64 = 0
+    while k < n |k, texts, lit, s|:
+        if lit[k.usize()] == 0:
+            return false
+        if texts[(s + k).usize()] != lit[k.usize()]:
+            return false
+        k <- k + 1
+    return lit[n.usize()] == 0
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_qr_kind(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    if rh_qr_eq(texts, s, e, "identity"):
+        return RH_Q_IDENTITY
+    if rh_qr_eq(texts, s, e, "metrics"):
+        return RH_Q_METRICS
+    if rh_qr_eq(texts, s, e, "continuity"):
+        return RH_Q_CONTINUITY
+    if rh_qr_eq(texts, s, e, "upstream"):
+        return RH_Q_UPSTREAM
+    if rh_qr_eq(texts, s, e, "downstream"):
+        return RH_Q_DOWNSTREAM
+    if rh_qr_eq(texts, s, e, "findings"):
+        return RH_Q_FINDINGS
+    if rh_qr_eq(texts, s, e, "evidence"):
+        return RH_Q_EVIDENCE
+    if rh_qr_eq(texts, s, e, "scan_status"):
+        return RH_Q_SCAN_STATUS
+    return -1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_qr_state(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    if rh_qr_eq(texts, s, e, "observed"):
+        return 0
+    if rh_qr_eq(texts, s, e, "not_observed"):
+        return 1
+    if rh_qr_eq(texts, s, e, "unavailable"):
+        return 2
+    if rh_qr_eq(texts, s, e, "unauthorized"):
+        return 3
+    if rh_qr_eq(texts, s, e, "partial"):
+        return 4
+    if rh_qr_eq(texts, s, e, "stale"):
+        return 5
+    if rh_qr_eq(texts, s, e, "not_applicable"):
+        return 6
+    if rh_qr_eq(texts, s, e, "error"):
+        return 7
+    if rh_qr_eq(texts, s, e, "conflicted"):
+        return 8
+    if rh_qr_eq(texts, s, e, "suppressed"):
+        return 9
+    if rh_qr_eq(texts, s, e, "unsupported"):
+        return 10
+    return -1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_qr_phase(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    if rh_qr_eq(texts, s, e, "queued"):
+        return RH_JOB_QUEUED
+    if rh_qr_eq(texts, s, e, "leased"):
+        return RH_JOB_LEASED
+    if rh_qr_eq(texts, s, e, "running"):
+        return RH_JOB_RUNNING
+    if rh_qr_eq(texts, s, e, "succeeded"):
+        return RH_JOB_SUCCEEDED
+    if rh_qr_eq(texts, s, e, "failed_terminal"):
+        return RH_JOB_FAILED_TERMINAL
+    if rh_qr_eq(texts, s, e, "canceled"):
+        return RH_JOB_CANCELED
+    return -1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_qr_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        return false
+    return rh_json_str_span(nodes, idx, s_out, e_out)
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_qr_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    ok_out[0] <- 0
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        return 0
+    return rh_json_int(nodes, raw, idx, ok_out)
+
+def rh_qr_kind_label(k: i64) -> u8&:
+    if k == 0:
+        return "identity"
+    if k == 1:
+        return "metrics"
+    if k == 2:
+        return "continuity"
+    if k == 3:
+        return "upstream"
+    if k == 4:
+        return "downstream"
+    if k == 5:
+        return "findings"
+    if k == 6:
+        return "evidence"
+    return "scan_status"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_qr_emit_phase(out: mutable darray[u8]&, p: u8) -> void can[Memory.Allocate, Abort.Panic]:
+    if p == RH_JOB_QUEUED:
+        rh_push_text(out, "queued")
+    elif p == RH_JOB_LEASED:
+        rh_push_text(out, "leased")
+    elif p == RH_JOB_RUNNING:
+        rh_push_text(out, "running")
+    elif p == RH_JOB_SUCCEEDED:
+        rh_push_text(out, "succeeded")
+    elif p == RH_JOB_FAILED_TERMINAL:
+        rh_push_text(out, "failed_terminal")
+    else:
+        rh_push_text(out, "canceled")
+
+def rh_query_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        return -1
+    ss: mutable i64 = 0
+    se: mutable i64 = 0
+    if not rh_qr_str(nodes, texts, root, "schema", &ss, &se):
+        return -1
+    if not rh_qr_eq(texts, ss, se, "rh-query-input/1"):
+        return -1
+    ks: mutable i64 = 0
+    ke: mutable i64 = 0
+    if not rh_qr_str(nodes, texts, root, "kind", &ks, &ke):
+        return -1
+    kind: i64 = rh_qr_kind(texts, ks, ke)
+    if kind < 0:
+        return -1
+    if not rh_query_kind_valid(kind.u8()):
+        return -1
+    ids_idx: i64 = rh_json_obj_get(nodes, texts, root, "ids")
+    if ids_idx < 0 or nodes[ids_idx.usize()].kind != RH_JSON_ARR:
+        return -1
+    ids: mutable darray[i64] = []
+    iarr: RhJsonNode = nodes[ids_idx.usize()]
+    child: mutable i64 = iarr.first_child
+    while child >= 0 |child, nodes, raw, texts, ids|:
+        if nodes[child.usize()].kind != RH_JSON_NUM:
+            return -1
+        okv: mutable i64 = 0
+        v: i64 = rh_json_int(nodes, raw, child, &okv)
+        if okv == 0:
+            return -1
+        ids.push(v)
+        child <- nodes[child.usize()].next_sibling
+    okc: mutable i64 = 0
+    cursor: mutable i64 = rh_qr_int(nodes, raw, texts, root, "cursor", &okc)
+    if okc == 0:
+        cursor <- -1
+    okl: mutable i64 = 0
+    limit: mutable i64 = rh_qr_int(nodes, raw, texts, root, "limit", &okl)
+    if okl == 0:
+        limit <- 10
+    page: mutable darray[i64] = []
+    next_cursor: mutable i64 = -1
+    complete: mutable i64 = 0
+    _ = rh_query_page(ids, cursor, limit, page, &next_cursor, &complete)
+
+    # Optional scan-status tally.
+    has_states: mutable bool = false
+    so: mutable i64 = 0
+    st: mutable i64 = 0
+    pa: mutable i64 = 0
+    un: mutable i64 = 0
+    au: mutable i64 = 0
+    ot: mutable i64 = 0
+    st_idx: i64 = rh_json_obj_get(nodes, texts, root, "scan_states")
+    if st_idx >= 0:
+        if nodes[st_idx.usize()].kind != RH_JSON_ARR:
+            return -1
+        has_states <- true
+        codes: mutable darray[u8] = []
+        sarr: RhJsonNode = nodes[st_idx.usize()]
+        sc: mutable i64 = sarr.first_child
+        while sc >= 0 |sc, nodes, texts, codes|:
+            cxs: mutable i64 = 0
+            cxe: mutable i64 = 0
+            if not rh_json_str_span(nodes, sc, &cxs, &cxe):
+                return -1
+            code: i64 = rh_qr_state(texts, cxs, cxe)
+            if code < 0:
+                return -1
+            codes.push(code.u8())
+            sc <- nodes[sc.usize()].next_sibling
+        rh_scan_status_tally(codes, &so, &st, &pa, &un, &au, &ot)
+
+    rh_push_text(out, "{\"schema\":\"rh-query-result/1\",\"kind\":\"")
+    rh_push_text(out, rh_qr_kind_label(kind))
+    rh_push_text(out, "\",\"page\":{\"ids\":[")
+    i: mutable i64 = 0
+    while i < page.count.i64() |i, page, out|:
+        if i > 0:
+            out.push(44)
+        rh_push_decimal_i64(out, page[i.usize()])
+        i <- i + 1
+    rh_push_text(out, "],\"next_cursor\":")
+    if next_cursor < 0:
+        rh_push_text(out, "null")
+    else:
+        rh_push_decimal_i64(out, next_cursor)
+    rh_push_text(out, ",\"complete\":")
+    if complete == 1:
+        rh_push_text(out, "true")
+    else:
+        rh_push_text(out, "false")
+    rh_push_text(out, "}")
+    if has_states:
+        rh_push_text(out, ",\"scan_status\":{\"observed\":")
+        rh_push_decimal_i64(out, so)
+        rh_push_text(out, ",\"stale\":")
+        rh_push_decimal_i64(out, st)
+        rh_push_text(out, ",\"partial\":")
+        rh_push_decimal_i64(out, pa)
+        rh_push_text(out, ",\"unavailable\":")
+        rh_push_decimal_i64(out, un)
+        rh_push_text(out, ",\"unauthorized\":")
+        rh_push_decimal_i64(out, au)
+        rh_push_text(out, ",\"other\":")
+        rh_push_decimal_i64(out, ot)
+        rh_push_text(out, "}")
+    # Optional job lease sequence.
+    job_idx: i64 = rh_json_obj_get(nodes, texts, root, "job")
+    if job_idx >= 0:
+        if nodes[job_idx.usize()].kind != RH_JSON_OBJ:
+            return -1
+        okj: mutable i64 = 0
+        job_id: mutable i64 = rh_qr_int(nodes, raw, texts, job_idx, "job_id", &okj)
+        if okj == 0:
+            job_id <- 1
+        lease: mutable RhJobLease = rh_job_make(job_id)
+        ops_idx: i64 = rh_json_obj_get(nodes, texts, job_idx, "ops")
+        if ops_idx < 0 or nodes[ops_idx.usize()].kind != RH_JSON_ARR:
+            return -1
+        rh_push_text(out, ",\"job\":{\"job_id\":")
+        rh_push_decimal_i64(out, job_id)
+        rh_push_text(out, ",\"ops\":[")
+        oarr: RhJsonNode = nodes[ops_idx.usize()]
+        oc: mutable i64 = oarr.first_child
+        first_op: mutable bool = true
+        while oc >= 0 |oc, nodes, texts, raw, out, lease, first_op|:
+            if nodes[oc.usize()].kind != RH_JSON_OBJ:
+                return -1
+            if not first_op:
+                out.push(44)
+            first_op <- false
+            os: mutable i64 = 0
+            oe: mutable i64 = 0
+            if not rh_qr_str(nodes, texts, oc, "op", &os, &oe):
+                return -1
+            rh_push_text(out, "{\"op\":\"")
+            if rh_qr_eq(texts, os, oe, "claim"):
+                okow: mutable i64 = 0
+                oknw: mutable i64 = 0
+                oktt: mutable i64 = 0
+                ow: i64 = rh_qr_int(nodes, raw, texts, oc, "owner", &okow)
+                nw: i64 = rh_qr_int(nodes, raw, texts, oc, "now", &oknw)
+                tt: i64 = rh_qr_int(nodes, raw, texts, oc, "ttl", &oktt)
+                if okow == 0 or oknw == 0 or oktt == 0:
+                    return -1
+                tok: i64 = rh_job_claim(&lease, ow, nw, tt)
+                rh_push_text(out, "claim\",\"result\":")
+                if tok >= 0:
+                    rh_push_text(out, "{\"outcome\":\"claimed\",\"token\":")
+                    rh_push_decimal_i64(out, tok)
+                    rh_push_text(out, ",\"phase\":\"")
+                    rh_qr_emit_phase(out, lease.phase)
+                    rh_push_text(out, "\"}")
+                elif tok == -1:
+                    rh_push_text(out, "{\"outcome\":\"held\"}")
+                else:
+                    rh_push_text(out, "{\"outcome\":\"terminal\"}")
+            elif rh_qr_eq(texts, os, oe, "renew"):
+                okt: mutable i64 = 0
+                okrw: mutable i64 = 0
+                oktl: mutable i64 = 0
+                tk: i64 = rh_qr_int(nodes, raw, texts, oc, "token", &okt)
+                rw: i64 = rh_qr_int(nodes, raw, texts, oc, "now", &okrw)
+                tl: i64 = rh_qr_int(nodes, raw, texts, oc, "ttl", &oktl)
+                if okt == 0 or okrw == 0 or oktl == 0:
+                    return -1
+                rn: bool = rh_job_renew(&lease, tk, rw, tl)
+                rh_push_text(out, "renew\",\"result\":{\"applied\":")
+                if rn:
+                    rh_push_text(out, "true")
+                else:
+                    rh_push_text(out, "false")
+                rh_push_text(out, ",\"phase\":\"")
+                rh_qr_emit_phase(out, lease.phase)
+                rh_push_text(out, "\"}")
+            elif rh_qr_eq(texts, os, oe, "finish"):
+                okt2: mutable i64 = 0
+                tk2: i64 = rh_qr_int(nodes, raw, texts, oc, "token", &okt2)
+                phs: mutable i64 = 0
+                phe: mutable i64 = 0
+                if okt2 == 0 or not rh_qr_str(nodes, texts, oc, "phase", &phs, &phe):
+                    return -1
+                pcode: i64 = rh_qr_phase(texts, phs, phe)
+                if pcode < 0:
+                    return -1
+                fn: bool = rh_job_finish(&lease, tk2, pcode.u8())
+                rh_push_text(out, "finish\",\"result\":{\"applied\":")
+                if fn:
+                    rh_push_text(out, "true")
+                else:
+                    rh_push_text(out, "false")
+                rh_push_text(out, ",\"phase\":\"")
+                rh_qr_emit_phase(out, lease.phase)
+                rh_push_text(out, "\"}")
+            elif rh_qr_eq(texts, os, oe, "budget"):
+                okv1: mutable i64 = 0
+                okv2: mutable i64 = 0
+                okv3: mutable i64 = 0
+                okv4: mutable i64 = 0
+                visited: i64 = rh_qr_int(nodes, raw, texts, oc, "visited_nodes", &okv1)
+                dl: i64 = rh_qr_int(nodes, raw, texts, oc, "deadline", &okv2)
+                nw2: i64 = rh_qr_int(nodes, raw, texts, oc, "now", &okv3)
+                mx: i64 = rh_qr_int(nodes, raw, texts, oc, "max_nodes", &okv4)
+                if okv1 == 0 or okv2 == 0 or okv3 == 0 or okv4 == 0:
+                    return -1
+                wb: bool = rh_job_within_budget(visited, dl, nw2, mx)
+                rh_push_text(out, "budget\",\"result\":{\"within\":")
+                if wb:
+                    rh_push_text(out, "true")
+                else:
+                    rh_push_text(out, "false")
+                rh_push_text(out, "}")
+            else:
+                return -1
+            out.push(125)
+            oc <- nodes[oc.usize()].next_sibling
+        rh_push_text(out, "]}")
+    rh_push_text(out, ",\"note\":\"cursor pagination is idempotent for a replayed cursor; scan status is a per-capability breakdown, never one project verdict; job leases carry fencing tokens\"}")
+    return 0

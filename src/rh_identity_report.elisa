@@ -1,0 +1,192 @@
+# rh_identity_report.elisa — reversible identity-link execution path
+# (M04-03, R016).
+#
+# Turns an `rh-identity-input/1` link ledger into `rh-identity-result/1`:
+# the identity revision, clusters derived ONLY from accepted links, and a
+# per-actor cluster map. A rejected or revoked link changes nothing;
+# revoking an accepted link recomputes clusters and changes the revision
+# without rewriting any raw record. Duplicate/repeated accepted links still
+# count toward the revision (each accepted-state change is a revision step),
+# matching rh_identity_revision. Malformed input fails closed.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_identity.elisa"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_ir_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = e - s
+    k: mutable i64 = 0
+    while k < n |k, texts, lit, s|:
+        if lit[k.usize()] == 0:
+            return false
+        if texts[(s + k).usize()] != lit[k.usize()]:
+            return false
+        k <- k + 1
+    return lit[n.usize()] == 0
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_ir_link_state(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    if rh_ir_eq(texts, s, e, "proposed"):
+        return RH_LINK_PROPOSED
+    if rh_ir_eq(texts, s, e, "accepted"):
+        return RH_LINK_ACCEPTED
+    if rh_ir_eq(texts, s, e, "rejected"):
+        return RH_LINK_REJECTED
+    if rh_ir_eq(texts, s, e, "revoked"):
+        return RH_LINK_REVOKED
+    return -1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_ir_actor_kind(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    if rh_ir_eq(texts, s, e, "human"):
+        return RH_ACTOR_HUMAN
+    if rh_ir_eq(texts, s, e, "bot_known"):
+        return RH_ACTOR_BOT_KNOWN
+    if rh_ir_eq(texts, s, e, "unresolved"):
+        return RH_ACTOR_UNRESOLVED
+    return -1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_ir_state_label(s: u8) -> u8&:
+    if s == RH_LINK_ACCEPTED:
+        return "accepted"
+    if s == RH_LINK_REJECTED:
+        return "rejected"
+    if s == RH_LINK_REVOKED:
+        return "revoked"
+    return "proposed"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_ir_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    ok_out[0] <- 0
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        return 0
+    return rh_json_int(nodes, raw, idx, ok_out)
+
+def rh_identity_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        return -1
+    sspan: mutable i64 = 0
+    espan: mutable i64 = 0
+    sidx: i64 = rh_json_obj_get(nodes, texts, root, "schema")
+    if sidx < 0 or not rh_json_str_span(nodes, sidx, &sspan, &espan):
+        return -1
+    if not rh_ir_eq(texts, sspan, espan, "rh-identity-input/1"):
+        return -1
+    oks: mutable i64 = 0
+    actor_count: i64 = rh_ir_int(nodes, raw, texts, root, "actor_count", &oks)
+    if oks == 0 or actor_count < 0 or actor_count > 1000000:
+        return -1
+    links_idx: i64 = rh_json_obj_get(nodes, texts, root, "links")
+    if links_idx < 0 or nodes[links_idx.usize()].kind != RH_JSON_ARR:
+        return -1
+    links: mutable darray[RhIdentityLink] = []
+    arr: RhJsonNode = nodes[links_idx.usize()]
+    child: mutable i64 = arr.first_child
+    while child >= 0 |child, nodes, texts, raw, links, actor_count|:
+        if nodes[child.usize()].kind != RH_JSON_OBJ:
+            return -1
+        oka: mutable i64 = 0
+        okb: mutable i64 = 0
+        a: i64 = rh_ir_int(nodes, raw, texts, child, "a", &oka)
+        b: i64 = rh_ir_int(nodes, raw, texts, child, "b", &okb)
+        if oka == 0 or okb == 0 or a < 0 or b < 0 or a >= actor_count or b >= actor_count:
+            return -1
+        sts: mutable i64 = 0
+        ste: mutable i64 = 0
+        if not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "state"), &sts, &ste):
+            return -1
+        state: i64 = rh_ir_link_state(texts, sts, ste)
+        if state < 0:
+            return -1
+        okr: mutable i64 = 0
+        radd: i64 = rh_ir_int(nodes, raw, texts, child, "revision_added", &okr)
+        links.push(RhIdentityLink{a: a, b: b, state: state.u8(), revision_added: radd})
+        child <- nodes[child.usize()].next_sibling
+    rev: i64 = rh_identity_revision(links)
+    parent: mutable darray[i64] = []
+    cmap: mutable darray[i64] = []
+    clusters: i64 = rh_identity_clusters(links, actor_count, parent, cmap)
+
+    # Optional actor-kind stratification.
+    has_kinds: mutable bool = false
+    humans: mutable i64 = 0
+    bots: mutable i64 = 0
+    unresolved: mutable i64 = 0
+    kinds_idx: i64 = rh_json_obj_get(nodes, texts, root, "actor_kinds")
+    if kinds_idx >= 0:
+        if nodes[kinds_idx.usize()].kind != RH_JSON_ARR:
+            return -1
+        has_kinds <- true
+        kinds: mutable darray[u8] = []
+        karr: RhJsonNode = nodes[kinds_idx.usize()]
+        kc: mutable i64 = karr.first_child
+        while kc >= 0 |kc, nodes, texts, kinds|:
+            kxs: mutable i64 = 0
+            kxe: mutable i64 = 0
+            if not rh_json_str_span(nodes, kc, &kxs, &kxe):
+                return -1
+            code: i64 = rh_ir_actor_kind(texts, kxs, kxe)
+            if code < 0:
+                return -1
+            kinds.push(code.u8())
+            kc <- nodes[kc.usize()].next_sibling
+        rh_actor_kinds(kinds, &humans, &bots, &unresolved)
+
+    rh_push_text(out, "{\"schema\":\"rh-identity-result/1\",\"actor_count\":")
+    rh_push_decimal_i64(out, actor_count)
+    rh_push_text(out, ",\"identity_revision\":")
+    rh_push_decimal_i64(out, rev)
+    rh_push_text(out, ",\"cluster_count\":")
+    rh_push_decimal_i64(out, clusters)
+    rh_push_text(out, ",\"cluster_id_by_actor\":[")
+    m: mutable i64 = 0
+    while m < actor_count |m, cmap, out|:
+        if m > 0:
+            out.push(44)
+        cid: i64 = rh_cluster_of(cmap, m)
+        rh_push_decimal_i64(out, cid)
+        m <- m + 1
+    rh_push_text(out, "],\"clusters\":[")
+    first_group: mutable bool = true
+    g: mutable i64 = 0
+    while g < actor_count |g, cmap, actor_count, out, first_group|:
+        croot: i64 = rh_cluster_of(cmap, g)
+        seen_before: mutable bool = false
+        p: mutable i64 = 0
+        while p < g |p, cmap, croot, seen_before|:
+            if rh_cluster_of(cmap, p) == croot:
+                seen_before <- true
+            p <- p + 1
+        if not seen_before:
+            if not first_group:
+                out.push(44)
+            first_group <- false
+            out.push(91)
+            inner_first: mutable bool = true
+            q: mutable i64 = 0
+            while q < actor_count |q, cmap, croot, out, inner_first|:
+                if rh_cluster_of(cmap, q) == croot:
+                    if not inner_first:
+                        out.push(44)
+                    inner_first <- false
+                    rh_push_decimal_i64(out, q)
+                q <- q + 1
+            out.push(93)
+        g <- g + 1
+    rh_push_text(out, "]")
+    if has_kinds:
+        rh_push_text(out, ",\"actor_kinds\":{\"human\":")
+        rh_push_decimal_i64(out, humans)
+        rh_push_text(out, ",\"bot_known\":")
+        rh_push_decimal_i64(out, bots)
+        rh_push_text(out, ",\"unresolved\":")
+        rh_push_decimal_i64(out, unresolved)
+        rh_push_text(out, "}")
+    rh_push_text(out, ",\"note\":\"clusters derive only from ACCEPTED links; rejected/revoked links change nothing; revoking recomputes clusters and advances the revision with no raw record rewritten; unresolved never forced human\"}")
+    return 0

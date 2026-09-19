@@ -1,0 +1,566 @@
+# rh_git.elisa — safe Git acquisition (M01-01/02/03).
+#
+# M01-01: rh_url_kind classifies local paths, public https remotes, and
+# everything else (unsupported). M01-02: rh_arg_safe enforces the strict
+# allowlist before ANY system() call (see docs/THREAT_MODEL.md for the
+# documented shell deviation). M01-03: acquisition uses plumbing only
+# (`log --format`, `rev-parse`); never checkout/clone-with-hooks/archive,
+# so no source-provided command ever runs (S001). Bounded by default
+# (RH_DEFAULT_MAX_COMMITS) with an explicit full-history mode.
+
+
+include "./rh_base.elisa"
+
+const RH_URL_LOCAL: u8 = 0
+const RH_URL_HTTPS: u8 = 1
+const RH_URL_UNSUPPORTED: u8 = 2
+
+const RH_DEFAULT_MAX_COMMITS: i64 = 20000
+
+def rh_url_kind(url: cstr) -> u8 can[Memory.Allocate, Abort.Panic]:
+    if rh_cstr_len_c(url) == 0:
+        return RH_URL_UNSUPPORTED
+    if rh_cstr_starts_with(url, "https://"):
+        return RH_URL_HTTPS
+    if rh_cstr_has_scheme(url):
+        return RH_URL_UNSUPPORTED
+    if rh_cstr_starts_with(url, "git@"):
+        return RH_URL_UNSUPPORTED
+    return RH_URL_LOCAL
+
+# Strict allowlist for anything interpolated into a system() command:
+# [A-Za-z0-9] / . : _ - + only. Everything else (quotes, whitespace,
+# shell metacharacters, '@', non-ASCII) is rejected. Notably '@' is
+# rejected everywhere: forge https URLs never need it, and it closes the
+# userinfo-smuggling class (S003).
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_byte_allowed(b: u8) -> bool:
+    if b >= 48 and b <= 57:
+        return true
+    if b >= 65 and b <= 90:
+        return true
+    if b >= 97 and b <= 122:
+        return true
+    if b == 47:
+        return true
+    if b == 46:
+        return true
+    if b == 58:
+        return true
+    if b == 95:
+        return true
+    if b == 45:
+        return true
+    if b == 43:
+        return true
+    return false
+
+def rh_arg_safe(s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    if rh_cstr_len_c(s) == 0:
+        return false
+    i: mutable usize = 0
+    while true |i, s|:
+        b: u8 = s[i]
+        break if b == 0
+        if not rh_byte_allowed(b):
+            return false
+        i <- i + 1
+    return true
+
+# Join dir + "/" + name into out (NUL-terminated). False on empty dir.
+def rh_join_path(dir: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+    if rh_cstr_len_c(dir) == 0:
+        return false
+    rh_push_cstr(out, dir)
+    out.push(47)
+    rh_push_text(out, name)
+    out.push(0)
+    return true
+
+# Append a single-quoted shell arg (content pre-validated by rh_arg_safe;
+# quoting is belt-and-braces since the charset cannot break out).
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_push_quoted(cmd: mutable darray[u8]&, arg: cstr) -> void can[Memory.Allocate, Abort.Panic]:
+    cmd.push(39)
+    rh_push_cstr(cmd, arg)
+    cmd.push(39)
+
+# Run: git -c core.pager=cat -c core.quotepath=false -C '<repo>' log --all
+#   --no-decorate --format=<plumbing> [--max-count=N] > '<out>' 2> '<err>'
+# Plumbing format per record (NUL-terminated): H %x01 an %x01 ae %x01 at
+# %x01 ct %x01 parents. Returns the system() status, or -1 when any input
+# fails validation (nothing executed in that case).
+def rh_run_git_log(repo: cstr, out_file: cstr, err_file: cstr, full_history: bool) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    if not rh_arg_safe(repo):
+        return -1
+    if not rh_arg_safe(out_file):
+        return -1
+    if not rh_arg_safe(err_file):
+        return -1
+    cmd: mutable darray[u8] = []
+    rh_push_text(cmd, "git -c core.pager=cat -c core.quotepath=false -C ")
+    rh_push_quoted(cmd, repo)
+    rh_push_text(cmd, " log --all --no-decorate --format=%H%x01%an%x01%ae%x01%at%x01%ct%x01%P%x00")
+    if not full_history:
+        rh_push_text(cmd, " --max-count=")
+        rh_push_decimal_i64(cmd, RH_DEFAULT_MAX_COMMITS)
+    rh_push_text(cmd, " > ")
+    rh_push_quoted(cmd, out_file)
+    rh_push_text(cmd, " 2> ")
+    rh_push_quoted(cmd, err_file)
+    cmd.push(0)
+    return system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+
+# Run: git -C '<repo>' rev-parse --is-shallow-repository > '<out>' 2> '<err>'
+def rh_run_git_shallow(repo: cstr, out_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    if not rh_arg_safe(repo):
+        return -1
+    if not rh_arg_safe(out_file):
+        return -1
+    if not rh_arg_safe(err_file):
+        return -1
+    cmd: mutable darray[u8] = []
+    rh_push_text(cmd, "git -C ")
+    rh_push_quoted(cmd, repo)
+    rh_push_text(cmd, " rev-parse --is-shallow-repository > ")
+    rh_push_quoted(cmd, out_file)
+    rh_push_text(cmd, " 2> ")
+    rh_push_quoted(cmd, err_file)
+    cmd.push(0)
+    return system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+
+# Run: git -C '<repo>' config --get extensions.partialClone > '<out>'
+# 2> '<err>'. A configured partial clone may be missing blobs, so
+# blob-derived metrics must be reported partial rather than complete
+# (F004). Exit is nonzero when the extension is absent (not a partial
+# clone); the caller reads the file, not the exit code.
+def rh_run_git_partial(repo: cstr, out_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    if not rh_arg_safe(repo):
+        return -1
+    if not rh_arg_safe(out_file):
+        return -1
+    if not rh_arg_safe(err_file):
+        return -1
+    cmd: mutable darray[u8] = []
+    rh_push_text(cmd, "git -C ")
+    rh_push_quoted(cmd, repo)
+    rh_push_text(cmd, " config --get extensions.partialClone > ")
+    rh_push_quoted(cmd, out_file)
+    rh_push_text(cmd, " 2> ")
+    rh_push_quoted(cmd, err_file)
+    cmd.push(0)
+    return system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+
+# Run: git -C '<repo>' rev-parse --verify --quiet HEAD (0 iff the repo has
+# at least one commit). Distinguishes observed-empty history (F001) from a
+# genuine collection failure: empty is reported, never errored.
+def rh_run_git_head(repo: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    if not rh_arg_safe(repo):
+        return -1
+    if not rh_arg_safe(err_file):
+        return -1
+    cmd: mutable darray[u8] = []
+    rh_push_text(cmd, "git -C ")
+    rh_push_quoted(cmd, repo)
+    rh_push_text(cmd, " rev-parse --verify --quiet HEAD -- > /dev/null 2> ")
+    rh_push_quoted(cmd, err_file)
+    cmd.push(0)
+    headrc: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+    return headrc
+
+# Run: git --version > '<out>' 2> '<err>' (evidence capture, M01-05).
+def rh_run_git_version(out_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    if not rh_arg_safe(out_file):
+        return -1
+    if not rh_arg_safe(err_file):
+        return -1
+    cmd: mutable darray[u8] = []
+    rh_push_text(cmd, "git --version > ")
+    rh_push_quoted(cmd, out_file)
+    rh_push_text(cmd, " 2> ")
+    rh_push_quoted(cmd, err_file)
+    cmd.push(0)
+    bound: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+    return bound
+
+# Run: mkdir -p '<dir>' (evidence/report tree setup; path pre-validated).
+def rh_ensure_dir(dir: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    if not rh_arg_safe(dir):
+        return -1
+    cmd: mutable darray[u8] = []
+    rh_push_text(cmd, "mkdir -p ")
+    rh_push_quoted(cmd, dir)
+    cmd.push(0)
+    made: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+    return made
+
+# Run: sort -u '<src>' -o '<dst>' (identity dedup; POSIX sort, no hashing
+# of personhood implied — raw strings in, unique raw strings out).
+def rh_run_sort_uniq(src_file: cstr, dst_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    if not rh_arg_safe(src_file):
+        return -1
+    if not rh_arg_safe(dst_file):
+        return -1
+    if not rh_arg_safe(err_file):
+        return -1
+    cmd: mutable darray[u8] = []
+    rh_push_text(cmd, "sort -u ")
+    rh_push_quoted(cmd, src_file)
+    rh_push_text(cmd, " -o ")
+    rh_push_quoted(cmd, dst_file)
+    rh_push_text(cmd, " 2> ")
+    rh_push_quoted(cmd, err_file)
+    cmd.push(0)
+    sorted: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+    return sorted
+
+# --- Fetch policy (S002/S003). Two layers, both must pass before any
+# network/file access:
+# (1) rh_fetch_guard: semantic policy. https or file scheme only (file =
+# recorded fixtures / controlled local inputs, never a confused deputy:
+# the caller names the fixture). No userinfo ('@'), no percent-escapes in
+# the host, no ports, no IPv6 brackets, no bare "localhost", no IPv4
+# loopback/private/link-local literals. Public IPv4 literals pass.
+# DNS rebinding is NOT solved here (M07 follow-up, recorded in
+# docs/THREAT_MODEL.md); the M02 slice fetches only public APIs and
+# caller-named fixture files.
+# (2) rh_fetch_arg_safe: shell safety for the system() runner. Single
+# quotes wrap the URL, so only the quote itself plus backtick, dollar,
+# backslash, controls, and DEL can break out — all rejected.
+def rh_fetch_arg_safe(s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: usize = rh_cstr_len_c(s)
+    if n == 0:
+        return false
+    i: mutable usize = 0
+    while true |i, s|:
+        b: u8 = s[i]
+        break if b == 0
+        if b < 32 or b == 127:
+            return false
+        if b == 39 or b == 96 or b == 36 or b == 92:
+            return false
+        i <- i + 1
+    return true
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_host_is_v4_literal(host_start: usize, host_end: usize, s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = host_start
+    while i < host_end |i, s, host_end|:
+        b: u8 = s[i]
+        if (b < 48 or b > 57) and b != 46:
+            return false
+        i <- i + 1
+    return true
+
+# Parse dotted quad at [start,end) into o0..o3. ok_out 1/0.
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_parse_v4(s: cstr, start: usize, end: usize, o0: mutable i64&, o1: mutable i64&, o2: mutable i64&, o3: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    parts: mutable i64 = 0
+    cur: mutable i64 = 0
+    digits: mutable i64 = 0
+    lz: mutable i64 = 0
+    i: mutable usize = start
+    while i < end |i, s, end, parts, cur, digits, lz, o0, o1, o2, o3|:
+        b: u8 = s[i]
+        if b >= 48 and b <= 57:
+            if digits == 0 and b == 48:
+                lz <- 1
+            cur <- cur * 10 + (b - 48).i64()
+            if cur > 255:
+                return false
+            digits <- digits + 1
+        elif b == 46:
+            if digits == 0:
+                return false
+            # Leading zeros make some resolvers read the octet as octal
+            # (0177.0.0.1 -> 127.0.0.1); reject rather than guess (S002).
+            if lz == 1 and digits > 1:
+                return false
+            if parts == 0:
+                o0[0] <- cur
+            elif parts == 1:
+                o1[0] <- cur
+            elif parts == 2:
+                o2[0] <- cur
+            else:
+                return false
+            parts <- parts + 1
+            cur <- 0
+            digits <- 0
+            lz <- 0
+        else:
+            return false
+        i <- i + 1
+    if parts != 3 or digits == 0:
+        return false
+    if lz == 1 and digits > 1:
+        return false
+    o3[0] <- cur
+    return true
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_v4_blocked(a: i64, b: i64) -> bool:
+    if a == 127:
+        return true
+    if a == 10:
+        return true
+    if a == 172 and b >= 16 and b <= 31:
+        return true
+    if a == 192 and b == 168:
+        return true
+    if a == 169 and b == 254:
+        return true
+    if a == 0:
+        return true
+    # Shared/CGNAT (100.64/10), benchmark (198.18/15), IETF protocol
+    # assignments (192.0.0/24), multicast/reserved (>=224). Same policy:
+    # a public crawler has no business reaching these (S002).
+    if a == 100 and b >= 64 and b <= 127:
+        return true
+    if a == 198 and (b == 18 or b == 19):
+        return true
+    # Conservative: 192.0.0.0/24 is IETF-assignment space; blocking the
+    # enclosing /16 is harmless for a public crawler and avoids an octet
+    # we do not carry here.
+    if a == 192 and b == 0:
+        return true
+    if a >= 224:
+        return true
+    return false
+
+# Hostname charset: letters, digits, hyphen, dot only; no empty label and
+# no leading/trailing hyphen. Rejects underscores and stray punctuation so
+# resolver-specific extensions cannot expand the attack surface.
+# (private to this file)
+def rh_host_chars_ok(start: usize, end: usize, s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = start
+    label_start: mutable usize = start
+    while i < end |i, s, end, label_start|:
+        b: u8 = s[i]
+        ok: bool = (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 57) or b == 45
+        if not ok and b != 46:
+            return false
+        if b == 46:
+            if i == label_start:
+                return false
+            prev: u8 = s[i - 1]
+            if prev == 45:
+                return false
+            label_start <- i + 1
+        i <- i + 1
+    if label_start == end:
+        return false
+    last: u8 = s[end - 1]
+    if last == 45:
+        return false
+    return true
+
+# Numeric-obfuscated hosts some resolvers accept but this policy must not:
+# "0x..." hex labels and zero-padded decimal labels. Fail closed (S002).
+# (private to this file)
+def rh_host_obfuscated(start: usize, end: usize, s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    i: mutable usize = start
+    at_label: mutable bool = true
+    while i < end |i, s, end, at_label|:
+        b: u8 = s[i]
+        if b == 46:
+            at_label <- true
+        else:
+            if at_label and b == 48 and i + 1 < end:
+                nxt: u8 = s[i + 1]
+                if nxt == 120 or nxt == 88:
+                    return true
+                if nxt >= 48 and nxt <= 57:
+                    return true
+            at_label <- false
+        i <- i + 1
+    return false
+
+def rh_fetch_guard(url: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    is_https: bool = rh_cstr_starts_with(url, "https://")
+    is_file: bool = rh_cstr_starts_with(url, "file://")
+    if not is_https and not is_file:
+        return false
+    n: usize = rh_cstr_len_c(url)
+    if is_file:
+        if n < 9:
+            return false
+        if url[7] != 47:
+            return false
+        return true
+    base: mutable usize = 8
+    if base >= n:
+        return false
+    hend: mutable usize = base
+    while hend < n |hend, url, n|:
+        c: u8 = url[hend]
+        break if c == 47 or c == 63 or c == 35
+        hend <- hend + 1
+    if hend == base:
+        return false
+    hi: mutable usize = base
+    while hi < hend |hi, url, hend|:
+        h: u8 = url[hi]
+        if h == 64 or h == 37 or h == 91 or h == 93 or h == 58:
+            return false
+        hi <- hi + 1
+    if rh_host_is_v4_literal(base, hend, url):
+        a0: mutable i64 = 0
+        a1: mutable i64 = 0
+        a2: mutable i64 = 0
+        a3: mutable i64 = 0
+        if not rh_parse_v4(url, base, hend, &a0, &a1, &a2, &a3):
+            return false
+        if rh_v4_blocked(a0, a1):
+            return false
+        return true
+    if not rh_host_chars_ok(base, hend, url):
+        return false
+    if rh_host_obfuscated(base, hend, url):
+        return false
+    dotted: mutable bool = false
+    dj: mutable usize = base
+    while dj < hend |dj, url, hend, dotted|:
+        if url[dj] == 46:
+            dotted <- true
+        dj <- dj + 1
+    return dotted
+
+# ASCII lower-case fold for address comparison.
+# (private to this file)
+def rh_lower_u8(b: u8) -> u8:
+    if b >= 65 and b <= 90:
+        return b + 32
+    return b
+
+# Case-insensitive prefix test on cstr.
+# (private to this file)
+def rh_starts_ci(s: cstr, prefix: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: usize = strlen(prefix)
+    i: mutable usize = 0
+    while i < n |i, s, prefix|:
+        if rh_lower_u8(s[i]) != rh_lower_u8(prefix[i]):
+            return false
+        i <- i + 1
+    return true
+
+# Second phase of transport policy (M07-02): a resolved address, checked
+# AFTER DNS, so the answer that is actually connected to is vetted. The
+# string guard cannot see rebinding (e.g. loopback.nip.io); the connector
+# must resolve and then call this before any bytes leave. Rejects
+# loopback/private/link-local/CGNAT/benchmark/multicast v4 and
+# unspecified/loopback/link-local/ULA/multicast/v4-mapped v6. Unknown
+# textual forms fail closed (false).
+def rh_addr_guard(ip: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: usize = rh_cstr_len_c(ip)
+    if n == 0:
+        return false
+    has_colon: mutable bool = false
+    i: mutable usize = 0
+    while i < n |i, ip, n, has_colon|:
+        if ip[i] == 58:
+            has_colon <- true
+        i <- i + 1
+    if not has_colon:
+        a0: mutable i64 = 0
+        a1: mutable i64 = 0
+        a2: mutable i64 = 0
+        a3: mutable i64 = 0
+        if not rh_parse_v4(ip, 0, n, &a0, &a1, &a2, &a3):
+            return false
+        if rh_v4_blocked(a0, a1):
+            return false
+        return true
+    # v6 literal: exact loopback/unspecified, then scoped/ULA/multicast
+    # prefixes, then v4-mapped tail (recurse on the dotted part).
+    if n == 2 and ip[0] == 58 and ip[1] == 58:
+        return false
+    if rh_starts_ci(ip, "::1"):
+        return false
+    if rh_starts_ci(ip, "::ffff:"):
+        a0: mutable i64 = 0
+        a1: mutable i64 = 0
+        a2: mutable i64 = 0
+        a3: mutable i64 = 0
+        if not rh_parse_v4(ip, 7, n, &a0, &a1, &a2, &a3):
+            return false
+        if rh_v4_blocked(a0, a1):
+            return false
+        return true
+    if rh_starts_ci(ip, "fe80:"):
+        return false
+    if rh_starts_ci(ip, "fec0:"):
+        return false
+    if rh_starts_ci(ip, "fc") or rh_starts_ci(ip, "fd"):
+        return false
+    if rh_starts_ci(ip, "ff"):
+        return false
+    return true
+
+# Run a bounded HTTPS/file fetch for forge APIs (M02-05 transport).
+# Policy, all enforced before and during the call (S002/S003/S012):
+# rh_fetch_guard (scheme/host/credential rules) + rh_fetch_arg_safe
+# (shell quoting safety); curl --proto restricts to https+file, redirects
+# disabled (fail closed, no credential re-send surface), wall-clock and
+# byte caps bound the transfer. No Authorization header is ever sent in
+# the M02 slice: authed endpoints report unauthorized honestly instead.
+# Returns the curl process status (0 = transfer ran; the caller MUST read
+# the code file: 200 = body usable, 000 = file-fixture transport with no
+# HTTP status, anything else = upstream answer preserved as evidence).
+# -1 on validation failure (nothing executed).
+const RH_FETCH_MAX_BYTES: i64 = 8388608
+const RH_FETCH_MAX_SECS: i64 = 60
+
+def rh_run_https_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    if not rh_fetch_guard(url):
+        return -1
+    if not rh_fetch_arg_safe(url):
+        return -1
+    if not rh_arg_safe(body_file):
+        return -1
+    if not rh_arg_safe(code_file):
+        return -1
+    if not rh_arg_safe(err_file):
+        return -1
+    cmd: mutable darray[u8] = []
+    rh_push_text(cmd, "curl -sS --proto '=https,file' --max-redirs 0 --max-time ")
+    rh_push_decimal_i64(cmd, RH_FETCH_MAX_SECS)
+    rh_push_text(cmd, " --max-filesize ")
+    rh_push_decimal_i64(cmd, RH_FETCH_MAX_BYTES)
+    rh_push_text(cmd, " -H 'User-Agent: repo-health-m02' -o ")
+    rh_push_quoted(cmd, body_file)
+    rh_push_text(cmd, " -w '%{http_code}' > ")
+    rh_push_quoted(cmd, code_file)
+    rh_push_text(cmd, " 2> ")
+    rh_push_quoted(cmd, err_file)
+    rh_push_text(cmd, " ")
+    rh_push_quoted(cmd, url)
+    cmd.push(0)
+    transport: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+    return transport
+
+# Run a bounded bare clone for https remotes (M01-03): no worktree, no
+# checkout (so no smudge/clean filters, no hooks execute), blob-less and
+# depth-bounded by default. Protocol guards forbid ext/file helpers.
+# Full-history mode drops the depth bound (filter stays: blobs are never
+# needed by the M01 metric set).
+def rh_run_git_clone(url: cstr, dest: cstr, err_file: cstr, full_history: bool) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    if not rh_arg_safe(url):
+        return -1
+    if not rh_arg_safe(dest):
+        return -1
+    if not rh_arg_safe(err_file):
+        return -1
+    cmd: mutable darray[u8] = []
+    rh_push_text(cmd, "git -c protocol.ext.allow=never -c protocol.file.allow=never clone --bare --no-checkout --filter=blob:none")
+    if not full_history:
+        rh_push_text(cmd, " --depth=5000")
+    rh_push_text(cmd, " ")
+    rh_push_quoted(cmd, url)
+    rh_push_text(cmd, " ")
+    rh_push_quoted(cmd, dest)
+    rh_push_text(cmd, " 2> ")
+    rh_push_quoted(cmd, err_file)
+    cmd.push(0)
+    cloned: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+    return cloned

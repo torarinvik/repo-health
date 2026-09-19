@@ -1,0 +1,158 @@
+# rh_query.elisa — machine query contract: request kinds, cursor
+# pagination, scan-status aggregation, bounded graph jobs (M06-01).
+#
+# This is a local, in-process contract rather than an HTTP server: the
+# same shapes a server would expose, testable offline. Cursor pagination
+# is stable (ascending id order, exclusive cursor, capped page size) so a
+# caller can resume without duplicates or gaps. Scan status is reported
+# per capability and never collapsed into a project verdict: a failed
+# review fetch makes the REVIEW capability stale/partial while the rest
+# stay observed — "outage != abandonment". Graph jobs carry explicit
+# budgets and a fenced lease, so a stale worker cannot publish results.
+
+const RH_Q_IDENTITY: u8 = 0
+const RH_Q_METRICS: u8 = 1
+const RH_Q_CONTINUITY: u8 = 2
+const RH_Q_UPSTREAM: u8 = 3
+const RH_Q_DOWNSTREAM: u8 = 4
+const RH_Q_FINDINGS: u8 = 5
+const RH_Q_EVIDENCE: u8 = 6
+const RH_Q_SCAN_STATUS: u8 = 7
+
+const RH_QFIELD_EVIDENCE: u64 = 1
+const RH_QFIELD_COVERAGE: u64 = 2
+const RH_QFIELD_LIMITATIONS: u64 = 4
+const RH_QFIELD_REPLAYABILITY: u64 = 8
+
+const RH_JOB_QUEUED: u8 = 0
+const RH_JOB_LEASED: u8 = 1
+const RH_JOB_RUNNING: u8 = 2
+const RH_JOB_SUCCEEDED: u8 = 3
+const RH_JOB_FAILED_TERMINAL: u8 = 4
+const RH_JOB_CANCELED: u8 = 5
+
+const RH_QPAGE_MAX: i64 = 1000
+
+def rh_query_kind_valid(kind: u8) -> bool:
+    return kind <= RH_Q_SCAN_STATUS
+
+# Pagination over an ascending-sorted id list. The cursor is the last id
+# already delivered (exclusive); ids lower than the cursor are skipped so
+# a replay of an old cursor is idempotent. Returns the number written,
+# sets next_cursor (or -1 when complete), and complete.
+def rh_query_page(ids: darray[i64]&, cursor: i64, limit: i64, out: mutable darray[i64]&, next_cursor: mutable i64&, complete: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    next_cursor[0] <- -1
+    complete[0] <- 0
+    if limit <= 0 or ids.count == 0:
+        complete[0] <- 1
+        next_cursor[0] <- -1
+        return out.count.i64()
+    cap: i64 = limit if limit <= RH_QPAGE_MAX else RH_QPAGE_MAX
+    i: mutable usize = 0
+    while i < ids.count |i, ids, cursor, cap, out, next_cursor, complete|:
+        v: i64 = ids[i]
+        i <- i + 1
+        if v <= cursor:
+            continue
+        if out.count.i64() >= cap:
+            complete[0] <- 0
+            last_i: usize = out.count - 1
+            next_cursor[0] <- out[last_i]
+            return out.count.i64()
+        out.push(v)
+    complete[0] <- 1
+    next_cursor[0] <- -1
+    return out.count.i64()
+
+# Counts per capability state over a scan's capability rows. States use
+# rh_observation codes (0 observed, 2 unavailable, 4 partial, 5 stale,
+# 3 unauthorized, ...). No single status is derived here on purpose:
+# callers present the breakdown so one failed capability cannot read as
+# a failed project.
+def rh_scan_status_tally(states: darray[u8]&, observed_out: mutable i64&, stale_out: mutable i64&, partial_out: mutable i64&, unavailable_out: mutable i64&, unauthorized_out: mutable i64&, other_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    observed_out[0] <- 0
+    stale_out[0] <- 0
+    partial_out[0] <- 0
+    unavailable_out[0] <- 0
+    unauthorized_out[0] <- 0
+    other_out[0] <- 0
+    i: mutable usize = 0
+    while i < states.count |i, states, observed_out, stale_out, partial_out, unavailable_out, unauthorized_out, other_out|:
+        s: u8 = states[i]
+        i <- i + 1
+        if s == 0:
+            observed_out[0] <- observed_out[0] + 1
+        elif s == 5:
+            stale_out[0] <- stale_out[0] + 1
+        elif s == 4:
+            partial_out[0] <- partial_out[0] + 1
+        elif s == 2:
+            unavailable_out[0] <- unavailable_out[0] + 1
+        elif s == 3:
+            unauthorized_out[0] <- unauthorized_out[0] + 1
+        else:
+            other_out[0] <- other_out[0] + 1
+    return
+
+# Which capability rows are affected by a collection failure? A capability
+# that previously had data becomes stale; one without data becomes
+# unavailable. Other capabilities are untouched.
+def rh_capability_failure(states: mutable darray[u8]&, capability: i64, had_data: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    if capability < 0 or capability >= states.count.i64():
+        return
+    states[capability.usize()] <- (5 if had_data else 2)
+    return
+
+# Bounded graph job lease (in-memory twin of the store lease; recorded ttl
+# so expiry is judged by the lease itself). Returns the fencing token on
+# a successful claim, -1 when held, -2 when terminally closed.
+struct RhJobLease:
+    job_id: mutable i64
+    token: mutable i64
+    owner_id: mutable i64
+    expires_at: mutable i64
+    phase: mutable u8
+
+def rh_job_make(job_id: i64) -> RhJobLease:
+    return RhJobLease{job_id: job_id, token: 0, owner_id: -1, expires_at: 0, phase: RH_JOB_QUEUED}
+
+def rh_job_claim(l: mutable RhJobLease&, owner_id: i64, now: i64, ttl: i64) -> i64:
+    if ttl <= 0:
+        return -1
+    if l.phase == RH_JOB_SUCCEEDED or l.phase == RH_JOB_FAILED_TERMINAL or l.phase == RH_JOB_CANCELED:
+        return -2
+    if l.phase != RH_JOB_QUEUED and now < l.expires_at:
+        return -1
+    l.token <- l.token + 1
+    l.owner_id <- owner_id
+    l.expires_at <- now + ttl
+    l.phase <- RH_JOB_LEASED
+    return l.token
+
+def rh_job_renew(l: mutable RhJobLease&, token: i64, now: i64, ttl: i64) -> bool:
+    if l.token != token:
+        return false
+    if l.phase == RH_JOB_SUCCEEDED or l.phase == RH_JOB_FAILED_TERMINAL or l.phase == RH_JOB_CANCELED:
+        return false
+    if ttl <= 0:
+        return false
+    l.expires_at <- now + ttl
+    if l.phase == RH_JOB_LEASED:
+        l.phase <- RH_JOB_RUNNING
+    return true
+
+def rh_job_finish(l: mutable RhJobLease&, token: i64, final_phase: u8) -> bool:
+    if l.token != token:
+        return false
+    if l.phase == RH_JOB_SUCCEEDED or l.phase == RH_JOB_FAILED_TERMINAL or l.phase == RH_JOB_CANCELED:
+        return false
+    l.phase <- final_phase
+    return true
+
+# Budget check for a bounded graph job: within node and wall-clock limits.
+def rh_job_within_budget(visited_nodes: i64, deadline: i64, now: i64, max_nodes: i64) -> bool:
+    if visited_nodes > max_nodes:
+        return false
+    if deadline > 0 and now > deadline:
+        return false
+    return true

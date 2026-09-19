@@ -1,0 +1,121 @@
+# rh_privacy_report.elisa — M07-07 publication suppression execution path.
+#
+# Turns an `rh-privacy-input/1` set of aggregate cells into
+# `rh-privacy-result/1`. A cell publishes only when every contributing
+# subject is public AND the cell meets the disclosure threshold; a private
+# or unknown-visibility member withholds, and a small public cell is
+# suppressed rather than rounded or hidden behind a score. The explanation
+# is the `rh_privacy` text verbatim, so the "suppression is not
+# anonymization" caveat travels with every decision. Malformed input fails
+# closed.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_privacy.elisa"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_pv_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = e - s
+    k: mutable i64 = 0
+    while k < n |k, texts, lit, s|:
+        if lit[k.usize()] == 0:
+            return false
+        if texts[(s + k).usize()] != lit[k.usize()]:
+            return false
+        k <- k + 1
+    return lit[n.usize()] == 0
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_pv_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        return false
+    return rh_json_str_span(nodes, idx, s_out, e_out)
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_pv_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, default_v: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    ok: mutable i64 = 0
+    v: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, obj, key), &ok)
+    if ok == 0:
+        return default_v
+    return v
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_pv_label(d: i64) -> u8&:
+    if d == RH_PUB_PUBLISH:
+        return "publish"
+    if d == RH_PUB_SUPPRESS_SMALL:
+        return "suppress_small_cell"
+    if d == RH_PUB_WITHHOLD_PRIVATE:
+        return "withhold_private_member"
+    if d == RH_PUB_WITHHOLD_UNKNOWN:
+        return "withhold_unknown_visibility"
+    return "unavailable"
+
+def rh_privacy_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        return -1
+    sspan: mutable i64 = 0
+    espan: mutable i64 = 0
+    sc: i64 = rh_json_obj_get(nodes, texts, root, "schema")
+    if sc < 0 or not rh_json_str_span(nodes, sc, &sspan, &espan):
+        return -1
+    if not rh_pv_eq(texts, sspan, espan, "rh-privacy-input/1"):
+        return -1
+    cells_idx: i64 = rh_json_obj_get(nodes, texts, root, "cells")
+    if cells_idx < 0 or nodes[cells_idx.usize()].kind != RH_JSON_ARR:
+        return -1
+    rh_push_text(out, "{\"schema\":\"rh-privacy-result/1\",\"cells\":[")
+    arr: RhJsonNode = nodes[cells_idx.usize()]
+    child: mutable i64 = arr.first_child
+    i: mutable i64 = 0
+    while child >= 0 |child, nodes, texts, raw, out, i|:
+        if nodes[child.usize()].kind != RH_JSON_OBJ:
+            return -1
+        ids: mutable i64 = 0
+        ide: mutable i64 = 0
+        if not rh_pv_str(nodes, texts, child, "id", &ids, &ide):
+            return -1
+        pub: i64 = rh_pv_int(nodes, raw, texts, child, "public_count", 0)
+        aut: i64 = rh_pv_int(nodes, raw, texts, child, "authorized_count", 0)
+        priv: i64 = rh_pv_int(nodes, raw, texts, child, "private_count", 0)
+        unk: i64 = rh_pv_int(nodes, raw, texts, child, "unknown_count", 0)
+        thr: i64 = rh_pv_int(nodes, raw, texts, child, "threshold", 1)
+        decision: i64 = rh_pub_decide(pub, aut, priv, unk, thr)
+        if i > 0:
+            out.push(44)
+        i <- i + 1
+        rh_push_text(out, "{\"id\":\"")
+        rh_json_escape(out, texts, ids.usize(), ide.usize())
+        rh_push_text(out, "\",\"decision\":\"")
+        rh_push_text(out, rh_pv_label(decision))
+        rh_push_text(out, "\",\"publishable\":")
+        if rh_pub_is_publishable(decision):
+            rh_push_text(out, "true")
+        else:
+            rh_push_text(out, "false")
+        rh_push_text(out, ",\"counts\":{\"public\":")
+        rh_push_decimal_i64(out, pub)
+        rh_push_text(out, ",\"authorized\":")
+        rh_push_decimal_i64(out, aut)
+        rh_push_text(out, ",\"private\":")
+        rh_push_decimal_i64(out, priv)
+        rh_push_text(out, ",\"unknown\":")
+        rh_push_decimal_i64(out, unk)
+        rh_push_text(out, "},\"threshold\":")
+        rh_push_decimal_i64(out, thr)
+        rh_push_text(out, ",\"explanation\":\"")
+        expl: mutable darray[u8] = []
+        rh_pub_text(decision, pub, aut, priv, unk, thr, expl)
+        # Trim the trailing newline before embedding.
+        expl_end: mutable usize = expl.count
+        if expl_end > 0 and expl[expl_end - 1] == 10:
+            expl_end <- expl_end - 1
+        rh_json_escape(out, expl, 0, expl_end)
+        rh_push_text(out, "\"}")
+        child <- nodes[child.usize()].next_sibling
+    rh_push_text(out, "],\"note\":\"a cell publishes only when every contributing subject is public and the cell meets the threshold; suppression is not anonymization; no formal-anonymity claim is made without a stated method\"}")
+    return 0

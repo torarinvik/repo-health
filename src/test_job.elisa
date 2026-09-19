@@ -1,0 +1,208 @@
+# test_job.elisa — ingestion job machine (M02-03): failure classification,
+# retry disposition, exponential backoff, and the retry/dead-letter/
+# terminal state transitions. Every failure kind is distinct and the
+# machine never turns an exhausted retry into a silent success.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_job.elisa"
+
+def jcheck(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    if cond:
+        return
+    fails[0] <- fails[0] + 1
+    b: mutable darray[u8] = []
+    rh_push_text(b, "JOB-FAIL ")
+    rh_push_text(b, label)
+    b.push(10)
+    rh_write_stdout(b)
+
+# Classify a literal string via the JSON parser (so the span compare is
+# exercised the same way the CLI will use it).
+def kind_of(lit: u8&, fails: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    raw: mutable darray[u8] = []
+    raw.push(34)
+    rh_push_text(raw, lit)
+    raw.push(34)
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0:
+        fails[0] <- fails[0] + 1
+        return -1
+    s: mutable i64 = 0
+    e: mutable i64 = 0
+    _ = rh_json_str_span(nodes, root, &s, &e)
+    return rh_job_classify(texts, s, e)
+
+def check_classify(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    jcheck(kind_of("transient", fails) == 0, "kind-transient", fails)
+    jcheck(kind_of("rate_limit", fails) == 1, "kind-rate-limit", fails)
+    jcheck(kind_of("auth", fails) == 2, "kind-auth", fails)
+    jcheck(kind_of("unsupported", fails) == 3, "kind-unsupported", fails)
+    jcheck(kind_of("malformed", fails) == 4, "kind-malformed", fails)
+    jcheck(kind_of("budget", fails) == 5, "kind-budget", fails)
+    jcheck(kind_of("canceled", fails) == 6, "kind-canceled", fails)
+    jcheck(kind_of("vibes", fails) == -1, "kind-unknown-fails-closed", fails)
+    # kinds are distinct (no accidental collapse)
+    a: i64 = kind_of("auth", fails)
+    u: i64 = kind_of("unsupported", fails)
+    m: i64 = kind_of("malformed", fails)
+    t: i64 = kind_of("transient", fails)
+    jcheck(a != u and a != m and a != t and u != m and u != t and m != t, "kinds-distinct", fails)
+    return
+
+def check_disposition(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    # auth/unsupported terminal, malformed dead-letter, transient/rate/budget retry
+    jcheck(rh_job_disposition(2) == 1, "disp-auth-terminal", fails)
+    jcheck(rh_job_disposition(3) == 1, "disp-unsupported-terminal", fails)
+    jcheck(rh_job_disposition(4) == 2, "disp-malformed-dead-letter", fails)
+    jcheck(rh_job_disposition(0) == 0, "disp-transient-retry", fails)
+    jcheck(rh_job_disposition(1) == 0, "disp-rate-retry", fails)
+    jcheck(rh_job_disposition(5) == 0, "disp-budget-retry", fails)
+    return
+
+def check_backoff(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    # transient doubles, rate_limit base is larger, budget larger still; capped.
+    jcheck(rh_job_backoff(0, 1, 3600) == 2, "backoff-transient-1", fails)
+    jcheck(rh_job_backoff(0, 2, 3600) == 4, "backoff-transient-2", fails)
+    jcheck(rh_job_backoff(0, 3, 3600) == 8, "backoff-transient-3", fails)
+    jcheck(rh_job_backoff(1, 1, 3600) == 30, "backoff-rate-1", fails)
+    jcheck(rh_job_backoff(5, 1, 3600) == 60, "backoff-budget-1", fails)
+    jcheck(rh_job_backoff(0, 1, 3) == 2, "backoff-cap-not-hit", fails)
+    jcheck(rh_job_backoff(0, 3, 3) == 3, "backoff-cap-hit", fails)
+    jcheck(rh_job_backoff(0, 0, 3600) == 0, "backoff-zero-attempt", fails)
+    # monotone non-decreasing in attempt until the cap
+    prev: mutable i64 = 0
+    ok: mutable bool = true
+    i: mutable i64 = 1
+    while i <= 10 |i, prev, ok|:
+        v: i64 = rh_job_backoff(0, i, 100000000)
+        if v < prev:
+            ok <- false
+        prev <- v
+        i <- i + 1
+    jcheck(ok, "backoff-monotone", fails)
+    return
+
+def check_failure_transitions(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    # auth -> terminal regardless of attempts
+    n1: RhJobNext = rh_job_on_failure(2, 1, 1000, 5, 3600)
+    jcheck(n1.phase == 4, "f-auth-terminal", fails)
+    # unsupported -> terminal
+    n2: RhJobNext = rh_job_on_failure(3, 1, 1000, 5, 3600)
+    jcheck(n2.phase == 4, "f-unsupported-terminal", fails)
+    # malformed -> dead-letter immediately (no retry)
+    n3: RhJobNext = rh_job_on_failure(4, 1, 1000, 5, 3600)
+    jcheck(n3.phase == 7, "f-malformed-dead-letter", fails)
+    # transient -> retry_wait with a future wake time and incremented attempt
+    n4: RhJobNext = rh_job_on_failure(0, 1, 1000, 5, 3600)
+    jcheck(n4.phase == 6, "f-transient-retry-wait", fails)
+    jcheck(n4.wake_at == 1002, "f-transient-wake", fails)
+    jcheck(n4.attempt == 2, "f-transient-attempt-inc", fails)
+    # rates back off further
+    n5: RhJobNext = rh_job_on_failure(1, 1, 1000, 5, 3600)
+    jcheck(n5.wake_at == 1030, "f-rate-wake", fails)
+    # exhausted retries dead-letter, never succeed
+    n6: RhJobNext = rh_job_on_failure(0, 5, 1000, 5, 3600)
+    jcheck(n6.phase == 7, "f-exhausted-dead-letter", fails)
+    # max_attempts == 0 means unlimited retries
+    n7: RhJobNext = rh_job_on_failure(0, 999, 1000, 0, 3600)
+    jcheck(n7.phase == 6, "f-unlimited-retries", fails)
+    # the wake time is always at/after now for retryable kinds
+    jcheck(n7.wake_at > 1000, "f-wake-in-future", fails)
+    return
+
+def check_labels(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    # labels must be distinct and present (no phase collapses to another)
+    jcheck(rh_streq(rh_job_phase_label(4), "failed_terminal"), "label-failed-terminal", fails)
+    jcheck(rh_streq(rh_job_phase_label(6), "retry_wait"), "label-retry-wait", fails)
+    jcheck(rh_streq(rh_job_phase_label(7), "dead_letter"), "label-dead-letter", fails)
+    jcheck(not rh_streq(rh_job_phase_label(7), rh_job_phase_label(3)), "label-distinct", fails)
+    jcheck(rh_streq(rh_job_kind_label(2), "auth"), "kind-label-auth", fails)
+    jcheck(rh_streq(rh_job_kind_label(1), "rate_limit"), "kind-label-rate", fails)
+    return
+
+def check_scheduler(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    # Queue is bounded: enqueue past capacity is refused, never dropped.
+    slots: mutable darray[RhSlot] = rh_sched_slots(2)
+    h: mutable RhHost = rh_sched_host(10, 1, 1, 100)
+    jcheck(rh_sched_enqueue(slots, 100) == 0, "sched-enq-0", fails)
+    jcheck(rh_sched_enqueue(slots, 100) == 1, "sched-enq-1", fails)
+    jcheck(rh_sched_enqueue(slots, 100) == -1, "sched-full-refused", fails)
+    # Claim consumes a host token and fences with a token.
+    c: i64 = rh_sched_claim(slots, &h, 7, 100, 50)
+    jcheck(c == 0, "sched-claim-first", fails)
+    jcheck(slots[0].phase == RH_JOB_LEASED_C, "sched-claim-phase", fails)
+    jcheck(slots[0].token == 1, "sched-claim-token", fails)
+    jcheck(h.tokens == 9, "sched-claim-consumes-token", fails)
+    # A stale token cannot succeed.
+    jcheck(not rh_sched_succeed(slots, 0, 999), "sched-stale-success-refused", fails)
+    jcheck(rh_sched_succeed(slots, 0, 1), "sched-success", fails)
+    jcheck(slots[0].phase == RH_JOB_SUCCEEDED_C, "sched-success-phase", fails)
+    # Terminal slots cannot be cancelled.
+    jcheck(not rh_sched_cancel(slots, 0), "sched-cancel-terminal-refused", fails)
+    return
+
+def check_scheduler_retry(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    slots: mutable darray[RhSlot] = rh_sched_slots(1)
+    h: mutable RhHost = rh_sched_host(10, 1, 1, 100)
+    _ = rh_sched_enqueue(slots, 100)
+    idx: i64 = rh_sched_claim(slots, &h, 1, 100, 50)
+    tok: i64 = slots[idx.usize()].token
+    # transient failure -> retry_wait with backoff, host backed off
+    p: i64 = rh_sched_fail(slots, &h, 0, tok, 0, 100, 5, 3600)
+    jcheck(p == 6, "sched-fail-retry-phase", fails)
+    jcheck(slots[0].phase == RH_JOB_RETRY_WAIT_C and slots[0].attempt == 1, "sched-fail-retry-slot", fails)
+    jcheck(h.backoff_until > 100, "sched-host-backed-off", fails)
+    # not ready until wake time
+    jcheck(rh_sched_claim(slots, &h, 1, 101, 50) == -1, "sched-not-ready-before-wake", fails)
+    # ready after wake time
+    idx2: i64 = rh_sched_claim(slots, &h, 1, 100 + 100, 50)
+    tok2: i64 = slots[idx2.usize()].token
+    jcheck(idx2 == 0, "sched-ready-after-wake", fails)
+    jcheck(tok2 == 2, "sched-ready-after-wake-token", fails)
+    # malformed -> dead_letter
+    p2: i64 = rh_sched_fail(slots, &h, 0, tok2, 4, 1000, 5, 3600)
+    jcheck(p2 == 7, "sched-malformed-dead-letter", fails)
+    jcheck(slots[0].phase == RH_JOB_DEAD_LETTER_C, "sched-dead-letter-slot", fails)
+    return
+
+def check_scheduler_reclaim(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    slots: mutable darray[RhSlot] = rh_sched_slots(1)
+    h: mutable RhHost = rh_sched_host(10, 1, 1, 100)
+    _ = rh_sched_enqueue(slots, 100)
+    idx: i64 = rh_sched_claim(slots, &h, 1, 100, 50)
+    tok: i64 = slots[idx.usize()].token
+    jcheck(tok == 1, "sched-reclaim-claim", fails)
+    # not expired yet -> reclaim refused
+    jcheck(not rh_sched_reclaim(slots, 0, 120), "sched-reclaim-not-expired", fails)
+    # expired -> reclaim to queued with a NEW token; stale worker blocked
+    jcheck(rh_sched_reclaim(slots, 0, 200), "sched-reclaim-expired", fails)
+    jcheck(slots[0].phase == RH_JOB_QUEUED_C, "sched-reclaim-queued", fails)
+    jcheck(slots[0].token == 2, "sched-reclaim-new-token", fails)
+    jcheck(not rh_sched_succeed(slots, 0, 1), "sched-reclaim-old-token-blocked", fails)
+    # an auth failure is terminal (no retry slot state)
+    idx3: i64 = rh_sched_claim(slots, &h, 1, 200, 50)
+    tok3: i64 = slots[idx3.usize()].token
+    p: i64 = rh_sched_fail(slots, &h, 0, tok3, 2, 200, 5, 3600)
+    jcheck(p == 4, "sched-auth-terminal", fails)
+    jcheck(slots[0].phase == RH_JOB_FAILED_TERMINAL_C, "sched-auth-terminal-slot", fails)
+    return
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fails: mutable i64 = 0
+    check_classify(&fails)
+    check_disposition(&fails)
+    check_backoff(&fails)
+    check_failure_transitions(&fails)
+    check_labels(&fails)
+    check_scheduler(&fails)
+    check_scheduler_retry(&fails)
+    check_scheduler_reclaim(&fails)
+    if fails == 0:
+        b: mutable darray[u8] = []
+        rh_push_text(b, "JOB OK")
+        b.push(10)
+        rh_write_stdout(b)
+        return 0
+    return 1

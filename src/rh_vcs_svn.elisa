@@ -1,0 +1,425 @@
+# rh_vcs_svn.elisa — Subversion adapter (M08 native-VCS lane; prototype).
+#
+# Input is the documented machine format of `svn log --xml -v`: an <log>
+# document of <logentry revision="N"> elements with <author>, <date>,
+# <msg>, and <paths><path action="A|M|D|R" ...>. This module only PARSES
+# and NORMALIZES; it never invents a Git hash and never treats an SVN
+# revision as a Git revision. Native revision numbers are preserved
+# verbatim.
+#
+# This is a direct linear byte parser, not a general XML DOM: it scans for
+# the documented tags, decodes the five predefined entities plus numeric
+# character references in text, and fails closed on a document that is not
+# an <log> with well-formed <logentry> elements. Unknown tags are skipped.
+#
+# Honest scope (prototype): an SVN revision is a REPOSITORY-GLOBAL counter.
+# A single revision can touch several paths and therefore spans multiple
+# projects; it is NOT a per-project change count and must never be summed
+# as one change per project (R025). The author string is raw identity
+# evidence, not an account and not a person. Fields the format does not
+# support (reviews, proposals, traffic, branches) stay unsupported in the
+# capability manifest. Path actions are counted, not interpreted.
+include "./rh_base.elisa"
+
+const RH_SVN_MAX_ENTRIES_DEFAULT: i64 = 20000
+
+const RH_SVN_ACT_UNKNOWN: u8 = 0
+const RH_SVN_ACT_ADD: u8 = 1
+const RH_SVN_ACT_MODIFY: u8 = 2
+const RH_SVN_ACT_DELETE: u8 = 3
+const RH_SVN_ACT_REPLACE: u8 = 4
+
+# One normalized log entry. Spans index into the caller-owned log pool.
+struct RhSvnEntry:
+    rev: i64
+    author_s: i64
+    author_e: i64
+    msg_s: i64
+    msg_e: i64
+    date_s: i64
+    date_e: i64
+    has_date: mutable i64
+    has_author: mutable i64
+    path_count: mutable i64
+    add_n: mutable i64
+    modify_n: mutable i64
+    delete_n: mutable i64
+    replace_n: mutable i64
+    other_n: mutable i64
+
+# Parsed log: ok, entries, the decoded text pool spans index into, and the
+# count of entries skipped for a missing/malformed revision.
+struct RhSvnLog:
+    ok: mutable i64
+    entries: mutable darray[RhSvnEntry]
+    pool: mutable darray[u8]
+    rejected: mutable i64
+
+def rh_svn_action_label(a: u8) -> u8&:
+    if a == RH_SVN_ACT_ADD:
+        return "A"
+    if a == RH_SVN_ACT_MODIFY:
+        return "M"
+    if a == RH_SVN_ACT_DELETE:
+        return "D"
+    if a == RH_SVN_ACT_REPLACE:
+        return "R"
+    return "?"
+
+def rh_svn_action_of(b: u8) -> u8 can[Memory.Allocate, Abort.Panic]:
+    if b == 65:
+        return RH_SVN_ACT_ADD
+    if b == 77:
+        return RH_SVN_ACT_MODIFY
+    if b == 68:
+        return RH_SVN_ACT_DELETE
+    if b == 82:
+        return RH_SVN_ACT_REPLACE
+    return RH_SVN_ACT_UNKNOWN
+
+# --- byte scanning helpers (all by-reference parameters, no nested
+# value-block mutation, which this compiler loses) -----------------------
+
+# Index of the first occurrence of literal `lit` at or after `from`, or -1.
+def rh_svn_find(data: darray[u8]&, from: i64, lit: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    n: i64 = data.count.i64()
+    ln: i64 = strlen(lit).i64()
+    if from < 0 or ln == 0 or ln > n:
+        return -1
+    i: mutable i64 = from
+    while i + ln <= n |i, n, ln, data, lit|:
+        hit: mutable bool = true
+        k: mutable i64 = 0
+        while k < ln |k, ln, data, lit, i, hit|:
+            if data[(i + k).usize()] != lit[k.usize()]:
+                hit <- false
+            k <- k + 1
+        if hit:
+            return i
+        i <- i + 1
+    return -1
+
+# Index of byte b at or after from, or -1.
+def rh_svn_find_byte(data: darray[u8]&, from: i64, b: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
+    n: i64 = data.count.i64()
+    i: mutable i64 = from
+    while i < n |i, n, data, b|:
+        if data[i.usize()] == b:
+            return i
+        i <- i + 1
+    return -1
+
+# Copy raw run [s,e) into pool, decoding predefined + numeric entities.
+# Returns the pool start offset, or -1 when the span is invalid.
+def rh_svn_copy_text(data: darray[u8]&, s: i64, e: i64, pool: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e < s or e > data.count.i64():
+        return -1
+    start: i64 = pool.count.i64()
+    i: mutable i64 = s
+    while i < e |i, e, data, pool|:
+        b: u8 = data[i.usize()]
+        if b == 38:
+            i <- i + 1
+            ns: i64 = i
+            while i < e and data[i.usize()] != 59 and i - ns <= 12 |i, e, data, ns|:
+                i <- i + 1
+            if i < e and data[i.usize()] == 59 and i - ns <= 12:
+                if rh_svn_entity(data, ns, i, pool):
+                    i <- i + 1
+                else:
+                    pool.push(38)
+                    k: mutable i64 = ns
+                    while k <= i |k, data, pool, i|:
+                        pool.push(data[k.usize()])
+                        k <- k + 1
+                    i <- i + 1
+            else:
+                pool.push(38)
+        else:
+            pool.push(b)
+            i <- i + 1
+    return start
+
+# Resolve one entity name between & and ;. true when resolved.
+def rh_svn_entity(data: darray[u8]&, s: i64, e: i64, pool: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = e - s
+    if n == 2:
+        if rh_svn_lit(data, s, e, "lt"):
+            pool.push(60)
+            return true
+        if rh_svn_lit(data, s, e, "gt"):
+            pool.push(62)
+            return true
+    if n == 3:
+        if rh_svn_lit(data, s, e, "amp"):
+            pool.push(38)
+            return true
+    if n == 4:
+        if rh_svn_lit(data, s, e, "quot"):
+            pool.push(34)
+            return true
+        if rh_svn_lit(data, s, e, "apos"):
+            pool.push(39)
+            return true
+    if n >= 3 and data[s.usize()] == 35:
+        code: mutable i64 = 0
+        i: mutable i64 = s + 1
+        hex: mutable bool = false
+        if i < e and (data[i.usize()] == 120 or data[i.usize()] == 88):
+            hex <- true
+            i <- i + 1
+        if i >= e:
+            return false
+        while i < e |i, e, data, code, hex|:
+            b: u8 = data[i.usize()]
+            d: mutable i64 = -1
+            if b >= 48 and b <= 57:
+                d <- (b - 48).i64()
+            elif hex and b >= 97 and b <= 102:
+                d <- (b - 87).i64()
+            elif hex and b >= 65 and b <= 70:
+                d <- (b - 55).i64()
+            if d < 0:
+                return false
+            code <- code * 16 + d
+            if code > 1114111:
+                return false
+            i <- i + 1
+        rh_svn_push_cp(pool, code)
+        return true
+    return false
+
+def rh_svn_lit(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = strlen(lit).i64()
+    if s < 0 or e - s != n:
+        return false
+    k: mutable i64 = 0
+    while k < n |k, data, s, lit|:
+        if data[(s + k).usize()] != lit[k.usize()]:
+            return false
+        k <- k + 1
+    return true
+
+def rh_svn_push_cp(pool: mutable darray[u8]&, cp: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    v: mutable i64 = cp
+    if v < 0 or v > 1114111:
+        v <- 65533
+    if v >= 55296 and v <= 57343:
+        v <- 65533
+    if v < 128:
+        pool.push(v.u8())
+    elif v < 2048:
+        pool.push((192 + v / 64).u8())
+        pool.push((128 + v % 64).u8())
+    elif v < 65536:
+        pool.push((224 + v / 4096).u8())
+        pool.push((128 + (v / 64) % 64).u8())
+        pool.push((128 + v % 64).u8())
+    else:
+        pool.push((240 + v / 262144).u8())
+        pool.push((128 + (v / 4096) % 64).u8())
+        pool.push((128 + (v / 64) % 64).u8())
+        pool.push((128 + v % 64).u8())
+
+# Strict non-negative decimal integer over a raw span; err 1 and -1 when
+# missing/empty/non-digit (never guessed). err is i64 because the stage1
+# backend does not lower a `mutable bool&` out-parameter.
+def rh_svn_parse_i64(data: darray[u8]&, s: i64, e: i64, err: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    err[0] <- 1
+    if s < 0 or e <= s or e > data.count.i64():
+        return -1
+    value: mutable i64 = 0
+    i: mutable i64 = s
+    while i < e |i, e, data, value|:
+        b: u8 = data[i.usize()]
+        if b < 48 or b > 57:
+            return -1
+        value <- value * 10 + (b.i64() - 48)
+        if value > 1000000000000000:
+            return -1
+        i <- i + 1
+    err[0] <- 0
+    return value
+
+# Read an attribute value span in the start tag [tag_s, tag_e): looks for
+# ` name="..."` / ` name='...'`. Returns value start via out_s/out_e (raw
+# offsets into data), or false when absent.
+def rh_svn_attr_span(data: darray[u8]&, tag_s: i64, tag_e: i64, name: u8&, out_s: mutable i64&, out_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    out_s[0] <- -1
+    out_e[0] <- -1
+    pos: mutable i64 = tag_s
+    while true |pos, tag_s, tag_e, data, name, out_s, out_e|:
+        break if pos >= tag_e
+        hit: i64 = rh_svn_find(data, pos, name)
+        if hit < 0 or hit + strlen(name).i64() > tag_e:
+            break
+        # require a non-name char before the name (space) and after it
+        before_ok: bool = hit == 0 or data[(hit - 1).usize()] == 32 or data[(hit - 1).usize()] == 9 or data[(hit - 1).usize()] == 10 or data[(hit - 1).usize()] == 13 or data[(hit - 1).usize()] == 60
+        if before_ok:
+            after: i64 = hit + strlen(name).i64()
+            eq: mutable i64 = after
+            while eq < tag_e and (data[eq.usize()] == 32 or data[eq.usize()] == 9) |eq, tag_e, data|:
+                eq <- eq + 1
+            if eq < tag_e and data[eq.usize()] == 61:
+                eq <- eq + 1
+                while eq < tag_e and (data[eq.usize()] == 32 or data[eq.usize()] == 9) |eq, tag_e, data|:
+                    eq <- eq + 1
+                if eq < tag_e and (data[eq.usize()] == 34 or data[eq.usize()] == 39):
+                    q: u8 = data[eq.usize()]
+                    vs: i64 = eq + 1
+                    ve: i64 = rh_svn_find_byte(data, vs, q)
+                    if ve >= 0 and ve <= tag_e:
+                        out_s[0] <- vs
+                        out_e[0] <- ve
+                        return true
+        pos <- hit + 1
+    return false
+
+# Count <path action="X"> children in the <paths>...</paths> block
+# [block_s, block_e).
+def rh_svn_count_paths(data: darray[u8]&, block_s: i64, block_e: i64, pc: mutable i64&, an: mutable i64&, mn: mutable i64&, dn: mutable i64&, rn: mutable i64&, on: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    pos: mutable i64 = block_s
+    while true |pos, block_s, block_e, data, pc, an, mn, dn, rn, on|:
+        break if pos >= block_e
+        ptag: i64 = rh_svn_find(data, pos, "<path")
+        if ptag < 0 or ptag >= block_e:
+            break
+        gt: i64 = rh_svn_find_byte(data, ptag, 62)
+        if gt < 0 or gt > block_e:
+            break
+        vs: mutable i64 = -1
+        ve: mutable i64 = -1
+        act: mutable u8 = RH_SVN_ACT_UNKNOWN
+        if rh_svn_attr_span(data, ptag, gt, "action", &vs, &ve):
+            if ve > vs:
+                act <- rh_svn_action_of(data[vs.usize()])
+        pc[0] <- pc[0] + 1
+        if act == RH_SVN_ACT_ADD:
+            an[0] <- an[0] + 1
+        elif act == RH_SVN_ACT_MODIFY:
+            mn[0] <- mn[0] + 1
+        elif act == RH_SVN_ACT_DELETE:
+            dn[0] <- dn[0] + 1
+        elif act == RH_SVN_ACT_REPLACE:
+            rn[0] <- rn[0] + 1
+        else:
+            on[0] <- on[0] + 1
+        pos <- gt + 1
+
+# Extract the text of the first element `name` inside [from, to_pos): copies the
+# decoded text into pool and returns start via out_s (end via out_e), or
+# false when the element is absent. `<name/>` yields an empty span.
+def rh_svn_elem_text(data: darray[u8]&, from: i64, to_pos: i64, name: u8&, pool: mutable darray[u8]&, out_s: mutable i64&, out_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    open_tag: mutable darray[u8] = []
+    open_tag.push(60)
+    # build "<name"
+    k: mutable i64 = 0
+    while k < strlen(name).i64() |k, name, open_tag|:
+        open_tag.push(name[k.usize()])
+        k <- k + 1
+    osp: i64 = rh_svn_find(data, from, (&open_tag[0]).cast[u8&] can Unsafe.PointerCast)
+    if osp < 0 or osp >= to_pos:
+        return false
+    gt: i64 = rh_svn_find_byte(data, osp, 62)
+    if gt < 0 or gt > to_pos:
+        return false
+    # self-closing "<name .../>"
+    if gt > osp and data[(gt - 1).usize()] == 47:
+        out_s[0] <- pool.count.i64()
+        out_e[0] <- pool.count.i64()
+        return true
+    close_tag: mutable darray[u8] = []
+    close_tag.push(60)
+    close_tag.push(47)
+    k2: mutable i64 = 0
+    while k2 < strlen(name).i64() |k2, name, close_tag|:
+        close_tag.push(name[k2.usize()])
+        k2 <- k2 + 1
+    csp: i64 = rh_svn_find(data, gt + 1, (&close_tag[0]).cast[u8&] can Unsafe.PointerCast)
+    if csp < 0 or csp > to_pos:
+        return false
+    start: i64 = rh_svn_copy_text(data, gt + 1, csp, pool)
+    out_s[0] <- start
+    out_e[0] <- pool.count.i64()
+    return true
+
+# Parse `svn log --xml -v` bytes. ok=0 when the payload is not a <log>
+# document or the entry cap is exceeded. Entries with a missing/malformed
+# revision are skipped and counted.
+def rh_svn_parse(raw: darray[u8]&, max_entries: i64) -> RhSvnLog can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    cap: mutable i64 = max_entries
+    if cap <= 0:
+        cap <- RH_SVN_MAX_ENTRIES_DEFAULT
+    entries: mutable darray[RhSvnEntry] = []
+    pool: mutable darray[u8] = []
+    rej: mutable i64 = 0
+    if rh_svn_find(raw, 0, "<log") < 0:
+        return RhSvnLog{ok: 0, entries: entries, pool: pool, rejected: 0}
+    if rh_svn_find(raw, 0, "</log>") < 0:
+        return RhSvnLog{ok: 0, entries: entries, pool: pool, rejected: 0}
+    over: mutable bool = false
+    pos: mutable i64 = 0
+    while true |pos, raw, entries, pool, rej, cap, over|:
+        break if over
+        le: i64 = rh_svn_find(raw, pos, "<logentry")
+        if le < 0:
+            break
+        gt: i64 = rh_svn_find_byte(raw, le, 62)
+        if gt < 0:
+            return RhSvnLog{ok: 0, entries: entries, pool: pool, rejected: rej}
+        # end of this entry = next </logentry> or <logentry
+        close: i64 = rh_svn_find(raw, gt + 1, "</logentry>")
+        nxt: i64 = rh_svn_find(raw, gt + 1, "<logentry")
+        end: mutable i64 = close
+        if end < 0:
+            end <- raw.count.i64()
+        if nxt >= 0 and nxt < end:
+            end <- nxt
+        if entries.count.i64() >= cap:
+            over <- true
+        else:
+            rs: mutable i64 = -1
+            re2: mutable i64 = -1
+            rev: mutable i64 = -1
+            if rh_svn_attr_span(raw, le, gt, "revision", &rs, &re2):
+                err: mutable i64 = 0
+                rev <- rh_svn_parse_i64(raw, rs, re2, &err)
+                if err != 0:
+                    rev <- -1
+            if rev < 0:
+                rej <- rej + 1
+            else:
+                ent: RhSvnEntry = rh_svn_entry(raw, gt + 1, end, rev, pool)
+                entries.push(ent)
+        pos <- gt + 1
+    if over:
+        return RhSvnLog{ok: 0, entries: entries, pool: pool, rejected: rej}
+    return RhSvnLog{ok: 1, entries: entries, pool: pool, rejected: rej}
+
+def rh_svn_entry(raw: darray[u8]&, from: i64, to_pos: i64, rev: i64, pool: mutable darray[u8]&) -> RhSvnEntry can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    author_s: mutable i64 = -1
+    author_e: mutable i64 = -1
+    msg_s: mutable i64 = -1
+    msg_e: mutable i64 = -1
+    date_s: mutable i64 = -1
+    date_e: mutable i64 = -1
+    has_date: mutable i64 = 0
+    has_author: mutable i64 = 0
+    if rh_svn_elem_text(raw, from, to_pos, "author", pool, &author_s, &author_e):
+        has_author <- 1
+    if rh_svn_elem_text(raw, from, to_pos, "date", pool, &date_s, &date_e):
+        has_date <- 1
+    _ = rh_svn_elem_text(raw, from, to_pos, "msg", pool, &msg_s, &msg_e)
+    pc: mutable i64 = 0
+    an: mutable i64 = 0
+    mn: mutable i64 = 0
+    dn: mutable i64 = 0
+    rn: mutable i64 = 0
+    on: mutable i64 = 0
+    paths_open: i64 = rh_svn_find(raw, from, "<paths")
+    if paths_open >= 0 and paths_open < to_pos:
+        pgt: i64 = rh_svn_find_byte(raw, paths_open, 62)
+        pclose: i64 = rh_svn_find(raw, paths_open, "</paths>")
+        if pgt >= 0 and pclose >= 0 and pgt < pclose and pclose <= to_pos:
+            rh_svn_count_paths(raw, pgt + 1, pclose, &pc, &an, &mn, &dn, &rn, &on)
+    return RhSvnEntry{rev: rev, author_s: author_s, author_e: author_e, msg_s: msg_s, msg_e: msg_e, date_s: date_s, date_e: date_e, has_date: has_date, has_author: has_author, path_count: pc, add_n: an, modify_n: mn, delete_n: dn, replace_n: rn, other_n: on}

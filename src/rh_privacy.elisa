@@ -1,0 +1,73 @@
+# rh_privacy.elisa — M07-07 publication review gate.
+#
+# Contract: an aggregate is publishable only when every contributing
+# subject is public AND the cell is at or above the disclosure threshold.
+# Private (unreviewed) subjects never get folded into a public aggregate,
+# and a small public cell is suppressed rather than rounded or hidden
+# behind a score. Suppression is NOT anonymization and the explanation
+# says so explicitly: no formal-anonymity claim is made without a stated
+# method (M07-07).
+#
+# Visibility is supplied by the caller from tenant/scope policy; this
+# module never infers it from counts.
+include "./rh_base.elisa"
+
+const RH_PV_VIS_PUBLIC: u8 = 0
+const RH_PV_VIS_AUTHORIZED: u8 = 1
+const RH_PV_VIS_PRIVATE: u8 = 2
+const RH_PV_VIS_UNKNOWN: u8 = 3
+
+const RH_PUB_UNAVAILABLE: i64 = 0
+const RH_PUB_PUBLISH: i64 = 1
+const RH_PUB_SUPPRESS_SMALL: i64 = 2
+const RH_PUB_WITHHOLD_PRIVATE: i64 = 3
+const RH_PUB_WITHHOLD_UNKNOWN: i64 = 4
+
+# Decide publication. Precedence: any unknown-visibility member withholds
+# first (we cannot prove it is public), then any private member, then the
+# small-cell threshold, then publish. No "safe" claim is encoded anywhere.
+def rh_pub_decide(public_count: i64, authorized_count: i64, private_count: i64, unknown_count: i64, threshold: i64) -> i64:
+    if unknown_count > 0:
+        return RH_PUB_WITHHOLD_UNKNOWN
+    if private_count > 0:
+        return RH_PUB_WITHHOLD_PRIVATE
+    if public_count < 0 or authorized_count < 0 or threshold < 1:
+        return RH_PUB_UNAVAILABLE
+    total: i64 = public_count + authorized_count
+    if total == 0:
+        return RH_PUB_UNAVAILABLE
+    if public_count < threshold:
+        return RH_PUB_SUPPRESS_SMALL
+    return RH_PUB_PUBLISH
+
+# True only for a fully public, above-threshold cell. Anything else is
+# false, including suppressed/withheld: the caller must render the
+# explanation, not a number.
+def rh_pub_is_publishable(decision: i64) -> bool:
+    return decision == RH_PUB_PUBLISH
+
+# Deterministic explanation text. Never states that suppression makes a
+# subject anonymous.
+def rh_pub_text(decision: i64, public_count: i64, authorized_count: i64, private_count: i64, unknown_count: i64, threshold: i64, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(out, "decision=")
+    if decision == RH_PUB_PUBLISH:
+        rh_push_text(out, "publish")
+    elif decision == RH_PUB_SUPPRESS_SMALL:
+        rh_push_text(out, "suppress_small_cell")
+    elif decision == RH_PUB_WITHHOLD_PRIVATE:
+        rh_push_text(out, "withhold_private_member")
+    elif decision == RH_PUB_WITHHOLD_UNKNOWN:
+        rh_push_text(out, "withhold_unknown_visibility")
+    else:
+        rh_push_text(out, "unavailable")
+    rh_push_text(out, " public=")
+    rh_push_decimal_i64(out, public_count)
+    rh_push_text(out, " authorized=")
+    rh_push_decimal_i64(out, authorized_count)
+    rh_push_text(out, " private=")
+    rh_push_decimal_i64(out, private_count)
+    rh_push_text(out, " unknown=")
+    rh_push_decimal_i64(out, unknown_count)
+    rh_push_text(out, " threshold=")
+    rh_push_decimal_i64(out, threshold)
+    rh_push_text(out, " note=suppression is not anonymization\n")

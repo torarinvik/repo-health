@@ -1,0 +1,418 @@
+# rh_http.elisa — bounded local HTTP listener (M06-01 wire protocol).
+#
+# A minimal, single-threaded, LOOPBACK-ONLY server that answers GET requests
+# against a report directory. It is deliberately narrow:
+#   * binds 127.0.0.1 only (never 0.0.0.0), so it cannot be reached from
+#     another host (S002);
+#   * accepts one connection at a time, closes promptly, and caps the
+#     request line and header count (S012);
+#   * only GET and HEAD are allowed; anything else is 405;
+#   * path traversal (..), absolute paths, and NUL are rejected with 400;
+#   * only a fixed set of report files under the root may be served; an
+#     unknown path is 404, never a directory listing;
+#   * response bodies are produced by the renderer/report writer, not by
+#     interpolating request bytes (R022/S010).
+# It does not run collection, does not execute anything, and holds no
+# credentials. The socket externs are only what the libc provides.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_render.elisa"
+
+@link_name("socket")
+extern rh_sys_socket(domain: i32, kind: i32, proto: i32) -> i32
+@link_name("setsockopt")
+extern rh_sys_setsockopt(fd: i32, level: i32, optname: i32, optval: void&, optlen: u32) -> i32
+@link_name("bind")
+extern rh_sys_bind(fd: i32, addr: void&, len: u32) -> i32
+@link_name("listen")
+extern rh_sys_listen(fd: i32, backlog: i32) -> i32
+@link_name("accept")
+extern rh_sys_accept(fd: i32, addr: void&?, len: void&?) -> i32
+@link_name("read")
+extern rh_sys_read(fd: i32, buf: void&, count: usize) -> i64
+@link_name("write")
+extern rh_sys_write(fd: i32, buf: void&, count: usize) -> i64
+@link_name("close")
+extern rh_sys_close(fd: i32) -> i32
+
+const RH_HTTP_MAX_REQUEST: i64 = 8192
+const RH_HTTP_MAX_HEADERS: i64 = 64
+const RH_HTTP_MAX_BODY: i64 = 1048576
+
+const RH_HTTP_OK: i64 = 200
+const RH_HTTP_BAD_REQUEST: i64 = 400
+const RH_HTTP_NOT_FOUND: i64 = 404
+const RH_HTTP_METHOD_NOT_ALLOWED: i64 = 405
+const RH_HTTP_URI_TOO_LONG: i64 = 414
+const RH_HTTP_INTERNAL: i64 = 500
+
+const RH_CT_TEXT: i64 = 0
+const RH_CT_HTML: i64 = 1
+const RH_CT_JSON: i64 = 2
+const RH_CT_MARKDOWN: i64 = 3
+
+def rh_http_content_type(ct: i64) -> u8&:
+    if ct == RH_CT_HTML:
+        return "text/html; charset=utf-8"
+    if ct == RH_CT_JSON:
+        return "application/json"
+    if ct == RH_CT_MARKDOWN:
+        return "text/markdown; charset=utf-8"
+    return "text/plain; charset=utf-8"
+
+# Allowlisted paths under the report root. Returns a NUL-free name span
+# index, or -1 when the path is unknown. No directory listing, no dynamic
+# construction: only files the report writer produces.
+def rh_http_allowed_path(path: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if rh_streq(path, "/"):
+        return 0
+    if rh_streq(path, "/index.html"):
+        return 0
+    if rh_streq(path, "/report.json"):
+        return 1
+    if rh_streq(path, "/report.md"):
+        return 2
+    if rh_streq(path, "/bundle.manifest"):
+        return 3
+    if rh_streq(path, "/health"):
+        return 4
+    if rh_streq(path, "/_report.html"):
+        return 5
+    return -1
+
+def rh_http_file_name(idx: i64) -> u8&:
+    if idx == 0:
+        return "index.html"
+    if idx == 1:
+        return "report.json"
+    if idx == 2:
+        return "report.md"
+    if idx == 3:
+        return "bundle.manifest"
+    return ""
+
+# Request-line parse result. method is a small enum; ok 1 when parseable.
+struct RhHttpRequest:
+    ok: i64
+    method: u8
+    path_s: i64
+    path_e: i64
+
+const RH_M_GET: u8 = 1
+const RH_M_HEAD: u8 = 2
+const RH_M_OTHER: u8 = 3
+
+# Parse "<METHOD> <PATH> HTTP/1.1" from the first line. Rejects an empty
+# line, a second space in the method, a path that is not origin-form
+# (must start with '/'), and any embedded NUL or '..' segment. Bounded by
+# the max request size.
+def rh_http_parse_request_line(buf: darray[u8]&) -> RhHttpRequest can[Memory.Allocate, Abort.Panic]:
+    bad: RhHttpRequest = RhHttpRequest{ok: 0, method: RH_M_OTHER, path_s: -1, path_e: -1}
+    if buf.count == 0 or buf.count.i64() > RH_HTTP_MAX_REQUEST:
+        return bad
+    stop: i64 = rh_find_byte(buf, 0, 10)
+    line_end: mutable i64 = buf.count.i64()
+    if stop >= 0:
+        line_end <- stop
+    # method
+    i: mutable i64 = 0
+    while i < line_end and buf[i.usize()] != 32 |i, buf, line_end|:
+        i <- i + 1
+    if i == 0 or i >= line_end:
+        return bad
+    method: mutable u8 = RH_M_OTHER
+    meth_s: i64 = 0
+    meth_e: i64 = i
+    if rh_span_eq_lit(buf, meth_s, meth_e, "GET"):
+        method <- RH_M_GET
+    if rh_span_eq_lit(buf, meth_s, meth_e, "HEAD"):
+        method <- RH_M_HEAD
+    # skip spaces
+    while i < line_end and buf[i.usize()] == 32 |i, buf, line_end|:
+        i <- i + 1
+    ps: mutable i64 = i
+    while i < line_end and buf[i.usize()] != 32 |i, buf, line_end|:
+        i <- i + 1
+    pe: mutable i64 = i
+    if pe <= ps or buf[ps.usize()] != 47:
+        return bad
+    if rh_http_has_traversal(buf, ps, pe):
+        return bad
+    return RhHttpRequest{ok: 1, method: method, path_s: ps, path_e: pe}
+
+# (private to this file)
+def rh_span_eq_lit(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = strlen(lit).i64()
+    if s < 0 or e - s != n:
+        return false
+    k: mutable i64 = 0
+    while k < n |k, data, s, lit|:
+        if data[(s + k).usize()] != lit[k.usize()]:
+            return false
+        k <- k + 1
+    return true
+
+# Reject "..", NUL and control bytes in [s,e).
+# (private to this file)
+def rh_http_has_traversal(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+    i: mutable i64 = s
+    while i < e |i, data, s, e|:
+        b: u8 = data[i.usize()]
+        if b == 0 or b < 32:
+            return true
+        if b == 46 and i + 1 < e and data[(i + 1).usize()] == 46:
+            return true
+        i <- i + 1
+    return false
+
+# Map a parsed request to a status code, without I/O. Pure and testable.
+# - unknown path -> 404
+# - method other than GET/HEAD -> 405
+# - "/health" -> 200 (service liveness only; carries no project verdict)
+def rh_http_status_for(req: RhHttpRequest&, raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if req.ok != 1:
+        return RH_HTTP_BAD_REQUEST
+    if req.method != RH_M_GET and req.method != RH_M_HEAD:
+        return RH_HTTP_METHOD_NOT_ALLOWED
+    idx: i64 = rh_http_allowed_span(raw, req.path_s, req.path_e)
+    if idx < 0:
+        return RH_HTTP_NOT_FOUND
+    return RH_HTTP_OK
+
+# Allowlist by span over the request buffer. Kept separate so no copy is
+# needed when only comparing.
+def rh_http_allowed_span(data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if rh_span_eq_lit(data, s, e, "/"):
+        return 0
+    if rh_span_eq_lit(data, s, e, "/index.html"):
+        return 0
+    if rh_span_eq_lit(data, s, e, "/report.json"):
+        return 1
+    if rh_span_eq_lit(data, s, e, "/report.md"):
+        return 2
+    if rh_span_eq_lit(data, s, e, "/bundle.manifest"):
+        return 3
+    if rh_span_eq_lit(data, s, e, "/health"):
+        return 4
+    if rh_span_eq_lit(data, s, e, "/_report.html"):
+        return 5
+    return -1
+
+# (private to this file)
+def rh_contains_bytes(hay: darray[u8]&, needle: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: usize = strlen(needle)
+    if hay.count < n or n == 0:
+        return false
+    i: mutable usize = 0
+    while i + n <= hay.count |i, hay, needle, n|:
+        same: mutable bool = true
+        k: mutable usize = 0
+        while k < n |k, hay, needle, i, same|:
+            if hay[i + k] != needle[k]:
+                same <- false
+            k <- k + 1
+        if same:
+            return true
+        i <- i + 1
+    return false
+
+# Build the response head. Status text is fixed per code; no request bytes
+# are echoed. Content-Length is supplied by the caller.
+def rh_http_head(status: i64, content_type: u8&, length: i64, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(out, "HTTP/1.1 ")
+    rh_push_decimal_i64(out, status)
+    out.push(32)
+    if status == RH_HTTP_OK:
+        rh_push_text(out, "OK")
+    elif status == RH_HTTP_BAD_REQUEST:
+        rh_push_text(out, "Bad Request")
+    elif status == RH_HTTP_NOT_FOUND:
+        rh_push_text(out, "Not Found")
+    elif status == RH_HTTP_METHOD_NOT_ALLOWED:
+        rh_push_text(out, "Method Not Allowed")
+    elif status == RH_HTTP_URI_TOO_LONG:
+        rh_push_text(out, "URI Too Long")
+    else:
+        rh_push_text(out, "Internal Server Error")
+    rh_push_text(out, "\r\nContent-Type: ")
+    rh_push_text(out, content_type)
+    rh_push_text(out, "\r\nContent-Length: ")
+    rh_push_decimal_i64(out, length)
+    rh_push_text(out, "\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n")
+
+# --- Listener loop (loopback only) --------------------------------------
+#
+# bind address is a sockaddr_in for 127.0.0.1. It is built byte-by-byte so
+# no platform struct packing is assumed beyond the documented layout:
+#   family(2) port(2, big-endian) addr(4, network order) zero(8)
+# The port is caller-supplied; binding 0 asks the OS for a free port.
+# Only 127.0.0.1 is ever bound — a public interface is not reachable.
+
+# Write a 127.0.0.1 sockaddr_in into buf; returns 16 (the length).
+def rh_http_loopback_addr(port: i32, buf: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    # family AF_INET=2, little-endian host -> bytes 2,0 on this platform
+    buf.push(2)
+    buf.push(0)
+    # port big-endian
+    buf.push(((port >> 8) & 255).u8())
+    buf.push((port & 255).u8())
+    # 127.0.0.1 network order
+    buf.push(127)
+    buf.push(0)
+    buf.push(0)
+    buf.push(1)
+    # sin_zero[8]
+    k: mutable i64 = 0
+    while k < 8 |k, buf|:
+        buf.push(0)
+        k <- k + 1
+    return 16
+
+# Open a loopback listener. Returns the fd or -1. SO_REUSEADDR=2 at
+# SOL_SOCKET=1 avoids TIME_WAIT bind failures during tests.
+def rh_http_listen(port: i32) -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    fd: i32 = rh_sys_socket(2, 1, 0)
+    if fd < 0:
+        return -1
+    one: mutable i32 = 1
+    onep: void& = (&one).cast[void&] can Unsafe.PointerCast
+    _ = rh_sys_setsockopt(fd, 1, 2, onep, 4)
+    addr: mutable darray[u8] = []
+    n: i64 = rh_http_loopback_addr(port, addr)
+    addrp: void& = (&addr[0]).cast[void&] can Unsafe.PointerCast
+    if rh_sys_bind(fd, addrp, n.u32()) != 0:
+        _ = rh_sys_close(fd)
+        return -1
+    if rh_sys_listen(fd, 8) != 0:
+        _ = rh_sys_close(fd)
+        return -1
+    return fd
+
+# Serve exactly one connection on an accepted fd: read a bounded request,
+# route it, write the head and (for GET) the body bytes the caller supplies
+# via resolve. resolve fills `body` and returns the content type; it must
+# only read files under the report root. Returns the status code served.
+def rh_http_serve_one(cfd: i32, raw: mutable darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    # read up to the cap in one shot (requests here are small headers only)
+    # Requests are small headers; route the already-buffered bytes. Socket
+    # reads are performed by the accept loop in the caller so this function
+    # is testable without a live socket.
+    return rh_http_route(raw, root, body, ctype_out)
+
+# Route a fully-buffered request. Pure w.r.t. the socket: decides status,
+# fills body/content-type for an allowed GET, and never echoes the request.
+def rh_http_route(raw: darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    req: RhHttpRequest = rh_http_parse_request_line(raw)
+    status: i64 = rh_http_status_for(req, raw)
+    ctype_out[0] <- RH_CT_TEXT
+    if status != RH_HTTP_OK:
+        return status
+    idx: i64 = rh_http_allowed_span(raw, req.path_s, req.path_e)
+    if idx == 4:
+        # /health: liveness only, carries no project verdict
+        rh_push_text(body, "ok\n")
+        ctype_out[0] <- RH_CT_TEXT
+        return RH_HTTP_OK
+    if idx == 5:
+        # /_report.html: server-rendered accessible page from report.json.
+        rpath: mutable darray[u8] = []
+        rh_push_cstr(rpath, root)
+        rh_push_text(rpath, "/report.json")
+        rpath.push(0)
+        rback: mutable darray[u8] = []
+        rpp: cstr = (&rpath[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_io_read(rpp, rback) < 0:
+            return RH_HTTP_NOT_FOUND
+        if rh_render_report_html(rback, body) != 0:
+            return RH_HTTP_INTERNAL
+        ctype_out[0] <- RH_CT_HTML
+        return RH_HTTP_OK
+    name: u8& = rh_http_file_name(idx)
+    if idx == 0:
+        ctype_out[0] <- RH_CT_HTML
+    elif idx == 1:
+        ctype_out[0] <- RH_CT_JSON
+    elif idx == 2:
+        ctype_out[0] <- RH_CT_MARKDOWN
+    else:
+        ctype_out[0] <- RH_CT_TEXT
+    path: mutable darray[u8] = []
+    rh_push_cstr(path, root)
+    path.push(47)
+    rh_push_text(path, name)
+    path.push(0)
+    back: mutable darray[u8] = []
+    pathp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+    if rh_io_read(pathp, back) < 0:
+        return RH_HTTP_NOT_FOUND
+    if back.count.i64() > RH_HTTP_MAX_BODY:
+        return RH_HTTP_INTERNAL
+    k: mutable usize = 0
+    while k < back.count |k, back, body|:
+        body.push(back[k])
+        k <- k + 1
+    return RH_HTTP_OK
+
+# Read up to cap bytes from a socket into buf. Returns bytes read or -1.
+def rh_http_read_request(cfd: i32, buf: mutable darray[u8]&, cap: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    tmp: mutable darray[u8] = []
+    k: mutable i64 = 0
+    while k < cap |k, tmp, cap|:
+        tmp.push(0)
+        k <- k + 1
+    p: void& = (&tmp[0]).cast[void&] can Unsafe.PointerCast
+    n: i64 = rh_sys_read(cfd, p, cap.u64().usize())
+    if n <= 0:
+        return 0
+    i: mutable i64 = 0
+    while i < n |i, n, buf, tmp|:
+        buf.push(tmp[i.usize()])
+        i <- i + 1
+    return n
+
+# Write all bytes to a socket. Returns bytes written or -1.
+def rh_http_write_all(cfd: i32, data: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    if data.count == 0:
+        return 0
+    p: void& = (&data[0]).cast[void&] can Unsafe.PointerCast
+    return rh_sys_write(cfd, p, data.count)
+
+# Serve one accepted connection end to end: bounded read, route, write head
+# (and body for GET, not for HEAD). Returns the status code served.
+def rh_http_serve_conn(cfd: i32, root: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    raw: mutable darray[u8] = []
+    got: i64 = rh_http_read_request(cfd, raw, RH_HTTP_MAX_REQUEST)
+    body: mutable darray[u8] = []
+    ct: mutable i64 = 0
+    status: mutable i64 = RH_HTTP_BAD_REQUEST
+    if got > 0:
+        status <- rh_http_route(raw, root, body, &ct)
+    req: RhHttpRequest = rh_http_parse_request_line(raw)
+    is_head: bool = req.ok == 1 and req.method == RH_M_HEAD
+    send_len: mutable i64 = body.count.i64()
+    if is_head:
+        send_len <- 0
+    head: mutable darray[u8] = []
+    rh_http_head(status, rh_http_content_type(ct), send_len, head)
+    _ = rh_http_write_all(cfd, head)
+    if not is_head:
+        _ = rh_http_write_all(cfd, body)
+    return status
+
+# Bounded accept loop. Serves at most max_connections then returns, so the
+# process always terminates. Each connection is closed immediately.
+def rh_http_serve(root: cstr, port: i32, max_connections: i64) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fd: i32 = rh_http_listen(port)
+    if fd < 0:
+        return -1
+    served: mutable i64 = 0
+    cap: i64 = max_connections
+    while served < cap |served, cap, fd, root|:
+        cfd: i32 = rh_sys_accept(fd, null, null)
+        if cfd < 0:
+            break if true
+        _ = rh_http_serve_conn(cfd, root)
+        _ = rh_sys_close(cfd)
+        served <- served + 1
+    _ = rh_sys_close(fd)
+    return served

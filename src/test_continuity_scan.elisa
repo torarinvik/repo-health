@@ -1,0 +1,127 @@
+# test_continuity_scan.elisa — M04 execution-path inputs: raw-identity
+# assignment from the pinned git log, retention windows and censoring.
+# Expected values are hand-computed from the plan's §19.3 retention rule,
+# not copied from the implementation.
+#
+# Exit 0 pass, 1 failure.
+
+include "./rh_base.elisa"
+include "./rh_continuity_scan.elisa"
+
+def cs_check(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    if cond:
+        return
+    fails[0] <- fails[0] + 1
+    b: mutable darray[u8] = []
+    rh_push_text(b, "CS-FAIL ")
+    rh_push_text(b, label)
+    b.push(10)
+    rh_write_stdout(b)
+
+def rec(log: mutable darray[u8]&, h: u8&, an: u8&, ae: u8&, at: i64, ct: i64, parents: u8&) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(log, h)
+    log.push(1)
+    rh_push_text(log, an)
+    log.push(1)
+    rh_push_text(log, ae)
+    log.push(1)
+    rh_push_decimal_i64(log, at)
+    log.push(1)
+    rh_push_decimal_i64(log, ct)
+    log.push(1)
+    rh_push_text(log, parents)
+    log.push(0)
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fails: mutable i64 = 0
+    day: i64 = 86400
+    t: i64 = 1700000000
+    cutoff: i64 = t + 400 * day
+
+    log: mutable darray[u8] = []
+    rec(log, "aaa1", "Alice", "alice@example.test", t, t, "p")
+    rec(log, "aaa2", "Alice", "alice@example.test", t + 100 * day, t + 100 * day, "aaa1")
+    rec(log, "bbb1", "Bob", "bob@example.test", t + 5 * day, t + 5 * day, "p")
+    rec(log, "ccc1", "Carol", "carol@example.test", t + 200 * day, t + 200 * day, "p")
+    rec(log, "ddd1", "Dave", "dave@example.test", t + 350 * day, t + 350 * day, "p")
+    # malformed author time must be skipped, not coerced to zero
+    rh_push_text(log, "eee1")
+    log.push(1)
+    rh_push_text(log, "Eve")
+    log.push(1)
+    rh_push_text(log, "eve@example.test")
+    log.push(1)
+    rh_push_text(log, "notanumber")
+    log.push(1)
+    rh_push_decimal_i64(log, 0)
+    log.push(1)
+    rh_push_text(log, "p")
+    log.push(0)
+    log.push(126)
+
+    actor: mutable darray[i64] = []
+    month: mutable darray[i64] = []
+    inst: mutable darray[i64] = []
+    kind: mutable darray[u8] = []
+    n: mutable i64 = 0
+    acc: i64 = rh_cs_parse(log, 0, cutoff, actor, month, inst, kind, &n)
+    cs_check(acc == 5, "full-accepted-5", &fails)
+    cs_check(n == 4, "full-actors-4", &fails)
+    cs_check(actor[0] == 0 and actor[1] == 0, "alice-dedup-id0", &fails)
+    cs_check(actor[2] == 1, "bob-id1", &fails)
+    cs_check(actor[3] == 2, "carol-id2", &fails)
+    cs_check(actor[4] == 3, "dave-id3", &fails)
+    cs_check(inst[0] == t and inst[1] == t + 100 * day, "instants-preserved", &fails)
+
+    st: mutable darray[i64] = []
+    rh_cs_retention(actor, inst, n, cutoff, 0, cutoff, 90, 120, true, st)
+    cs_check(st.count == 4, "status-four", &fails)
+    cs_check(st[0] == RH_RET_RETAINED, "alice-retained", &fails)
+    cs_check(st[1] == RH_RET_NOT_RETAINED, "bob-not-retained", &fails)
+    cs_check(st[2] == RH_RET_NOT_RETAINED, "carol-not-retained", &fails)
+    cs_check(st[3] == RH_RET_CENSORED, "dave-censored", &fails)
+    ro: mutable i64 = 0
+    eo: mutable i64 = 0
+    co: mutable i64 = 0
+    uo: mutable i64 = 0
+    rh_retention_tally(st, &ro, &eo, &co, &uo)
+    cs_check(ro == 1 and eo == 3 and co == 1, "tally-1-3-1", &fails)
+
+    # Windowed scan: first observation cannot be established -> unobservable,
+    # and events before the window are excluded.
+    actor2: mutable darray[i64] = []
+    month2: mutable darray[i64] = []
+    inst2: mutable darray[i64] = []
+    kind2: mutable darray[u8] = []
+    n2: mutable i64 = 0
+    acc2: i64 = rh_cs_parse(log, t + 100 * day, cutoff, actor2, month2, inst2, kind2, &n2)
+    cs_check(acc2 == 3, "windowed-accepted-3", &fails)
+    cs_check(n2 == 3, "windowed-actors-3", &fails)
+    st2: mutable darray[i64] = []
+    rh_cs_retention(actor2, inst2, n2, cutoff, t + 100 * day, cutoff, 90, 120, false, st2)
+    cs_check(st2.count == 3, "windowed-status-three", &fails)
+    all_unobs: mutable bool = true
+    i: mutable usize = 0
+    while i < st2.count |i, st2, all_unobs|:
+        if st2[i] != RH_RET_UNOBSERVABLE:
+            all_unobs <- false
+        i <- i + 1
+    cs_check(all_unobs, "windowed-all-unobservable", &fails)
+
+    # Empty log: no actors, no crash.
+    empty: mutable darray[u8] = []
+    actor3: mutable darray[i64] = []
+    month3: mutable darray[i64] = []
+    inst3: mutable darray[i64] = []
+    kind3: mutable darray[u8] = []
+    n3: mutable i64 = 0
+    acc3: i64 = rh_cs_parse(empty, 0, cutoff, actor3, month3, inst3, kind3, &n3)
+    cs_check(acc3 == 0 and n3 == 0, "empty-zero-zero", &fails)
+
+    if fails == 0:
+        b: mutable darray[u8] = []
+        rh_push_text(b, "CONTINUITY-SCAN OK")
+        b.push(10)
+        rh_write_stdout(b)
+        return 0
+    return 1

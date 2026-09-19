@@ -1,0 +1,332 @@
+# rh_report.elisa — pinned reports (M01-07).
+#
+# Writes report.json, report.md, and bundle.manifest. Every published
+# number traces to the retained evidence files named in its "evidence"
+# list (R003). Capabilities the generic-Git path cannot observe (reviews,
+# permissions, traffic, dependents) are reported unavailable with reasons
+# (R002); they never appear as zero or as a favorable default (R030: no
+# universal score anywhere in these files).
+#
+# All human-readable strings here are fixed literals or allowlist-checked
+# inputs (rh_arg_safe charset has no JSON/Markdown metacharacters), so no
+# escaping layer is needed or claimed.
+
+
+include "./rh_base.elisa"
+include "./rh_observation.elisa"
+include "./rh_scan.elisa"
+
+struct RhReportCtx:
+    identities: i64
+    bots: i64
+    months: i64
+    cov_num: i64
+    cov_den: i64
+    cov_state: i64
+    fresh_age: i64
+    window_days: i64
+    full_history: i64
+    repo_kind: i64
+    cutoff: i64
+    partial_clone: i64
+
+def rh_report_ctx_make(identities: i64, bots: i64, months: i64, cov_num: i64, cov_den: i64, cov_state: i64, fresh_age: i64, window_days: i64, full_history: i64, repo_kind: i64, cutoff: i64, partial_clone: i64) -> RhReportCtx:
+    return RhReportCtx{identities: identities, bots: bots, months: months, cov_num: cov_num, cov_den: cov_den, cov_state: cov_state, fresh_age: fresh_age, window_days: window_days, full_history: full_history, repo_kind: repo_kind, cutoff: cutoff, partial_clone: partial_clone}
+
+# {"key":..,"version":"1.0.0","status":..,"value":N,"evidence":[...]}
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_emit_count(buffer: mutable darray[u8]&, key: u8&, status: u8, count: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(buffer, "{\"key\":\"")
+    rh_push_text(buffer, key)
+    rh_push_text(buffer, "\",\"version\":\"1.0.0\",\"status\":\"")
+    rh_push_text(buffer, rh_status_label(status))
+    rh_push_text(buffer, "\",\"value\":")
+    rh_push_decimal_i64(buffer, count)
+    rh_push_text(buffer, ",\"evidence\":[\"evidence/git-log.bin\"]}")
+
+# Absent value: no "value" member at all (never null-as-zero).
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_emit_absent(buffer: mutable darray[u8]&, key: u8&, status: u8, reason: u8&) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(buffer, "{\"key\":\"")
+    rh_push_text(buffer, key)
+    rh_push_text(buffer, "\",\"version\":\"1.0.0\",\"status\":\"")
+    rh_push_text(buffer, rh_status_label(status))
+    rh_push_text(buffer, "\",\"reason\":\"")
+    rh_push_text(buffer, reason)
+    rh_push_text(buffer, "\"}")
+
+# Ratio value {"num":N,"den":D}.
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_emit_ratio(buffer: mutable darray[u8]&, key: u8&, status: u8, num: i64, den: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(buffer, "{\"key\":\"")
+    rh_push_text(buffer, key)
+    rh_push_text(buffer, "\",\"version\":\"1.0.0\",\"status\":\"")
+    rh_push_text(buffer, rh_status_label(status))
+    rh_push_text(buffer, "\",\"value\":{\"num\":")
+    rh_push_decimal_i64(buffer, num)
+    rh_push_text(buffer, ",\"den\":")
+    rh_push_decimal_i64(buffer, den)
+    rh_push_text(buffer, "},\"evidence\":[\"evidence/git-log.bin\",\"evidence/git-shallow.txt\"]}")
+
+# Enum value {"code":C,"label":"..."}.
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_emit_enum(buffer: mutable darray[u8]&, key: u8&, status: u8, code: i64, label: u8&, ev2: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(buffer, "{\"key\":\"")
+    rh_push_text(buffer, key)
+    rh_push_text(buffer, "\",\"version\":\"1.0.0\",\"status\":\"")
+    rh_push_text(buffer, rh_status_label(status))
+    rh_push_text(buffer, "\",\"value\":{\"code\":")
+    rh_push_decimal_i64(buffer, code)
+    rh_push_text(buffer, ",\"label\":\"")
+    rh_push_text(buffer, label)
+    rh_push_text(buffer, "\"},\"evidence\":[\"evidence/git-log.bin\"")
+    if ev2:
+        rh_push_text(buffer, ",\"evidence/git-shallow.txt\"")
+    rh_push_text(buffer, "]}")
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_coverage_label(state: i64) -> u8&:
+    if state == 1:
+        return "shallow"
+    if state == 2:
+        return "truncated"
+    return "complete"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_manifest_label(code: i64) -> u8&:
+    if code == 1:
+        return "found"
+    return "none"
+
+def rh_write_report_json(path: cstr, repo: cstr, snap: RhSnapshot&, ctx: RhReportCtx&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+    out: mutable darray[u8] = []
+    rh_push_text(out, "{\"report\":\"repo-health-m01\",\"report_version\":\"1.0.0\",\"source\":\"")
+    rh_push_cstr(out, repo)
+    rh_push_text(out, "\",\"source_kind\":\"")
+    if ctx.repo_kind == 1:
+        rh_push_text(out, "https")
+    else:
+        rh_push_text(out, "local")
+    rh_push_text(out, "\",\"evidence_cutoff\":")
+    rh_push_decimal_i64(out, ctx.cutoff)
+    rh_push_text(out, ",\"window_days\":")
+    rh_push_decimal_i64(out, ctx.window_days)
+    rh_push_text(out, ",\"full_history\":")
+    if ctx.full_history == 1:
+        rh_push_text(out, "true")
+    else:
+        rh_push_text(out, "false")
+    rh_push_text(out, ",\"input_digest_fnv1a64\":\"")
+    rh_push_text(out, "fnv1a64:")
+    rh_push_hex_u64(out, snap.digest)
+    rh_push_text(out, "\",\"metrics\":[")
+    rh_emit_count(out, "history.commit_count", 0, snap.commits)
+    rh_push_text(out, ",")
+    rh_emit_count(out, "history.reachable_revisions", 0, snap.commits_all)
+    rh_push_text(out, ",")
+    rh_emit_enum(out, "history.coverage_state", 0, ctx.cov_state, rh_coverage_label(ctx.cov_state), true)
+    rh_push_text(out, ",")
+    rh_emit_count(out, "activity.commit_event_count", 0, snap.commits)
+    rh_push_text(out, ",")
+    rh_emit_count(out, "activity.active_complete_months", 0, ctx.months)
+    rh_push_text(out, ",")
+    rh_emit_count(out, "contributors.raw_identity_count", 0, ctx.identities)
+    rh_push_text(out, ",")
+    rh_emit_count(out, "contributors.automation_known", 0, ctx.bots)
+    rh_push_text(out, ",")
+    if ctx.cov_den == 0:
+        rh_emit_absent(out, "coverage.window_completeness", 6, "empty-window-no-complete-month")
+    else:
+        if ctx.cov_state == 0:
+            rh_emit_ratio(out, "coverage.window_completeness", 0, ctx.cov_num, ctx.cov_den)
+        else:
+            rh_emit_ratio(out, "coverage.window_completeness", 4, ctx.cov_num, ctx.cov_den)
+    rh_push_text(out, ",")
+    if ctx.fresh_age < 0:
+        rh_emit_absent(out, "freshness.evidence_max_age_hours", 2, "no-commit-events-in-window")
+    else:
+        rh_emit_count(out, "freshness.evidence_max_age_hours", 0, ctx.fresh_age)
+    rh_push_text(out, ",")
+    if snap.manifest == 2:
+        rh_emit_absent(out, "source.manifest_presence", 2, "non-local-source-no-file-access")
+    else:
+        rh_emit_enum(out, "source.manifest_presence", 0, snap.manifest, rh_manifest_label(snap.manifest), false)
+    rh_push_text(out, "],\"capabilities\":{\"git_log\":\"observed\",\"review_events\":\"unavailable-from-generic-git\",\"maintainer_permissions\":\"unavailable-from-generic-git\",\"clone_traffic\":\"unavailable-from-generic-git\",\"known_downstream\":\"not-collected-in-m01\",\"retention\":\"deferred-to-m04\",\"cross_source_identity\":\"not-configured\"")
+    if ctx.partial_clone == 1:
+        rh_push_text(out, ",\"blob_metrics\":\"partial-missing-blobs\"")
+    else:
+        rh_push_text(out, ",\"blob_metrics\":\"not-derived\"")
+    rh_push_text(out, "}}")
+    rh_push_text(out, "\n")
+    return rh_io_write(path, out)
+
+def rh_write_report_md(path: cstr, repo: cstr, snap: RhSnapshot&, ctx: RhReportCtx&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+    out: mutable darray[u8] = []
+    rh_push_text(out, "# repo-health report (M01 slice)\n\nSource: `")
+    rh_push_cstr(out, repo)
+    rh_push_text(out, "`\n\nProject identity: repository-only; no accepted multi-repository mapping.\n")
+    rh_push_text(out, "History: ")
+    rh_push_text(out, rh_coverage_label(ctx.cov_state))
+    rh_push_text(out, " for the requested window.\n\n")
+    rh_push_text(out, "| metric | status | value |\n|---|---|---|\n| observed commits | observed | ")
+    rh_push_decimal_i64(out, snap.commits)
+    rh_push_text(out, " |\n| reachable revisions | observed | ")
+    rh_push_decimal_i64(out, snap.commits_all)
+    rh_push_text(out, " |\n| rejected records | observed | ")
+    rh_push_decimal_i64(out, snap.rejected)
+    rh_push_text(out, " |\n| merge commits | observed | ")
+    rh_push_decimal_i64(out, snap.merges)
+    rh_push_text(out, " |\n| future timestamps | flagged | ")
+    rh_push_decimal_i64(out, snap.future)
+    rh_push_text(out, " |\n| author-committer skew | observed | ")
+    rh_push_decimal_i64(out, snap.skew)
+    rh_push_text(out, " |\n| raw author identities | observed | ")
+    rh_push_decimal_i64(out, ctx.identities)
+    rh_push_text(out, " |\n| automation (heuristic) | observed | ")
+    rh_push_decimal_i64(out, ctx.bots)
+    rh_push_text(out, " |\n| active complete months | observed | ")
+    rh_push_decimal_i64(out, ctx.months)
+    rh_push_text(out, " |\n| window completeness | ")
+    if ctx.cov_den == 0:
+        rh_push_text(out, "not_applicable | no complete month in window")
+    else:
+        if ctx.cov_state != 0:
+            rh_push_text(out, "partial")
+        else:
+            rh_push_text(out, "observed")
+        rh_push_text(out, " | ")
+        rh_push_decimal_i64(out, ctx.cov_num)
+        rh_push_text(out, "/")
+        rh_push_decimal_i64(out, ctx.cov_den)
+    rh_push_text(out, " |\n| evidence max age (hours) | ")
+    if ctx.fresh_age < 0:
+        rh_push_text(out, "unavailable | no commit events in window")
+    else:
+        rh_push_text(out, "observed | ")
+        rh_push_decimal_i64(out, ctx.fresh_age)
+    rh_push_text(out, " |\n| manifest presence | ")
+    if snap.manifest == 2:
+        rh_push_text(out, "unavailable | non-local source")
+    else:
+        rh_push_text(out, "observed | ")
+        rh_push_text(out, rh_manifest_label(snap.manifest))
+    rh_push_text(out, " |\n| blob-derived metrics | ")
+    if ctx.partial_clone == 1:
+        rh_push_text(out, "partial | partial clone: blobs may be missing; history metrics are unaffected")
+    else:
+        rh_push_text(out, "not-derived | no blob/tree metric is published in M01")
+    rh_push_text(out, " |\n\n")
+    rh_push_text(out, "## Explicitly not collected from generic Git\n\nReview events, maintainer permission inventories, clone traffic, and known downstream projects are unavailable from generic Git history, not zero. Retention and cross-source identity are deferred to M04. Raw commit authors are not called maintainers.\n\n")
+    rh_push_text(out, "Evidence digest `fnv1a64:")
+    rh_push_hex_u64(out, snap.digest)
+    rh_push_text(out, "`. Replay with `rh_cli replay` against the retained bundle.\n")
+    return rh_io_write(path, out)
+
+def rh_write_manifest(path: cstr, repo: cstr, snap: RhSnapshot&, ctx: RhReportCtx&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+    out: mutable darray[u8] = []
+    rh_push_text(out, "repo-health-bundle-manifest 1\ntool: rh_cli 0.1.0\nsource: ")
+    rh_push_cstr(out, repo)
+    rh_push_text(out, "\nsource-kind: ")
+    if ctx.repo_kind == 1:
+        rh_push_text(out, "https\n")
+    else:
+        rh_push_text(out, "local\n")
+    rh_push_text(out, "window-days: ")
+    rh_push_decimal_i64(out, ctx.window_days)
+    rh_push_text(out, "\nfull-history: ")
+    if ctx.full_history == 1:
+        rh_push_text(out, "true\n")
+    else:
+        rh_push_text(out, "false\n")
+    rh_push_text(out, "evidence-cutoff: ")
+    rh_push_decimal_i64(out, ctx.cutoff)
+    rh_push_text(out, "\ncommits: ")
+    rh_push_decimal_i64(out, snap.commits)
+    rh_push_text(out, "\nrejected: ")
+    rh_push_decimal_i64(out, snap.rejected)
+    rh_push_text(out, "\ndigest-fnv1a64: ")
+    rh_push_hex_u64(out, snap.digest)
+    rh_push_text(out, "\nfiles: evidence/git-log.bin evidence/git-shallow.txt evidence/git-version.txt evidence/emails.uniq\n")
+    return rh_io_write(path, out)
+
+# Parse "digest-fnv1a64: <16 hex>" back out of a manifest. False when absent
+# or malformed (replay then fails closed, never fabricates success).
+def rh_manifest_digest(manifest: darray[u8]&, digest_out: mutable u64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    needle: u8& = "digest-fnv1a64: "
+    nn: usize = strlen(needle)
+    pos: mutable usize = 0
+    while pos + nn + 16 <= manifest.count |pos, manifest, nn|:
+        hit: mutable bool = true
+        k: mutable usize = 0
+        while k < nn |k, manifest, pos, needle, hit|:
+            if manifest[pos + k] != needle[k]:
+                hit <- false
+            k <- k + 1
+        if hit:
+            ok: mutable i64 = 0
+            parsed: u64 = rh_parse_hex64(manifest, pos + nn, pos + nn + 16, &ok)
+            if ok == 1:
+                digest_out[0] <- parsed
+                return true
+            return false
+        pos <- pos + 1
+    return false
+
+# Count bot-heuristic lines in a newline-separated email list.
+def rh_count_bot_lines(data: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    total: mutable i64 = 0
+    start: mutable usize = 0
+    while start < data.count |start, data, total|:
+        stop: i64 = rh_find_byte(data, start, 10)
+        line_end: usize = stop.usize() if stop >= 0 else data.count
+        if line_end > start:
+            if rh_email_is_bot(data, start, line_end):
+                total <- total + 1
+        if stop < 0:
+            start <- data.count
+        else:
+            start <- stop.usize() + 1
+    return total
+
+# Locate "key" at a line start; returns the value span [vstart, vend).
+# Found flag via found_out (1/0). Replay fails closed when absent.
+def rh_manifest_span(manifest: darray[u8]&, key: u8&, vstart_out: mutable i64&, vend_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    kn: usize = strlen(key)
+    pos: mutable usize = 0
+    while pos + kn < manifest.count |pos, manifest, kn, key|:
+        at_line_start: bool = pos == 0 or manifest[pos - 1] == 10
+        if at_line_start:
+            hit: mutable bool = true
+            k: mutable usize = 0
+            while k < kn |k, manifest, pos, key, hit|:
+                if manifest[pos + k] != key[k]:
+                    hit <- false
+                k <- k + 1
+            if hit:
+                eol: i64 = rh_find_byte(manifest, pos + kn, 10)
+                line_end: usize = eol.usize() if eol >= 0 else manifest.count
+                vstart_out[0] <- (pos + kn).i64()
+                vend_out[0] <- line_end.i64()
+                return true
+        pos <- pos + 1
+    return false
+
+# Integer manifest field ("window-days: 365"). ok_out 1/0.
+def rh_manifest_int(manifest: darray[u8]&, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    ok_out[0] <- 0
+    vs: mutable i64 = 0
+    ve: mutable i64 = 0
+    if not rh_manifest_span(manifest, key, &vs, &ve):
+        return 0
+    return rh_parse_i64(manifest, vs.usize(), ve.usize(), ok_out)
+
+# Boolean manifest field ("full-history: true"). 1 true, 0 false/unparseable.
+def rh_manifest_flag(manifest: darray[u8]&, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    vs: mutable i64 = 0
+    ve: mutable i64 = 0
+    if not rh_manifest_span(manifest, key, &vs, &ve):
+        return 0
+    if ve - vs == 4:
+        if manifest[vs.usize()] == 116 and manifest[vs.usize() + 1] == 114 and manifest[vs.usize() + 2] == 117 and manifest[vs.usize() + 3] == 101:
+            return 1
+    return 0

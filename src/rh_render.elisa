@@ -1,0 +1,180 @@
+# rh_render.elisa — accessible server-rendered report page (M06-03).
+#
+# Renders an M01 `report.json` into a self-contained, keyboard/screen-reader
+# friendly HTML page: a metric TABLE (the text alternative to any visual),
+# a capabilities table, and the mandatory caveats. It computes nothing and
+# adds no verdict — it only reformats retained report bytes. Every dynamic
+# string is HTML-escaped, so a hostile repository name cannot inject markup.
+# Malformed/unexpected JSON returns -1 (the caller serves a plain error).
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_hr_escape(out: mutable darray[u8]&, data: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e < s or e > data.count.i64():
+        return
+    i: mutable i64 = s
+    while i < e |i, data, out|:
+        b: u8 = data[i.usize()]
+        if b == 38:
+            rh_push_text(out, "&amp;")
+        elif b == 60:
+            rh_push_text(out, "&lt;")
+        elif b == 62:
+            rh_push_text(out, "&gt;")
+        elif b == 34:
+            rh_push_text(out, "&quot;")
+        elif b == 39:
+            rh_push_text(out, "&#39;")
+        else:
+            out.push(b)
+        i <- i + 1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_hr_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        return false
+    return rh_json_str_span(nodes, idx, s_out, e_out)
+
+# Emit one metric's value as accessible text into out.
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_hr_value(nodes: darray[RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, mobj: i64, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+    v: i64 = rh_json_obj_get(nodes, texts, mobj, "value")
+    if v < 0:
+        rh_push_text(out, "&mdash;")
+        return
+    kind: u8 = nodes[v.usize()].kind
+    if kind == RH_JSON_NUM:
+        ok: mutable i64 = 0
+        n: i64 = rh_json_int(nodes, raw, v, &ok)
+        if ok == 1:
+            rh_push_decimal_i64(out, n)
+        else:
+            rh_push_text(out, "number")
+    elif kind == RH_JSON_STR:
+        vs: mutable i64 = 0
+        ve: mutable i64 = 0
+        if rh_json_str_span(nodes, v, &vs, &ve):
+            rh_hr_escape(out, texts, vs, ve)
+    elif kind == RH_JSON_OBJ:
+        ns: mutable i64 = 0
+        ne: mutable i64 = 0
+        if rh_hr_str(nodes, texts, v, "num", &ns, &ne):
+            okn: mutable i64 = 0
+            num: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, v, "num"), &okn)
+            okd: mutable i64 = 0
+            den: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, v, "den"), &okd)
+            if okn == 1 and okd == 1:
+                rh_push_decimal_i64(out, num)
+                rh_push_text(out, " / ")
+                rh_push_decimal_i64(out, den)
+        else:
+            ls: mutable i64 = 0
+            le: mutable i64 = 0
+            if rh_hr_str(nodes, texts, v, "label", &ls, &le):
+                rh_hr_escape(out, texts, ls, le)
+            else:
+                rh_push_text(out, "object")
+    else:
+        rh_push_text(out, "&mdash;")
+
+def rh_render_report_html(j: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(j, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        return -1
+    metrics_idx: i64 = rh_json_obj_get(nodes, texts, root, "metrics")
+    if metrics_idx < 0 or nodes[metrics_idx.usize()].kind != RH_JSON_ARR:
+        return -1
+    rh_push_text(out, "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">")
+    rh_push_text(out, "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
+    rh_push_text(out, "<meta name=\"generator\" content=\"repo-health-report-html/1\">")
+    rh_push_text(out, "<title>repo-health report</title></head><body>\n")
+    rh_push_text(out, "<h1>repo-health report</h1>\n")
+    rh_push_text(out, "<p>Source: <code>")
+    ss: mutable i64 = 0
+    se: mutable i64 = 0
+    if rh_hr_str(nodes, texts, root, "source", &ss, &se):
+        rh_hr_escape(out, texts, ss, se)
+    rh_push_text(out, "</code>")
+    sk: mutable i64 = 0
+    ske: mutable i64 = 0
+    if rh_hr_str(nodes, texts, root, "source_kind", &sk, &ske):
+        rh_push_text(out, " (")
+        rh_hr_escape(out, texts, sk, ske)
+        rh_push_text(out, ")")
+    rh_push_text(out, "</p>\n")
+    rh_push_text(out, "<h2>Important limitations</h2>\n<ul>\n")
+    rh_push_text(out, "<li>Raw commit authors are not maintainers; this report makes no person-level claim.</li>\n")
+    rh_push_text(out, "<li>Unknown is not zero, and &ldquo;not_applicable&rdquo; is not false.</li>\n")
+    rh_push_text(out, "<li>There is no universal health, trust, or safety score here.</li>\n")
+    rh_push_text(out, "<li>Review events, maintainer permissions, clone traffic, and known downstream dependents are not collected from generic Git in this report.</li>\n")
+    rh_push_text(out, "</ul>\n")
+    rh_push_text(out, "<h2>Metrics</h2>\n<table>\n<caption>Metric observations; each row is the text alternative to a chart.</caption>\n")
+    rh_push_text(out, "<thead><tr><th scope=\"col\">Metric</th><th scope=\"col\">Version</th><th scope=\"col\">Status</th><th scope=\"col\">Value</th><th scope=\"col\">Evidence</th></tr></thead>\n<tbody>\n")
+    arr: RhJsonNode = nodes[metrics_idx.usize()]
+    child: mutable i64 = arr.first_child
+    while child >= 0 |child, nodes, texts, j, out|:
+        if nodes[child.usize()].kind != RH_JSON_OBJ:
+            return -1
+        rh_push_text(out, "<tr><th scope=\"row\">")
+        ks: mutable i64 = 0
+        ke: mutable i64 = 0
+        if rh_hr_str(nodes, texts, child, "key", &ks, &ke):
+            rh_hr_escape(out, texts, ks, ke)
+        rh_push_text(out, "</th><td>")
+        vs: mutable i64 = 0
+        ve: mutable i64 = 0
+        if rh_hr_str(nodes, texts, child, "version", &vs, &ve):
+            rh_hr_escape(out, texts, vs, ve)
+        rh_push_text(out, "</td><td>")
+        sts: mutable i64 = 0
+        ste: mutable i64 = 0
+        if rh_hr_str(nodes, texts, child, "status", &sts, &ste):
+            rh_hr_escape(out, texts, sts, ste)
+        rs: mutable i64 = 0
+        re: mutable i64 = 0
+        if rh_hr_str(nodes, texts, child, "reason", &rs, &re):
+            rh_push_text(out, " (")
+            rh_hr_escape(out, texts, rs, re)
+            rh_push_text(out, ")")
+        rh_push_text(out, "</td><td>")
+        rh_hr_value(nodes, texts, j, child, out)
+        rh_push_text(out, "</td><td>")
+        ev: i64 = rh_json_obj_get(nodes, texts, child, "evidence")
+        evn: mutable i64 = 0
+        if ev >= 0 and nodes[ev.usize()].kind == RH_JSON_ARR:
+            ea: RhJsonNode = nodes[ev.usize()]
+            ec: mutable i64 = ea.first_child
+            while ec >= 0 |ec, nodes, evn|:
+                evn <- evn + 1
+                ec <- nodes[ec.usize()].next_sibling
+        rh_push_decimal_i64(out, evn)
+        rh_push_text(out, " file(s)</td></tr>\n")
+        child <- nodes[child.usize()].next_sibling
+    rh_push_text(out, "</tbody></table>\n")
+    caps_idx: i64 = rh_json_obj_get(nodes, texts, root, "capabilities")
+    if caps_idx >= 0 and nodes[caps_idx.usize()].kind == RH_JSON_OBJ:
+        rh_push_text(out, "<h2>Capabilities</h2>\n<table>\n<caption>What this source could and could not observe.</caption>\n")
+        rh_push_text(out, "<thead><tr><th scope=\"col\">Capability</th><th scope=\"col\">State</th></tr></thead>\n<tbody>\n")
+        co: RhJsonNode = nodes[caps_idx.usize()]
+        cc: mutable i64 = co.first_child
+        while cc >= 0 |cc, nodes, texts, out|:
+            kn: RhJsonNode = nodes[cc.usize()]
+            vn: i64 = kn.next_sibling
+            if vn < 0:
+                return -1
+            rh_push_text(out, "<tr><th scope=\"row\">")
+            rh_hr_escape(out, texts, kn.text_start, kn.text_end)
+            rh_push_text(out, "</th><td>")
+            vv: RhJsonNode = nodes[vn.usize()]
+            rh_hr_escape(out, texts, vv.text_start, vv.text_end)
+            rh_push_text(out, "</td></tr>\n")
+            cc <- nodes[vn.usize()].next_sibling
+        rh_push_text(out, "</tbody></table>\n")
+    rh_push_text(out, "<p>Rendered from <code>report.json</code> at request time; it computes nothing and adds no verdict. Replay the retained bundle for reproducibility.</p>\n")
+    rh_push_text(out, "</body></html>\n")
+    return 0

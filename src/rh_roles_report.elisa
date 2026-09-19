@@ -1,0 +1,166 @@
+# rh_roles_report.elisa — R013 declared-roles execution path.
+#
+# Turns an `rh-roles-input/1` document of time-scoped role/permission
+# declarations plus queries into `rh-roles-result/1`. Declared roles are
+# evidence, separate from observed actions (the report says so); an
+# unrecognized role string is `unknown`, never guessed at maintainer; a
+# revoked or not-yet-effective declaration is not active at that time; and
+# the declaration source (provider/file/operator) is tallied. Malformed
+# input fails closed.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_roles.elisa"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_rr_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = e - s
+    k: mutable i64 = 0
+    while k < n |k, texts, lit, s|:
+        if lit[k.usize()] == 0:
+            return false
+        if texts[(s + k).usize()] != lit[k.usize()]:
+            return false
+        k <- k + 1
+    return lit[n.usize()] == 0
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_rr_source(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    if rh_rr_eq(texts, s, e, "provider"):
+        return RH_DECL_SOURCE_PROVIDER
+    if rh_rr_eq(texts, s, e, "file"):
+        return RH_DECL_SOURCE_FILE
+    if rh_rr_eq(texts, s, e, "operator"):
+        return RH_DECL_SOURCE_OPERATOR
+    return -1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_rr_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        return false
+    return rh_json_str_span(nodes, idx, s_out, e_out)
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_rr_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, default_v: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    ok: mutable i64 = 0
+    v: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, obj, key), &ok)
+    if ok == 0:
+        return default_v
+    return v
+
+def rh_roles_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        return -1
+    sspan: mutable i64 = 0
+    espan: mutable i64 = 0
+    sc: i64 = rh_json_obj_get(nodes, texts, root, "schema")
+    if sc < 0 or not rh_json_str_span(nodes, sc, &sspan, &espan):
+        return -1
+    if not rh_rr_eq(texts, sspan, espan, "rh-roles-input/1"):
+        return -1
+    decls: mutable darray[RhRoleDecl] = []
+    d_idx: i64 = rh_json_obj_get(nodes, texts, root, "declarations")
+    if d_idx < 0 or nodes[d_idx.usize()].kind != RH_JSON_ARR:
+        return -1
+    darr: RhJsonNode = nodes[d_idx.usize()]
+    dc: mutable i64 = darr.first_child
+    while dc >= 0 |dc, nodes, texts, raw, decls|:
+        if nodes[dc.usize()].kind != RH_JSON_OBJ:
+            return -1
+        rs: mutable i64 = 0
+        re: mutable i64 = 0
+        ss: mutable i64 = 0
+        se: mutable i64 = 0
+        if not rh_rr_str(nodes, texts, dc, "role", &rs, &re):
+            return -1
+        if not rh_rr_str(nodes, texts, dc, "source", &ss, &se):
+            return -1
+        role: u8 = rh_role_parse_role(texts, rs, re)
+        source: i64 = rh_rr_source(texts, ss, se)
+        if source < 0:
+            return -1
+        actor: i64 = rh_rr_int(nodes, raw, texts, dc, "actor_id", -1)
+        if actor < 0:
+            return -1
+        decls.push(RhRoleDecl{actor_id: actor, role: role, permission: rh_rr_int(nodes, raw, texts, dc, "permission", 0).u8(), source: source.u8(), declared_at: rh_rr_int(nodes, raw, texts, dc, "declared_at", 0), revoked_at: rh_rr_int(nodes, raw, texts, dc, "revoked_at", 0)})
+        dc <- nodes[dc.usize()].next_sibling
+    rh_push_text(out, "{\"schema\":\"rh-roles-result/1\",\"declaration_count\":")
+    rh_push_decimal_i64(out, decls.count.i64())
+    rh_push_text(out, ",\"source_tally\":{\"provider\":")
+    p: mutable i64 = 0
+    f: mutable i64 = 0
+    o: mutable i64 = 0
+    rh_role_source_tally(decls, &p, &f, &o)
+    rh_push_decimal_i64(out, p)
+    rh_push_text(out, ",\"file\":")
+    rh_push_decimal_i64(out, f)
+    rh_push_text(out, ",\"operator\":")
+    rh_push_decimal_i64(out, o)
+    rh_push_text(out, "},\"queries\":[")
+    q_idx: i64 = rh_json_obj_get(nodes, texts, root, "queries")
+    first: mutable bool = true
+    if q_idx >= 0:
+        if nodes[q_idx.usize()].kind != RH_JSON_ARR:
+            return -1
+        qarr: RhJsonNode = nodes[q_idx.usize()]
+        qc: mutable i64 = qarr.first_child
+        while qc >= 0 |qc, nodes, texts, raw, decls, out, first|:
+            if nodes[qc.usize()].kind != RH_JSON_OBJ:
+                return -1
+            actor: i64 = rh_rr_int(nodes, raw, texts, qc, "actor_id", -1)
+            if actor < 0:
+                return -1
+            as_of: i64 = rh_rr_int(nodes, raw, texts, qc, "as_of", 0)
+            role: u8 = rh_role_declared(decls, actor, as_of)
+            if not first:
+                out.push(44)
+            first <- false
+            rh_push_text(out, "{\"actor_id\":")
+            rh_push_decimal_i64(out, actor)
+            rh_push_text(out, ",\"as_of\":")
+            rh_push_decimal_i64(out, as_of)
+            rh_push_text(out, ",\"declared_role\":\"")
+            rh_push_text(out, rh_role_label(role))
+            rh_push_text(out, "\"}")
+            qc <- nodes[qc.usize()].next_sibling
+    rh_push_text(out, "],\"permission_queries\":[")
+    pfirst: mutable bool = true
+    p_idx: i64 = rh_json_obj_get(nodes, texts, root, "permission_queries")
+    if p_idx >= 0:
+        if nodes[p_idx.usize()].kind != RH_JSON_ARR:
+            return -1
+        parr: RhJsonNode = nodes[p_idx.usize()]
+        pc: mutable i64 = parr.first_child
+        while pc >= 0 |pc, nodes, texts, raw, decls, out, pfirst|:
+            if nodes[pc.usize()].kind != RH_JSON_OBJ:
+                return -1
+            actor2: i64 = rh_rr_int(nodes, raw, texts, pc, "actor_id", -1)
+            if actor2 < 0:
+                return -1
+            as_of2: i64 = rh_rr_int(nodes, raw, texts, pc, "as_of", 0)
+            bit: i64 = rh_rr_int(nodes, raw, texts, pc, "perm_bit", -1)
+            if bit < 0 or bit > 255:
+                return -1
+            granted: i64 = rh_role_permission_declared(decls, actor2, bit.u8(), as_of2)
+            if not pfirst:
+                out.push(44)
+            pfirst <- false
+            rh_push_text(out, "{\"actor_id\":")
+            rh_push_decimal_i64(out, actor2)
+            rh_push_text(out, ",\"perm_bit\":")
+            rh_push_decimal_i64(out, bit)
+            rh_push_text(out, ",\"as_of\":")
+            rh_push_decimal_i64(out, as_of2)
+            rh_push_text(out, ",\"declared\":")
+            if granted == 1:
+                rh_push_text(out, "true")
+            else:
+                rh_push_text(out, "false")
+            rh_push_text(out, "}")
+            pc <- nodes[pc.usize()].next_sibling
+    rh_push_text(out, "],\"note\":\"declared roles are time-scoped evidence, separate from observed actions; an unrecognized role string is unknown, never guessed; a revoked or not-yet-effective declaration is not active at that time\"}")
+    return 0

@@ -1,0 +1,229 @@
+# rh_spdx.elisa — SPDX 2.3 JSON inventory (M08 inventory-formats lane).
+#
+# A second pinned interchange format alongside CycloneDX, so a consumer is
+# not locked to one producer. Declared supported version: SPDX-2.3; any
+# other `spdxVersion` is reported `unsupported`, never guessed at.
+#
+# Lossless/unknown-field awareness: the parser counts top-level keys it does
+# not model (`unknown_top_keys`) instead of pretending it understood them.
+# `valid != complete`: validating a document proves it is well-formed SPDX,
+# not that it enumerates every dependency.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_SPDX_MAX_PACKAGES: i64 = 100000
+
+struct RhSpdxPackage:
+    name_s: i64
+    name_e: i64
+    version_s: i64
+    version_e: i64
+    purl_s: i64
+    purl_e: i64
+    hash_count: i64
+    valid_sha256: i64
+
+struct RhSpdx:
+    ok: mutable i64
+    spec_unsupported: mutable i64
+    packages: mutable i64
+    invalid_packages: mutable i64
+    with_purl: mutable i64
+    with_hash: mutable i64
+    digest_known: mutable i64
+    unknown_top_keys: mutable i64
+
+# (private to this file)
+def rh_spdx_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e < s:
+        return -1
+    start: i64 = pool.count.i64()
+    k: mutable i64 = s
+    while k < e |k, texts, pool, e|:
+        pool.push(texts[k.usize()])
+        k <- k + 1
+    return start
+
+# (private to this file)
+def rh_spdx_end(start: i64, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if start < 0 or s < 0 or e < s:
+        return -1
+    return start + (e - s)
+
+# (private to this file)
+def rh_spdx_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = strlen(lit).i64()
+    if s < 0 or e - s != n:
+        return false
+    k: mutable i64 = 0
+    while k < n |k, texts, s, lit|:
+        if texts[(s + k).usize()] != lit[k.usize()]:
+            return false
+        k <- k + 1
+    return true
+
+# (private to this file)
+def rh_spdx_sha256_hex(texts: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e - s != 64:
+        return false
+    i: mutable i64 = s
+    while i < e |i, e, texts|:
+        b: u8 = texts[i.usize()]
+        if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102)):
+            return false
+        i <- i + 1
+    return true
+
+# One checksums array: count entries and valid SHA256 (algorithm == "SHA256").
+# (private to this file)
+def rh_spdx_checksums(nodes: darray[RhJsonNode]&, texts: darray[u8]&, arr: i64, total_out: mutable i64&, valid_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+    total_out[0] <- 0
+    valid_out[0] <- 0
+    if arr < 0:
+        return
+    o: RhJsonNode = nodes[arr.usize()]
+    if o.kind != RH_JSON_ARR:
+        return
+    child: mutable i64 = o.first_child
+    while child >= 0 |child, nodes, texts, total_out, valid_out|:
+        nxt: i64 = nodes[child.usize()].next_sibling
+        total_out[0] <- total_out[0] + 1
+        alg_s: mutable i64 = -1
+        ae: mutable i64 = -1
+        cs: mutable i64 = -1
+        ce: mutable i64 = -1
+        ok_a: bool = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "algorithm"), &alg_s, &ae)
+        ok_c: bool = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "checksumValue"), &cs, &ce)
+        if ok_a and ok_c and rh_spdx_eq(texts, alg_s, ae, "SHA256") and rh_spdx_sha256_hex(texts, cs, ce):
+            valid_out[0] <- valid_out[0] + 1
+        child <- nxt
+
+# Find a purl in externalRefs: referenceType == "purl".
+# (private to this file)
+def rh_spdx_purl(nodes: darray[RhJsonNode]&, texts: darray[u8]&, arr: i64, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    s_out[0] <- -1
+    e_out[0] <- -1
+    if arr < 0:
+        return false
+    o: RhJsonNode = nodes[arr.usize()]
+    if o.kind != RH_JSON_ARR:
+        return false
+    child: mutable i64 = o.first_child
+    while child >= 0 |child, nodes, texts, s_out, e_out|:
+        nxt: i64 = nodes[child.usize()].next_sibling
+        ts: mutable i64 = -1
+        te: mutable i64 = -1
+        if rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "referenceType"), &ts, &te):
+            if rh_spdx_eq(texts, ts, te, "purl"):
+                ls: mutable i64 = -1
+                le: mutable i64 = -1
+                if rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "referenceLocator"), &ls, &le):
+                    if le > ls:
+                        s_out[0] <- ls
+                        e_out[0] <- le
+                        return true
+        child <- nxt
+    return false
+
+# Count top-level keys that are not in the modeled set (lossless note).
+# (private to this file)
+def rh_spdx_unknown_keys(nodes: darray[RhJsonNode]&, texts: darray[u8]&, root: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    total: mutable i64 = 0
+    child: mutable i64 = nodes[root.usize()].first_child
+    while child >= 0 |child, nodes, texts, total|:
+        kn: RhJsonNode = nodes[child.usize()]
+        vn: i64 = kn.next_sibling
+        if kn.kind == RH_JSON_STR:
+            ks: i64 = kn.text_start
+            ke: i64 = kn.text_end
+            known: mutable bool = false
+            if rh_spdx_eq(texts, ks, ke, "spdxVersion"):
+                known <- true
+            if rh_spdx_eq(texts, ks, ke, "dataLicense"):
+                known <- true
+            if rh_spdx_eq(texts, ks, ke, "SPDXID"):
+                known <- true
+            if rh_spdx_eq(texts, ks, ke, "name"):
+                known <- true
+            if rh_spdx_eq(texts, ks, ke, "documentNamespace"):
+                known <- true
+            if rh_spdx_eq(texts, ks, ke, "creationInfo"):
+                known <- true
+            if rh_spdx_eq(texts, ks, ke, "packages"):
+                known <- true
+            if rh_spdx_eq(texts, ks, ke, "files"):
+                known <- true
+            if rh_spdx_eq(texts, ks, ke, "relationships"):
+                known <- true
+            if rh_spdx_eq(texts, ks, ke, "hasExtractedLicensingInfos"):
+                known <- true
+            if not known:
+                total <- total + 1
+        if vn >= 0:
+            child <- nodes[vn.usize()].next_sibling
+        else:
+            child <- -1
+    return total
+
+# Parse an SPDX 2.3 JSON document. Returns 0 when an SPDX document was
+# recognized (including an unsupported version, reported in the result),
+# -1 when the payload is not JSON/not SPDX.
+def rh_spdx_parse(raw: darray[u8]&, pool: mutable darray[u8]&, out: mutable darray[RhSpdxPackage]&, spdx_out: mutable RhSpdx&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    spdx_out[0] <- RhSpdx{ok: 0, spec_unsupported: 0, packages: 0, invalid_packages: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0:
+        return -1
+    rn: RhJsonNode = nodes[root.usize()]
+    if rn.kind != RH_JSON_OBJ:
+        return -1
+    vs: mutable i64 = -1
+    ve: mutable i64 = -1
+    if not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, root, "spdxVersion"), &vs, &ve):
+        return -1
+    s: RhSpdx = RhSpdx{ok: 1, spec_unsupported: 0, packages: 0, invalid_packages: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: rh_spdx_unknown_keys(nodes, texts, root)}
+    if not rh_spdx_eq(texts, vs, ve, "SPDX-2.3"):
+        s.spec_unsupported <- 1
+        spdx_out[0] <- s
+        return 0
+    arr: i64 = rh_json_obj_get(nodes, texts, root, "packages")
+    if arr < 0:
+        spdx_out[0] <- s
+        return 0
+    an: RhJsonNode = nodes[arr.usize()]
+    if an.kind != RH_JSON_ARR:
+        return -1
+    child: mutable i64 = an.first_child
+    while child >= 0 |child, nodes, texts, pool, out, s|:
+        nxt: i64 = nodes[child.usize()].next_sibling
+        if out.count.i64() >= RH_SPDX_MAX_PACKAGES:
+            return -1
+        ns: mutable i64 = -1
+        ne: mutable i64 = -1
+        ok_name: bool = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "name"), &ns, &ne)
+        if not ok_name or ne <= ns:
+            s.invalid_packages <- s.invalid_packages + 1
+        else:
+            s.packages <- s.packages + 1
+            ws: mutable i64 = -1
+            we: mutable i64 = -1
+            _ = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "versionInfo"), &ws, &we)
+            ps: mutable i64 = -1
+            pe: mutable i64 = -1
+            has_purl: bool = rh_spdx_purl(nodes, texts, rh_json_obj_get(nodes, texts, child, "externalRefs"), &ps, &pe)
+            if has_purl:
+                s.with_purl <- s.with_purl + 1
+            hc: mutable i64 = 0
+            hv: mutable i64 = 0
+            rh_spdx_checksums(nodes, texts, rh_json_obj_get(nodes, texts, child, "checksums"), &hc, &hv)
+            if hc > 0:
+                s.with_hash <- s.with_hash + 1
+            s.digest_known <- s.digest_known + hv
+            n2: i64 = rh_spdx_copy(pool, texts, ns, ne)
+            v2: i64 = rh_spdx_copy(pool, texts, ws, we)
+            p2: i64 = rh_spdx_copy(pool, texts, ps, pe)
+            out.push(RhSpdxPackage{name_s: n2, name_e: rh_spdx_end(n2, ns, ne), version_s: v2, version_e: rh_spdx_end(v2, ws, we), purl_s: p2, purl_e: rh_spdx_end(p2, ps, pe), hash_count: hc, valid_sha256: hv})
+        child <- nxt
+    spdx_out[0] <- s
+    return 0

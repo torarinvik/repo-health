@@ -1,0 +1,351 @@
+# test_m07.elisa — M07 security/ops cores: adversarial transport (S002),
+# parser hardening (M07-03), monitoring separation (M07-11), per-host
+# source-respect (M07-12), and backup/restore drills (M07-10).
+# Deterministic, offline. Requires workdir `build/tmp_m07` pre-created.
+include "./rh_base.elisa"
+include "./rh_git.elisa"
+include "./rh_store.elisa"
+include "./rh_ops.elisa"
+include "./rh_json.elisa"
+include "./rh_package.elisa"
+include "./rh_privacy.elisa"
+
+def t7check(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    if cond:
+        return
+    fails[0] <- fails[0] + 1
+    b: mutable darray[u8] = []
+    rh_push_text(b, "M07-FAIL ")
+    rh_push_text(b, label)
+    b.push(10)
+    rh_write_stdout(b)
+
+def m7_contains(hay: darray[u8]&, needle: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: usize = strlen(needle)
+    if n == 0 or hay.count < n:
+        return false
+    i: mutable usize = 0
+    while i + n <= hay.count |i, hay, needle, n|:
+        same: mutable bool = true
+        k: mutable usize = 0
+        while k < n |k, hay, needle, i, same|:
+            if hay[i + k] != needle[k]:
+                same <- false
+            k <- k + 1
+        if same:
+            return true
+        i <- i + 1
+    return false
+
+# --- M07-02: adversarial transport --------------------------------------
+def check_transport(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    t7check(rh_fetch_guard("https://example.com/"), "tx-accept-host", fails)
+    t7check(rh_fetch_guard("https://gitlab.example.org/g/p"), "tx-accept-path", fails)
+    t7check(rh_fetch_guard("https://8.8.8.8/x"), "tx-accept-public-v4", fails)
+    t7check(rh_fetch_guard("file:///tmp/f"), "tx-accept-file", fails)
+    t7check(not rh_fetch_guard("http://example.com/"), "tx-reject-http", fails)
+    t7check(not rh_fetch_guard("https://127.0.0.1/"), "tx-reject-loopback", fails)
+    t7check(not rh_fetch_guard("https://10.0.0.5/"), "tx-reject-rfc1918-10", fails)
+    t7check(not rh_fetch_guard("https://172.16.0.1/"), "tx-reject-rfc1918-172", fails)
+    t7check(rh_fetch_guard("https://172.32.0.1/"), "tx-accept-172-public", fails)
+    t7check(not rh_fetch_guard("https://192.168.1.1/"), "tx-reject-rfc1918-192", fails)
+    t7check(not rh_fetch_guard("https://169.254.169.254/"), "tx-reject-metadata", fails)
+    t7check(not rh_fetch_guard("https://100.64.0.1/"), "tx-reject-cgnat", fails)
+    t7check(not rh_fetch_guard("https://198.18.0.1/"), "tx-reject-benchmark", fails)
+    t7check(not rh_fetch_guard("https://224.0.0.1/"), "tx-reject-multicast", fails)
+    t7check(not rh_fetch_guard("https://0.0.0.0/"), "tx-reject-unspecified", fails)
+    t7check(not rh_fetch_guard("https://[::1]/"), "tx-reject-v6-brackets", fails)
+    t7check(not rh_fetch_guard("https://[fd00::1]/"), "tx-reject-v6-ula", fails)
+    t7check(not rh_fetch_guard("https://user@example.com/"), "tx-reject-userinfo", fails)
+    t7check(not rh_fetch_guard("https://user:pass@example.com/"), "tx-reject-credential", fails)
+    t7check(not rh_fetch_guard("https://example.com:8080/"), "tx-reject-port", fails)
+    t7check(not rh_fetch_guard("https://example.com%2f@evil/"), "tx-reject-percent", fails)
+    t7check(not rh_fetch_guard("https://2130706433/"), "tx-reject-decimal-ip", fails)
+    t7check(not rh_fetch_guard("https://0x7f.0.0.1/"), "tx-reject-hex-ip", fails)
+    t7check(not rh_fetch_guard("https://0177.0.0.1/"), "tx-reject-octal-ip", fails)
+    t7check(not rh_fetch_guard("https://127.1/"), "tx-reject-short-v4", fails)
+    t7check(not rh_fetch_guard("https://exa_mple.com/"), "tx-reject-underscore", fails)
+    t7check(not rh_fetch_guard("file://"), "tx-reject-bare-file", fails)
+    return
+
+def check_addr_guard(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    t7check(rh_addr_guard("93.184.216.34"), "addr-accept-public-v4", fails)
+    t7check(rh_addr_guard("2606:2800:220:1:248:1893:25c8:1946"), "addr-accept-public-v6", fails)
+    t7check(not rh_addr_guard("127.0.0.1"), "addr-reject-loopback", fails)
+    t7check(not rh_addr_guard("10.1.2.3"), "addr-reject-private", fails)
+    t7check(not rh_addr_guard("169.254.169.254"), "addr-reject-linklocal", fails)
+    t7check(not rh_addr_guard("100.64.0.1"), "addr-reject-cgnat", fails)
+    t7check(not rh_addr_guard("224.0.0.1"), "addr-reject-multicast", fails)
+    t7check(not rh_addr_guard("::1"), "addr-reject-v6-loopback", fails)
+    t7check(not rh_addr_guard("::"), "addr-reject-v6-unspecified", fails)
+    t7check(not rh_addr_guard("fe80::1"), "addr-reject-v6-linklocal", fails)
+    t7check(not rh_addr_guard("fc00::1"), "addr-reject-v6-ula-fc", fails)
+    t7check(not rh_addr_guard("fd12::1"), "addr-reject-v6-ula-fd", fails)
+    t7check(not rh_addr_guard("ff02::1"), "addr-reject-v6-multicast", fails)
+    t7check(not rh_addr_guard("::ffff:127.0.0.1"), "addr-reject-v4mapped", fails)
+    t7check(not rh_addr_guard("not-an-ip"), "addr-reject-unknown-form", fails)
+    return
+
+# --- M07-03: parser hardening (structured failure, bounded) -------------
+def try_bad_json(data: darray[u8]&, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    t7check(rh_json_parse(data, nodes, texts) < 0, label, fails)
+
+def check_json_hardening(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    a0: darray[u8] = []
+    try_bad_json(a0, "json-reject-empty", fails)
+    a1: darray[u8] = [123]
+    try_bad_json(a1, "json-reject-open-brace", fails)
+    a2: darray[u8] = [91]
+    try_bad_json(a2, "json-reject-open-bracket", fails)
+    a3: darray[u8] = [123, 34, 97, 34, 58, 49]
+    try_bad_json(a3, "json-reject-truncated-object", fails)
+    a4: darray[u8] = [91, 49, 44, 50, 44]
+    try_bad_json(a4, "json-reject-trailing-comma", fails)
+    a5: darray[u8] = [49, 32, 50]
+    try_bad_json(a5, "json-reject-trailing-garbage", fails)
+    deep: mutable darray[u8] = []
+    k: mutable i64 = 0
+    while k < 600 |k, deep|:
+        deep.push(91)
+        k <- k + 1
+    j: mutable i64 = 0
+    while j < 600 |j, deep|:
+        deep.push(93)
+        j <- j + 1
+    dn: mutable darray[RhJsonNode] = []
+    dt: mutable darray[u8] = []
+    t7check(rh_json_parse(deep, dn, dt) < 0, "json-reject-depth-bound", fails)
+    return
+
+def try_bad_semver(data: darray[u8]&, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    vv: mutable RhSemver = RhSemver{0, 0, 0, 0, 0}
+    ok: bool = rh_semver_parse(data, 0, data.count.usize(), &vv)
+    t7check(not ok, label, fails)
+
+def check_semver_hardening(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    good: mutable darray[u8] = []
+    rh_push_text(good, "1.2.3")
+    v: mutable RhSemver = RhSemver{0, 0, 0, 0, 0}
+    t7check(rh_semver_parse(good, 0, 5, &v), "sem-accept", fails)
+    # Partial versions ("1", "1.2") are accepted on purpose: Cargo-style
+    # requirements rely on them. Only malformed forms are rejected.
+    p1: darray[u8] = [49]
+    vp1: mutable RhSemver = RhSemver{0, 0, 0, 0, 0}
+    t7check(rh_semver_parse(p1, 0, 1, &vp1), "sem-accept-major-only", fails)
+    p2: darray[u8] = [49, 46, 50]
+    vp2: mutable RhSemver = RhSemver{0, 0, 0, 0, 0}
+    t7check(rh_semver_parse(p2, 0, 3, &vp2), "sem-accept-two-part", fails)
+    b0: darray[u8] = []
+    try_bad_semver(b0, "sem-reject-empty", fails)
+    b3: darray[u8] = [49, 46, 50, 46, 51, 46, 52]
+    try_bad_semver(b3, "sem-reject-four-part", fails)
+    b4: darray[u8] = [48, 49, 46, 50, 46, 51]
+    try_bad_semver(b4, "sem-reject-leading-zero", fails)
+    b5: darray[u8] = [49, 46, 50, 46]
+    try_bad_semver(b5, "sem-reject-trailing-dot", fails)
+    return
+
+def check_lock_hardening(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    garbage: mutable darray[u8] = [91, 91, 112, 97, 99, 107]
+    pkgs: mutable darray[RhPkgNode] = []
+    pool: mutable darray[u8] = []
+    reqs: mutable darray[RhRequire] = []
+    unk: mutable i64 = 0
+    _ = rh_cargo_parse(garbage, pkgs, pool, reqs, &unk)
+    t7check(pkgs.count == 0, "cargo-garbage-no-nodes", fails)
+    nbytes: mutable darray[u8] = [123, 123, 123]
+    npkgs: mutable darray[RhPkgNode] = []
+    npool: mutable darray[u8] = []
+    npaths: mutable darray[i64] = []
+    nreqs: mutable darray[RhRequire] = []
+    _ = rh_npm_lock_parse(nbytes, garbage, npkgs, npool, npaths, nreqs)
+    t7check(npkgs.count == 0, "npm-garbage-no-nodes", fails)
+    return
+
+# --- M07-11: monitoring separation --------------------------------------
+def check_monitoring(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    m: mutable RhMon = rh_mon_new(3600)
+    t7check(rh_mon_observed_rate_bp(m) == -1, "mon-no-denominator-unknown", fails)
+    rh_mon_observed(m)
+    rh_mon_observed(m)
+    rh_mon_observed(m)
+    rh_mon_unknown(m)
+    rate: i64 = rh_mon_observed_rate_bp(m)
+    t7check(rate == 7500, "mon-rate-3of4", fails)
+    t7check(rh_mon_freshness_age(m, 500) == -1, "mon-never-fresh", fails)
+    rh_mon_success(m, 1000)
+    t7check(rh_mon_freshness_age(m, 1500) == 500, "mon-freshness-age", fails)
+    t7check(rh_mon_freshness_age(m, 900) == 0, "mon-freshness-clock-skew-clamped", fails)
+    rh_mon_error(m)
+    rh_mon_parser_reject(m)
+    rh_mon_truncation(m)
+    out: mutable darray[u8] = []
+    rh_mon_text(m, 1500, out)
+    t7check(m7_contains(out, "rh_project_unknown_total 1"), "mon-text-unknown", fails)
+    t7check(m7_contains(out, "rh_project_observed_rate_bp 7500"), "mon-text-rate", fails)
+    t7check(m7_contains(out, "rh_service_freshness_age_seconds 500"), "mon-text-freshness", fails)
+    t7check(m7_contains(out, "rh_project_truncations_total 1"), "mon-text-trunc", fails)
+    t7check(not m7_contains(out, "rh_project_queue_age"), "mon-service-project-separate", fails)
+    return
+
+# --- M07-12: source-respect quotas --------------------------------------
+def check_quota(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    p: RhHostPolicy = RhHostPolicy{capacity: 2, refill_per_second: 1, base_backoff_seconds: 10, max_backoff_seconds: 100}
+    st: mutable RhHostState = rh_host_new(7, 2)
+    t7check(rh_host_consume(st, p, 0) == 1, "q-consume-1", fails)
+    t7check(rh_host_consume(st, p, 0) == 1, "q-consume-2", fails)
+    t7check(rh_host_consume(st, p, 0) == 0, "q-empty-refused", fails)
+    t7check(rh_host_consume(st, p, 5) == 1, "q-refill", fails)
+    w1: i64 = rh_host_record_failure(st, p, 5)
+    t7check(w1 == 10, "q-backoff-10", fails)
+    t7check(rh_host_allow(st, p, 10) == 0, "q-backoff-blocks", fails)
+    t7check(rh_host_consume(st, p, 10) == 0, "q-backoff-no-request", fails)
+    t7check(rh_host_consume(st, p, 16) == 1, "q-backoff-expires", fails)
+    w2: i64 = rh_host_record_failure(st, p, 16)
+    t7check(w2 == 20, "q-backoff-doubles", fails)
+    rh_host_record_success(st)
+    t7check(rh_host_allow(st, p, 17) == 1, "q-success-clears", fails)
+    rh_host_stop(st)
+    t7check(rh_host_consume(st, p, 17) == 0, "q-stop-killswitch", fails)
+    return
+
+def check_backup(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    ev: mutable darray[u8] = []
+    rh_push_text(ev, "build/tmp_m07/store/evidence")
+    ev.push(0)
+    evp: cstr = (&ev[0]).cast[cstr] can Unsafe.PointerCast
+    da: mutable darray[u8] = []
+    rh_push_text(da, "alpha")
+    ha: mutable darray[u8] = []
+    t7check(rh_store_blob(evp, da, ha) == 0, "bk-store-a", fails)
+    db: mutable darray[u8] = []
+    rh_push_text(db, "beta")
+    hb: mutable darray[u8] = []
+    t7check(rh_store_blob(evp, db, hb) == 0, "bk-store-b", fails)
+    dc: mutable darray[u8] = []
+    rh_push_text(dc, "gamma")
+    hc: mutable darray[u8] = []
+    t7check(rh_store_blob(evp, dc, hc) == 0, "bk-store-c", fails)
+    names: mutable darray[u8] = []
+    k: mutable usize = 0
+    while k < ha.count |k, ha, names|:
+        names.push(ha[k])
+        k <- k + 1
+    names.push(10)
+    k <- 0
+    while k < hb.count |k, hb, names|:
+        names.push(hb[k])
+        k <- k + 1
+    names.push(10)
+    k <- 0
+    while k < hc.count |k, hc, names|:
+        names.push(hc[k])
+        k <- k + 1
+    names.push(10)
+    man: mutable darray[u8] = []
+    rh_push_text(man, "build/tmp_m07/backup.manifest")
+    man.push(0)
+    mp: cstr = (&man[0]).cast[cstr] can Unsafe.PointerCast
+    t7check(rh_backup_write(mp, names), "bk-write-manifest", fails)
+    p_out: mutable i64 = 0
+    m_out: mutable i64 = 0
+    c_out: mutable i64 = 0
+    _ = rh_backup_verify(evp, mp, &p_out, &m_out, &c_out)
+    t7check(p_out == 3 and c_out == 0, "bk-verify-clean", fails)
+    # Corrupt blob C in place: verify must catch it, restore must skip it.
+    cbuf: mutable darray[u8] = []
+    cn: mutable darray[u8] = []
+    k <- 0
+    while k < hc.count |k, hc, cn|:
+        cn.push(hc[k])
+        k <- k + 1
+    cn.push(0)
+    cnp: cstr = (&cn[0]).cast[cstr] can Unsafe.PointerCast
+    cpath: cstr = rh_backup_path_cstr(evp, cnp, cbuf)
+    tampered: mutable darray[u8] = []
+    rh_push_text(tampered, "tampered")
+    _ = rh_io_write(cpath, tampered)
+    _ = rh_backup_verify(evp, mp, &p_out, &m_out, &c_out)
+    t7check(c_out == 1, "bk-detect-corrupt", fails)
+    dst: mutable darray[u8] = []
+    rh_push_text(dst, "build/tmp_m07/restore/evidence")
+    dst.push(0)
+    dstp: cstr = (&dst[0]).cast[cstr] can Unsafe.PointerCast
+    r_out: mutable i64 = 0
+    _ = rh_backup_restore(evp, dstp, mp, &r_out)
+    t7check(r_out == 2, "bk-restore-skips-corrupt", fails)
+    ok: mutable i64 = 0
+    ha2: mutable darray[u8] = []
+    k <- 0
+    while k < ha.count |k, ha, ha2|:
+        ha2.push(ha[k])
+        k <- k + 1
+    ha2.push(0)
+    hap: cstr = (&ha2[0]).cast[cstr] can Unsafe.PointerCast
+    _ = rh_store_blob_verify(dstp, hap, &ok)
+    t7check(ok == 1, "bk-restored-verifies", fails)
+
+    # --- M07-08 deletion drill: replayability label changes ---
+    dd: mutable darray[u8] = []
+    rh_push_text(dd, "delete-me")
+    hd: mutable darray[u8] = []
+    t7check(rh_store_blob(evp, dd, hd) == 0, "dr-store", fails)
+    refd: mutable darray[u8] = []
+    k <- 0
+    while k < hd.count |k, hd, refd|:
+        refd.push(hd[k])
+        k <- k + 1
+    refd.push(10)
+    t7check(rh_replay_label(evp, refd) == RH_REPLAY_REPLAYABLE, "dr-replayable-before", fails)
+    hdn: mutable darray[u8] = []
+    k <- 0
+    while k < hd.count |k, hd, hdn|:
+        hdn.push(hd[k])
+        k <- k + 1
+    hdn.push(0)
+    hdnp: u8& = (&hdn[0]).cast[u8&] can Unsafe.PointerCast
+    t7check(rh_store_delete_blob(evp, hdnp) == 0, "dr-delete", fails)
+    t7check(rh_replay_label(evp, refd) == RH_REPLAY_NOT_REPLAYABLE, "dr-not-replayable-after", fails)
+    emptyref: mutable darray[u8] = []
+    t7check(rh_replay_label(evp, emptyref) == RH_REPLAY_UNKNOWN, "dr-empty-unknown", fails)
+    return
+
+# --- M07-07: publication suppression ------------------------------------
+def check_publication(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    t7check(rh_pub_decide(0, 0, 0, 0, 5) == RH_PUB_UNAVAILABLE, "pub-empty-unavailable", fails)
+    t7check(rh_pub_decide(1, 0, 0, 0, 5) == RH_PUB_SUPPRESS_SMALL, "pub-small-suppressed", fails)
+    t7check(rh_pub_decide(4, 0, 0, 0, 5) == RH_PUB_SUPPRESS_SMALL, "pub-below-threshold", fails)
+    t7check(rh_pub_decide(5, 0, 0, 0, 5) == RH_PUB_PUBLISH, "pub-at-threshold", fails)
+    t7check(rh_pub_decide(9, 1, 0, 0, 5) == RH_PUB_PUBLISH, "pub-authorized-broad", fails)
+    t7check(rh_pub_decide(9, 0, 1, 0, 5) == RH_PUB_WITHHOLD_PRIVATE, "pub-private-withheld", fails)
+    t7check(rh_pub_decide(0, 0, 0, 1, 5) == RH_PUB_WITHHOLD_UNKNOWN, "pub-unknown-withheld", fails)
+    # Precedence: unknown > private > threshold.
+    t7check(rh_pub_decide(9, 0, 1, 1, 5) == RH_PUB_WITHHOLD_UNKNOWN, "pub-unknown-wins", fails)
+    t7check(not rh_pub_is_publishable(rh_pub_decide(9, 0, 1, 0, 5)), "pub-private-not-publishable", fails)
+    t7check(not rh_pub_is_publishable(rh_pub_decide(1, 0, 0, 0, 5)), "pub-small-not-publishable", fails)
+    out: mutable darray[u8] = []
+    rh_pub_text(RH_PUB_WITHHOLD_PRIVATE, 9, 0, 1, 0, 5, out)
+    t7check(m7_contains(out, "withhold_private_member"), "pub-text-decision", fails)
+    t7check(m7_contains(out, "suppression is not anonymization"), "pub-text-anonymity-caveat", fails)
+    return
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fails: mutable i64 = 0
+    check_transport(&fails)
+    check_publication(&fails)
+    check_addr_guard(&fails)
+    check_json_hardening(&fails)
+    check_semver_hardening(&fails)
+    check_lock_hardening(&fails)
+    check_monitoring(&fails)
+    check_quota(&fails)
+    check_backup(&fails)
+    if fails == 0:
+        b: mutable darray[u8] = []
+        rh_push_text(b, "M07 OK")
+        b.push(10)
+        rh_write_stdout(b)
+        return 0
+    return 1

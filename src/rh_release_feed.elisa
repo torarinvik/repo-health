@@ -1,0 +1,148 @@
+# rh_release_feed.elisa — release-only source adapter (M08 archives/releases
+# lane). Some sites publish releases and downloadable artifacts but no
+# revision history. This adapter reports exactly that: releases, their
+# published time (VALID time), the collector's first-seen time (KNOWN
+# time), and artifact metadata. It never invents commits, authors, or
+# history, and its capability manifest marks history `unsupported`.
+#
+# A tag is a label on a release, not the release identity by itself: the
+# record is (tag, first_seen) so a re-published tag is a new observation
+# rather than a silent overwrite. `published` absent stays unknown (0), not
+# the collector time.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_RELEASE_FEED_MAX: i64 = 5000
+const RH_RELEASE_FEED_VERSION: i64 = 1
+
+struct RhRelease:
+    tag_s: i64
+    tag_e: i64
+    published: i64
+    has_published: i64
+    first_seen: i64
+    asset_count: i64
+    digest_known_count: i64
+
+# Explicit: this source family has no revision-history capability.
+def rh_release_feed_history_supported() -> i64:
+    return 0
+
+# Explicit: no author/identity evidence is derived here.
+def rh_release_feed_identity_supported() -> i64:
+    return 0
+
+# Copy [s,e) of texts into pool; returns start, or -1.
+# (private to this file)
+def rh_rel_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if s < 0 or e < s:
+        return -1
+    start: i64 = pool.count.i64()
+    k: mutable i64 = s
+    while k < e |k, texts, pool, e|:
+        pool.push(texts[k.usize()])
+        k <- k + 1
+    return start
+
+# (private to this file)
+def rh_rel_arr_count(nodes: darray[RhJsonNode]&, arr: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if arr < 0:
+        return 0
+    o: RhJsonNode = nodes[arr.usize()]
+    if o.kind != RH_JSON_ARR:
+        return 0
+    return o.child_count
+
+# Count assets in an assets array that carry a non-empty "digest" string.
+# (private to this file)
+def rh_rel_digest_count(nodes: darray[RhJsonNode]&, texts: darray[u8]&, arr: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    if arr < 0:
+        return 0
+    o: RhJsonNode = nodes[arr.usize()]
+    if o.kind != RH_JSON_ARR:
+        return 0
+    total: mutable i64 = 0
+    child: mutable i64 = o.first_child
+    while child >= 0 |child, nodes, texts, total|:
+        nxt: i64 = nodes[child.usize()].next_sibling
+        ds: mutable i64 = -1
+        de: mutable i64 = -1
+        if rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "digest"), &ds, &de):
+            if de > ds:
+                total <- total + 1
+        child <- nxt
+    return total
+
+# Parse a release feed. Accepts either a top-level array of release objects
+# or an object with a "releases" array. Each release needs a non-empty
+# string "tag"; "published_at" and "assets" are optional. Returns 0 on
+# success (rejects counted), -1 when the payload shape is unusable or the
+# release cap is exceeded.
+def rh_release_feed_parse(raw: darray[u8]&, first_seen: i64, max_releases: i64, pool: mutable darray[u8]&, out: mutable darray[RhRelease]&, reject_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    reject_out[0] <- 0
+    cap: mutable i64 = max_releases
+    if cap <= 0:
+        cap <- RH_RELEASE_FEED_MAX
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0:
+        return -1
+    rn: RhJsonNode = nodes[root.usize()]
+    arr: mutable i64 = -1
+    if rn.kind == RH_JSON_ARR:
+        arr <- root
+    elif rn.kind == RH_JSON_OBJ:
+        arr <- rh_json_obj_get(nodes, texts, root, "releases")
+        if arr < 0:
+            return -1
+        an: RhJsonNode = nodes[arr.usize()]
+        if an.kind != RH_JSON_ARR:
+            return -1
+    else:
+        return -1
+    child: mutable i64 = nodes[arr.usize()].first_child
+    while child >= 0 |child, nodes, texts, pool, out, reject_out, cap, raw, first_seen|:
+        nxt: i64 = nodes[child.usize()].next_sibling
+        if out.count.i64() >= cap:
+            return -1
+        ts: mutable i64 = -1
+        te: mutable i64 = -1
+        if not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, child, "tag"), &ts, &te) or te <= ts:
+            reject_out[0] <- reject_out[0] + 1
+        else:
+            tag_s: i64 = rh_rel_copy(pool, texts, ts, te)
+            tag_e: i64 = tag_s + (te - ts)
+            pub: mutable i64 = 0
+            has_pub: mutable i64 = 0
+            pok: mutable i64 = 0
+            pub <- rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, child, "published_at"), &pok)
+            if pok == 1:
+                has_pub <- 1
+            asset_arr: i64 = rh_json_obj_get(nodes, texts, child, "assets")
+            ac: i64 = rh_rel_arr_count(nodes, asset_arr)
+            dc: i64 = rh_rel_digest_count(nodes, texts, asset_arr)
+            out.push(RhRelease{tag_s: tag_s, tag_e: tag_e, published: pub, has_published: has_pub, first_seen: first_seen, asset_count: ac, digest_known_count: dc})
+        child <- nxt
+    return 0
+
+# Smallest first_seen among releases whose tag equals the given span; -1
+# when none. Lets a caller distinguish a genuinely new release from a
+# re-observation without treating the tag as identity.
+def rh_release_first_seen_for(pool: darray[u8]&, out: darray[RhRelease]&, ts: i64, te: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+    best: mutable i64 = -1
+    i: mutable i64 = 0
+    while i < out.count.i64() |i, out, pool, ts, te, best|:
+        r: RhRelease = out[i.usize()]
+        if r.tag_e - r.tag_s == te - ts:
+            same: mutable bool = true
+            k: mutable i64 = 0
+            while k < te - ts |k, pool, r, ts, same|:
+                if pool[(r.tag_s + k).usize()] != pool[(ts + k).usize()]:
+                    same <- false
+                k <- k + 1
+            if same:
+                if best < 0 or r.first_seen < best:
+                    best <- r.first_seen
+        i <- i + 1
+    return best

@@ -1,0 +1,225 @@
+# rh_lease_report.elisa — M02-03 job-lease execution path.
+#
+# Applies an `rh-store-lease-input/1` op sequence to a real filesystem lease
+# under `<root>/leases/<job>.lease` (+ `.log` attempt history). Fencing is
+# enforced by the store: a stale worker (wrong token) cannot heartbeat or
+# release/publish, an expired lease is reclaimable, and a terminal phase
+# refuses further claims. Malformed input fails closed.
+
+include "./rh_base.elisa"
+include "./rh_store.elisa"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_lr_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = e - s
+    k: mutable i64 = 0
+    while k < n |k, texts, lit, s|:
+        if lit[k.usize()] == 0:
+            return false
+        if texts[(s + k).usize()] != lit[k.usize()]:
+            return false
+        k <- k + 1
+    return lit[n.usize()] == 0
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_lr_phase(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    if rh_lr_eq(texts, s, e, "queued"):
+        return 0
+    if rh_lr_eq(texts, s, e, "leased"):
+        return 1
+    if rh_lr_eq(texts, s, e, "running"):
+        return 2
+    if rh_lr_eq(texts, s, e, "succeeded"):
+        return 3
+    if rh_lr_eq(texts, s, e, "failed_terminal"):
+        return 4
+    if rh_lr_eq(texts, s, e, "canceled"):
+        return 5
+    return -1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_lr_phase_label(p: i64) -> u8&:
+    if p == 0:
+        return "queued"
+    if p == 1:
+        return "leased"
+    if p == 2:
+        return "running"
+    if p == 3:
+        return "succeeded"
+    if p == 4:
+        return "failed_terminal"
+    return "canceled"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_lr_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        return false
+    return rh_json_str_span(nodes, idx, s_out, e_out)
+
+def rh_lease_report(raw: darray[u8]&, root: cstr, job: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    rooti: i64 = rh_json_parse(raw, nodes, texts)
+    if rooti < 0 or nodes[rooti.usize()].kind != RH_JSON_OBJ:
+        return -1
+    sspan: mutable i64 = 0
+    espan: mutable i64 = 0
+    sc: i64 = rh_json_obj_get(nodes, texts, rooti, "schema")
+    if sc < 0 or not rh_json_str_span(nodes, sc, &sspan, &espan):
+        return -1
+    if not rh_lr_eq(texts, sspan, espan, "rh-store-lease-input/1"):
+        return -1
+    os: mutable i64 = 0
+    oe: mutable i64 = 0
+    if not rh_lr_str(nodes, texts, rooti, "owner", &os, &oe):
+        return -1
+    owner_buf: mutable darray[u8] = []
+    k: mutable i64 = os
+    while k < oe |k, texts, owner_buf, oe|:
+        owner_buf.push(texts[k.usize()])
+        k <- k + 1
+    owner_buf.push(0)
+    owner: cstr = (&owner_buf[0]).cast[cstr] can Unsafe.PointerCast
+    # leases dir + paths
+    ldir: mutable darray[u8] = []
+    rh_push_cstr(ldir, root)
+    rh_push_text(ldir, "/leases")
+    ldir.push(0)
+    if rh_ensure_dir((&ldir[0]).cast[cstr] can Unsafe.PointerCast) != 0:
+        return -1
+    lpath: mutable darray[u8] = []
+    logpath: mutable darray[u8] = []
+    rh_push_cstr(lpath, root)
+    rh_push_text(lpath, "/leases/")
+    rh_push_cstr(lpath, job)
+    rh_push_text(lpath, ".lease")
+    lpath.push(0)
+    rh_push_cstr(logpath, root)
+    rh_push_text(logpath, "/leases/")
+    rh_push_cstr(logpath, job)
+    rh_push_text(logpath, ".log")
+    logpath.push(0)
+    lp: cstr = (&lpath[0]).cast[cstr] can Unsafe.PointerCast
+    lgp: cstr = (&logpath[0]).cast[cstr] can Unsafe.PointerCast
+    ops_idx: i64 = rh_json_obj_get(nodes, texts, rooti, "ops")
+    if ops_idx < 0 or nodes[ops_idx.usize()].kind != RH_JSON_ARR:
+        return -1
+    rh_push_text(out, "{\"schema\":\"rh-store-lease-result/1\",\"job\":\"")
+    rh_push_cstr(out, job)
+    rh_push_text(out, "\",\"owner\":\"")
+    rh_push_cstr(out, owner)
+    rh_push_text(out, "\",\"ops\":[")
+    arr: RhJsonNode = nodes[ops_idx.usize()]
+    child: mutable i64 = arr.first_child
+    first: mutable bool = true
+    token: mutable i64 = 0
+    while child >= 0 |child, nodes, texts, raw, out, first, token, lp, lgp, owner|:
+        if nodes[child.usize()].kind != RH_JSON_OBJ:
+            return -1
+        os2: mutable i64 = 0
+        oe2: mutable i64 = 0
+        if not rh_lr_str(nodes, texts, child, "op", &os2, &oe2):
+            return -1
+        if not first:
+            out.push(44)
+        first <- false
+        now: mutable i64 = 0
+        nok: mutable i64 = 0
+        now <- rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, child, "now"), &nok)
+        if nok == 0:
+            now <- 0
+        if rh_lr_eq(texts, os2, oe2, "claim"):
+            ttl: mutable i64 = 0
+            tok: mutable i64 = 0
+            ttl <- rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, child, "ttl"), &tok)
+            got: i64 = rh_lease_acquire(lp, lgp, owner, now, ttl)
+            rh_push_text(out, "{\"op\":\"claim\",\"outcome\":")
+            if got > 0:
+                token <- got
+                rh_push_text(out, "\"claimed\",\"token\":")
+                rh_push_decimal_i64(out, got)
+                rh_push_text(out, ",\"phase\":\"leased\"")
+            elif got == -1:
+                rh_push_text(out, "\"held\"")
+            else:
+                rh_push_text(out, "\"terminal\"")
+            rh_push_text(out, "}")
+        elif rh_lr_eq(texts, os2, oe2, "heartbeat"):
+            ok: bool = rh_lease_heartbeat(lp, token, owner, now)
+            rh_push_text(out, "{\"op\":\"heartbeat\",\"applied\":")
+            if ok:
+                rh_push_text(out, "true")
+            else:
+                rh_push_text(out, "false")
+            rh_push_text(out, ",\"token\":")
+            rh_push_decimal_i64(out, token)
+            rh_push_text(out, "}")
+        elif rh_lr_eq(texts, os2, oe2, "release"):
+            ps: mutable i64 = 0
+            pe: mutable i64 = 0
+            if not rh_lr_str(nodes, texts, child, "phase", &ps, &pe):
+                return -1
+            phase: i64 = rh_lr_phase(texts, ps, pe)
+            if phase < 0:
+                return -1
+            ok2: bool = rh_lease_release(lp, lgp, token, owner, now, phase)
+            rh_push_text(out, "{\"op\":\"release\",\"applied\":")
+            if ok2:
+                rh_push_text(out, "true")
+            else:
+                rh_push_text(out, "false")
+            rh_push_text(out, ",\"phase\":\"")
+            rh_push_text(out, rh_lr_phase_label(phase))
+            rh_push_text(out, "\"}")
+        elif rh_lr_eq(texts, os2, oe2, "status"):
+            tk: mutable i64 = 0
+            ob: mutable darray[u8] = []
+            hb: mutable i64 = 0
+            kept: mutable i64 = 0
+            ph: mutable i64 = 0
+            have: bool = rh_lease_read(lp, &tk, ob, &hb, &kept, &ph)
+            rh_push_text(out, "{\"op\":\"status\",\"have\":")
+            if have:
+                rh_push_text(out, "true")
+            else:
+                rh_push_text(out, "false")
+            if have:
+                rh_push_text(out, ",\"token\":")
+                rh_push_decimal_i64(out, tk)
+                rh_push_text(out, ",\"heartbeat\":")
+                rh_push_decimal_i64(out, hb)
+                rh_push_text(out, ",\"ttl\":")
+                rh_push_decimal_i64(out, kept)
+                rh_push_text(out, ",\"phase\":\"")
+                rh_push_text(out, rh_lr_phase_label(ph))
+                rh_push_text(out, "\"")
+            rh_push_text(out, "}")
+        else:
+            return -1
+        child <- nodes[child.usize()].next_sibling
+    # final status
+    fmtk: mutable i64 = 0
+    fob: mutable darray[u8] = []
+    fhb: mutable i64 = 0
+    fttl: mutable i64 = 0
+    fph: mutable i64 = 0
+    havef: bool = rh_lease_read(lp, &fmtk, fob, &fhb, &fttl, &fph)
+    rh_push_text(out, "],\"final\":{\"have\":")
+    if havef:
+        rh_push_text(out, "true")
+    else:
+        rh_push_text(out, "false")
+    if havef:
+        rh_push_text(out, ",\"token\":")
+        rh_push_decimal_i64(out, fmtk)
+        rh_push_text(out, ",\"heartbeat\":")
+        rh_push_decimal_i64(out, fhb)
+        rh_push_text(out, ",\"ttl\":")
+        rh_push_decimal_i64(out, fttl)
+        rh_push_text(out, ",\"phase\":\"")
+        rh_push_text(out, rh_lr_phase_label(fph))
+        rh_push_text(out, "\"")
+    rh_push_text(out, "},\"note\":\"a stale worker (wrong fencing token) cannot heartbeat or release; an expired lease is reclaimable; a terminal phase refuses further claims\"}")
+    return 0

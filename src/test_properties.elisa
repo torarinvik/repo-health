@@ -1,0 +1,235 @@
+# test_properties.elisa — property layer (plan: dupe invariance, reorder
+# independence, share/HHI/effective bounds, concentration monotonicity,
+# depth-limit monotonic reachability, public subset of private, reversible
+# identity). Deterministic, offline. Complements (does not replace) the
+# oracle/unit tests: these assert invariants over many inputs, not exact
+# expected values.
+include "./rh_base.elisa"
+include "./rh_metrics.elisa"
+include "./rh_continuity.elisa"
+include "./rh_identity.elisa"
+include "./rh_graph.elisa"
+include "./rh_observation.elisa"
+
+def pfail(text: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    fails[0] <- fails[0] + 1
+    b: mutable darray[u8] = []
+    rh_push_text(b, "PROPERTY-FAIL ")
+    rh_push_text(b, text)
+    b.push(10)
+    rh_write_stdout(b)
+
+def u64_from(a: i64, b: i64, c: i64, d: i64) -> darray[u64] can[Memory.Allocate, Abort.Panic]:
+    v: mutable darray[u64] = []
+    if a > 0:
+        v.push(a.u64())
+    if b > 0:
+        v.push(b.u64())
+    if c > 0:
+        v.push(c.u64())
+    if d > 0:
+        v.push(d.u64())
+    return v
+
+# 1/n <= hhi <= 1 and 1 <= effective <= n, using exact cross-multiplication.
+def prop_bounds(counts: darray[u64]&, n: u64, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    hn: mutable u64 = 0
+    hd: mutable u64 = 0
+    if not rh_hhi(counts, &hn, &hd):
+        pfail(label, fails)
+        return
+    # hhi <= 1  <=>  hn <= hd ; hhi >= 1/n  <=>  hd <= n*hn
+    if hn > hd:
+        pfail(label, fails)
+    if hd > n * hn:
+        pfail(label, fails)
+    en: mutable u64 = 0
+    ed: mutable u64 = 0
+    if not rh_effective_count(counts, &en, &ed):
+        pfail(label, fails)
+        return
+    # effective >= 1 <=> en >= ed ; effective <= n <=> en <= n*ed
+    if en < ed:
+        pfail(label, fails)
+    if en > n * ed:
+        pfail(label, fails)
+    return
+
+def prop_hhi_reorder(a: i64, b: i64, c: i64, d: i64, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    x: mutable darray[u64] = u64_from(a, b, c, d)
+    y: mutable darray[u64] = u64_from(d, c, b, a)
+    xn: mutable u64 = 0
+    xd: mutable u64 = 0
+    yn: mutable u64 = 0
+    yd: mutable u64 = 0
+    okx: bool = rh_hhi(x, &xn, &xd)
+    oky: bool = rh_hhi(y, &yn, &yd)
+    if not okx or not oky:
+        pfail("hhi-reorder-ok", fails)
+        return
+    if xn != yn or xd != yd:
+        pfail("hhi-reorder-equal", fails)
+    x2: mutable darray[u64] = u64_from(a, b, c, d)
+    y2: mutable darray[u64] = u64_from(d, c, b, a)
+    if rh_absence_factor_50(x2) != rh_absence_factor_50(y2):
+        pfail("conc-reorder-equal", fails)
+    return
+
+def prop_concentration_monotone(a: i64, b: i64, c: i64, d: i64, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    x: mutable darray[u64] = u64_from(a, b, c, d)
+    y: mutable darray[u64] = u64_from(a, b, c, d)
+    k50: i64 = rh_absence_factor_50(x)
+    k80: i64 = rh_concentration_80(y)
+    if k50 < 1 or k80 < 1:
+        pfail("conc-positive", fails)
+        return
+    if k50 > k80:
+        pfail("conc-monotone-threshold", fails)
+    return
+
+# S006 mutation kill: no status other than observed/partial/stale may carry
+# a value. If a mutation made unknown carry 0, this fails.
+def prop_unknown_no_value(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    value_statuses: mutable darray[u8] = []
+    value_statuses.push(RH_ST_OBSERVED)
+    value_statuses.push(RH_ST_PARTIAL)
+    value_statuses.push(RH_ST_STALE)
+    all: mutable darray[u8] = []
+    all.push(RH_ST_OBSERVED)
+    all.push(RH_ST_NOT_OBSERVED)
+    all.push(RH_ST_UNAVAILABLE)
+    all.push(RH_ST_UNAUTHORIZED)
+    all.push(RH_ST_PARTIAL)
+    all.push(RH_ST_STALE)
+    all.push(RH_ST_NOT_APPLICABLE)
+    all.push(RH_ST_ERROR)
+    all.push(RH_ST_CONFLICTED)
+    all.push(RH_ST_SUPPRESSED)
+    all.push(RH_ST_UNSUPPORTED)
+    i: mutable usize = 0
+    while i < all.count |i, all, value_statuses, fails|:
+        st: u8 = all[i]
+        allows: mutable bool = false
+        j: mutable usize = 0
+        while j < value_statuses.count |j, value_statuses, st, allows|:
+            if value_statuses[j] == st:
+                allows <- true
+            j <- j + 1
+        if allows:
+            if not rh_observation_consistent(st, true):
+                pfail("value-status-must-accept-value", fails)
+        else:
+            if rh_observation_consistent(st, true):
+                pfail("unknown-status-must-reject-value", fails)
+            if not rh_observation_consistent(st, false):
+                pfail("unknown-status-accepts-absence", fails)
+        i <- i + 1
+    # A zero denominator never validates as an observed ratio.
+    if rh_ratio_valid(0, 0):
+        pfail("zero-denominator-no-value", fails)
+    if rh_ratio_valid(5, 0):
+        pfail("zero-denominator-rejects", fails)
+    if rh_ratio_valid(3, 2):
+        pfail("numerator-exceeds-denominator", fails)
+    if not rh_ratio_valid(0, 5):
+        pfail("zero-numerator-allowed", fails)
+
+def prop_empty(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    e: mutable darray[u64] = []
+    n: mutable u64 = 0
+    d: mutable u64 = 0
+    if rh_hhi(e, &n, &d):
+        pfail("empty-hhi-refused", fails)
+    if rh_effective_count(e, &n, &d):
+        pfail("empty-effective-refused", fails)
+    if rh_absence_factor_50(e) != -1:
+        pfail("empty-not-applicable", fails)
+
+def prop_identity_reversible(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    links: mutable darray[RhIdentityLink] = []
+    links.push(RhIdentityLink{a: 0, b: 1, state: RH_LINK_ACCEPTED, revision_added: 1})
+    p1: mutable darray[i64] = []
+    c1: mutable darray[i64] = []
+    apart: i64 = rh_identity_clusters(links, 3, p1, c1)
+    if apart != 2:
+        pfail("identity-accept-merges", fails)
+    l2: mutable RhIdentityLink = links[0]
+    l2.state <- RH_LINK_REVOKED
+    links[0] <- l2
+    p2: mutable darray[i64] = []
+    c2: mutable darray[i64] = []
+    rpart: i64 = rh_identity_clusters(links, 3, p2, c2)
+    if rpart != 3:
+        pfail("identity-revoke-reverses", fails)
+    if rh_identity_revision(links) != 0:
+        pfail("identity-revision-reverts", fails)
+    return
+
+def edge(a: i64, b: i64) -> RhGraphEdge:
+    return RhGraphEdge{from: a, dst: b, scope: 0, platform: 0, introduced: 0, removed: 0, first_seen: 100}
+
+def proj(depth: i64, public_only: bool) -> RhProjection:
+    return rh_projection_make(1, RH_SCOPE_ALL, 0, 0, 0, 0, 0, public_only, 10000, depth)
+
+def prop_graph_monotone(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    # chain: 2 -> 1, 3 -> 2, 4 -> 3 (consumer points at dependency)
+    edges: mutable darray[RhGraphEdge] = []
+    edges.push(edge(2, 1))
+    edges.push(edge(3, 2))
+    edges.push(edge(4, 3))
+    vis: mutable darray[u8] = []
+    p1: RhProjection = proj(1, false)
+    out1: mutable darray[i64] = []
+    t1: mutable i64 = 0
+    c1: i64 = rh_transitive_dependents(edges, vis, 1, &p1, out1, &t1)
+    p10: RhProjection = proj(10, false)
+    out2: mutable darray[i64] = []
+    t2: mutable i64 = 0
+    c2: i64 = rh_transitive_dependents(edges, vis, 1, &p10, out2, &t2)
+    if not (c1 <= c2):
+        pfail("depth-limit-monotone", fails)
+    if c2 < 3:
+        pfail("depth-limit-full-chain", fails)
+    # public projection is a subset of the unfiltered one
+    pvis: mutable darray[u8] = []
+    pvis.push(0)
+    pvis.push(0)
+    pvis.push(1)
+    pvis.push(0)
+    ppub: RhProjection = proj(10, true)
+    pall: RhProjection = proj(10, false)
+    pubs: mutable darray[i64] = []
+    cpub: i64 = rh_direct_dependents(edges, pvis, 1, &ppub, pubs)
+    alls: mutable darray[i64] = []
+    call: i64 = rh_direct_dependents(edges, pvis, 1, &pall, alls)
+    if cpub > call:
+        pfail("public-subset-of-private", fails)
+    return
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    fails: mutable i64 = 0
+    b93: mutable darray[u64] = u64_from(9, 3, 0, 0)
+    b25: mutable darray[u64] = u64_from(25, 25, 25, 25)
+    b103: mutable darray[u64] = u64_from(100, 1, 1, 1)
+    b1: mutable darray[u64] = u64_from(1, 1, 1, 1)
+    prop_bounds(b93, 2, "bounds-93", &fails)
+    prop_bounds(b25, 4, "bounds-25", &fails)
+    prop_bounds(b103, 4, "bounds-100-1-1-1", &fails)
+    prop_bounds(b1, 4, "bounds-1-1-1-1", &fails)
+    prop_hhi_reorder(9, 3, 0, 0, &fails)
+    prop_hhi_reorder(25, 25, 25, 25, &fails)
+    prop_hhi_reorder(100, 7, 2, 1, &fails)
+    prop_concentration_monotone(9, 3, 0, 0, &fails)
+    prop_concentration_monotone(25, 25, 25, 25, &fails)
+    prop_concentration_monotone(100, 1, 1, 1, &fails)
+    prop_empty(&fails)
+    prop_unknown_no_value(&fails)
+    prop_identity_reversible(&fails)
+    prop_graph_monotone(&fails)
+    if fails == 0:
+        b: mutable darray[u8] = []
+        rh_push_text(b, "PROPERTIES OK")
+        b.push(10)
+        rh_write_stdout(b)
+        return 0
+    return 1

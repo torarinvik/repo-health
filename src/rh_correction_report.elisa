@@ -1,0 +1,365 @@
+# rh_correction_report.elisa — correction workflow execution path (M06-07).
+#
+# Turns an `rh-corrections/1` document into an `rh-corrections-result/1`
+# report. Accepted corrections advance the revision and mark only that
+# subject's older derived results superseded; rejected/open corrections
+# change nothing. Raw inputs are supplied for replay and are never rewritten
+# by this path, so the corrected derived value is reproducible from the same
+# ledger. Malformed or unknown kind/state/combine fails closed (-1).
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_correction.elisa"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_cr_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: i64 = e - s
+    k: mutable i64 = 0
+    while k < n |k, texts, lit, s|:
+        if lit[k.usize()] == 0:
+            return false
+        if texts[(s + k).usize()] != lit[k.usize()]:
+            return false
+        k <- k + 1
+    return lit[n.usize()] == 0
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_cr_kind(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    if rh_cr_eq(texts, s, e, "identity"):
+        return RH_CORR_IDENTITY
+    if rh_cr_eq(texts, s, e, "mapping"):
+        return RH_CORR_MAPPING
+    if rh_cr_eq(texts, s, e, "measurement"):
+        return RH_CORR_MEASUREMENT
+    return -1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_cr_state(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    if rh_cr_eq(texts, s, e, "open"):
+        return RH_CORR_OPEN
+    if rh_cr_eq(texts, s, e, "accepted"):
+        return RH_CORR_ACCEPTED
+    if rh_cr_eq(texts, s, e, "rejected"):
+        return RH_CORR_REJECTED
+    return -1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_cr_combine(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    if rh_cr_eq(texts, s, e, "add"):
+        return 0
+    if rh_cr_eq(texts, s, e, "subtract"):
+        return 1
+    if rh_cr_eq(texts, s, e, "identity"):
+        return 2
+    return -1
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_cr_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        return false
+    return rh_json_str_span(nodes, idx, s_out, e_out)
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_cr_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    ok_out[0] <- 0
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        return 0
+    return rh_json_int(nodes, raw, idx, ok_out)
+
+# Parse, apply, and emit. Returns 0 ok, -1 malformed.
+def rh_correction_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    empty: mutable darray[i64] = []
+    fr: mutable i64 = 0
+    fw: mutable i64 = -1
+    return rh_correction_report_state(raw, 0, 0, empty, &fr, &fw, out)
+
+# Stateful variant: `persisted_rev` is a revision floor carried over from a
+# prior run and `watermark` the 1-based ordinal of the last correction
+# already folded in (0 = none). Only corrections at an ordinal greater than
+# the watermark are applied, so replaying the same input is idempotent
+# across runs while multiple corrections to the same target in one document
+# still each count. `new_superseded` collects the subjects whose derived
+# results this run newly superseded.
+def rh_correction_report_state(raw: darray[u8]&, persisted_rev: i64, watermark: i64, new_superseded: mutable darray[i64]&, final_rev_out: mutable i64&, final_wm_out: mutable i64&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0:
+        return -1
+    if nodes[root.usize()].kind != RH_JSON_OBJ:
+        return -1
+    ss: mutable i64 = 0
+    se: mutable i64 = 0
+    if not rh_cr_str(nodes, texts, root, "schema", &ss, &se):
+        return -1
+    if not rh_cr_eq(texts, ss, se, "rh-corrections/1"):
+        return -1
+    okrev: mutable i64 = 0
+    docrev: i64 = rh_cr_int(nodes, raw, texts, root, "current_revision", &okrev)
+    if okrev == 0 or docrev < 0:
+        return -1
+    rev: mutable i64 = docrev
+    wm: mutable i64 = watermark
+    if persisted_rev > rev:
+        rev <- persisted_rev
+
+    # Derived results (subject, revision used, superseded).
+    derived: mutable darray[RhDerived] = []
+    didx: i64 = rh_json_obj_get(nodes, texts, root, "derived")
+    if didx >= 0:
+        if nodes[didx.usize()].kind != RH_JSON_ARR:
+            return -1
+        arr: RhJsonNode = nodes[didx.usize()]
+        child: mutable i64 = arr.first_child
+        while child >= 0 |child, nodes, texts, raw, derived|:
+            if nodes[child.usize()].kind != RH_JSON_OBJ:
+                return -1
+            oks: mutable i64 = 0
+            okr: mutable i64 = 0
+            sub: i64 = rh_cr_int(nodes, raw, texts, child, "subject_id", &oks)
+            used: i64 = rh_cr_int(nodes, raw, texts, child, "revision_used", &okr)
+            if oks == 0 or okr == 0:
+                return -1
+            sup: mutable bool = false
+            sidx: i64 = rh_json_obj_get(nodes, texts, child, "superseded")
+            if sidx >= 0:
+                sup <- rh_json_is_true(nodes, raw, sidx)
+            derived.push(RhDerived{subject_id: sub, revision_used: used, superseded: sup})
+            child <- nodes[child.usize()].next_sibling
+
+    # Replay inputs (subject, raw_a, raw_b, combine).
+    ra: mutable darray[i64] = []
+    rb: mutable darray[i64] = []
+    rsub: mutable darray[i64] = []
+    rcomb: mutable darray[i64] = []
+    ridx: i64 = rh_json_obj_get(nodes, texts, root, "replay")
+    if ridx >= 0:
+        if nodes[ridx.usize()].kind != RH_JSON_ARR:
+            return -1
+        rarr: RhJsonNode = nodes[ridx.usize()]
+        rchild: mutable i64 = rarr.first_child
+        while rchild >= 0 |rchild, nodes, texts, raw, ra, rb, rsub, rcomb|:
+            if nodes[rchild.usize()].kind != RH_JSON_OBJ:
+                return -1
+            ok1: mutable i64 = 0
+            ok2: mutable i64 = 0
+            ok3: mutable i64 = 0
+            a: i64 = rh_cr_int(nodes, raw, texts, rchild, "raw_a", &ok1)
+            b: i64 = rh_cr_int(nodes, raw, texts, rchild, "raw_b", &ok2)
+            sub2: i64 = rh_cr_int(nodes, raw, texts, rchild, "subject_id", &ok3)
+            if ok1 == 0 or ok2 == 0 or ok3 == 0:
+                return -1
+            cs: mutable i64 = 0
+            ce: mutable i64 = 0
+            if not rh_cr_str(nodes, texts, rchild, "combine", &cs, &ce):
+                return -1
+            comb: i64 = rh_cr_combine(texts, cs, ce)
+            if comb < 0:
+                return -1
+            ra.push(a)
+            rb.push(b)
+            rsub.push(sub2)
+            rcomb.push(comb)
+            rchild <- nodes[rchild.usize()].next_sibling
+
+    # Corrections (kind, target, state) — applied in document order.
+    cidx: i64 = rh_json_obj_get(nodes, texts, root, "corrections")
+    if cidx < 0 or nodes[cidx.usize()].kind != RH_JSON_ARR:
+        return -1
+    carr: RhJsonNode = nodes[cidx.usize()]
+    # Emitted applied entries, collected as we go.
+    app_kind: mutable darray[i64] = []
+    app_target: mutable darray[i64] = []
+    app_state: mutable darray[i64] = []
+    app_before: mutable darray[i64] = []
+    app_after: mutable darray[i64] = []
+    app_super: mutable darray[i64] = []
+    cchild: mutable i64 = carr.first_child
+    ordinal: mutable i64 = 0
+    while cchild >= 0 |cchild, nodes, texts, raw, derived, rev, wm, ordinal, app_kind, app_target, app_state, app_before, app_after, app_super, new_superseded|:
+        if nodes[cchild.usize()].kind != RH_JSON_OBJ:
+            return -1
+        ordinal <- ordinal + 1
+        ks: mutable i64 = 0
+        ke: mutable i64 = 0
+        sts: mutable i64 = 0
+        ste: mutable i64 = 0
+        if not rh_cr_str(nodes, texts, cchild, "kind", &ks, &ke):
+            return -1
+        if not rh_cr_str(nodes, texts, cchild, "state", &sts, &ste):
+            return -1
+        kind: i64 = rh_cr_kind(texts, ks, ke)
+        state: i64 = rh_cr_state(texts, sts, ste)
+        if kind < 0 or state < 0:
+            return -1
+        okt: mutable i64 = 0
+        target: i64 = rh_cr_int(nodes, raw, texts, cchild, "target_id", &okt)
+        if okt == 0:
+            return -1
+        before: i64 = rev
+        # Idempotent replay: a correction at or below the watermark ordinal
+        # was folded in by a prior run, so it is recorded as already-applied
+        # and never advances the revision again.
+        already: mutable bool = false
+        if ordinal <= wm:
+            already <- true
+        c: RhCorrection = RhCorrection{kind: kind.u8(), target_id: target, state: state.u8()}
+        if not already:
+            rev <- rh_correction_apply(&c, rev)
+        sup_ids: mutable darray[i64] = []
+        scount: mutable i64 = 0
+        if rev > before:
+            # Count only NEWLY superseded results (a later accepted correction
+            # must not re-count results an earlier one already superseded).
+            pre: mutable i64 = 0
+            pi: mutable usize = 0
+            while pi < derived.count |pi, derived, target, rev, pre|:
+                dpre: RhDerived = derived[pi]
+                if dpre.subject_id == target and dpre.revision_used < rev and not dpre.superseded:
+                    pre <- pre + 1
+                pi <- pi + 1
+            _ = rh_invalidate_derived(derived, &c, rev, sup_ids)
+            scount <- pre
+            new_superseded.push(target)
+        if ordinal > wm:
+            wm <- ordinal
+        app_kind.push(kind)
+        app_target.push(target)
+        app_state.push(state)
+        app_before.push(before)
+        app_after.push(rev)
+        app_super.push(scount)
+        cchild <- nodes[cchild.usize()].next_sibling
+
+    rh_push_text(out, "{\"schema\":\"rh-corrections-result/1\",\"final_revision\":")
+    rh_push_decimal_i64(out, rev)
+    rh_push_text(out, ",\"applied\":[")
+    i: mutable i64 = 0
+    while i < app_kind.count.i64() |i, app_kind, app_target, app_state, app_before, app_after, app_super, out|:
+        if i > 0:
+            out.push(44)
+        rh_push_text(out, "{\"kind\":\"")
+        rh_push_text(out, rh_cr_kind_label(app_kind[i.usize()]))
+        rh_push_text(out, "\",\"target_id\":")
+        rh_push_decimal_i64(out, app_target[i.usize()])
+        rh_push_text(out, ",\"state\":\"")
+        rh_push_text(out, rh_cr_state_label(app_state[i.usize()]))
+        rh_push_text(out, "\",\"revision_before\":")
+        rh_push_decimal_i64(out, app_before[i.usize()])
+        rh_push_text(out, ",\"revision_after\":")
+        rh_push_decimal_i64(out, app_after[i.usize()])
+        rh_push_text(out, ",\"superseded_count\":")
+        rh_push_decimal_i64(out, app_super[i.usize()])
+        rh_push_text(out, "}")
+        i <- i + 1
+    rh_push_text(out, "],\"derived\":[")
+    d2: mutable i64 = 0
+    while d2 < derived.count.i64() |d2, derived, out|:
+        if d2 > 0:
+            out.push(44)
+        d: RhDerived = derived[d2.usize()]
+        rh_push_text(out, "{\"subject_id\":")
+        rh_push_decimal_i64(out, d.subject_id)
+        rh_push_text(out, ",\"revision_used\":")
+        rh_push_decimal_i64(out, d.revision_used)
+        rh_push_text(out, ",\"superseded\":")
+        if d.superseded:
+            rh_push_text(out, "true")
+        else:
+            rh_push_text(out, "false")
+        rh_push_text(out, "}")
+        d2 <- d2 + 1
+    rh_push_text(out, "],\"replay\":[")
+    r2: mutable i64 = 0
+    while r2 < ra.count.i64() |r2, ra, rb, rsub, rcomb, out|:
+        if r2 > 0:
+            out.push(44)
+        rh_push_text(out, "{\"subject_id\":")
+        rh_push_decimal_i64(out, rsub[r2.usize()])
+        rh_push_text(out, ",\"value\":")
+        val: i64 = rh_replay_value(ra[r2.usize()], rb[r2.usize()], rcomb[r2.usize()].u8())
+        rh_push_decimal_i64(out, val)
+        rh_push_text(out, "}")
+        r2 <- r2 + 1
+    rh_push_text(out, "],\"note\":\"accepted corrections advance the revision and supersede only that subject's older derived results; raw inputs are never rewritten, so replay is reproducible from the same ledger\"}")
+    final_rev_out[0] <- rev
+    final_wm_out[0] <- wm
+    return 0
+
+def rh_cr_kind_label(k: i64) -> u8&:
+    if k == 0:
+        return "identity"
+    if k == 1:
+        return "mapping"
+    return "measurement"
+
+def rh_cr_state_label(s: i64) -> u8&:
+    if s == 1:
+        return "accepted"
+    if s == 2:
+        return "rejected"
+    return "open"
+
+# --- Durable correction ledger (M06-07). ---
+# Persist the accepted revision and the set of subjects whose derived
+# results were superseded under an `rh-corrections-state/1` document. The
+# next run folds in only corrections with `target_id` greater than the
+# persisted watermark, so a correction is counted at most once even if the
+# same input file is replayed (idempotent across runs). Raw replay inputs
+# are never stored here, so the raw ledger stays the sole source of truth.
+# An empty buffer is a fresh state; malformed state fails closed.
+
+def rh_correction_state_parse(raw: darray[u8]&, revision_out: mutable i64&, watermark_out: mutable i64&, superseded: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    revision_out[0] <- 0
+    watermark_out[0] <- 0
+    if raw.count == 0:
+        return 0
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ:
+        return -1
+    ss: mutable i64 = 0
+    se: mutable i64 = 0
+    if not rh_cr_str(nodes, texts, root, "schema", &ss, &se):
+        return -1
+    if not rh_cr_eq(texts, ss, se, "rh-corrections-state/1"):
+        return -1
+    okrev: mutable i64 = 0
+    okwm: mutable i64 = 0
+    rev: i64 = rh_cr_int(nodes, raw, texts, root, "revision", &okrev)
+    wm: i64 = rh_cr_int(nodes, raw, texts, root, "watermark", &okwm)
+    if okrev == 0 or okwm == 0 or rev < 0 or wm < 0:
+        return -1
+    revision_out[0] <- rev
+    watermark_out[0] <- wm
+    sidx: i64 = rh_json_obj_get(nodes, texts, root, "superseded_subjects")
+    if sidx >= 0:
+        if nodes[sidx.usize()].kind != RH_JSON_ARR:
+            return -1
+        arr: RhJsonNode = nodes[sidx.usize()]
+        child: mutable i64 = arr.first_child
+        while child >= 0 |child, nodes, raw, superseded|:
+            oks: mutable i64 = 0
+            sub: i64 = rh_json_int(nodes, raw, child, &oks)
+            if oks == 0:
+                return -1
+            superseded.push(sub)
+            child <- nodes[child.usize()].next_sibling
+    return 0
+
+def rh_correction_state_emit(revision: i64, watermark: i64, superseded: darray[i64]&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(out, "{\"schema\":\"rh-corrections-state/1\",\"revision\":")
+    rh_push_decimal_i64(out, revision)
+    rh_push_text(out, ",\"watermark\":")
+    rh_push_decimal_i64(out, watermark)
+    rh_push_text(out, ",\"superseded_subjects\":[")
+    i: mutable usize = 0
+    while i < superseded.count |i, superseded, out|:
+        if i > 0:
+            out.push(44)
+        rh_push_decimal_i64(out, superseded[i])
+        i <- i + 1
+    rh_push_text(out, "]}")

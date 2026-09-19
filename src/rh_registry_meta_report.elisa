@@ -1,0 +1,81 @@
+# rh_registry_meta_report.elisa — registry enrichment execution path
+# (M03-05).
+#
+# Turns an `rh-registry-meta/1` document into `rh-registry-meta-result/1`:
+# per-version metadata with the honest states preserved — a yanked version is
+# RETAINED (not deleted), an absent yank field is `null` (unknown, never
+# false), a published time may be numeric or an ISO string (unknown stays
+# null), a declared repository link is an ASSERTION not identity, and
+# declared dependency counts are NOT resolved edges. Malformed input fails
+# closed.
+
+include "./rh_base.elisa"
+include "./rh_inventory_report.elisa"
+include "./rh_registry_meta.elisa"
+
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_rmr_emit(out: mutable darray[u8]&, pool: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    if s >= 0 and e >= s and e <= pool.count.i64():
+        rh_json_escape(out, pool, s.usize(), e.usize())
+
+def rh_registry_meta_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    pool: mutable darray[u8] = []
+    versions: mutable darray[RhRegVersion] = []
+    meta: mutable RhRegMeta = RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+    if rh_regmeta_parse(raw, pool, versions, &meta) != 0:
+        return -1
+    rh_push_text(out, "{\"schema\":\"rh-registry-meta-result/1\",\"counts\":{\"versions\":")
+    rh_push_decimal_i64(out, meta.versions)
+    rh_push_text(out, ",\"yanked\":")
+    rh_push_decimal_i64(out, meta.yanked_count)
+    rh_push_text(out, ",\"unknown_yank\":")
+    rh_push_decimal_i64(out, meta.unknown_yank_count)
+    rh_push_text(out, ",\"with_repo\":")
+    rh_push_decimal_i64(out, meta.with_repo)
+    rh_push_text(out, ",\"declared_deps\":")
+    rh_push_decimal_i64(out, meta.declared_deps)
+    rh_push_text(out, ",\"optional_deps\":")
+    rh_push_decimal_i64(out, meta.optional_deps)
+    rh_push_text(out, ",\"dev_deps\":")
+    rh_push_decimal_i64(out, meta.dev_deps)
+    rh_push_text(out, "},\"versions\":[")
+    i: mutable i64 = 0
+    while i < versions.count.i64() |i, versions, pool, out|:
+        v: RhRegVersion = versions[i.usize()]
+        if i > 0:
+            out.push(44)
+        rh_push_text(out, "{\"version\":\"")
+        rh_rmr_emit(out, pool, v.ver_s, v.ver_e)
+        rh_push_text(out, "\",\"yanked\":")
+        if v.yanked == -1:
+            rh_push_text(out, "null")
+        elif v.yanked == 1:
+            rh_push_text(out, "true")
+        else:
+            rh_push_text(out, "false")
+        rh_push_text(out, ",\"published_at\":")
+        if v.has_published == 0:
+            rh_push_text(out, "null")
+        elif v.published_s >= 0:
+            rh_push_text(out, "\"")
+            rh_rmr_emit(out, pool, v.published_s, v.published_e)
+            rh_push_text(out, "\"")
+        else:
+            rh_push_decimal_i64(out, v.published_epoch)
+        rh_push_text(out, ",\"repository\":")
+        if v.has_repo == 1:
+            rh_push_text(out, "\"")
+            rh_rmr_emit(out, pool, v.repo_s, v.repo_e)
+            rh_push_text(out, "\"")
+        else:
+            rh_push_text(out, "null")
+        rh_push_text(out, ",\"dep_count\":")
+        rh_push_decimal_i64(out, v.dep_count)
+        rh_push_text(out, ",\"optional_dep_count\":")
+        rh_push_decimal_i64(out, v.optional_dep_count)
+        rh_push_text(out, ",\"dev_dep_count\":")
+        rh_push_decimal_i64(out, v.dev_dep_count)
+        rh_push_text(out, "}")
+        i <- i + 1
+    rh_push_text(out, "],\"note\":\"a yanked version is retained, not deleted; an absent yank field is null (unknown), not false; a declared repository link is an assertion, not identity; declared dependencies are counts, not resolved edges\"}")
+    return 0
