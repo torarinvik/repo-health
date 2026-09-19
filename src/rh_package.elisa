@@ -1564,6 +1564,40 @@ module Package:
                 total <- total + findings[i.usize()].alias_count + 1
                 i <- i + 1
 
+        # Classify unique matched advisory nodes against the selected graph
+        # root. Mode 0 counts direct destinations, mode 1 counts reachable
+        # non-direct destinations, and mode 2 counts matched nodes outside the
+        # root's observed reachability. The latter remains evidence of a feed
+        # match, never an affected-root claim.
+        def rh_advisory_scope_count(findings: mutable darray[RhAdvisory]&, edges: mutable darray[RhDepEdge]&, root: mutable i64, node_count: mutable i64, mode: mutable i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if root < 0 or node_count <= 0
+            reachable: mutable darray[i64] = []
+            frontier: mutable darray[i64] = []
+            frontier.push(root)
+            while fi < frontier.count |fi: i64 = 0, frontier, reachable, edges|:
+                cur: i64 = frontier[fi.usize()]
+                fi <- fi + 1
+                continue if rh_visited_has(reachable, cur)
+                reachable.push(cur)
+                while ei < edges.count |ei: i64 = 0, edges, cur, frontier, reachable|:
+                    edge: RhDepEdge = edges[ei.usize()]
+                    frontier.push(edge.dst) if edge.from == cur and not rh_visited_has(reachable, edge.dst)
+                    ei <- ei + 1
+            counted: mutable darray[i64] = []
+            while i < findings.count |total: i64 = 0, i: i64 = 0, findings, edges, root, reachable, counted, mode| -> total:
+                node: mutable i64 = findings[i.usize()].node
+                already: bool = rh_visited_has(counted, node)
+                if not already:
+                    counted.push(node)
+                    direct: bool =
+                        while j < edges.count |direct: bool = false, j: i64 = 0, edges, node, root| -> direct:
+                            direct <- true if edges[j.usize()].from == root and edges[j.usize()].dst == node
+                            j <- j + 1
+                    in_reach: bool = rh_visited_has(reachable, node)
+                    include: bool = (mode == 0 and direct) or (mode == 1 and in_reach and not direct) or (mode == 2 and not in_reach)
+                    total <- total + 1 if include
+                i <- i + 1
+
         # Triples (kind, vstart, vend) per range event: 0 introduced, 1 fixed,
         # 2 last_affected. Returns the triple count, -1 malformed, 0 no events.
         def rh_osv_collect_events(jnodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, range_obj: i64, out: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -2347,7 +2381,7 @@ module Package:
         # `dependencies.unsupported_range_count`, with per-ecosystem components so
         # the denominator-free count can be audited. It never claims a dependency
         # is safe or that the graph is complete (R009/F022/R030).
-        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, transitive_resolved: mutable darray[i64]&, runtime_requirements: mutable darray[i64]&, development_requirements: mutable darray[i64]&, optional_requirements: mutable darray[i64]&, peer_requirements: mutable darray[i64]&, unknown_scope_requirements: mutable darray[i64]&, runtime_edges: mutable darray[i64]&, development_edges: mutable darray[i64]&, optional_edges: mutable darray[i64]&, peer_edges: mutable darray[i64]&, unknown_scope_edges: mutable darray[i64]&, advisories: mutable darray[i64]&, advisory_records: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, transitive_resolved: mutable darray[i64]&, runtime_requirements: mutable darray[i64]&, development_requirements: mutable darray[i64]&, optional_requirements: mutable darray[i64]&, peer_requirements: mutable darray[i64]&, unknown_scope_requirements: mutable darray[i64]&, runtime_edges: mutable darray[i64]&, development_edges: mutable darray[i64]&, optional_edges: mutable darray[i64]&, peer_edges: mutable darray[i64]&, unknown_scope_edges: mutable darray[i64]&, advisories: mutable darray[i64]&, advisory_records: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, affected_direct_nodes: mutable darray[i64]&, affected_transitive_nodes: mutable darray[i64]&, affected_unreachable_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
             total_declared: i64 =
                 while i < eco_codes.count.i64() |total_declared: i64 = 0, i: i64 = 0| -> total_declared:
                     total_declared <- total_declared + declared[i.usize()]
@@ -2424,6 +2458,9 @@ module Package:
             total_advisories: mutable i64 = 0
             total_advisory_records: mutable i64 = 0
             total_affected_nodes: mutable i64 = 0
+            total_affected_direct_nodes: mutable i64 = 0
+            total_affected_transitive_nodes: mutable i64 = 0
+            total_affected_unreachable_nodes: mutable i64 = 0
             total_withdrawn: mutable i64 = 0
             if security_observed:
                 total_advisories <- while i < eco_codes.count.i64() |total_advisories: i64 = 0, i: i64 = 0, advisories| -> total_advisories:
@@ -2434,6 +2471,15 @@ module Package:
                     i <- i + 1
                 total_affected_nodes <- while i < eco_codes.count.i64() |total_affected_nodes: i64 = 0, i: i64 = 0, affected_nodes| -> total_affected_nodes:
                     total_affected_nodes <- total_affected_nodes + affected_nodes[i.usize()]
+                    i <- i + 1
+                total_affected_direct_nodes <- while i < eco_codes.count.i64() |total_affected_direct_nodes: i64 = 0, i: i64 = 0, affected_direct_nodes| -> total_affected_direct_nodes:
+                    total_affected_direct_nodes <- total_affected_direct_nodes + affected_direct_nodes[i.usize()]
+                    i <- i + 1
+                total_affected_transitive_nodes <- while i < eco_codes.count.i64() |total_affected_transitive_nodes: i64 = 0, i: i64 = 0, affected_transitive_nodes| -> total_affected_transitive_nodes:
+                    total_affected_transitive_nodes <- total_affected_transitive_nodes + affected_transitive_nodes[i.usize()]
+                    i <- i + 1
+                total_affected_unreachable_nodes <- while i < eco_codes.count.i64() |total_affected_unreachable_nodes: i64 = 0, i: i64 = 0, affected_unreachable_nodes| -> total_affected_unreachable_nodes:
+                    total_affected_unreachable_nodes <- total_affected_unreachable_nodes + affected_unreachable_nodes[i.usize()]
                     i <- i + 1
                 total_withdrawn <- while i < eco_codes.count.i64() |total_withdrawn: i64 = 0, i: i64 = 0, withdrawn| -> total_withdrawn:
                     total_withdrawn <- total_withdrawn + withdrawn[i.usize()]
@@ -2524,6 +2570,27 @@ module Package:
             else:
                 Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
             Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"security.affected_direct_nodes\",\"version\":\"1.0.0\",\"status\":\"")
+            if security_observed:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, total_affected_direct_nodes)
+            else:
+                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"security.affected_transitive_nodes\",\"version\":\"1.0.0\",\"status\":\"")
+            if security_observed:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, total_affected_transitive_nodes)
+            else:
+                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"security.affected_unreachable_nodes\",\"version\":\"1.0.0\",\"status\":\"")
+            if security_observed:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, total_affected_unreachable_nodes)
+            else:
+                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"security.withdrawn_advisory_count\",\"version\":\"1.0.0\",\"status\":\"")
             if security_observed:
                 Base::rh_push_text(out, "observed\",\"value\":")
@@ -2531,7 +2598,7 @@ module Package:
             else:
                 Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
             Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]}],\"by_ecosystem\":[")
-            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, transitive_resolved, runtime_requirements, development_requirements, optional_requirements, peer_requirements, unknown_scope_requirements, runtime_edges, development_edges, optional_edges, peer_edges, unknown_scope_edges, advisories, advisory_records, affected_nodes, withdrawn, out|:
+            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, transitive_resolved, runtime_requirements, development_requirements, optional_requirements, peer_requirements, unknown_scope_requirements, runtime_edges, development_edges, optional_edges, peer_edges, unknown_scope_edges, advisories, advisory_records, affected_nodes, affected_direct_nodes, affected_transitive_nodes, affected_unreachable_nodes, withdrawn, out|:
                 if k > 0:
                     out.push(44)
                 ec: i64 = eco_codes[k.usize()]
@@ -2588,6 +2655,21 @@ module Package:
                 Base::rh_push_text(out, ",\"affected_resolved_nodes\":")
                 if security_observed:
                     Base::rh_push_decimal_i64(out, affected_nodes[k.usize()])
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"affected_direct_nodes\":")
+                if security_observed:
+                    Base::rh_push_decimal_i64(out, affected_direct_nodes[k.usize()])
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"affected_transitive_nodes\":")
+                if security_observed:
+                    Base::rh_push_decimal_i64(out, affected_transitive_nodes[k.usize()])
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"affected_unreachable_nodes\":")
+                if security_observed:
+                    Base::rh_push_decimal_i64(out, affected_unreachable_nodes[k.usize()])
                 else:
                     Base::rh_push_text(out, "null")
                 Base::rh_push_text(out, ",\"withdrawn_advisory_count\":")
