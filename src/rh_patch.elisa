@@ -15,234 +15,238 @@
 # not confirmed reachability (R019).
 include "./rh_base.elisa"
 
-struct RhPatchSubject:
-    ok: i64
-    version: i64
-    index: i64
-    total: i64
-    base_s: i64
-    base_e: i64
+module Patch:
+    public:
+        struct RhPatchSubject:
+            ok: i64
+            version: i64
+            index: i64
+            total: i64
+            base_s: i64
+            base_e: i64
 
-# Case-insensitive ASCII equality against a literal.
-# (private to this file)
-def rh_patch_eq_ci(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    n: i64 = strlen(lit).i64()
-    return false if s < 0 or e - s != n
-    while k < n |k: i64 = 0, data, s, lit|:
-        a: mutable u8 = data[(s + k).usize()]
-        b: mutable u8 = lit[k.usize()]
-        if a >= 65 and a <= 90:
-            a <- a + 32
-        if b >= 65 and b <= 90:
-            b <- b + 32
-        return false if a != b
-        k <- k + 1
-    true
-
-# (private to this file)
-def rh_patch_is_digit(b: u8) -> bool:
-    b >= 48 and b <= 57
-
-# (private to this file)
-def rh_patch_sep(b: u8) -> bool:
-    b == 32 or b == 9
-
-# Parse a subject span. Looks for "[PATCH" ... "]" and an optional
-# " vN" and optional " M/T" before the closing bracket; the base subject is
-# the text after the bracket, trimmed. ok=0 when no PATCH tag is present.
-def rh_patch_parse(data: darray[u8]&, s: i64, e: i64) -> RhPatchSubject can[Memory.Allocate, Abort.Panic]:
-    none: RhPatchSubject = RhPatchSubject{ok: 0, version: 1, index: 0, total: 0, base_s: -1, base_e: -1}
-    open: mutable i64 =
-        while i < e |i: i64 = s, open: i64 = -1| -> open:
-            if data[i.usize()] == 91 and i + 6 <= e and rh_patch_eq_ci(data, i + 1, i + 6, "PATCH"):
-                open <- i
-                break if true
-            i <- i + 1
-    return none if open < 0
-    close: mutable i64 =
-        while j < e |close: i64 = -1, j: i64 = open + 6| -> close:
-            if data[j.usize()] == 93:
-                close <- j
-                break if true
-            j <- j + 1
-    return none if close < 0
-    version: mutable i64 = 1
-    index: mutable i64 = 0
-    total: mutable i64 = 0
-    k: mutable i64 = open + 6
-    # optional " vN"
-    while k < close |k, close, data|:
-        break if not rh_patch_sep(data[k.usize()])
-        k <- k + 1
-    if k < close and (data[k.usize()] == 118 or data[k.usize()] == 86):
-        m, num, got =
-            while m < close and rh_patch_is_digit(data[m.usize()]) |m: i64 = k + 1, num: i64 = 0, got: i64 = 0, close| -> m, num, got:
-                num <- num * 10 + (data[m.usize()].i64() - 48)
-                got <- 1
-                m <- m + 1
-        if got == 1:
-            version <- num
-            k <- m
-    while k < close |k, close, data|:
-        break if not rh_patch_sep(data[k.usize()])
-        k <- k + 1
-    # optional "M/T"
-    if k < close and rh_patch_is_digit(data[k.usize()]):
-        m2, num2 =
-            while m2 < close and rh_patch_is_digit(data[m2.usize()]) |m2: i64 = k, num2: i64 = 0, close| -> m2, num2:
-                num2 <- num2 * 10 + (data[m2.usize()].i64() - 48)
-                m2 <- m2 + 1
-        if m2 < close and data[m2.usize()] == 47:
-            m3, num3, got3 =
-                while m3 < close and rh_patch_is_digit(data[m3.usize()]) |m3: i64 = m2 + 1, num3: i64 = 0, got3: i64 = 0, close| -> m3, num3, got3:
-                    num3 <- num3 * 10 + (data[m3.usize()].i64() - 48)
-                    got3 <- 1
-                    m3 <- m3 + 1
-            if got3 == 1:
-                index <- num2
-                total <- num3
-                k <- m3
-    bs: mutable i64 =
-        while bs < e and rh_patch_sep(data[bs.usize()]) |bs: i64 = close + 1| -> bs:
-            bs <- bs + 1
-    be: i64 =
-        while be > bs and rh_patch_sep(data[(be - 1).usize()]) |be: i64 = e, bs| -> be:
-            be <- be - 1
-    RhPatchSubject{ok: 1, version: version, index: index, total: total, base_s: bs, base_e: be}
-
-# Distinct logical-change count: same (base subject, index) collapses
-# across revisions. Non-ok subjects each count once.
-def rh_patch_logical_count(data: darray[u8]&, msgs: darray[RhPatchSubject]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    while i < msgs.count.i64() |total: i64 = 0, i: i64 = 0| -> total:
-        cur: RhPatchSubject = msgs[i.usize()]
-        if cur.ok == 0:
-            total <- total + 1
-        else:
-            seen: i64 =
-                while j < i |seen: i64 = 0, j: i64 = 0, i| -> seen:
-                    prev: RhPatchSubject = msgs[j.usize()]
-                    if prev.ok == 1 and prev.index == cur.index and rh_patch_base_eq(data, prev, cur):
-                        seen <- 1
+        # Case-insensitive ASCII equality against a literal.
+        # (private to this file)
+        def rh_patch_parse(data: darray[u8]&, s: i64, e: i64) -> RhPatchSubject can[Memory.Allocate, Abort.Panic]:
+            none: RhPatchSubject = RhPatchSubject{ok: 0, version: 1, index: 0, total: 0, base_s: -1, base_e: -1}
+            open: mutable i64 =
+                while i < e |i: i64 = s, open: i64 = -1| -> open:
+                    if data[i.usize()] == 91 and i + 6 <= e and rh_patch_eq_ci(data, i + 1, i + 6, "PATCH"):
+                        open <- i
+                        break if true
+                    i <- i + 1
+            return none if open < 0
+            close: mutable i64 =
+                while j < e |close: i64 = -1, j: i64 = open + 6| -> close:
+                    if data[j.usize()] == 93:
+                        close <- j
+                        break if true
                     j <- j + 1
-            if seen == 0:
-                total <- total + 1
-        i <- i + 1
+            return none if close < 0
+            version: mutable i64 = 1
+            index: mutable i64 = 0
+            total: mutable i64 = 0
+            k: mutable i64 = open + 6
+            # optional " vN"
+            while k < close |k, close, data|:
+                break if not rh_patch_sep(data[k.usize()])
+                k <- k + 1
+            if k < close and (data[k.usize()] == 118 or data[k.usize()] == 86):
+                m, num, got =
+                    while m < close and rh_patch_is_digit(data[m.usize()]) |m: i64 = k + 1, num: i64 = 0, got: i64 = 0, close| -> m, num, got:
+                        num <- num * 10 + (data[m.usize()].i64() - 48)
+                        got <- 1
+                        m <- m + 1
+                if got == 1:
+                    version <- num
+                    k <- m
+            while k < close |k, close, data|:
+                break if not rh_patch_sep(data[k.usize()])
+                k <- k + 1
+            # optional "M/T"
+            if k < close and rh_patch_is_digit(data[k.usize()]):
+                m2, num2 =
+                    while m2 < close and rh_patch_is_digit(data[m2.usize()]) |m2: i64 = k, num2: i64 = 0, close| -> m2, num2:
+                        num2 <- num2 * 10 + (data[m2.usize()].i64() - 48)
+                        m2 <- m2 + 1
+                if m2 < close and data[m2.usize()] == 47:
+                    m3, num3, got3 =
+                        while m3 < close and rh_patch_is_digit(data[m3.usize()]) |m3: i64 = m2 + 1, num3: i64 = 0, got3: i64 = 0, close| -> m3, num3, got3:
+                            num3 <- num3 * 10 + (data[m3.usize()].i64() - 48)
+                            got3 <- 1
+                            m3 <- m3 + 1
+                    if got3 == 1:
+                        index <- num2
+                        total <- num3
+                        k <- m3
+            bs: mutable i64 =
+                while bs < e and rh_patch_sep(data[bs.usize()]) |bs: i64 = close + 1| -> bs:
+                    bs <- bs + 1
+            be: i64 =
+                while be > bs and rh_patch_sep(data[(be - 1).usize()]) |be: i64 = e, bs| -> be:
+                    be <- be - 1
+            RhPatchSubject{ok: 1, version: version, index: index, total: total, base_s: bs, base_e: be}
 
-# (private to this file)
-def rh_patch_base_eq(data: darray[u8]&, a: RhPatchSubject, b: RhPatchSubject) -> bool can[Memory.Allocate, Abort.Panic]:
-    return false if a.base_s < 0 or b.base_s < 0
-    return false if a.base_e - a.base_s != b.base_e - b.base_s
-    while k < a.base_e - a.base_s |k: i64 = 0, data, a, b|:
-        return false if data[(a.base_s + k).usize()] != data[(b.base_s + k).usize()]
-        k <- k + 1
-    true
+        # Distinct logical-change count: same (base subject, index) collapses
+        # across revisions. Non-ok subjects each count once.
+        def rh_patch_logical_count(data: darray[u8]&, msgs: darray[RhPatchSubject]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < msgs.count.i64() |total: i64 = 0, i: i64 = 0| -> total:
+                cur: RhPatchSubject = msgs[i.usize()]
+                if cur.ok == 0:
+                    total <- total + 1
+                else:
+                    seen: i64 =
+                        while j < i |seen: i64 = 0, j: i64 = 0, i| -> seen:
+                            prev: RhPatchSubject = msgs[j.usize()]
+                            if prev.ok == 1 and prev.index == cur.index and rh_patch_base_eq(data, prev, cur):
+                                seen <- 1
+                            j <- j + 1
+                    if seen == 0:
+                        total <- total + 1
+                i <- i + 1
 
-# Highest revision seen for a (base, index) group; 0 when absent.
-def rh_patch_max_version(data: darray[u8]&, msgs: darray[RhPatchSubject]&, base_s: i64, base_e: i64, index: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    want: RhPatchSubject = RhPatchSubject{ok: 1, version: 1, index: index, total: 0, base_s: base_s, base_e: base_e}
-    while i < msgs.count.i64() |best: i64 = 0, i: i64 = 0| -> best:
-        cur: RhPatchSubject = msgs[i.usize()]
-        if cur.ok == 1 and cur.index == index and rh_patch_base_eq(data, cur, want):
-            if cur.version > best:
-                best <- cur.version
-        i <- i + 1
+        # (private to this file)
+        def rh_patch_max_version(data: darray[u8]&, msgs: darray[RhPatchSubject]&, base_s: i64, base_e: i64, index: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            want: RhPatchSubject = RhPatchSubject{ok: 1, version: 1, index: index, total: 0, base_s: base_s, base_e: base_e}
+            while i < msgs.count.i64() |best: i64 = 0, i: i64 = 0| -> best:
+                cur: RhPatchSubject = msgs[i.usize()]
+                if cur.ok == 1 and cur.index == index and rh_patch_base_eq(data, cur, want):
+                    if cur.version > best:
+                        best <- cur.version
+                i <- i + 1
 
-# --- Trailers (mailing-list non-PR workflow) ---------------------------
-#
-# A patch body carries trailers like "Reviewed-by: Name <email>",
-# "Acked-by:", "Tested-by:", "Fixes: <sha>" and "Link:". These are role
-# and provenance evidence, not a pull-request review state. We only extract
-# key/value spans; we never execute or interpolate the body. `Fixes: <sha>`
-# is a CLAIM, not confirmed reachability (R019): it is recorded as a
-# reference to a commit, never as "fixed".
+        # --- Trailers (mailing-list non-PR workflow) ---------------------------
+        #
+        # A patch body carries trailers like "Reviewed-by: Name <email>",
+        # "Acked-by:", "Tested-by:", "Fixes: <sha>" and "Link:". These are role
+        # and provenance evidence, not a pull-request review state. We only extract
+        # key/value spans; we never execute or interpolate the body. `Fixes: <sha>`
+        # is a CLAIM, not confirmed reachability (R019): it is recorded as a
+        # reference to a commit, never as "fixed".
 
-const RH_TRAILER_REVIEWED: u8 = 1
-const RH_TRAILER_ACKED: u8 = 2
-const RH_TRAILER_TESTED: u8 = 3
-const RH_TRAILER_FIXES: u8 = 4
-const RH_TRAILER_LINK: u8 = 5
-const RH_TRAILER_OTHER: u8 = 6
+        const RH_TRAILER_REVIEWED: u8 = 1
+        const RH_TRAILER_ACKED: u8 = 2
+        const RH_TRAILER_TESTED: u8 = 3
+        const RH_TRAILER_FIXES: u8 = 4
+        const RH_TRAILER_LINK: u8 = 5
+        const RH_TRAILER_OTHER: u8 = 6
 
-struct RhTrailer:
-    kind: u8
-    value_s: i64
-    value_e: i64
+        struct RhTrailer:
+            kind: u8
+            value_s: i64
+            value_e: i64
 
-# (private to this file)
-def rh_trailer_kind(data: darray[u8]&, s: i64, e: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
-    return RH_TRAILER_REVIEWED if rh_patch_eq_ci(data, s, e, "Reviewed-by")
-    return RH_TRAILER_ACKED if rh_patch_eq_ci(data, s, e, "Acked-by")
-    return RH_TRAILER_TESTED if rh_patch_eq_ci(data, s, e, "Tested-by")
-    return RH_TRAILER_FIXES if rh_patch_eq_ci(data, s, e, "Fixes")
-    return RH_TRAILER_LINK if rh_patch_eq_ci(data, s, e, "Link")
-    RH_TRAILER_OTHER
+        # (private to this file)
+        def rh_trailers_scan(body: darray[u8]&, max_lines: i64, out: mutable darray[RhTrailer]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            n: i64 = body.count.i64()
+            while start <= n |total: i64 = 0, start: i64 = 0, lines: i64 = 0, out| -> total:
+                break if lines >= max_lines
+                stop: i64 = rh_find_byte(body, start.usize(), 10)
+                t: RhTrailer =
+                    line_end: i64 = stop if stop >= 0 else n
+                    rh_trailer_parse_line(body, start, line_end)
+                if t.kind != 0:
+                    out.push(t)
+                    total <- total + 1
+                lines <- lines + 1
+                start <- n + 1 if stop < 0 else stop + 1
 
-# (private to this file)
-def rh_trailer_key_char(b: u8) -> bool:
-    return true if b >= 65 and b <= 90
-    return true if b >= 97 and b <= 122
-    return true if b >= 48 and b <= 57
-    b == 45
+        # (private to this file) Value-span equality for two trailers.
+        def rh_trailer_distinct_approvers(trailers: darray[RhTrailer]&, body: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < trailers.count.i64() |total: i64 = 0, i: i64 = 0| -> total:
+                t: RhTrailer = trailers[i.usize()]
+                if t.kind == RH_TRAILER_REVIEWED or t.kind == RH_TRAILER_ACKED:
+                    seen: i64 =
+                        while j < i |seen: i64 = 0, j: i64 = 0, i| -> seen:
+                            p: RhTrailer = trailers[j.usize()]
+                            if (p.kind == RH_TRAILER_REVIEWED or p.kind == RH_TRAILER_ACKED) and rh_trailer_val_eq(body, p, t):
+                                seen <- 1
+                            j <- j + 1
+                    if seen == 0:
+                        total <- total + 1
+                i <- i + 1
 
-# Parse one body line as a trailer. Returns ok=1 with a value span, ok=0
-# otherwise. The key must be a bare token followed by ':'; the value is the
-# text after the colon, trimmed. This recognizes the standard trailer block
-# without depending on a specific project's conventions.
-def rh_trailer_parse_line(data: darray[u8]&, s: i64, e: i64) -> RhTrailer can[Memory.Allocate, Abort.Panic]:
-    none: RhTrailer = RhTrailer{kind: 0, value_s: -1, value_e: -1}
-    key_end: i64 =
-        while i < e |i: i64 = s| -> i:
-            break if not rh_trailer_key_char(data[i.usize()])
-            i <- i + 1
-    return none if key_end == s or key_end >= e or data[key_end.usize()] != 58
-    kind: u8 = rh_trailer_kind(data, s, key_end)
-    value_start: i64 =
-        while v < e and (data[v.usize()] == 32 or data[v.usize()] == 9) |v: i64 = key_end + 1| -> v:
-            v <- v + 1
-    value_end: i64 =
-        while ve > value_start and (data[(ve - 1).usize()] == 32 or data[(ve - 1).usize()] == 9 or data[(ve - 1).usize()] == 13) |ve: i64 = e| -> ve:
-            ve <- ve - 1
-    return none if value_end <= value_start
-    RhTrailer{kind: kind, value_s: value_start, value_e: value_end}
+    private:
+        def rh_patch_eq_ci(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            n: i64 = strlen(lit).i64()
+            return false if s < 0 or e - s != n
+            while k < n |k: i64 = 0, data, s, lit|:
+                a: mutable u8 = data[(s + k).usize()]
+                b: mutable u8 = lit[k.usize()]
+                if a >= 65 and a <= 90:
+                    a <- a + 32
+                if b >= 65 and b <= 90:
+                    b <- b + 32
+                return false if a != b
+                k <- k + 1
+            true
 
-# Extract trailers from a body: one entry per line that looks like a trailer.
-# Bounded by max_lines. Returns the count appended.
-def rh_trailers_scan(body: darray[u8]&, max_lines: i64, out: mutable darray[RhTrailer]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    n: i64 = body.count.i64()
-    while start <= n |total: i64 = 0, start: i64 = 0, lines: i64 = 0, out| -> total:
-        break if lines >= max_lines
-        stop: i64 = rh_find_byte(body, start.usize(), 10)
-        t: RhTrailer =
-            line_end: i64 = stop if stop >= 0 else n
-            rh_trailer_parse_line(body, start, line_end)
-        if t.kind != 0:
-            out.push(t)
-            total <- total + 1
-        lines <- lines + 1
-        start <- n + 1 if stop < 0 else stop + 1
+        # (private to this file)
+        def rh_patch_is_digit(b: u8) -> bool:
+            b >= 48 and b <= 57
 
-# (private to this file) Value-span equality for two trailers.
-def rh_trailer_val_eq(data: darray[u8]&, a: RhTrailer, b: RhTrailer) -> bool can[Memory.Allocate, Abort.Panic]:
-    return false if a.value_s < 0 or b.value_s < 0
-    return false if a.value_e - a.value_s != b.value_e - b.value_s
-    while k < a.value_e - a.value_s |k: i64 = 0, data, a, b|:
-        return false if data[(a.value_s + k).usize()] != data[(b.value_s + k).usize()]
-        k <- k + 1
-    true
+        # (private to this file)
+        def rh_patch_sep(b: u8) -> bool:
+            b == 32 or b == 9
 
-# Distinct reviewer identities (Reviewed-by + Acked-by values) across a
-# trailer set. These are declared roles, kept separate from observed
-# actions (M04-01); this function only counts the declared set.
-def rh_trailer_distinct_approvers(trailers: darray[RhTrailer]&, body: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    while i < trailers.count.i64() |total: i64 = 0, i: i64 = 0| -> total:
-        t: RhTrailer = trailers[i.usize()]
-        if t.kind == RH_TRAILER_REVIEWED or t.kind == RH_TRAILER_ACKED:
-            seen: i64 =
-                while j < i |seen: i64 = 0, j: i64 = 0, i| -> seen:
-                    p: RhTrailer = trailers[j.usize()]
-                    if (p.kind == RH_TRAILER_REVIEWED or p.kind == RH_TRAILER_ACKED) and rh_trailer_val_eq(body, p, t):
-                        seen <- 1
-                    j <- j + 1
-            if seen == 0:
-                total <- total + 1
-        i <- i + 1
+        # Parse a subject span. Looks for "[PATCH" ... "]" and an optional
+        # " vN" and optional " M/T" before the closing bracket; the base subject is
+        # the text after the bracket, trimmed. ok=0 when no PATCH tag is present.
+        def rh_patch_base_eq(data: darray[u8]&, a: RhPatchSubject, b: RhPatchSubject) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if a.base_s < 0 or b.base_s < 0
+            return false if a.base_e - a.base_s != b.base_e - b.base_s
+            while k < a.base_e - a.base_s |k: i64 = 0, data, a, b|:
+                return false if data[(a.base_s + k).usize()] != data[(b.base_s + k).usize()]
+                k <- k + 1
+            true
+
+        # Highest revision seen for a (base, index) group; 0 when absent.
+        def rh_trailer_kind(data: darray[u8]&, s: i64, e: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
+            return RH_TRAILER_REVIEWED if rh_patch_eq_ci(data, s, e, "Reviewed-by")
+            return RH_TRAILER_ACKED if rh_patch_eq_ci(data, s, e, "Acked-by")
+            return RH_TRAILER_TESTED if rh_patch_eq_ci(data, s, e, "Tested-by")
+            return RH_TRAILER_FIXES if rh_patch_eq_ci(data, s, e, "Fixes")
+            return RH_TRAILER_LINK if rh_patch_eq_ci(data, s, e, "Link")
+            RH_TRAILER_OTHER
+
+        # (private to this file)
+        def rh_trailer_key_char(b: u8) -> bool:
+            return true if b >= 65 and b <= 90
+            return true if b >= 97 and b <= 122
+            return true if b >= 48 and b <= 57
+            b == 45
+
+        # Parse one body line as a trailer. Returns ok=1 with a value span, ok=0
+        # otherwise. The key must be a bare token followed by ':'; the value is the
+        # text after the colon, trimmed. This recognizes the standard trailer block
+        # without depending on a specific project's conventions.
+        def rh_trailer_parse_line(data: darray[u8]&, s: i64, e: i64) -> RhTrailer can[Memory.Allocate, Abort.Panic]:
+            none: RhTrailer = RhTrailer{kind: 0, value_s: -1, value_e: -1}
+            key_end: i64 =
+                while i < e |i: i64 = s| -> i:
+                    break if not rh_trailer_key_char(data[i.usize()])
+                    i <- i + 1
+            return none if key_end == s or key_end >= e or data[key_end.usize()] != 58
+            kind: u8 = rh_trailer_kind(data, s, key_end)
+            value_start: i64 =
+                while v < e and (data[v.usize()] == 32 or data[v.usize()] == 9) |v: i64 = key_end + 1| -> v:
+                    v <- v + 1
+            value_end: i64 =
+                while ve > value_start and (data[(ve - 1).usize()] == 32 or data[(ve - 1).usize()] == 9 or data[(ve - 1).usize()] == 13) |ve: i64 = e| -> ve:
+                    ve <- ve - 1
+            return none if value_end <= value_start
+            RhTrailer{kind: kind, value_s: value_start, value_e: value_end}
+
+        # Extract trailers from a body: one entry per line that looks like a trailer.
+        # Bounded by max_lines. Returns the count appended.
+        def rh_trailer_val_eq(data: darray[u8]&, a: RhTrailer, b: RhTrailer) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if a.value_s < 0 or b.value_s < 0
+            return false if a.value_e - a.value_s != b.value_e - b.value_s
+            while k < a.value_e - a.value_s |k: i64 = 0, data, a, b|:
+                return false if data[(a.value_s + k).usize()] != data[(b.value_s + k).usize()]
+                k <- k + 1
+            true
+
+        # Distinct reviewer identities (Reviewed-by + Acked-by values) across a
+        # trailer set. These are declared roles, kept separate from observed
+        # actions (M04-01); this function only counts the declared set.
