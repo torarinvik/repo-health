@@ -27,223 +27,226 @@ include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_git.elisa"
 
-# Capability keys, in a fixed order so output is deterministic.
-const RH_CN_CAP_HISTORY: i64 = 0
-const RH_CN_CAP_ISSUES: i64 = 1
-const RH_CN_CAP_RELEASES: i64 = 2
-const RH_CN_CAP_REVIEWS: i64 = 3
-const RH_CN_CAP_PERMISSIONS: i64 = 4
-const RH_CN_CAP_TRAFFIC: i64 = 5
-const RH_CN_CAP_COUNT: i64 = 6
+module Connector:
+    private:
+        # Capability keys, in a fixed order so output is deterministic.
+        const RH_CN_CAP_HISTORY: i64 = 0
+        const RH_CN_CAP_ISSUES: i64 = 1
+        const RH_CN_CAP_RELEASES: i64 = 2
+        const RH_CN_CAP_REVIEWS: i64 = 3
+        const RH_CN_CAP_PERMISSIONS: i64 = 4
+        const RH_CN_CAP_TRAFFIC: i64 = 5
+        const RH_CN_CAP_COUNT: i64 = 6
 
-# Supported / unsupported / authorized-only / windowed, mirroring the
-# manifests. 0 unsupported, 1 read, 2 authorized-only, 3 windowed.
-def rh_connector_capability(conn: u8&, cap: i64) -> i64:
-    if Base::rh_streq(conn, "github"):
-        return 1 if cap == RH_CN_CAP_HISTORY
-        return 1 if cap == RH_CN_CAP_ISSUES
-        return 1 if cap == RH_CN_CAP_RELEASES
-        return 1 if cap == RH_CN_CAP_REVIEWS
-        return 2 if cap == RH_CN_CAP_PERMISSIONS
-        return 3 if cap == RH_CN_CAP_TRAFFIC
-        return 0
-    if Base::rh_streq(conn, "gitlab"):
-        return 1 if cap == RH_CN_CAP_HISTORY
-        return 1 if cap == RH_CN_CAP_ISSUES
-        return 1 if cap == RH_CN_CAP_RELEASES
-        return 1 if cap == RH_CN_CAP_REVIEWS
-        return 2 if cap == RH_CN_CAP_PERMISSIONS
-        return 3 if cap == RH_CN_CAP_TRAFFIC
-        return 0
-    if Base::rh_streq(conn, "gitea"):
-        return 1 if cap == RH_CN_CAP_HISTORY
-        return 1 if cap == RH_CN_CAP_ISSUES
-        return 1 if cap == RH_CN_CAP_RELEASES
-        if cap == RH_CN_CAP_REVIEWS:
-            return 1
-        # Gitea/Forgejo have no documented traffic API (manifest: unsupported).
-        return 0
-    if Base::rh_streq(conn, "forgejo"):
-        return 1 if cap == RH_CN_CAP_HISTORY
-        return 1 if cap == RH_CN_CAP_ISSUES
-        return 1 if cap == RH_CN_CAP_RELEASES
-        return 1 if cap == RH_CN_CAP_REVIEWS
-        return 0
-    if Base::rh_streq(conn, "bitbucket"):
-        return 1 if cap == RH_CN_CAP_HISTORY
-        return 1 if cap == RH_CN_CAP_ISSUES
-        return 1 if cap == RH_CN_CAP_RELEASES
-        return 1 if cap == RH_CN_CAP_REVIEWS
-        if cap == RH_CN_CAP_PERMISSIONS:
-            return 2
-        # Bitbucket Cloud has no documented repo traffic/clone API
-        # (manifest: unsupported). Never imply availability.
-        return 0
-    -1
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_ci_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
+            return false if idx < 0
+            Json::rh_json_str_span(nodes, idx, s_out, e_out)
 
-def rh_connector_known_id(conn: u8&) -> bool:
-    rh_connector_capability(conn, RH_CN_CAP_HISTORY) >= 0
+        # Copy a span of `texts` into a NUL-terminated cstr buffer. Returns the
+        # cstr, or an empty pointer when the span is empty.
+        def rh_ci_cstr(texts: darray[u8]&, s: i64, e: i64, buf: mutable darray[u8]&) -> cstr can[Memory.Allocate, Abort.Panic]:
+            while i < e |i: i64 = s, e, texts, buf|:
+                buf.push(texts[i.usize()])
+                i <- i + 1
+            buf.push(0)
+            (&buf[0]).cast[cstr] can Unsafe.PointerCast
 
-def rh_cap_key(cap: i64) -> u8&:
-    return "history" if cap == RH_CN_CAP_HISTORY
-    return "issues" if cap == RH_CN_CAP_ISSUES
-    return "releases" if cap == RH_CN_CAP_RELEASES
-    return "reviews" if cap == RH_CN_CAP_REVIEWS
-    return "permissions" if cap == RH_CN_CAP_PERMISSIONS
-    "traffic"
+        def rh_ci_eq_span(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, s, e, lit)
 
-# Capability mode label. An unsupported capability is stated as such; a
-# windowed one keeps its window semantics visible (never a bare "yes").
-def rh_cap_label(mode: i64) -> u8&:
-    return "unsupported" if mode == 0
-    return "read" if mode == 1
-    return "authorized-only" if mode == 2
-    "windowed"
+        # Membership in a JSON array of connector ids (string values).
+        def rh_ci_arr_has_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, arr: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while child >= 0 |child: i64 = nodes[arr.usize()].first_child, nodes, texts, lit|:
+                if nodes[child.usize()].kind == Json::RH_JSON_STR:
+                    s: mutable i64 = 0
+                    e: mutable i64 = 0
+                    if Json::rh_json_str_span(nodes, child, &s, &e):
+                        return true if rh_ci_eq_span(texts, s, e, lit)
+                child <- nodes[child.usize()].next_sibling
+            false
 
-struct RhConnectorInstance:
-    id_start: mutable i64
-    id_end: mutable i64
-    url_start: mutable i64
-    url_end: mutable i64
-    approved: mutable bool
+    public:
+        # Supported / unsupported / authorized-only / windowed, mirroring the
+        # manifests. 0 unsupported, 1 read, 2 authorized-only, 3 windowed.
+        def rh_connector_capability(conn: u8&, cap: i64) -> i64:
+            if Base::rh_streq(conn, "github"):
+                return 1 if cap == RH_CN_CAP_HISTORY
+                return 1 if cap == RH_CN_CAP_ISSUES
+                return 1 if cap == RH_CN_CAP_RELEASES
+                return 1 if cap == RH_CN_CAP_REVIEWS
+                return 2 if cap == RH_CN_CAP_PERMISSIONS
+                return 3 if cap == RH_CN_CAP_TRAFFIC
+                return 0
+            if Base::rh_streq(conn, "gitlab"):
+                return 1 if cap == RH_CN_CAP_HISTORY
+                return 1 if cap == RH_CN_CAP_ISSUES
+                return 1 if cap == RH_CN_CAP_RELEASES
+                return 1 if cap == RH_CN_CAP_REVIEWS
+                return 2 if cap == RH_CN_CAP_PERMISSIONS
+                return 3 if cap == RH_CN_CAP_TRAFFIC
+                return 0
+            if Base::rh_streq(conn, "gitea"):
+                return 1 if cap == RH_CN_CAP_HISTORY
+                return 1 if cap == RH_CN_CAP_ISSUES
+                return 1 if cap == RH_CN_CAP_RELEASES
+                if cap == RH_CN_CAP_REVIEWS:
+                    return 1
+                # Gitea/Forgejo have no documented traffic API (manifest: unsupported).
+                return 0
+            if Base::rh_streq(conn, "forgejo"):
+                return 1 if cap == RH_CN_CAP_HISTORY
+                return 1 if cap == RH_CN_CAP_ISSUES
+                return 1 if cap == RH_CN_CAP_RELEASES
+                return 1 if cap == RH_CN_CAP_REVIEWS
+                return 0
+            if Base::rh_streq(conn, "bitbucket"):
+                return 1 if cap == RH_CN_CAP_HISTORY
+                return 1 if cap == RH_CN_CAP_ISSUES
+                return 1 if cap == RH_CN_CAP_RELEASES
+                return 1 if cap == RH_CN_CAP_REVIEWS
+                if cap == RH_CN_CAP_PERMISSIONS:
+                    return 2
+                # Bitbucket Cloud has no documented repo traffic/clone API
+                # (manifest: unsupported). Never imply availability.
+                return 0
+            -1
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_ci_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-    idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
-    return false if idx < 0
-    Json::rh_json_str_span(nodes, idx, s_out, e_out)
+        def rh_connector_known_id(conn: u8&) -> bool:
+            rh_connector_capability(conn, RH_CN_CAP_HISTORY) >= 0
 
-# Copy a span of `texts` into a NUL-terminated cstr buffer. Returns the
-# cstr, or an empty pointer when the span is empty.
-def rh_ci_cstr(texts: darray[u8]&, s: i64, e: i64, buf: mutable darray[u8]&) -> cstr can[Memory.Allocate, Abort.Panic]:
-    while i < e |i: i64 = s, e, texts, buf|:
-        buf.push(texts[i.usize()])
-        i <- i + 1
-    buf.push(0)
-    (&buf[0]).cast[cstr] can Unsafe.PointerCast
+        def rh_cap_key(cap: i64) -> u8&:
+            return "history" if cap == RH_CN_CAP_HISTORY
+            return "issues" if cap == RH_CN_CAP_ISSUES
+            return "releases" if cap == RH_CN_CAP_RELEASES
+            return "reviews" if cap == RH_CN_CAP_REVIEWS
+            return "permissions" if cap == RH_CN_CAP_PERMISSIONS
+            "traffic"
 
-def rh_ci_eq_span(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    Base::rh_bytes_equal_literal(texts, s, e, lit)
+        # Capability mode label. An unsupported capability is stated as such; a
+        # windowed one keeps its window semantics visible (never a bare "yes").
+        def rh_cap_label(mode: i64) -> u8&:
+            return "unsupported" if mode == 0
+            return "read" if mode == 1
+            return "authorized-only" if mode == 2
+            "windowed"
 
-# Membership in a JSON array of connector ids (string values).
-def rh_ci_arr_has_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, arr: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    while child >= 0 |child: i64 = nodes[arr.usize()].first_child, nodes, texts, lit|:
-        if nodes[child.usize()].kind == Json::RH_JSON_STR:
-            s: mutable i64 = 0
-            e: mutable i64 = 0
-            if Json::rh_json_str_span(nodes, child, &s, &e):
-                return true if rh_ci_eq_span(texts, s, e, lit)
-        child <- nodes[child.usize()].next_sibling
-    false
+        struct RhConnectorInstance:
+            id_start: mutable i64
+            id_end: mutable i64
+            url_start: mutable i64
+            url_end: mutable i64
+            approved: mutable bool
 
-# Parse an rh-connector-instance/1 document. Returns 0 ok, -1 malformed.
-# Malformed means: not JSON, wrong/missing schema, unknown connector_id,
-# missing base_url, or a capability key the connector does not declare.
-# Approval is not a parse error; it is a separate verdict field.
-def rh_connector_instance_parse(raw: darray[u8]&, inst: mutable RhConnectorInstance&, caps: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    nodes: mutable darray[Json::RhJsonNode] = []
-    texts: mutable darray[u8] = []
-    root: i64 = Json::rh_json_parse(raw, nodes, texts)
-    return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
-    ss, se =
-        start: mutable i64 = 0
-        end: mutable i64 = 0
-        return -1 if not rh_ci_str(nodes, texts, root, "schema", &start, &end)
-        start, end
-    return -1 if not rh_ci_eq_span(texts, ss, se, "rh-connector-instance/1")
-    ids, ide =
-        start: mutable i64 = 0
-        end: mutable i64 = 0
-        return -1 if not rh_ci_str(nodes, texts, root, "connector_id", &start, &end)
-        start, end
-    idbuf: mutable darray[u8] = []
-    idc: cstr = rh_ci_cstr(texts, ids, ide, idbuf)
-    return -1 if not rh_connector_known_id(idc)
-    us, ue =
-        start: mutable i64 = 0
-        end: mutable i64 = 0
-        return -1 if not rh_ci_str(nodes, texts, root, "base_url", &start, &end)
-        start, end
-    inst.id_start <- ids
-    inst.id_end <- ide
-    inst.url_start <- us
-    inst.url_end <- ue
-    aidx: i64 = Json::rh_json_obj_get(nodes, texts, root, "approved")
-    approved: bool = aidx >= 0 and nodes[aidx.usize()].kind == Json::RH_JSON_BOOL and nodes[aidx.usize()].text_end - nodes[aidx.usize()].text_start == 4 and raw[nodes[aidx.usize()].text_start.usize()] == 116
-    inst.approved <- approved
-    # Declared capabilities, if present, must exist for this connector.
-    cidx: i64 = Json::rh_json_obj_get(nodes, texts, root, "capabilities")
-    if cidx >= 0:
-        return -1 if nodes[cidx.usize()].kind != Json::RH_JSON_ARR
-        while child >= 0 |child: i64 = nodes[cidx.usize()].first_child, nodes, texts, caps, idc|:
-            return -1 if nodes[child.usize()].kind != Json::RH_JSON_STR
-            cs: mutable i64 = 0
-            ce: mutable i64 = 0
-            return -1 if not Json::rh_json_str_span(nodes, child, &cs, &ce)
-            cap: i64 =
-                while k < RH_CN_CAP_COUNT |cap: i64 = -1, k: i64 = 0, texts, cs, ce| -> cap:
-                    if rh_ci_eq_span(texts, cs, ce, rh_cap_key(k)):
-                        cap <- k
-                    k <- k + 1
-            return -1 if cap < 0
-            return -1 if rh_connector_capability(idc, cap) <= 0
-            caps.push(cap)
-            child <- nodes[child.usize()].next_sibling
-    0
+        # Parse an rh-connector-instance/1 document. Returns 0 ok, -1 malformed.
+        # Malformed means: not JSON, wrong/missing schema, unknown connector_id,
+        # missing base_url, or a capability key the connector does not declare.
+        # Approval is not a parse error; it is a separate verdict field.
+        def rh_connector_instance_parse(raw: darray[u8]&, inst: mutable RhConnectorInstance&, caps: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            ss, se =
+                start: mutable i64 = 0
+                end: mutable i64 = 0
+                return -1 if not rh_ci_str(nodes, texts, root, "schema", &start, &end)
+                start, end
+            return -1 if not rh_ci_eq_span(texts, ss, se, "rh-connector-instance/1")
+            ids, ide =
+                start: mutable i64 = 0
+                end: mutable i64 = 0
+                return -1 if not rh_ci_str(nodes, texts, root, "connector_id", &start, &end)
+                start, end
+            idbuf: mutable darray[u8] = []
+            idc: cstr = rh_ci_cstr(texts, ids, ide, idbuf)
+            return -1 if not rh_connector_known_id(idc)
+            us, ue =
+                start: mutable i64 = 0
+                end: mutable i64 = 0
+                return -1 if not rh_ci_str(nodes, texts, root, "base_url", &start, &end)
+                start, end
+            inst.id_start <- ids
+            inst.id_end <- ide
+            inst.url_start <- us
+            inst.url_end <- ue
+            aidx: i64 = Json::rh_json_obj_get(nodes, texts, root, "approved")
+            approved: bool = aidx >= 0 and nodes[aidx.usize()].kind == Json::RH_JSON_BOOL and nodes[aidx.usize()].text_end - nodes[aidx.usize()].text_start == 4 and raw[nodes[aidx.usize()].text_start.usize()] == 116
+            inst.approved <- approved
+            # Declared capabilities, if present, must exist for this connector.
+            cidx: i64 = Json::rh_json_obj_get(nodes, texts, root, "capabilities")
+            if cidx >= 0:
+                return -1 if nodes[cidx.usize()].kind != Json::RH_JSON_ARR
+                while child >= 0 |child: i64 = nodes[cidx.usize()].first_child, nodes, texts, caps, idc|:
+                    return -1 if nodes[child.usize()].kind != Json::RH_JSON_STR
+                    cs: mutable i64 = 0
+                    ce: mutable i64 = 0
+                    return -1 if not Json::rh_json_str_span(nodes, child, &cs, &ce)
+                    cap: i64 =
+                        while k < RH_CN_CAP_COUNT |cap: i64 = -1, k: i64 = 0, texts, cs, ce| -> cap:
+                            if rh_ci_eq_span(texts, cs, ce, rh_cap_key(k)):
+                                cap <- k
+                            k <- k + 1
+                    return -1 if cap < 0
+                    return -1 if rh_connector_capability(idc, cap) <= 0
+                    caps.push(cap)
+                    child <- nodes[child.usize()].next_sibling
+            0
 
-# Verdict: is this instance usable for live collection? Requires operator
-# approval AND a base URL that passes the transport guard. Returns:
-#   0 usable, 1 unapproved, 2 transport-rejected, -1 invalid id (unreachable
-# after parse).
-def rh_connector_instance_verdict(inst: RhConnectorInstance&, texts: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return 1 if not inst.approved
-    ubuf: mutable darray[u8] = []
-    uc: cstr = rh_ci_cstr(texts, inst.url_start, inst.url_end, ubuf)
-    return 2 if not Git::rh_fetch_guard(uc)
-    0
+        # Verdict: is this instance usable for live collection? Requires operator
+        # approval AND a base URL that passes the transport guard. Returns:
+        #   0 usable, 1 unapproved, 2 transport-rejected, -1 invalid id (unreachable
+        # after parse).
+        def rh_connector_instance_verdict(inst: RhConnectorInstance&, texts: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 1 if not inst.approved
+            ubuf: mutable darray[u8] = []
+            uc: cstr = rh_ci_cstr(texts, inst.url_start, inst.url_end, ubuf)
+            return 2 if not Git::rh_fetch_guard(uc)
+            0
 
-def rh_connector_instance_emit(inst: RhConnectorInstance&, texts: darray[u8]&, caps: darray[i64]&, verdict: i64, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-    idbuf: mutable darray[u8] = []
-    idc: cstr = rh_ci_cstr(texts, inst.id_start, inst.id_end, idbuf)
-    ubuf: mutable darray[u8] = []
-    uc: cstr = rh_ci_cstr(texts, inst.url_start, inst.url_end, ubuf)
-    Base::rh_push_text(out, "{\"schema\":\"rh-connector-instance-result/1\",\"connector_id\":\"")
-    Base::rh_push_cstr(out, idc)
-    Base::rh_push_text(out, "\",\"base_url\":\"")
-    Base::rh_push_cstr(out, uc)
-    Base::rh_push_text(out, "\",\"approved\":")
-    if inst.approved:
-        Base::rh_push_text(out, "true")
-    else:
-        Base::rh_push_text(out, "false")
-    Base::rh_push_text(out, ",\"verdict\":\"")
-    if verdict == 0:
-        Base::rh_push_text(out, "usable")
-    elif verdict == 1:
-        Base::rh_push_text(out, "unapproved")
-    else:
-        Base::rh_push_text(out, "transport-rejected")
-    Base::rh_push_text(out, "\",\"capabilities\":{")
-    # Emit every capability of this connector with its mode, so an
-    # unsupported one is stated rather than omitted.
-    while k < RH_CN_CAP_COUNT |first: bool = true, k: i64 = 0, out, idc|:
-        mode: i64 = rh_connector_capability(idc, k)
-        if mode >= 0:
-            if not first:
-                out.push(44)
-            first <- false
-            Base::rh_push_text(out, "\"")
-            Base::rh_push_text(out, rh_cap_key(k))
-            Base::rh_push_text(out, "\":\"")
-            Base::rh_push_text(out, rh_cap_label(mode))
-            Base::rh_push_text(out, "\"")
-        k <- k + 1
-    Base::rh_push_text(out, "},\"declared_capabilities\":[")
-    while i < caps.count |i: usize = 0, caps, out|:
-        if i > 0:
-            out.push(44)
-        Base::rh_push_text(out, "\"")
-        Base::rh_push_text(out, rh_cap_key(caps[i]))
-        Base::rh_push_text(out, "\"")
-        i <- i + 1
-    Base::rh_push_text(out, "],\"note\":\"approval and transport are separate gates; approval never overrides transport policy, and an unsupported capability is reported as such (R006/R007)\"}")
+        def rh_connector_instance_emit(inst: RhConnectorInstance&, texts: darray[u8]&, caps: darray[i64]&, verdict: i64, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            idbuf: mutable darray[u8] = []
+            idc: cstr = rh_ci_cstr(texts, inst.id_start, inst.id_end, idbuf)
+            ubuf: mutable darray[u8] = []
+            uc: cstr = rh_ci_cstr(texts, inst.url_start, inst.url_end, ubuf)
+            Base::rh_push_text(out, "{\"schema\":\"rh-connector-instance-result/1\",\"connector_id\":\"")
+            Base::rh_push_cstr(out, idc)
+            Base::rh_push_text(out, "\",\"base_url\":\"")
+            Base::rh_push_cstr(out, uc)
+            Base::rh_push_text(out, "\",\"approved\":")
+            if inst.approved:
+                Base::rh_push_text(out, "true")
+            else:
+                Base::rh_push_text(out, "false")
+            Base::rh_push_text(out, ",\"verdict\":\"")
+            if verdict == 0:
+                Base::rh_push_text(out, "usable")
+            elif verdict == 1:
+                Base::rh_push_text(out, "unapproved")
+            else:
+                Base::rh_push_text(out, "transport-rejected")
+            Base::rh_push_text(out, "\",\"capabilities\":{")
+            # Emit every capability of this connector with its mode, so an
+            # unsupported one is stated rather than omitted.
+            while k < RH_CN_CAP_COUNT |first: bool = true, k: i64 = 0, out, idc|:
+                mode: i64 = rh_connector_capability(idc, k)
+                if mode >= 0:
+                    if not first:
+                        out.push(44)
+                    first <- false
+                    Base::rh_push_text(out, "\"")
+                    Base::rh_push_text(out, rh_cap_key(k))
+                    Base::rh_push_text(out, "\":\"")
+                    Base::rh_push_text(out, rh_cap_label(mode))
+                    Base::rh_push_text(out, "\"")
+                k <- k + 1
+            Base::rh_push_text(out, "},\"declared_capabilities\":[")
+            while i < caps.count |i: usize = 0, caps, out|:
+                if i > 0:
+                    out.push(44)
+                Base::rh_push_text(out, "\"")
+                Base::rh_push_text(out, rh_cap_key(caps[i]))
+                Base::rh_push_text(out, "\"")
+                i <- i + 1
+            Base::rh_push_text(out, "],\"note\":\"approval and transport are separate gates; approval never overrides transport policy, and an unsupported capability is reported as such (R006/R007)\"}")
