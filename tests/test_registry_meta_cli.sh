@@ -93,6 +93,45 @@ assert v[2]["dep_count"] == 2 and v[2]["optional_dep_count"] == 1, v[2]
 print("[registry-meta] PyPI release/yank/dependency normalization OK")
 PY
 
+echo "[registry-meta] npm provider shape normalizes to the canonical contract"
+cat > "$T/npm.json" <<'JSON'
+{
+  "name": "demo",
+  "time": {
+    "created": "2024-01-01T00:00:00Z",
+    "1.0.0": "2024-01-02T00:00:00Z",
+    "1.1.0": "2024-02-02T00:00:00Z"
+  },
+  "versions": {
+    "1.0.0": {
+      "version": "1.0.0",
+      "repository": {"type": "git", "url": "https://example.invalid/demo.git"},
+      "dependencies": {"a": "^1"},
+      "optionalDependencies": {"b": "^2"},
+      "devDependencies": {"c": "^3"}
+    },
+    "1.1.0": {
+      "version": "1.1.0",
+      "homepage": "https://example.invalid/home",
+      "dependencies": {}
+    }
+  }
+}
+JSON
+"$ROOT/build/rh_cli" registry-meta --input "$T/npm.json" --out "$T/npm.out" >/dev/null || fail "npm adapter"
+python3 - "$T/npm.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["counts"] == {"versions": 2, "yanked": 0, "unknown_yank": 2, "with_repo": 2,
+                       "declared_deps": 3, "optional_deps": 1, "dev_deps": 1}, d["counts"]
+v = d["versions"]
+assert v[0]["published_at"] == "2024-01-02T00:00:00Z", v[0]
+assert v[0]["repository"] == "https://example.invalid/demo.git", v[0]
+assert v[0]["dep_count"] == 3 and v[0]["optional_dep_count"] == 1 and v[0]["dev_dep_count"] == 1, v[0]
+assert v[1]["repository"] == "https://example.invalid/home" and v[1]["yanked"] is None, v[1]
+print("[registry-meta] npm release/time/repository/dependency normalization OK")
+PY
+
 echo "[registry-meta] bounded file transport capture"
 URL="file://$T/in.json"
 "$ROOT/build/rh_cli" registry-meta --url "$URL" --out "$T/fetched.json" >/dev/null || fail "file fetch"
@@ -124,8 +163,10 @@ printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" registry-meta --input "$T/notjson.json" --out "$T/x" >/dev/null 2>&1; rc_json=$?
 "$ROOT/build/rh_cli" registry-meta --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 "$ROOT/build/rh_cli" registry-meta --url "https://127.0.0.1/nope" --out "$T/x" >/dev/null 2>&1; rc_blocked=$?
+printf '{"versions":{"1.0.0":42}}' > "$T/npm-bad.json"
+"$ROOT/build/rh_cli" registry-meta --input "$T/npm-bad.json" --out "$T/x" >/dev/null 2>&1; rc_npm=$?
 set -e
-for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked"; do
+for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked" "$rc_npm"; do
   [[ "$rc" -eq 4 ]] || fail "malformed registry-meta input must exit 4 (got $rc)"
 done
 
