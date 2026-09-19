@@ -1,0 +1,183 @@
+# rh_homebrew.elisa — bounded Homebrew formula metadata (M08).
+#
+# This adapter consumes a formula API-shaped JSON document. It preserves
+# stable version and URL assertions plus dependency scopes, while omitting
+# descriptions and treating all dependencies as declared requirements.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_HOMEBREW_MAX_BYTES: usize = 4194304
+const RH_HOMEBREW_MAX_DEPS: i64 = 10000
+
+struct RhHomebrewDep:
+    name_s: mutable i64
+    name_e: mutable i64
+    scope: mutable u8
+
+module Homebrew:
+    private:
+        def rh_hb_eq(texts: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, literal)
+
+        def rh_hb_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return false if idx < 0 or not rh_json_str_span(nodes, idx, s_out, e_out)
+            s_out[0] < e_out[0]
+
+        def rh_hb_optional_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            present_out[0] <- 0
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return true if idx < 0 or nodes[idx.usize()].kind == RH_JSON_NULL
+            return false if not rh_json_str_span(nodes, idx, s_out, e_out) or s_out[0] >= e_out[0]
+            present_out[0] <- 1
+            true
+
+        def rh_hb_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, present_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            present_out[0] <- 0
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return 0 if idx < 0
+            ok: mutable i64 = 0
+            value: i64 = rh_json_int(nodes, raw, idx, &ok)
+            return 0 if ok == 0
+            present_out[0] <- 1
+            value
+
+        def rh_hb_prefix(texts: darray[u8]&, s: i64, e: i64, prefix: u8&) -> bool:
+            n: i64 = strlen(prefix).i64()
+            e - s >= n and rh_bytes_equal_literal(texts, s, s + n, prefix)
+
+        def rh_hb_digest(texts: darray[u8]&, s: i64, e: i64) -> bool:
+            return false if e - s != 64
+            while i < e |i: i64 = s, texts|:
+                b: u8 = texts[i.usize()]
+                return false if not ((b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102))
+                i <- i + 1
+            true
+
+        def rh_hb_deps(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, scope: u8, deps: mutable darray[RhHomebrewDep]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return 0 if idx < 0
+            return -1 if nodes[idx.usize()].kind != RH_JSON_ARR
+            array: RhJsonNode = nodes[idx.usize()]
+            while child >= 0 |child: i64 = array.first_child, nodes, texts, deps, scope|:
+                return -1 if nodes[child.usize()].kind != RH_JSON_STR or deps.count.i64() >= RH_HOMEBREW_MAX_DEPS
+                s: mutable i64 = 0
+                e: mutable i64 = 0
+                return -1 if not rh_json_str_span(nodes, child, &s, &e) or s >= e
+                deps.push(RhHomebrewDep{name_s: s, name_e: e, scope: scope})
+                child <- nodes[child.usize()].next_sibling
+            0
+
+        def rh_hb_scope_label(scope: u8) -> u8&:
+            return "runtime" if scope == 0
+            return "build" if scope == 1
+            return "optional" if scope == 2
+            "test"
+
+    public:
+        def rh_homebrew_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count > RH_HOMEBREW_MAX_BYTES
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not Homebrew::rh_hb_str(nodes, texts, root, "schema", &schema_s, &schema_e) or not Homebrew::rh_hb_eq(texts, schema_s, schema_e, "rh-homebrew-formula/1")
+            name_s: mutable i64 = 0
+            name_e: mutable i64 = 0
+            return -1 if not Homebrew::rh_hb_str(nodes, texts, root, "name", &name_s, &name_e)
+            homepage_s: mutable i64 = 0
+            homepage_e: mutable i64 = 0
+            homepage_present: mutable i64 = 0
+            return -1 if not Homebrew::rh_hb_optional_str(nodes, texts, root, "homepage", &homepage_s, &homepage_e, &homepage_present)
+            return -1 if homepage_present == 1 and not Homebrew::rh_hb_prefix(texts, homepage_s, homepage_e, "https://")
+            revision_present: mutable i64 = 0
+            revision: i64 = Homebrew::rh_hb_int(nodes, raw, texts, root, "revision", &revision_present)
+            return -1 if revision_present == 1 and revision < 0
+            stable_idx: i64 = rh_json_obj_get(nodes, texts, root, "stable")
+            return -1 if stable_idx < 0 or nodes[stable_idx.usize()].kind != RH_JSON_OBJ
+            version_s: mutable i64 = 0
+            version_e: mutable i64 = 0
+            return -1 if not Homebrew::rh_hb_str(nodes, texts, stable_idx, "version", &version_s, &version_e)
+            stable_url_s: mutable i64 = 0
+            stable_url_e: mutable i64 = 0
+            stable_url_present: mutable i64 = 0
+            return -1 if not Homebrew::rh_hb_optional_str(nodes, texts, stable_idx, "url", &stable_url_s, &stable_url_e, &stable_url_present)
+            return -1 if stable_url_present == 1 and not Homebrew::rh_hb_prefix(texts, stable_url_s, stable_url_e, "https://")
+            digest_s: mutable i64 = 0
+            digest_e: mutable i64 = 0
+            digest_present: mutable i64 = 0
+            return -1 if not Homebrew::rh_hb_optional_str(nodes, texts, stable_idx, "sha256", &digest_s, &digest_e, &digest_present)
+            return -1 if digest_present == 1 and not Homebrew::rh_hb_digest(texts, digest_s, digest_e)
+            deps: mutable darray[RhHomebrewDep] = []
+            return -1 if Homebrew::rh_hb_deps(nodes, texts, stable_idx, "dependencies", 0, deps) != 0
+            return -1 if Homebrew::rh_hb_deps(nodes, texts, stable_idx, "build_dependencies", 1, deps) != 0
+            return -1 if Homebrew::rh_hb_deps(nodes, texts, stable_idx, "optional_dependencies", 2, deps) != 0
+            return -1 if Homebrew::rh_hb_deps(nodes, texts, stable_idx, "test_dependencies", 3, deps) != 0
+            runtime_count: mutable i64 = 0
+            build_count: mutable i64 = 0
+            optional_count: mutable i64 = 0
+            test_count: mutable i64 = 0
+            while i < deps.count.i64() |i: usize = 0, deps, runtime_count, build_count, optional_count, test_count|:
+                dep_scope: u8 = deps[i].scope
+                runtime_count <- runtime_count + 1 if dep_scope == 0
+                build_count <- build_count + 1 if dep_scope == 1
+                optional_count <- optional_count + 1 if dep_scope == 2
+                test_count <- test_count + 1 if dep_scope == 3
+                i <- i + 1
+            rh_push_text(out, "{\"schema\":\"rh-homebrew-result/1\",\"name\":\"")
+            rh_json_escape(out, texts, name_s.usize(), name_e.usize())
+            rh_push_text(out, "\",\"stable_version\":\"")
+            rh_json_escape(out, texts, version_s.usize(), version_e.usize())
+            rh_push_text(out, "\",\"revision\":")
+            rh_push_decimal_i64(out, revision if revision_present == 1 else 0)
+            rh_push_text(out, ",\"homepage\":")
+            if homepage_present == 1:
+                out.push(34)
+                rh_json_escape(out, texts, homepage_s.usize(), homepage_e.usize())
+                out.push(34)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"source_assertions\":[")
+            assertion_count: mutable i64 = 0
+            if stable_url_present == 1:
+                rh_push_text(out, "{\"kind\":\"stable-url\",\"value\":\"")
+                rh_json_escape(out, texts, stable_url_s.usize(), stable_url_e.usize())
+                rh_push_text(out, "\"}")
+                assertion_count <- assertion_count + 1
+            if homepage_present == 1:
+                out.push(44) if assertion_count > 0
+                rh_push_text(out, "{\"kind\":\"homepage\",\"value\":\"")
+                rh_json_escape(out, texts, homepage_s.usize(), homepage_e.usize())
+                rh_push_text(out, "\"}")
+            rh_push_text(out, "],\"stable_digest\":")
+            if digest_present == 1:
+                rh_push_text(out, "\"sha256:")
+                rh_json_escape(out, texts, digest_s.usize(), digest_e.usize())
+                out.push(34)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"dependencies\":[")
+            while i < deps.count.i64() |i: usize = 0, deps, texts, out|:
+                dep: RhHomebrewDep = deps[i]
+                out.push(44) if i > 0
+                rh_push_text(out, "{\"name\":\"")
+                rh_json_escape(out, texts, dep.name_s.usize(), dep.name_e.usize())
+                rh_push_text(out, "\",\"scope\":\"")
+                rh_push_text(out, Homebrew::rh_hb_scope_label(dep.scope))
+                rh_push_text(out, "\"}")
+                i <- i + 1
+            rh_push_text(out, "],\"counts\":{\"dependencies\":")
+            rh_push_decimal_i64(out, deps.count.i64())
+            rh_push_text(out, ",\"runtime\":")
+            rh_push_decimal_i64(out, runtime_count)
+            rh_push_text(out, ",\"build\":")
+            rh_push_decimal_i64(out, build_count)
+            rh_push_text(out, ",\"optional\":")
+            rh_push_decimal_i64(out, optional_count)
+            rh_push_text(out, ",\"test\":")
+            rh_push_decimal_i64(out, test_count)
+            rh_push_text(out, "},\"note\":\"Homebrew formula metadata is an observation; stable version, links, digest claims, and declared dependency scopes are retained; descriptions and install outcomes are omitted; dependencies are not resolved\"}")
+            0

@@ -48,6 +48,7 @@ include "./rh_identity_report.elisa"
 include "./rh_identity_publication.elisa"
 include "./rh_distribution.elisa"
 include "./rh_archive.elisa"
+include "./rh_homebrew.elisa"
 include "./rh_release_feed_report.elisa"
 include "./rh_registry_meta_report.elisa"
 include "./rh_pep440_report.elisa"
@@ -129,6 +130,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli identity-publish --input <file> --out <file>")
     rh_cli_err("       rh_cli distribution --input <debian/control> --out <file>")
     rh_cli_err("       rh_cli archive --input <file> --out <file>")
+    rh_cli_err("       rh_cli homebrew --input <file> --out <file>")
     rh_cli_err("       rh_cli release-feed (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli registry-meta (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli pep440 --input <file> --out <file>")
@@ -1468,6 +1470,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 aq <- aq + 1
         return rh_cli_usage(2) if ai_idx < 0 or ao_idx < 0
         return rh_do_archive(slots[ai_idx], slots[ao_idx])
+    if rh_streq(cmd, "homebrew"):
+        hi_idx, ho_idx =
+            while hq < argc |hi_idx: i64 = -1, ho_idx: i64 = -1, hq: i64 = 2, slots| -> hi_idx, ho_idx:
+                ah: u8& = slots[hq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(ah, "--input"):
+                    if hq + 1 < argc:
+                        hq <- hq + 1
+                        hi_idx <- hq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(ah, "--out"):
+                    if hq + 1 < argc:
+                        hq <- hq + 1
+                        ho_idx <- hq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                hq <- hq + 1
+        return rh_cli_usage(2) if hi_idx < 0 or ho_idx < 0
+        return rh_do_homebrew(slots[hi_idx], slots[ho_idx])
     if rh_streq(cmd, "release-feed"):
         rfi_idx, rfu_idx, rfo_idx =
             while rfq < argc |rfi_idx: i64 = -1, rfu_idx: i64 = -1, rfo_idx: i64 = -1, rfq: i64 = 2, slots| -> rfi_idx, rfu_idx, rfo_idx:
@@ -5020,6 +5043,41 @@ def rh_do_archive(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, 
         rh_cli_err("archive: cannot write --out")
         return 4
     rh_cli_out("archive: ok")
+    0
+
+# --- M08 Homebrew formula metadata path. ---
+# Reads a bounded rh-homebrew-formula/1 document and writes the canonical
+# formula observation. No package manager is invoked and no dependency is
+# resolved.
+def rh_do_homebrew(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected homebrew argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("homebrew: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if Homebrew::rh_homebrew_report(raw, body) != 0:
+        rh_cli_err("homebrew: malformed or unsupported formula metadata (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] =
+        op: mutable darray[u8] = []
+        rh_push_cstr(op, out_path)
+        op.push(0)
+        op
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("homebrew: cannot write --out")
+        return 4
+    rh_cli_out("homebrew: ok")
     0
 
 # --- M08 release-only source execution path. ---
