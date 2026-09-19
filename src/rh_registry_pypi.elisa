@@ -1,0 +1,180 @@
+# rh_registry_pypi.elisa — bounded PyPI JSON adapter (M03-05/M08).
+#
+# PyPI's project endpoint is shaped differently from the canonical registry
+# input: releases are an object keyed by version and each value is a list of
+# distribution files. This adapter keeps that provider detail at the boundary
+# and emits the existing {"versions":[...]} contract. A version is marked
+# yanked only when every file is explicitly yanked; missing or mixed file
+# states remain unknown. `requires_dist` belongs to the current project
+# metadata, so it is attached only to the matching `info.version` release.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_REGMETA_PYPI_MAX_VERSIONS: i64 = 10000
+
+# (private to this module)
+def rh_regmeta_pypi_extra_marker(texts: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if s < 0 or e <= s or e > texts.count.i64()
+    while i + 7 < e |i: i64 = s, texts, e|:
+        if texts[i.usize()] == 101 and texts[(i + 1).usize()] == 120 and texts[(i + 2).usize()] == 116 and texts[(i + 3).usize()] == 114 and texts[(i + 4).usize()] == 97:
+            j: mutable i64 = i + 5
+            while j < e and (texts[j.usize()] == 32 or texts[j.usize()] == 9):
+                j <- j + 1
+            return true if j + 1 < e and texts[j.usize()] == 61 and texts[(j + 1).usize()] == 61
+        i <- i + 1
+    false
+
+# (private to this module)
+def rh_regmeta_pypi_string(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    start_out[0] <- -1
+    end_out[0] <- -1
+    rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, obj, key), &start_out[0], &end_out[0])
+
+# Read file-level yanked and publication state. A missing field is unknown;
+# the adapter never turns an absent provider value into false.
+# (private to this module)
+def rh_regmeta_pypi_files(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, arr: i64, yank_out: mutable i64&, pub_s_out: mutable i64&, pub_e_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    yank_out[0] <- -1
+    pub_s_out[0] <- -1
+    pub_e_out[0] <- -1
+    return -1 if arr < 0
+    an: RhJsonNode = nodes[arr.usize()]
+    return -1 if an.kind != RH_JSON_ARR
+    files: mutable i64 = 0
+    all_true: mutable i64 = 1
+    any_true: mutable i64 = 0
+    any_false: mutable i64 = 0
+    mixed: mutable i64 = 0
+    unknown: mutable i64 = 0
+    while child >= 0 |child: i64 = an.first_child, nodes, raw, texts, files, all_true, any_true, any_false, mixed, unknown, pub_s_out, pub_e_out|:
+        fn: RhJsonNode = nodes[child.usize()]
+        return -1 if fn.kind != RH_JSON_OBJ
+        files <- files + 1
+        yn: i64 = rh_json_obj_get(nodes, texts, child, "yanked")
+        if yn < 0 or nodes[yn.usize()].kind != RH_JSON_BOOL:
+            unknown <- 1
+        elif not rh_json_is_true(nodes, raw, yn):
+            all_true <- 0
+            any_false <- 1
+            mixed <- 1 if any_true == 1
+        else:
+            any_true <- 1
+            mixed <- 1 if any_false == 1
+        pub_s: mutable i64 = -1
+        pub_e: mutable i64 = -1
+        if pub_s_out[0] < 0:
+            if rh_regmeta_pypi_string(nodes, texts, child, "upload_time_iso_8601", &pub_s, &pub_e) or rh_regmeta_pypi_string(nodes, texts, child, "upload_time", &pub_s, &pub_e):
+                pub_s_out[0] <- pub_s
+                pub_e_out[0] <- pub_e
+        child <- nodes[child.usize()].next_sibling
+    if files == 0 or unknown == 1 or mixed == 1:
+        yank_out[0] <- -1
+    elif all_true == 1:
+        yank_out[0] <- 1
+    elif any_false == 1:
+        yank_out[0] <- 0
+    0
+
+# PyPI commonly puts a source URL in `home_page`, but some projects only
+# expose it under `project_urls`. Preserve the first provider assertion and
+# leave identity verification to the mapping workflow.
+# (private to this module)
+def rh_regmeta_pypi_repo(nodes: darray[RhJsonNode]&, texts: darray[u8]&, info: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    if rh_regmeta_pypi_string(nodes, texts, info, "home_page", &start_out[0], &end_out[0]) and end_out[0] > start_out[0]:
+        return true
+    urls: i64 = rh_json_obj_get(nodes, texts, info, "project_urls")
+    return false if urls < 0 or nodes[urls.usize()].kind != RH_JSON_OBJ
+    while child >= 0 |child: i64 = nodes[urls.usize()].first_child, nodes, texts, start_out, end_out|:
+        value: i64 = nodes[child.usize()].next_sibling
+        if value >= 0 and rh_json_str_span(nodes, value, &start_out[0], &end_out[0]) and end_out[0] > start_out[0]:
+            return true
+        child <- -1 if value < 0 else nodes[value.usize()].next_sibling
+    false
+
+# Normalize a PyPI project JSON response to the canonical registry shape.
+# Returns 0 on success and -1 on malformed provider data.
+def rh_regmeta_pypi_normalize(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(raw, nodes, texts)
+    return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+    releases: i64 = rh_json_obj_get(nodes, texts, root, "releases")
+    return -1 if releases < 0 or nodes[releases.usize()].kind != RH_JSON_OBJ
+    info: i64 = rh_json_obj_get(nodes, texts, root, "info")
+    if info >= 0:
+        return -1 if nodes[info.usize()].kind != RH_JSON_OBJ
+    info_version_s: mutable i64 = -1
+    info_version_e: mutable i64 = -1
+    repo_s: mutable i64 = -1
+    repo_e: mutable i64 = -1
+    requires: mutable i64 = -1
+    if info >= 0:
+        rh_regmeta_pypi_string(nodes, texts, info, "version", &info_version_s, &info_version_e)
+        rh_regmeta_pypi_repo(nodes, texts, info, &repo_s, &repo_e)
+        requires <- rh_json_obj_get(nodes, texts, info, "requires_dist")
+        if requires >= 0 and nodes[requires.usize()].kind != RH_JSON_ARR and nodes[requires.usize()].kind != RH_JSON_NULL:
+            return -1
+    rh_push_text(out, "{\"versions\":[")
+    emitted: mutable i64 = 0
+    rel: RhJsonNode = nodes[releases.usize()]
+    while child >= 0 |child: i64 = rel.first_child, nodes, texts, raw, out, emitted, info_version_s, info_version_e, repo_s, repo_e, requires|:
+        key: RhJsonNode = nodes[child.usize()]
+        value: i64 = key.next_sibling
+        return -1 if key.kind != RH_JSON_STR or value < 0
+        return -1 if nodes[value.usize()].kind != RH_JSON_ARR
+        version_s: i64 = key.text_start
+        version_e: i64 = key.text_end
+        return -1 if version_e <= version_s
+        return -1 if emitted >= RH_REGMETA_PYPI_MAX_VERSIONS
+        yanked: mutable i64 = -1
+        published_s: mutable i64 = -1
+        published_e: mutable i64 = -1
+        return -1 if rh_regmeta_pypi_files(nodes, raw, texts, value, &yanked, &published_s, &published_e) != 0
+        if emitted > 0:
+            out.push(44)
+        rh_push_text(out, "{\"num\":\"")
+        rh_json_escape(out, texts, version_s.usize(), version_e.usize())
+        rh_push_text(out, "\",\"yanked\":")
+        if yanked == 1:
+            rh_push_text(out, "true")
+        elif yanked == 0:
+            rh_push_text(out, "false")
+        else:
+            rh_push_text(out, "null")
+        rh_push_text(out, ",\"published_at\":")
+        if published_s >= 0:
+            out.push(34)
+            rh_json_escape(out, texts, published_s.usize(), published_e.usize())
+            out.push(34)
+        else:
+            rh_push_text(out, "null")
+        rh_push_text(out, ",\"repository\":")
+        if repo_s >= 0:
+            out.push(34)
+            rh_json_escape(out, texts, repo_s.usize(), repo_e.usize())
+            out.push(34)
+        else:
+            rh_push_text(out, "null")
+        rh_push_text(out, ",\"deps\":[")
+        same_version: bool = info_version_s >= 0 and info_version_e - info_version_s == version_e - version_s and rh_bytes_equal_span(texts, info_version_s, info_version_e, texts, version_s, version_e)
+        dep_emitted: mutable i64 = 0
+        if same_version and requires >= 0 and nodes[requires.usize()].kind == RH_JSON_ARR:
+            while dep >= 0 |dep: i64 = nodes[requires.usize()].first_child, nodes, texts, out, dep_emitted|:
+                return -1 if nodes[dep.usize()].kind != RH_JSON_STR
+                if dep_emitted > 0:
+                    out.push(44)
+                ds: RhJsonNode = nodes[dep.usize()]
+                rh_push_text(out, "{\"optional\":")
+                if rh_regmeta_pypi_extra_marker(texts, ds.text_start, ds.text_end):
+                    rh_push_text(out, "true")
+                else:
+                    rh_push_text(out, "false")
+                rh_push_text(out, "}")
+                dep_emitted <- dep_emitted + 1
+                dep <- ds.next_sibling
+        rh_push_text(out, "]}")
+        emitted <- emitted + 1
+        child <- nodes[value.usize()].next_sibling
+    rh_push_text(out, "]}")
+    0

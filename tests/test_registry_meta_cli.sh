@@ -55,6 +55,44 @@ echo "[registry-meta] determinism"
 "$ROOT/build/rh_cli" registry-meta --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "registry-meta output not deterministic"
 
+echo "[registry-meta] PyPI provider shape normalizes to the canonical contract"
+cat > "$T/pypi.json" <<'JSON'
+{
+  "info": {
+    "version": "2.0.0",
+    "home_page": "https://example.invalid/project",
+    "requires_dist": ["httpx>=1", "sphinx; extra == 'docs'"]
+  },
+  "releases": {
+    "1.0.0": [
+      {"upload_time_iso_8601": "2023-01-02T03:04:05Z", "yanked": false}
+    ],
+    "1.1.0": [
+      {"upload_time_iso_8601": "2023-02-02T03:04:05Z", "yanked": true},
+      {"upload_time_iso_8601": "2023-02-02T03:05:05Z", "yanked": true}
+    ],
+    "2.0.0": [
+      {"upload_time_iso_8601": "2024-01-02T03:04:05Z"}
+    ]
+  }
+}
+JSON
+"$ROOT/build/rh_cli" registry-meta --input "$T/pypi.json" --out "$T/pypi.out" >/dev/null || fail "pypi adapter"
+python3 - "$T/pypi.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-registry-meta-result/1", d
+assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1, "with_repo": 3,
+                       "declared_deps": 2, "optional_deps": 1, "dev_deps": 0}, d["counts"]
+v = d["versions"]
+assert v[0]["version"] == "1.0.0" and v[0]["yanked"] is False, v[0]
+assert v[1]["version"] == "1.1.0" and v[1]["yanked"] is True, v[1]
+assert v[2]["version"] == "2.0.0" and v[2]["yanked"] is None, v[2]
+assert v[2]["repository"] == "https://example.invalid/project", v[2]
+assert v[2]["dep_count"] == 2 and v[2]["optional_dep_count"] == 1, v[2]
+print("[registry-meta] PyPI release/yank/dependency normalization OK")
+PY
+
 echo "[registry-meta] bounded file transport capture"
 URL="file://$T/in.json"
 "$ROOT/build/rh_cli" registry-meta --url "$URL" --out "$T/fetched.json" >/dev/null || fail "file fetch"
