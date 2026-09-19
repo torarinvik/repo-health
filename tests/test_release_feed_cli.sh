@@ -27,7 +27,10 @@ assert d["schema"] == "rh-release-feed-result/1", d
 r = d["releases"]
 assert len(r) == 2 and d["rejected"] == 0, d
 metrics = {m["key"]: m for m in d["metrics"]}
-assert {k: metrics[k]["value"] for k in metrics} == {
+assert {k: metrics[k]["value"] for k in (
+    "release.release_count", "release.rejected_count", "release.asset_count",
+    "release.digest_known_count", "release.published_time_known_count",
+    "release.stable_count", "release.prerelease_count") } == {
     "release.release_count": 2,
     "release.rejected_count": 0,
     "release.asset_count": 2,
@@ -36,6 +39,9 @@ assert {k: metrics[k]["value"] for k in metrics} == {
     "release.stable_count": 1,
     "release.prerelease_count": 1,
 }, metrics
+assert metrics["release.latest_stable_age_days"]["value"] == 0, metrics
+assert metrics["release.interrelease_median_days"]["status"] == "not_applicable", metrics
+assert metrics["release.interrelease_variance"]["status"] == "not_applicable", metrics
 assert r[0] == {"tag": "v1.0.0", "published_at": 1700000000, "first_seen": 1700000123,
                 "prerelease": False, "asset_count": 2, "digest_known_count": 1}, r[0]
 # missing published time stays unknown (null), never replaced by first-seen
@@ -43,6 +49,20 @@ assert r[1]["published_at"] is None and r[1]["prerelease"] is True and r[1]["fir
 assert d["source"] == {"history_supported": False, "identity_supported": False}, d["source"]
 assert "no history or author identity is derived" in d["note"], d["note"]
 print("[release-feed] fields + validity/known time OK")
+PY
+
+echo "[release-feed] stable release cadence derives explicit median and variance"
+cat > "$T/cadence.json" <<'JSON'
+{"schema":"rh-release-feed-input/1","first_seen":1000604800,"releases":[{"tag":"v1.0.0","published_at":1000000000,"prerelease":false},{"tag":"v1.1.0","published_at":1000172800,"prerelease":false},{"tag":"v1.2.0","published_at":1000518400,"prerelease":false}]}
+JSON
+"$ROOT/build/rh_cli" release-feed --input "$T/cadence.json" --out "$T/cadence.out" >/dev/null || fail "cadence"
+python3 - "$T/cadence.out" <<'PY'
+import json, sys
+m = {x["key"]: x for x in json.load(open(sys.argv[1]))["metrics"]}
+assert m["release.latest_stable_age_days"]["value"] == 1, m
+assert m["release.interrelease_median_days"]["value"] == 3, m
+assert m["release.interrelease_variance"]["value"] == 1, m
+print("[release-feed] cadence metrics OK")
 PY
 
 echo "[release-feed] bounded --url capture retains source/status/error evidence"

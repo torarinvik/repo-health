@@ -15,6 +15,16 @@ include "./rh_release_feed.elisa"
 
 module ReleaseFeedReport:
     public:
+        def rh_rel_sort_times(values: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while i < values.count |i: i64 = 1, values|:
+                value: i64 = values[i.usize()]
+                j: i64 = i
+                while j > 0 and values[(j - 1).usize()] > value |j: i64 = i, value, values|:
+                    values[j.usize()] <- values[(j - 1).usize()]
+                    j <- j - 1
+                values[j.usize()] <- value
+                i <- i + 1
+
         def rh_rfr_report(raw: darray[u8]&, first_seen: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             pool: mutable darray[u8] = []
             releases: mutable darray[ReleaseFeed::RhRelease] = []
@@ -25,14 +35,16 @@ module ReleaseFeedReport:
             published_total: mutable i64 = 0
             stable_total: mutable i64 = 0
             prerelease_total: mutable i64 = 0
+            stable_times: mutable darray[i64] = []
             Base::rh_push_text(out, "{\"schema\":\"rh-release-feed-result/1\",\"releases\":[")
-            while i < releases.count.i64() |i: i64 = 0, releases, pool, out, asset_total, digest_total, published_total, stable_total, prerelease_total|:
+            while i < releases.count.i64() |i: i64 = 0, releases, pool, out, asset_total, digest_total, published_total, stable_total, prerelease_total, stable_times|:
                 r: ReleaseFeed::RhRelease = releases[i.usize()]
                 asset_total <- asset_total + r.asset_count
                 digest_total <- digest_total + r.digest_known_count
                 published_total <- published_total + 1 if r.has_published == 1
                 stable_total <- stable_total + 1 if r.prerelease == 0
                 prerelease_total <- prerelease_total + 1 if r.prerelease == 1
+                stable_times.push(r.published) if r.prerelease == 0 and r.has_published == 1
                 if i > 0:
                     out.push(44)
                 Base::rh_push_text(out, "{\"tag\":\"")
@@ -58,6 +70,32 @@ module ReleaseFeedReport:
                 Base::rh_push_decimal_i64(out, r.digest_known_count)
                 Base::rh_push_text(out, "}")
                 i <- i + 1
+            ReleaseFeedReport::rh_rel_sort_times(stable_times)
+            latest_stable_age: mutable i64 = -1
+            if stable_times.count > 0:
+                latest_stable_age <- (first_seen - stable_times[stable_times.count - 1]) / 86400
+            interrelease_median: mutable i64 = -1
+            interrelease_variance: mutable i64 = -1
+            if stable_times.count > 1:
+                gaps: mutable darray[i64] = []
+                while i < stable_times.count |i: i64 = 1, stable_times, gaps|:
+                    gaps.push((stable_times[i] - stable_times[i - 1]) / 86400)
+                    i <- i + 1
+                ReleaseFeedReport::rh_rel_sort_times(gaps)
+                middle: i64 = gaps.count / 2
+                interrelease_median <- gaps[middle.usize()]
+                interrelease_median <- (gaps[(middle - 1).usize()] + gaps[middle.usize()]) / 2 if gaps.count % 2 == 0
+                mean_gap_sum: i64 =
+                    while i < gaps.count |mean_gap_sum: i64 = 0, i: i64 = 0, gaps| -> mean_gap_sum:
+                        mean_gap_sum <- mean_gap_sum + gaps[i.usize()]
+                        i <- i + 1
+                mean_gap: mutable i64 = mean_gap_sum / gaps.count.i64()
+                variance_sum: i64 =
+                    while i < gaps.count |variance_sum: i64 = 0, i: i64 = 0, gaps, mean_gap| -> variance_sum:
+                        delta: i64 = gaps[i.usize()] - mean_gap
+                        variance_sum <- variance_sum + delta * delta
+                        i <- i + 1
+                interrelease_variance <- variance_sum / gaps.count.i64()
             Base::rh_push_text(out, "],\"rejected\":")
             Base::rh_push_decimal_i64(out, rej)
             Base::rh_push_text(out, ",\"source\":{\"history_supported\":")
@@ -91,5 +129,26 @@ module ReleaseFeedReport:
             Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"release.prerelease_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, prerelease_total)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]}],\"note\":\"release-only source: a tag is a label, not a release event; published time is valid time and first-seen is known time (both retained); missing published time and missing release classification stay unknown; stable/prerelease counts include only explicit boolean classification; no history or author identity is derived\"}")
+            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"release.latest_stable_age_days\",\"version\":\"1.0.0\",\"status\":\"")
+            if latest_stable_age >= 0:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, latest_stable_age)
+            else:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-published-stable-release\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"release.interrelease_median_days\",\"version\":\"1.0.0\",\"status\":\"")
+            if interrelease_median >= 0:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, interrelease_median)
+            else:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"fewer-than-two-published-stable-releases\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"release.interrelease_variance\",\"version\":\"1.0.0\",\"status\":\"")
+            if interrelease_variance >= 0:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, interrelease_variance)
+            else:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"fewer-than-two-published-stable-releases\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]}],\"note\":\"release-only source: a tag is a label, not a release event; published time is valid time and first-seen is known time (both retained); missing published time and missing release classification stay unknown; stable/prerelease counts include only explicit boolean classification; freshness uses first_seen as the explicit report cutoff; no history or author identity is derived\"}")
             0
