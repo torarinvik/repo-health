@@ -125,7 +125,7 @@ d["pagination"] = {
     "issues": {"next": "issues-page-2", "complete": False},
     "proposals": {"next": None, "complete": True},
     "reviews": {"next": "reviews-page-2", "complete": False},
-    "releases": {"next": None, "complete": True},
+    "releases": {"next": "", "complete": True},
 }
 json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
 PY
@@ -135,6 +135,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["pagination"]["issues"] == {"next": "issues-page-2", "complete": False}, d
 assert d["pagination"]["proposals"] == {"next": None, "complete": True}, d
+assert d["pagination"]["releases"] == {"next": "", "complete": True}, d
 print("[forge-events] pagination cursor + completion state OK")
 PY
 
