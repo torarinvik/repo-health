@@ -10,8 +10,9 @@
 #   * only GET and HEAD are allowed for report files; POST /api/query is the
 #     bounded query exception and anything else is 405;
 #   * path traversal (..), absolute paths, and NUL are rejected with 400;
-#   * only a fixed set of report files under the root may be served, plus the
-#     bounded query endpoint; an unknown path is 404, never a directory listing;
+#   * only a fixed set of report files and API resources under the root may be
+#     served, plus the bounded query endpoint; an unknown path is 404, never a
+#     directory listing;
 #   * response bodies are produced by the renderer/report writer, not by
 #     interpolating request bytes (R022/S010).
 # It does not run collection, does not execute anything, and holds no
@@ -72,6 +73,13 @@ def rh_http_allowed_path(path: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
     return 4 if rh_streq(path, "/health")
     return 5 if rh_streq(path, "/_report.html")
     return 6 if rh_streq(path, "/api/query")
+    return 7 if rh_streq(path, "/api/project")
+    return 8 if rh_streq(path, "/api/metrics")
+    return 9 if rh_streq(path, "/api/continuity")
+    return 10 if rh_streq(path, "/api/graph")
+    return 11 if rh_streq(path, "/api/findings")
+    return 12 if rh_streq(path, "/api/evidence")
+    return 13 if rh_streq(path, "/api/scan-status")
     -1
 
 def rh_http_file_name(idx: i64) -> u8&:
@@ -79,6 +87,13 @@ def rh_http_file_name(idx: i64) -> u8&:
     return "report.json" if idx == 1
     return "report.md" if idx == 2
     return "bundle.manifest" if idx == 3
+    return "project.json" if idx == 7
+    return "metrics.json" if idx == 8
+    return "continuity.json" if idx == 9
+    return "graph.json" if idx == 10
+    return "findings.json" if idx == 11
+    return "evidence.json" if idx == 12
+    return "scan-status.json" if idx == 13
     ""
 
 # Request-line parse result. method is a small enum; ok 1 when parseable.
@@ -167,6 +182,13 @@ def rh_http_allowed_span(data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Al
     return 4 if rh_span_eq_lit(data, s, e, "/health")
     return 5 if rh_span_eq_lit(data, s, e, "/_report.html")
     return 6 if rh_span_eq_lit(data, s, e, "/api/query")
+    return 7 if rh_span_eq_lit(data, s, e, "/api/project")
+    return 8 if rh_span_eq_lit(data, s, e, "/api/metrics")
+    return 9 if rh_span_eq_lit(data, s, e, "/api/continuity")
+    return 10 if rh_span_eq_lit(data, s, e, "/api/graph")
+    return 11 if rh_span_eq_lit(data, s, e, "/api/findings")
+    return 12 if rh_span_eq_lit(data, s, e, "/api/evidence")
+    return 13 if rh_span_eq_lit(data, s, e, "/api/scan-status")
     -1
 
 # Return the first byte after the HTTP header terminator. A query body is
@@ -275,7 +297,9 @@ def rh_http_serve_one(cfd: i32, raw: mutable darray[u8]&, root: cstr, body: muta
     rh_http_route(raw, root, body, ctype_out)
 
 # Route a fully-buffered request. Pure w.r.t. the socket: decides status,
-# fills body/content-type for an allowed GET, and never echoes the request.
+# fills body/content-type for an allowed GET/resource; it never echoes the request.
+# Resource paths map to fixed JSON artifact names; absent artifacts
+# remain 404.
 def rh_http_route(raw: darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     idx: i64 = |ctype_out|
         req: RhHttpRequest = rh_http_parse_request_line(raw)
@@ -320,6 +344,8 @@ def rh_http_route(raw: darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype
         ctype_out[0] <- RH_CT_JSON
     elif idx == 2:
         ctype_out[0] <- RH_CT_MARKDOWN
+    elif idx >= 7:
+        ctype_out[0] <- RH_CT_JSON
     else:
         ctype_out[0] <- RH_CT_TEXT
     path: mutable darray[u8] =

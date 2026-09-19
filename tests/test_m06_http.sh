@@ -44,27 +44,33 @@ if [[ "${RH_LIVE_TESTS:-0}" == "1" ]]; then
   ( cd "$W/src" && git config user.name D && git config user.email d@e.test && echo x > f && git add f \
       && GIT_AUTHOR_DATE="2024-03-01T00:00:00Z" GIT_COMMITTER_DATE="2024-03-01T00:00:00Z" git commit -qm one )
   "$ROOT/build/rh_cli" scan --repo "$W/src" --out "$W/report" --window-days 36500 >/dev/null
-  "$ROOT/build/rh_cli" serve --root "$W/report" --port 18099 --max 8 > "$W/log" 2>&1 &
+  "$ROOT/build/rh_cli" serve --root "$W/report" --port 18611 --max 20 > "$W/log" 2>&1 &
   SRV=$!
-  sleep 1
-  h="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18099/health)" || true
+  sleep 2
+  h="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18611/health)" || true
   [[ "$h" == "200" ]] || { kill "$SRV" 2>/dev/null; fail "live health=$h"; }
-  ct="$(curl -s -o /dev/null -w '%{content_type}' http://127.0.0.1:18099/report.json)" || true
+  ct="$(curl -s -o /dev/null -w '%{content_type}' http://127.0.0.1:18611/report.json)" || true
   [[ "$ct" == "application/json" ]] || { kill "$SRV" 2>/dev/null; fail "live json ct=$ct"; }
-  rct="$(curl -s -o /dev/null -w '%{content_type}' http://127.0.0.1:18099/_report.html)" || true
+  rct="$(curl -s -o /dev/null -w '%{content_type}' http://127.0.0.1:18611/_report.html)" || true
   [[ "$rct" == text/html* ]] || { kill "$SRV" 2>/dev/null; fail "server-rendered ct=$rct"; }
-  rbody="$(curl -s http://127.0.0.1:18099/_report.html)" || true
+  rbody="$(curl -s http://127.0.0.1:18611/_report.html)" || true
   [[ "$rbody" == *"not maintainers"* && "$rbody" == *"history.commit_count"* ]] \
     || { kill "$SRV" 2>/dev/null; fail "server-rendered page missing content"; }
   cat > "$W/query.json" <<'JSON'
 {"schema":"rh-query-input/1","kind":"metrics","ids":[10,20,30],"cursor":-1,"limit":2}
 JSON
-  qct="$(curl -s -X POST -H 'Content-Type: application/json' --data-binary @"$W/query.json" -o "$W/query.out" -w '%{content_type}' http://127.0.0.1:18099/api/query)" || true
+  qct="$(curl -s -X POST -H 'Content-Type: application/json' --data-binary @"$W/query.json" -o "$W/query.out" -w '%{content_type}' http://127.0.0.1:18611/api/query)" || true
   [[ "$qct" == application/json ]] || { kill "$SRV" 2>/dev/null; fail "query ct=$qct"; }
   grep -q 'rh-query-result/1' "$W/query.out" || { kill "$SRV" 2>/dev/null; fail "query result missing"; }
-  n="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18099/nope)" || true
+  printf '{"resource":"metrics"}\n' > "$W/report/metrics.json"
+  mct="$(curl -s -o "$W/metrics.out" -w '%{http_code} %{content_type}' http://127.0.0.1:18611/api/metrics)" || true
+  [[ "$mct" == "200 application/json" ]] || { kill "$SRV" 2>/dev/null; fail "resource route=$mct"; }
+  grep -q '"resource":"metrics"' "$W/metrics.out" || { kill "$SRV" 2>/dev/null; fail "resource body missing"; }
+  absent="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18611/api/findings)" || true
+  [[ "$absent" == "404" ]] || { kill "$SRV" 2>/dev/null; fail "absent resource=$absent"; }
+  n="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18611/nope)" || true
   [[ "$n" == "404" ]] || { kill "$SRV" 2>/dev/null; fail "live 404=$n"; }
-  t="$(curl -s -o /dev/null -w '%{http_code}' --path-as-is http://127.0.0.1:18099/../etc/passwd)" || true
+  t="$(curl -s -o /dev/null -w '%{http_code}' --path-as-is http://127.0.0.1:18611/../etc/passwd)" || true
   [[ "$t" == "400" ]] || { kill "$SRV" 2>/dev/null; fail "live traversal=$t"; }
   kill "$SRV" 2>/dev/null || true
   echo "[m06http] live serve OK (incl. server-rendered /_report.html)"
