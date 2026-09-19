@@ -74,7 +74,9 @@ sed 's/"lease_ttl":100/"lease_ttl":0/' "$T-input.json" > "$T-bad.json"
 "$ROOT/build/rh_cli" ingest --root "$T-root-bad" --input "$T-bad.json" --out "$T-x" >/dev/null 2>&1; rc_ttl=$?
 sed 's/"status":"failed"/"status":"broken"/' "$T-input.json" > "$T-bad-status.json"
 "$ROOT/build/rh_cli" ingest --root "$T-root-bad2" --input "$T-bad-status.json" --out "$T-x" >/dev/null 2>&1; rc_status=$?
+sed 's/"failure_kind":"rate_limit"/"failure_kind":"unknown"/' "$T-input.json" > "$T-bad-failure.json"
+"$ROOT/build/rh_cli" ingest --root "$T-root-bad2" --input "$T-bad-failure.json" --out "$T-x" >/dev/null 2>&1; rc_failure=$?
 set -e
-[[ "$rc_ttl" -eq 4 && "$rc_status" -eq 4 ]] || fail "invalid ingest must exit 4 (got $rc_ttl/$rc_status)"
+[[ "$rc_ttl" -eq 4 && "$rc_status" -eq 4 && "$rc_failure" -eq 4 ]] || fail "invalid ingest must exit 4 (got $rc_ttl/$rc_status/$rc_failure)"
 
 echo "test_ingest_conformance_cli OK"
