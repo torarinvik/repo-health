@@ -23,313 +23,316 @@ include "./rh_base.elisa"
 
 # Phase codes (mirror rh_job_phase_label). Kept as i64/u8 constants so the
 # scheduler can assign them to slot state.
-const RH_JOB_QUEUED_C: u8 = 0
-const RH_JOB_LEASED_C: u8 = 1
-const RH_JOB_RUNNING_C: u8 = 2
-const RH_JOB_SUCCEEDED_C: u8 = 3
-const RH_JOB_FAILED_TERMINAL_C: u8 = 4
-const RH_JOB_CANCELED_C: u8 = 5
-const RH_JOB_RETRY_WAIT_C: u8 = 6
-const RH_JOB_DEAD_LETTER_C: u8 = 7
+module Job:
+    public:
+        const RH_JOB_QUEUED_C: u8 = 0
+        const RH_JOB_LEASED_C: u8 = 1
+        const RH_JOB_RUNNING_C: u8 = 2
+        const RH_JOB_SUCCEEDED_C: u8 = 3
+        const RH_JOB_FAILED_TERMINAL_C: u8 = 4
+        const RH_JOB_CANCELED_C: u8 = 5
+        const RH_JOB_RETRY_WAIT_C: u8 = 6
+        const RH_JOB_DEAD_LETTER_C: u8 = 7
 
-# Failure kinds, deliberately distinct (never collapsed to "error").
-def rh_job_classify(texts: darray[u8]&, s: i64, e: i64) -> i64:
-    # Compare the span directly; a one-shot loop would add a mutable counter
-    # without expressing any repetition.
-    return 0 if rh_job_eq(texts, s, e, "transient")
-    return 1 if rh_job_eq(texts, s, e, "rate_limit")
-    return 2 if rh_job_eq(texts, s, e, "auth")
-    return 3 if rh_job_eq(texts, s, e, "unsupported")
-    return 4 if rh_job_eq(texts, s, e, "malformed")
-    return 5 if rh_job_eq(texts, s, e, "budget")
-    return 6 if rh_job_eq(texts, s, e, "canceled")
-    -1
+        # Failure kinds, deliberately distinct (never collapsed to "error").
+        def rh_job_classify(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            # Compare the span directly; a one-shot loop would add a mutable counter
+            # without expressing any repetition.
+            return 0 if rh_job_eq(texts, s, e, "transient")
+            return 1 if rh_job_eq(texts, s, e, "rate_limit")
+            return 2 if rh_job_eq(texts, s, e, "auth")
+            return 3 if rh_job_eq(texts, s, e, "unsupported")
+            return 4 if rh_job_eq(texts, s, e, "malformed")
+            return 5 if rh_job_eq(texts, s, e, "budget")
+            return 6 if rh_job_eq(texts, s, e, "canceled")
+            -1
 
-# public alias used by the CLI for schema-token comparison.
-def rh_job_lit_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    rh_job_eq(texts, s, e, lit)
+        # public alias used by the CLI for schema-token comparison.
+        def rh_job_lit_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_job_eq(texts, s, e, lit)
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_job_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    rh_bytes_equal_literal(texts, s, e, lit)
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_job_kind_label(k: i64) -> u8&:
+            return "transient" if k == 0
+            return "rate_limit" if k == 1
+            return "auth" if k == 2
+            return "unsupported" if k == 3
+            return "malformed" if k == 4
+            return "budget" if k == 5
+            return "canceled" if k == 6
+            "unknown"
 
-def rh_job_kind_label(k: i64) -> u8&:
-    return "transient" if k == 0
-    return "rate_limit" if k == 1
-    return "auth" if k == 2
-    return "unsupported" if k == 3
-    return "malformed" if k == 4
-    return "budget" if k == 5
-    return "canceled" if k == 6
-    "unknown"
+        # Retry disposition for a failure kind: 0 retry, 1 terminal, 2 dead-letter.
+        # - auth/unsupported: terminal (an operator must fix credentials or the
+        #   connector; retrying is noise and can trip lockouts).
+        # - malformed: dead-letter (the payload will not fix itself).
+        # - transient/rate_limit: retry with backoff.
+        # - budget: terminal for this run but *reclaimable* is not the same as
+        #   success, so it is retried on the next scheduled pass (classified retry)
+        #   yet recorded distinctly.
+        def rh_job_disposition(kind: i64) -> i64:
+            return 1 if kind == 2 or kind == 3
+            return 2 if kind == 4
+            return 0 if kind == 0 or kind == 1 or kind == 5
+            2
 
-# Retry disposition for a failure kind: 0 retry, 1 terminal, 2 dead-letter.
-# - auth/unsupported: terminal (an operator must fix credentials or the
-#   connector; retrying is noise and can trip lockouts).
-# - malformed: dead-letter (the payload will not fix itself).
-# - transient/rate_limit: retry with backoff.
-# - budget: terminal for this run but *reclaimable* is not the same as
-#   success, so it is retried on the next scheduled pass (classified retry)
-#   yet recorded distinctly.
-def rh_job_disposition(kind: i64) -> i64:
-    return 1 if kind == 2 or kind == 3
-    return 2 if kind == 4
-    return 0 if kind == 0 or kind == 1 or kind == 5
-    2
+        # Exponential backoff (seconds), capped. attempt is 1-based. A rate-limit
+        # gets a larger base so a hammered host is respected (M07-12). Integer
+        # only: no float rounding drift.
+        def rh_job_backoff(kind: i64, attempt: i64, cap_secs: i64) -> i64:
+            return 0 if attempt < 1
+            base: mutable i64 = 30 if kind == 1 else 2
+            if kind == 5:
+                base <- 60
+            # base * 2^(attempt-1), saturating at cap.
+            v: mutable i64 =
+                while i < attempt |v: i64 = base, i: i64 = 1| -> v:
+                    if v > 1073741824:
+                        v <- 1073741824
+                    v <- v * 2
+                    i <- i + 1
+            if cap_secs > 0 and v > cap_secs:
+                v <- cap_secs
+            v
 
-# Exponential backoff (seconds), capped. attempt is 1-based. A rate-limit
-# gets a larger base so a hammered host is respected (M07-12). Integer
-# only: no float rounding drift.
-def rh_job_backoff(kind: i64, attempt: i64, cap_secs: i64) -> i64:
-    return 0 if attempt < 1
-    base: mutable i64 = 30 if kind == 1 else 2
-    if kind == 5:
-        base <- 60
-    # base * 2^(attempt-1), saturating at cap.
-    v: mutable i64 =
-        while i < attempt |v: i64 = base, i: i64 = 1| -> v:
-            if v > 1073741824:
-                v <- 1073741824
-            v <- v * 2
-            i <- i + 1
-    if cap_secs > 0 and v > cap_secs:
-        v <- cap_secs
-    v
+        # Next state after a failure. Returns the phase code and, for retry, the
+        # wake time. Phase codes mirror the blueprint:
+        #   0 queued, 1 leased, 2 running, 3 succeeded, 4 failed_terminal,
+        #   5 canceled, 6 retry_wait, 7 dead_letter
+        struct RhJobNext:
+            phase: mutable u8
+            wake_at: mutable i64
+            attempt: mutable i64
 
-# Next state after a failure. Returns the phase code and, for retry, the
-# wake time. Phase codes mirror the blueprint:
-#   0 queued, 1 leased, 2 running, 3 succeeded, 4 failed_terminal,
-#   5 canceled, 6 retry_wait, 7 dead_letter
-struct RhJobNext:
-    phase: mutable u8
-    wake_at: mutable i64
-    attempt: mutable i64
+        def rh_job_on_failure(kind: i64, attempt: i64, now: i64, max_attempts: i64, cap_secs: i64) -> RhJobNext:
+            d: i64 = rh_job_disposition(kind)
+            return RhJobNext{phase: 4, wake_at: 0, attempt: attempt} if d == 1
+            return RhJobNext{phase: 7, wake_at: 0, attempt: attempt} if d == 2
+            if max_attempts > 0 and attempt >= max_attempts:
+                # Exhausted retryable attempts dead-letter (never silent success).
+                return RhJobNext{phase: 7, wake_at: 0, attempt: attempt}
+            back: i64 = rh_job_backoff(kind, attempt, cap_secs)
+            RhJobNext{phase: 6, wake_at: now + back, attempt: attempt + 1}
 
-def rh_job_on_failure(kind: i64, attempt: i64, now: i64, max_attempts: i64, cap_secs: i64) -> RhJobNext:
-    d: i64 = rh_job_disposition(kind)
-    return RhJobNext{phase: 4, wake_at: 0, attempt: attempt} if d == 1
-    return RhJobNext{phase: 7, wake_at: 0, attempt: attempt} if d == 2
-    if max_attempts > 0 and attempt >= max_attempts:
-        # Exhausted retryable attempts dead-letter (never silent success).
-        return RhJobNext{phase: 7, wake_at: 0, attempt: attempt}
-    back: i64 = rh_job_backoff(kind, attempt, cap_secs)
-    RhJobNext{phase: 6, wake_at: now + back, attempt: attempt + 1}
+        def rh_job_phase_label(p: u8) -> u8&:
+            return "queued" if p == 0
+            return "leased" if p == 1
+            return "running" if p == 2
+            return "succeeded" if p == 3
+            return "failed_terminal" if p == 4
+            return "canceled" if p == 5
+            return "retry_wait" if p == 6
+            "dead_letter"
 
-def rh_job_phase_label(p: u8) -> u8&:
-    return "queued" if p == 0
-    return "leased" if p == 1
-    return "running" if p == 2
-    return "succeeded" if p == 3
-    return "failed_terminal" if p == 4
-    return "canceled" if p == 5
-    return "retry_wait" if p == 6
-    "dead_letter"
+        # --- Bounded scheduler (M02-03): queue + quota + retry/dead-letter. ---
+        #
+        # A single-host scheduler over a fixed bounded queue of job slots. It composes
+        # the failure classification above with a token-bucket host quota and an
+        # exponential host backoff so a hammered or failing host is not retried in a
+        # tight loop. All state is explicit and pure, so the same op sequence replays
+        # identically. The queue is bounded: enqueue past capacity is refused (never
+        # silently dropped), matching S012 (bounded work).
 
-# --- Bounded scheduler (M02-03): queue + quota + retry/dead-letter. ---
-#
-# A single-host scheduler over a fixed bounded queue of job slots. It composes
-# the failure classification above with a token-bucket host quota and an
-# exponential host backoff so a hammered or failing host is not retried in a
-# tight loop. All state is explicit and pure, so the same op sequence replays
-# identically. The queue is bounded: enqueue past capacity is refused (never
-# silently dropped), matching S012 (bounded work).
+        # Job slot phases reuse the code values from rh_job_phase_label, plus 8=empty.
+        const RH_SLOT_EMPTY: u8 = 8
 
-# Job slot phases reuse the code values from rh_job_phase_label, plus 8=empty.
-const RH_SLOT_EMPTY: u8 = 8
+        struct RhHost:
+            capacity: mutable i64
+            refill_per_second: mutable i64
+            base_backoff_seconds: mutable i64
+            max_backoff_seconds: mutable i64
+            tokens: mutable i64
+            last_refill: mutable i64
+            backoff_until: mutable i64
+            consecutive_failures: mutable i64
+            stopped: mutable i64
 
-struct RhHost:
-    capacity: mutable i64
-    refill_per_second: mutable i64
-    base_backoff_seconds: mutable i64
-    max_backoff_seconds: mutable i64
-    tokens: mutable i64
-    last_refill: mutable i64
-    backoff_until: mutable i64
-    consecutive_failures: mutable i64
-    stopped: mutable i64
+        struct RhSlot:
+            used: mutable bool
+            phase: mutable u8
+            attempt: mutable i64
+            wake_at: mutable i64
+            token: mutable i64
+            owner: mutable i64
+            lease_expires: mutable i64
 
-struct RhSlot:
-    used: mutable bool
-    phase: mutable u8
-    attempt: mutable i64
-    wake_at: mutable i64
-    token: mutable i64
-    owner: mutable i64
-    lease_expires: mutable i64
+        def rh_sched_host(capacity: i64, refill: i64, base_backoff: i64, max_backoff: i64) -> RhHost:
+            RhHost{capacity: capacity, refill_per_second: refill, base_backoff_seconds: base_backoff, max_backoff_seconds: max_backoff, tokens: capacity, last_refill: 0, backoff_until: 0, consecutive_failures: 0, stopped: 0}
 
-def rh_sched_host(capacity: i64, refill: i64, base_backoff: i64, max_backoff: i64) -> RhHost:
-    RhHost{capacity: capacity, refill_per_second: refill, base_backoff_seconds: base_backoff, max_backoff_seconds: max_backoff, tokens: capacity, last_refill: 0, backoff_until: 0, consecutive_failures: 0, stopped: 0}
+        def rh_sched_slots(n: i64) -> darray[RhSlot] can[Memory.Allocate, Abort.Panic]:
+            out: mutable darray[RhSlot] = []
+            while i < n |i: i64 = 0, out|:
+                out.push(RhSlot{used: false, phase: RH_SLOT_EMPTY, attempt: 0, wake_at: 0, token: 0, owner: -1, lease_expires: 0})
+                i <- i + 1
+            out
 
-def rh_sched_slots(n: i64) -> darray[RhSlot] can[Memory.Allocate, Abort.Panic]:
-    out: mutable darray[RhSlot] = []
-    while i < n |i: i64 = 0, out|:
-        out.push(RhSlot{used: false, phase: RH_SLOT_EMPTY, attempt: 0, wake_at: 0, token: 0, owner: -1, lease_expires: 0})
-        i <- i + 1
-    out
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_sched_host_allow(h: mutable RhHost&, now: i64) -> bool:
+            return false if h.stopped != 0
+            return false if h.backoff_until > now
+            rh_host_refill_j(h, now)
+            h.tokens > 0
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_host_refill_j(h: mutable RhHost&, now: i64) -> void:
-    return if now <= h.last_refill
-    add: i64 =
-        delta: i64 = now - h.last_refill
-        delta * h.refill_per_second
-    if add > 0:
-        h.tokens <- h.tokens + add
-        if h.tokens > h.capacity:
-            h.tokens <- h.capacity
-    h.last_refill <- now
+        # Enqueue: find the first empty slot. Returns the index or -1 when full.
+        def rh_sched_enqueue(slots: mutable darray[RhSlot]&, now: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < slots.count |i: usize = 0, slots|:
+                if not slots[i].used:
+                    slots[i] <- RhSlot{used: true, phase: RH_JOB_QUEUED_C, attempt: 0, wake_at: now, token: 0, owner: -1, lease_expires: 0}
+                    return i.i64()
+                i <- i + 1
+            -1
 
-def rh_sched_host_allow(h: mutable RhHost&, now: i64) -> bool:
-    return false if h.stopped != 0
-    return false if h.backoff_until > now
-    rh_host_refill_j(h, now)
-    h.tokens > 0
+        # Claim the earliest ready job (queued, or retry_wait whose wake time has
+        # arrived) that the host quota currently allows. Returns the slot index, or
+        # -1 when nothing is ready or the quota refuses. Consumes a host token.
+        def rh_sched_claim(slots: mutable darray[RhSlot]&, h: mutable RhHost&, owner: i64, now: i64, ttl: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if ttl <= 0
+            return -1 if not rh_sched_host_allow(h, now)
+            best: i64 =
+                while i < slots.count |best: i64 = -1, best_wake: i64 = 0, i: usize = 0, slots| -> best:
+                    s: RhSlot = slots[i]
+                    if s.used:
+                        ready: bool = (s.phase == RH_JOB_QUEUED_C) or (s.phase == RH_JOB_RETRY_WAIT_C and s.wake_at <= now)
+                        if ready:
+                            if best < 0 or s.wake_at < best_wake:
+                                best <- i.i64()
+                                best_wake <- s.wake_at
+                    i <- i + 1
+            return -1 if best < 0
+            b: RhSlot = slots[best.usize()]
+            h.tokens <- h.tokens - 1
+            slots[best.usize()] <- RhSlot{used: true, phase: RH_JOB_LEASED_C, attempt: b.attempt, wake_at: b.wake_at, token: b.token + 1, owner: owner, lease_expires: now + ttl}
+            best
 
-# Enqueue: find the first empty slot. Returns the index or -1 when full.
-def rh_sched_enqueue(slots: mutable darray[RhSlot]&, now: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    while i < slots.count |i: usize = 0, slots|:
-        if not slots[i].used:
-            slots[i] <- RhSlot{used: true, phase: RH_JOB_QUEUED_C, attempt: 0, wake_at: now, token: 0, owner: -1, lease_expires: 0}
-            return i.i64()
-        i <- i + 1
-    -1
+        def rh_sched_succeed(slots: mutable darray[RhSlot]&, idx: i64, token: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if idx < 0 or idx >= slots.count.i64()
+            s: RhSlot = slots[idx.usize()]
+            return false if not s.used or s.token != token
+            return false if s.phase != RH_JOB_LEASED_C and s.phase != RH_JOB_RUNNING_C
+            slots[idx.usize()] <- RhSlot{used: true, phase: RH_JOB_SUCCEEDED_C, attempt: s.attempt, wake_at: s.wake_at, token: s.token, owner: s.owner, lease_expires: s.lease_expires}
+            true
 
-# Claim the earliest ready job (queued, or retry_wait whose wake time has
-# arrived) that the host quota currently allows. Returns the slot index, or
-# -1 when nothing is ready or the quota refuses. Consumes a host token.
-def rh_sched_claim(slots: mutable darray[RhSlot]&, h: mutable RhHost&, owner: i64, now: i64, ttl: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return -1 if ttl <= 0
-    return -1 if not rh_sched_host_allow(h, now)
-    best: i64 =
-        while i < slots.count |best: i64 = -1, best_wake: i64 = 0, i: usize = 0, slots| -> best:
-            s: RhSlot = slots[i]
-            if s.used:
-                ready: bool = (s.phase == RH_JOB_QUEUED_C) or (s.phase == RH_JOB_RETRY_WAIT_C and s.wake_at <= now)
-                if ready:
-                    if best < 0 or s.wake_at < best_wake:
-                        best <- i.i64()
-                        best_wake <- s.wake_at
-            i <- i + 1
-    return -1 if best < 0
-    b: RhSlot = slots[best.usize()]
-    h.tokens <- h.tokens - 1
-    slots[best.usize()] <- RhSlot{used: true, phase: RH_JOB_LEASED_C, attempt: b.attempt, wake_at: b.wake_at, token: b.token + 1, owner: owner, lease_expires: now + ttl}
-    best
+        # Fail a leased job: classify, advance attempt, and either retry (with
+        # backoff), dead-letter, or go terminal. Also records host backoff on a
+        # retryable/transient failure so the host is respected (never tight-loop).
+        def rh_sched_fail(slots: mutable darray[RhSlot]&, h: mutable RhHost&, idx: i64, token: i64, kind: i64, now: i64, max_attempts: i64, cap_secs: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if idx < 0 or idx >= slots.count.i64()
+            s: RhSlot = slots[idx.usize()]
+            return -1 if not s.used or s.token != token
+            return -1 if s.phase != RH_JOB_LEASED_C and s.phase != RH_JOB_RUNNING_C
+            att: i64 = s.attempt + 1
+            nxt: RhJobNext = rh_job_on_failure(kind, att, now, max_attempts, cap_secs)
+            slots[idx.usize()] <- RhSlot{used: true, phase: nxt.phase, attempt: att, wake_at: nxt.wake_at, token: s.token, owner: -1, lease_expires: 0}
+            d: i64 = rh_job_disposition(kind)
+            if d == 0:
+                # transient/rate-limit/budget: back the host off the same amount.
+                wait: i64 = rh_job_backoff(kind, att, h.max_backoff_seconds)
+                if wait > 0:
+                    h.consecutive_failures <- h.consecutive_failures + 1
+                    h.backoff_until <- now + wait
+            nxt.phase.i64()
 
-def rh_sched_succeed(slots: mutable darray[RhSlot]&, idx: i64, token: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    return false if idx < 0 or idx >= slots.count.i64()
-    s: RhSlot = slots[idx.usize()]
-    return false if not s.used or s.token != token
-    return false if s.phase != RH_JOB_LEASED_C and s.phase != RH_JOB_RUNNING_C
-    slots[idx.usize()] <- RhSlot{used: true, phase: RH_JOB_SUCCEEDED_C, attempt: s.attempt, wake_at: s.wake_at, token: s.token, owner: s.owner, lease_expires: s.lease_expires}
-    true
+        # Cancel a queued/leased/running job. Cancelling a live lease leaves the slot
+        # canceled; a stale worker cannot later succeed it (token/phase check).
+        def rh_sched_cancel(slots: mutable darray[RhSlot]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if idx < 0 or idx >= slots.count.i64()
+            s: RhSlot = slots[idx.usize()]
+            return false if not s.used
+            return false if s.phase == RH_JOB_SUCCEEDED_C or s.phase == RH_JOB_FAILED_TERMINAL_C or s.phase == RH_JOB_CANCELED_C or s.phase == RH_JOB_DEAD_LETTER_C
+            slots[idx.usize()] <- RhSlot{used: true, phase: RH_JOB_CANCELED_C, attempt: s.attempt, wake_at: s.wake_at, token: s.token, owner: s.owner, lease_expires: s.lease_expires}
+            true
 
-# Fail a leased job: classify, advance attempt, and either retry (with
-# backoff), dead-letter, or go terminal. Also records host backoff on a
-# retryable/transient failure so the host is respected (never tight-loop).
-def rh_sched_fail(slots: mutable darray[RhSlot]&, h: mutable RhHost&, idx: i64, token: i64, kind: i64, now: i64, max_attempts: i64, cap_secs: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return -1 if idx < 0 or idx >= slots.count.i64()
-    s: RhSlot = slots[idx.usize()]
-    return -1 if not s.used or s.token != token
-    return -1 if s.phase != RH_JOB_LEASED_C and s.phase != RH_JOB_RUNNING_C
-    att: i64 = s.attempt + 1
-    nxt: RhJobNext = rh_job_on_failure(kind, att, now, max_attempts, cap_secs)
-    slots[idx.usize()] <- RhSlot{used: true, phase: nxt.phase, attempt: att, wake_at: nxt.wake_at, token: s.token, owner: -1, lease_expires: 0}
-    d: i64 = rh_job_disposition(kind)
-    if d == 0:
-        # transient/rate-limit/budget: back the host off the same amount.
-        wait: i64 = rh_job_backoff(kind, att, h.max_backoff_seconds)
-        if wait > 0:
-            h.consecutive_failures <- h.consecutive_failures + 1
-            h.backoff_until <- now + wait
-    nxt.phase.i64()
+        # Reclaim a job whose lease expired: back to queued with the SAME token
+        # counter bumped is wrong here (the old worker's token must stop matching),
+        # so the token is advanced and the phase resets to queued. A stale worker
+        # holding the old token can no longer succeed it.
+        def rh_sched_reclaim(slots: mutable darray[RhSlot]&, idx: i64, now: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if idx < 0 or idx >= slots.count.i64()
+            s: RhSlot = slots[idx.usize()]
+            return false if not s.used
+            return false if s.phase != RH_JOB_LEASED_C and s.phase != RH_JOB_RUNNING_C
+            return false if now < s.lease_expires
+            slots[idx.usize()] <- RhSlot{used: true, phase: RH_JOB_QUEUED_C, attempt: s.attempt, wake_at: now, token: s.token + 1, owner: -1, lease_expires: 0}
+            true
 
-# Cancel a queued/leased/running job. Cancelling a live lease leaves the slot
-# canceled; a stale worker cannot later succeed it (token/phase check).
-def rh_sched_cancel(slots: mutable darray[RhSlot]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    return false if idx < 0 or idx >= slots.count.i64()
-    s: RhSlot = slots[idx.usize()]
-    return false if not s.used
-    return false if s.phase == RH_JOB_SUCCEEDED_C or s.phase == RH_JOB_FAILED_TERMINAL_C or s.phase == RH_JOB_CANCELED_C or s.phase == RH_JOB_DEAD_LETTER_C
-    slots[idx.usize()] <- RhSlot{used: true, phase: RH_JOB_CANCELED_C, attempt: s.attempt, wake_at: s.wake_at, token: s.token, owner: s.owner, lease_expires: s.lease_expires}
-    true
+        # --- Scheduler op-sequence interpreter (M02-03 CLI path). ---
+        #
+        # A flat, replayable op sequence over the bounded scheduler. Op codes:
+        #   0 enqueue(now)           -> slot index or -1 (full)
+        #   1 claim(owner, now, ttl) -> slot index or -1
+        #   2 succeed(slot, token)   -> 1/0
+        #   3 fail(slot, token, kind, now, max_attempts, cap) -> resulting phase i64 or -1
+        #   4 cancel(slot)           -> 1/0
+        #   5 reclaim(slot, now)     -> 1/0
+        # These are applied in order, so the same sequence replays identically.
+        struct RhSchedOp:
+            code: mutable i64
+            a: mutable i64
+            b: mutable i64
+            c: mutable i64
+            d: mutable i64
+            e: mutable i64
+            f: mutable i64
 
-# Reclaim a job whose lease expired: back to queued with the SAME token
-# counter bumped is wrong here (the old worker's token must stop matching),
-# so the token is advanced and the phase resets to queued. A stale worker
-# holding the old token can no longer succeed it.
-def rh_sched_reclaim(slots: mutable darray[RhSlot]&, idx: i64, now: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    return false if idx < 0 or idx >= slots.count.i64()
-    s: RhSlot = slots[idx.usize()]
-    return false if not s.used
-    return false if s.phase != RH_JOB_LEASED_C and s.phase != RH_JOB_RUNNING_C
-    return false if now < s.lease_expires
-    slots[idx.usize()] <- RhSlot{used: true, phase: RH_JOB_QUEUED_C, attempt: s.attempt, wake_at: now, token: s.token + 1, owner: -1, lease_expires: 0}
-    true
+        # Result of one op, recorded by the caller for the report.
+        struct RhSchedResult:
+            op_index: mutable i64
+            code: mutable i64
+            outcome: mutable i64
 
-# --- Scheduler op-sequence interpreter (M02-03 CLI path). ---
-#
-# A flat, replayable op sequence over the bounded scheduler. Op codes:
-#   0 enqueue(now)           -> slot index or -1 (full)
-#   1 claim(owner, now, ttl) -> slot index or -1
-#   2 succeed(slot, token)   -> 1/0
-#   3 fail(slot, token, kind, now, max_attempts, cap) -> resulting phase i64 or -1
-#   4 cancel(slot)           -> 1/0
-#   5 reclaim(slot, now)     -> 1/0
-# These are applied in order, so the same sequence replays identically.
-struct RhSchedOp:
-    code: mutable i64
-    a: mutable i64
-    b: mutable i64
-    c: mutable i64
-    d: mutable i64
-    e: mutable i64
-    f: mutable i64
+        def rh_sched_apply(slots: mutable darray[RhSlot]&, h: mutable RhHost&, op: RhSchedOp&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return rh_sched_enqueue(slots, op.a) if op.code == 0
+            return rh_sched_claim(slots, h, op.a, op.b, op.c) if op.code == 1
+            if op.code == 2:
+                return 1 if rh_sched_succeed(slots, op.a, op.b)
+                return 0
+            return rh_sched_fail(slots, h, op.a, op.b, op.c, op.d, op.e, op.f) if op.code == 3
+            if op.code == 4:
+                return 1 if rh_sched_cancel(slots, op.a)
+                return 0
+            if op.code == 5:
+                return 1 if rh_sched_reclaim(slots, op.a, op.b)
+                return 0
+            -1
 
-# Result of one op, recorded by the caller for the report.
-struct RhSchedResult:
-    op_index: mutable i64
-    code: mutable i64
-    outcome: mutable i64
+        # Op code/label for the scheduler interpreter.
+        def rh_job_op_code(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return 0 if rh_job_eq(texts, s, e, "enqueue")
+            return 1 if rh_job_eq(texts, s, e, "claim")
+            return 2 if rh_job_eq(texts, s, e, "succeed")
+            return 3 if rh_job_eq(texts, s, e, "fail")
+            return 4 if rh_job_eq(texts, s, e, "cancel")
+            return 5 if rh_job_eq(texts, s, e, "reclaim")
+            -1
 
-def rh_sched_apply(slots: mutable darray[RhSlot]&, h: mutable RhHost&, op: RhSchedOp&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return rh_sched_enqueue(slots, op.a) if op.code == 0
-    return rh_sched_claim(slots, h, op.a, op.b, op.c) if op.code == 1
-    if op.code == 2:
-        return 1 if rh_sched_succeed(slots, op.a, op.b)
-        return 0
-    return rh_sched_fail(slots, h, op.a, op.b, op.c, op.d, op.e, op.f) if op.code == 3
-    if op.code == 4:
-        return 1 if rh_sched_cancel(slots, op.a)
-        return 0
-    if op.code == 5:
-        return 1 if rh_sched_reclaim(slots, op.a, op.b)
-        return 0
-    -1
+        def rh_job_op_label(code: i64) -> u8&:
+            return "enqueue" if code == 0
+            return "claim" if code == 1
+            return "succeed" if code == 2
+            return "fail" if code == 3
+            return "cancel" if code == 4
+            "reclaim"
 
-# Op code/label for the scheduler interpreter.
-def rh_job_op_code(texts: darray[u8]&, s: i64, e: i64) -> i64:
-    return 0 if rh_job_eq(texts, s, e, "enqueue")
-    return 1 if rh_job_eq(texts, s, e, "claim")
-    return 2 if rh_job_eq(texts, s, e, "succeed")
-    return 3 if rh_job_eq(texts, s, e, "fail")
-    return 4 if rh_job_eq(texts, s, e, "cancel")
-    return 5 if rh_job_eq(texts, s, e, "reclaim")
-    -1
+        # Read an optional integer field from a JSON object; default when absent.
+        def rh_opt_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, dflt: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return dflt if idx < 0
+            ok: mutable i64 = 0
+            v: i64 = rh_json_int(nodes, raw, idx, &ok)
+            return dflt if ok == 0
+            v
 
-def rh_job_op_label(code: i64) -> u8&:
-    return "enqueue" if code == 0
-    return "claim" if code == 1
-    return "succeed" if code == 2
-    return "fail" if code == 3
-    return "cancel" if code == 4
-    "reclaim"
+    private:
+        def rh_job_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, lit)
 
-# Read an optional integer field from a JSON object; default when absent.
-def rh_opt_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, dflt: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
-    return dflt if idx < 0
-    ok: mutable i64 = 0
-    v: i64 = rh_json_int(nodes, raw, idx, &ok)
-    return dflt if ok == 0
-    v
+        def rh_host_refill_j(h: mutable RhHost&, now: i64) -> void:
+            return if now <= h.last_refill
+            add: i64 =
+                delta: i64 = now - h.last_refill
+                delta * h.refill_per_second
+            if add > 0:
+                h.tokens <- h.tokens + add
+                if h.tokens > h.capacity:
+                    h.tokens <- h.capacity
+            h.last_refill <- now
