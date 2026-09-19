@@ -1,0 +1,234 @@
+# rh_rpm.elisa — bounded RPM spec metadata (M08).
+#
+# Only the preamble is parsed. Macro declarations are retained as context but
+# never expanded, and section bodies are never executed or interpreted.
+# Relations are declarations, not resolved package edges.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_RPM_MAX_BYTES: usize = 4194304
+const RH_RPM_MAX_FIELDS: i64 = 512
+const RH_RPM_MAX_RELATIONS: i64 = 200000
+
+struct RhRpmField:
+    key_s: i64
+    key_e: i64
+    value_s: i64
+    value_e: i64
+
+module Rpm:
+    private:
+        def rh_rpm_eq(data: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(data, s, e, literal)
+
+        def rh_rpm_trim(data: darray[u8]&, s: i64, e: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e < s or e > data.count.i64()
+            start_out[0] <- s
+            end_out[0] <- e
+            while start_out[0] < end_out[0] and (data[start_out[0].usize()] == 32 or data[start_out[0].usize()] == 9 or data[start_out[0].usize()] == 13):
+                start_out[0] <- start_out[0] + 1
+            while end_out[0] > start_out[0] and (data[(end_out[0] - 1).usize()] == 32 or data[(end_out[0] - 1).usize()] == 9 or data[(end_out[0] - 1).usize()] == 13):
+                end_out[0] <- end_out[0] - 1
+            true
+
+        def rh_rpm_key_char(value: u8) -> bool:
+            (value >= 65 and value <= 90) or (value >= 97 and value <= 122) or (value >= 48 and value <= 57) or value == 45 or value == 95
+
+        def rh_rpm_known_key(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if Rpm::rh_rpm_eq(data, s, e, "Name") or Rpm::rh_rpm_eq(data, s, e, "Version") or Rpm::rh_rpm_eq(data, s, e, "Release")
+            return true if Rpm::rh_rpm_eq(data, s, e, "Epoch") or Rpm::rh_rpm_eq(data, s, e, "URL") or Rpm::rh_rpm_eq(data, s, e, "License")
+            return true if Rpm::rh_rpm_eq(data, s, e, "BuildArch") or Rpm::rh_rpm_eq(data, s, e, "Summary") or Rpm::rh_rpm_eq(data, s, e, "Group")
+            return true if Rpm::rh_rpm_eq(data, s, e, "BuildRequires") or Rpm::rh_rpm_eq(data, s, e, "Requires")
+            return true if Rpm::rh_rpm_eq(data, s, e, "Recommends") or Rpm::rh_rpm_eq(data, s, e, "Suggests")
+            return true if Rpm::rh_rpm_eq(data, s, e, "Provides") or Rpm::rh_rpm_eq(data, s, e, "Obsoletes") or Rpm::rh_rpm_eq(data, s, e, "Conflicts")
+            return true if e - s >= 6 and (Rpm::rh_rpm_eq(data, s, s + 6, "Source") or Rpm::rh_rpm_eq(data, s, s + 5, "Patch"))
+            false
+
+        def rh_rpm_parse(raw: darray[u8]&, fields: mutable darray[RhRpmField]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count > RH_RPM_MAX_BYTES
+            unknown_out[0] <- 0
+            line_start: mutable usize = 0
+            while line_start <= raw.count |line_start, raw, fields, unknown_out|:
+                line_end: usize =
+                    while j < raw.count and raw[j] != 10 |j: usize = line_start, raw| -> j:
+                        j <- j + 1
+                s: mutable i64 = line_start.i64()
+                e: mutable i64 = line_end.i64()
+                while e > s and raw[(e - 1).usize()] == 13:
+                    e <- e - 1
+                while s < e and (raw[s.usize()] == 32 or raw[s.usize()] == 9):
+                    s <- s + 1
+                if s < e and raw[s.usize()] == 37:
+                    # Macro declarations are not expanded; section bodies end
+                    # the preamble and are intentionally not interpreted.
+                    if (e - s >= 7 and Rpm::rh_rpm_eq(raw, s, s + 7, "%global")) or (e - s >= 7 and Rpm::rh_rpm_eq(raw, s, s + 7, "%define")):
+                        line_start <- line_end + 1
+                        continue
+                    break
+                if s < e:
+                    colon: mutable i64 = -1
+                    while k < e |k: i64 = s, e, raw, colon|:
+                        if raw[k.usize()] == 58:
+                            colon <- k
+                            break
+                        k <- k + 1
+                    return -1 if colon <= s
+                    while k < colon |k: i64 = s, colon, raw|:
+                        return -1 if not Rpm::rh_rpm_key_char(raw[k.usize()])
+                        k <- k + 1
+                    return -1 if fields.count.i64() >= RH_RPM_MAX_FIELDS
+                    value_s: mutable i64 = colon + 1
+                    while value_s < e and (raw[value_s.usize()] == 32 or raw[value_s.usize()] == 9):
+                        value_s <- value_s + 1
+                    fields.push(RhRpmField{key_s: s, key_e: colon, value_s: value_s, value_e: e})
+                    unknown_out[0] <- unknown_out[0] + 1 if not Rpm::rh_rpm_known_key(raw, s, colon)
+                line_start <- line_end + 1
+            fields.count.i64()
+
+        def rh_rpm_field(data: darray[u8]&, fields: darray[RhRpmField]&, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < fields.count.i64() |i: i64 = 0, fields, data, key, s_out, e_out|:
+                field: RhRpmField = fields[i.usize()]
+                if Rpm::rh_rpm_eq(data, field.key_s, field.key_e, key):
+                    s_out[0] <- field.value_s
+                    e_out[0] <- field.value_e
+                    return i
+                i <- i + 1
+            -1
+
+        def rh_rpm_singleton(data: darray[u8]&, fields: darray[RhRpmField]&, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            seen: mutable i64 = 0
+            while i < fields.count.i64() |i: i64 = 0, fields, data, key, seen|:
+                field: RhRpmField = fields[i.usize()]
+                if Rpm::rh_rpm_eq(data, field.key_s, field.key_e, key):
+                    seen <- seen + 1
+                i <- i + 1
+            seen <= 1
+
+        def rh_rpm_emit_value(out: mutable darray[u8]&, raw: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            if s >= 0 and e >= s:
+                out.push(34)
+                rh_json_escape(out, raw, s.usize(), e.usize())
+                out.push(34)
+            else:
+                rh_push_text(out, "null")
+
+        def rh_rpm_emit_field(out: mutable darray[u8]&, raw: darray[u8]&, fields: darray[RhRpmField]&, key: u8&) -> void can[Memory.Allocate, Abort.Panic]:
+            s: mutable i64 = -1
+            e: mutable i64 = -1
+            Rpm::rh_rpm_field(raw, fields, key, &s, &e)
+            Rpm::rh_rpm_emit_value(out, raw, s, e)
+
+        def rh_rpm_relation_scope(data: darray[u8]&, s: i64, e: i64) -> u8&:
+            return "build" if Rpm::rh_rpm_eq(data, s, e, "BuildRequires")
+            return "runtime" if Rpm::rh_rpm_eq(data, s, e, "Requires")
+            return "recommend" if Rpm::rh_rpm_eq(data, s, e, "Recommends")
+            return "suggest" if Rpm::rh_rpm_eq(data, s, e, "Suggests")
+            return "provide" if Rpm::rh_rpm_eq(data, s, e, "Provides")
+            return "obsolete" if Rpm::rh_rpm_eq(data, s, e, "Obsoletes")
+            "conflict"
+
+        def rh_rpm_relation_key(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            Rpm::rh_rpm_eq(data, s, e, "BuildRequires") or Rpm::rh_rpm_eq(data, s, e, "Requires") or Rpm::rh_rpm_eq(data, s, e, "Recommends") or Rpm::rh_rpm_eq(data, s, e, "Suggests") or Rpm::rh_rpm_eq(data, s, e, "Provides") or Rpm::rh_rpm_eq(data, s, e, "Obsoletes") or Rpm::rh_rpm_eq(data, s, e, "Conflicts")
+
+        def rh_rpm_emit_relations(out: mutable darray[u8]&, raw: darray[u8]&, fields: darray[RhRpmField]&, unresolved_out: mutable i64&, emitted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while fi < fields.count.i64() |fi: i64 = 0, fields, raw, out, unresolved_out, emitted_out|:
+                field: RhRpmField = fields[fi.usize()]
+                if Rpm::rh_rpm_relation_key(raw, field.key_s, field.key_e):
+                    s: mutable i64 = field.value_s
+                    while s < field.value_e:
+                        while s < field.value_e and (raw[s.usize()] == 32 or raw[s.usize()] == 9 or raw[s.usize()] == 44):
+                            s <- s + 1
+                        break if s >= field.value_e
+                        name_s: i64 = s
+                        while s < field.value_e and raw[s.usize()] != 32 and raw[s.usize()] != 9 and raw[s.usize()] != 44:
+                            s <- s + 1
+                        name_e: i64 = s
+                        req_s: mutable i64 = -1
+                        req_e: mutable i64 = -1
+                        while s < field.value_e and (raw[s.usize()] == 32 or raw[s.usize()] == 9):
+                            s <- s + 1
+                        if s < field.value_e and (raw[s.usize()] == 60 or raw[s.usize()] == 62 or raw[s.usize()] == 61):
+                            req_s <- s
+                            while s < field.value_e and raw[s.usize()] != 32 and raw[s.usize()] != 9 and raw[s.usize()] != 44:
+                                s <- s + 1
+                            while s < field.value_e and (raw[s.usize()] == 32 or raw[s.usize()] == 9):
+                                s <- s + 1
+                            while s < field.value_e and raw[s.usize()] != 32 and raw[s.usize()] != 9 and raw[s.usize()] != 44:
+                                s <- s + 1
+                            req_e <- s
+                        unresolved: mutable bool = false
+                        while k < name_e |k: i64 = name_s, name_e, raw, unresolved|:
+                            unresolved <- true if raw[k.usize()] == 37 or raw[k.usize()] == 124 or raw[k.usize()] == 40 or raw[k.usize()] == 41
+                            k <- k + 1
+                        unresolved <- true if req_s >= 0 and req_e > req_s and raw[req_s.usize()] == 37
+                        if unresolved:
+                            unresolved_out[0] <- unresolved_out[0] + 1
+                        return -1 if emitted_out[0] >= RH_RPM_MAX_RELATIONS
+                        out.push(44) if emitted_out[0] > 0
+                        rh_push_text(out, "{\"name\":\"")
+                        rh_json_escape(out, raw, name_s.usize(), name_e.usize())
+                        rh_push_text(out, "\",\"requirement\":")
+                        Rpm::rh_rpm_emit_value(out, raw, req_s, req_e)
+                        rh_push_text(out, ",\"scope\":\"")
+                        rh_push_text(out, Rpm::rh_rpm_relation_scope(raw, field.key_s, field.key_e))
+                        rh_push_text(out, "\",\"state\":\"")
+                        rh_push_text(out, "unresolved" if unresolved else "declared")
+                        rh_push_text(out, "\"}")
+                        emitted_out[0] <- emitted_out[0] + 1
+                fi <- fi + 1
+            0
+
+        def rh_rpm_emit_named(out: mutable darray[u8]&, raw: darray[u8]&, fields: darray[RhRpmField]&, prefix: u8&, prefix_n: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            first: mutable i64 = 1
+            while i < fields.count.i64() |i: i64 = 0, fields, raw, out, prefix, prefix_n, first|:
+                field: RhRpmField = fields[i.usize()]
+                if field.key_e - field.key_s >= prefix_n and rh_bytes_equal_literal(raw, field.key_s, field.key_s + prefix_n, prefix):
+                    out.push(44) if first == 0
+                    first <- 0
+                    out.push(34)
+                    rh_json_escape(out, raw, field.value_s.usize(), field.value_e.usize())
+                    out.push(34)
+                i <- i + 1
+
+    public:
+        def rh_rpm_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            fields: mutable darray[RhRpmField] = []
+            unknown: mutable i64 = 0
+            return -1 if Rpm::rh_rpm_parse(raw, fields, &unknown) <= 0
+            return -1 if not Rpm::rh_rpm_singleton(raw, fields, "Name") or not Rpm::rh_rpm_singleton(raw, fields, "Version") or not Rpm::rh_rpm_singleton(raw, fields, "Release") or not Rpm::rh_rpm_singleton(raw, fields, "Epoch") or not Rpm::rh_rpm_singleton(raw, fields, "URL") or not Rpm::rh_rpm_singleton(raw, fields, "License") or not Rpm::rh_rpm_singleton(raw, fields, "BuildArch")
+            name_s: mutable i64 = -1
+            name_e: mutable i64 = -1
+            version_s: mutable i64 = -1
+            version_e: mutable i64 = -1
+            release_s: mutable i64 = -1
+            release_e: mutable i64 = -1
+            return -1 if Rpm::rh_rpm_field(raw, fields, "Name", &name_s, &name_e) < 0 or Rpm::rh_rpm_field(raw, fields, "Version", &version_s, &version_e) < 0 or Rpm::rh_rpm_field(raw, fields, "Release", &release_s, &release_e) < 0
+            rh_push_text(out, "{\"schema\":\"rh-rpm-spec-result/1\",\"format\":\"rpm-spec\",\"name\":")
+            Rpm::rh_rpm_emit_value(out, raw, name_s, name_e)
+            rh_push_text(out, ",\"version\":")
+            Rpm::rh_rpm_emit_value(out, raw, version_s, version_e)
+            rh_push_text(out, ",\"release\":")
+            Rpm::rh_rpm_emit_value(out, raw, release_s, release_e)
+            rh_push_text(out, ",\"epoch\":")
+            Rpm::rh_rpm_emit_field(out, raw, fields, "Epoch")
+            rh_push_text(out, ",\"url\":")
+            Rpm::rh_rpm_emit_field(out, raw, fields, "URL")
+            rh_push_text(out, ",\"license\":")
+            Rpm::rh_rpm_emit_field(out, raw, fields, "License")
+            rh_push_text(out, ",\"build_arch\":")
+            Rpm::rh_rpm_emit_field(out, raw, fields, "BuildArch")
+            rh_push_text(out, ",\"sources\":[")
+            Rpm::rh_rpm_emit_named(out, raw, fields, "Source", 6)
+            rh_push_text(out, "],\"patches\":[")
+            Rpm::rh_rpm_emit_named(out, raw, fields, "Patch", 5)
+            rh_push_text(out, "],\"relations\":[")
+            unresolved_relations: mutable i64 = 0
+            emitted_relations: mutable i64 = 0
+            return -1 if Rpm::rh_rpm_emit_relations(out, raw, fields, &unresolved_relations, &emitted_relations) != 0
+            rh_push_text(out, "],\"unknown_fields\":")
+            rh_push_decimal_i64(out, unknown)
+            rh_push_text(out, ",\"unresolved_relations\":")
+            rh_push_decimal_i64(out, unresolved_relations)
+            rh_push_text(out, ",\"note\":\"RPM spec preamble only; macros and section bodies are not expanded or executed; source and patch entries are declarations; relations are not resolved\"}")
+            0
