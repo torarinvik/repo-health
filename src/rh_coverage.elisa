@@ -1,0 +1,192 @@
+# rh_coverage.elisa — source-specific capability coverage intervals (M02/M05).
+#
+# Intervals describe what a source could observe during a bounded window. A
+# missing endpoint is serialized as null, never as a factual epoch sentinel;
+# capability state remains separate from activity and from other sources.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module Coverage:
+    private:
+        def rh_coverage_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if obj < 0 or nodes[obj.usize()].kind != RH_JSON_OBJ
+            want: usize = strlen(key)
+            while child >= 0 |child: i64 = nodes[obj.usize()].first_child, nodes, texts, key, want|:
+                kn: RhJsonNode = nodes[child.usize()]
+                value: i64 = kn.next_sibling
+                if kn.kind == RH_JSON_STR and value >= 0 and kn.text_end - kn.text_start == want.i64():
+                    same: mutable bool = true
+                    while k < want |k: usize = 0, texts, kn, key|:
+                        if texts[(kn.text_start + k.i64()).usize()] != key[k]:
+                            same <- false
+                        k <- k + 1
+                    return value if same
+                child <- nodes[value.usize()].next_sibling if value >= 0 else -1
+            -1
+
+        def rh_coverage_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Coverage::rh_coverage_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            n: RhJsonNode = nodes[idx.usize()]
+            s_out[0] <- n.text_start
+            e_out[0] <- n.text_end
+            true
+
+        def rh_coverage_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Coverage::rh_coverage_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_coverage_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool:
+            return false if s < 0 or e < s or e - s != strlen(lit).i64()
+            while i < e - s |i: i64 = 0, texts, s, lit|:
+                return false if texts[(s + i).usize()] != lit[i.usize()]
+                i <- i + 1
+            true
+
+        def rh_coverage_state(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return 0 if Coverage::rh_coverage_eq(texts, s, e, "observed")
+            return 1 if Coverage::rh_coverage_eq(texts, s, e, "partial")
+            return 2 if Coverage::rh_coverage_eq(texts, s, e, "stale")
+            return 3 if Coverage::rh_coverage_eq(texts, s, e, "unavailable")
+            return 4 if Coverage::rh_coverage_eq(texts, s, e, "unauthorized")
+            return 5 if Coverage::rh_coverage_eq(texts, s, e, "not_applicable")
+            return 6 if Coverage::rh_coverage_eq(texts, s, e, "unsupported")
+            -1
+
+        def rh_coverage_state_label(state: i64) -> u8&:
+            return "observed" if state == 0
+            return "partial" if state == 1
+            return "stale" if state == 2
+            return "unavailable" if state == 3
+            return "unauthorized" if state == 4
+            return "not_applicable" if state == 5
+            "unsupported"
+
+        def rh_coverage_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, s.usize(), e.usize())
+            out.push(34)
+
+        def rh_coverage_optional_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, out: mutable darray[u8]&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Coverage::rh_coverage_get(nodes, texts, obj, key)
+            return false if idx < 0
+            if nodes[idx.usize()].kind == RH_JSON_NULL:
+                rh_push_text(out, "null")
+                value_out[0] <- 0
+                present_out[0] <- 0
+                return true
+            ok: mutable i64 = 0
+            value: i64 = rh_json_int(nodes, raw, idx, &ok)
+            return false if ok == 0 or value < 0
+            rh_push_decimal_i64(out, value)
+            value_out[0] <- value
+            present_out[0] <- 1
+            true
+
+    public:
+        def rh_coverage_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema: i64 = Coverage::rh_coverage_get(nodes, texts, root, "schema")
+            return -1 if schema < 0 or nodes[schema.usize()].kind != RH_JSON_STR
+            sn: RhJsonNode = nodes[schema.usize()]
+            return -1 if not Coverage::rh_coverage_eq(texts, sn.text_start, sn.text_end, "rh-coverage-input/1")
+            ss: mutable i64 = 0
+            se: mutable i64 = 0
+            is_: mutable i64 = 0
+            ie: mutable i64 = 0
+            return -1 if not Coverage::rh_coverage_str(nodes, texts, root, "source", &ss, &se)
+            return -1 if not Coverage::rh_coverage_str(nodes, texts, root, "source_instance", &is_, &ie)
+            arr: i64 = Coverage::rh_coverage_get(nodes, texts, root, "capabilities")
+            return -1 if arr < 0 or nodes[arr.usize()].kind != RH_JSON_ARR
+            observed: mutable i64 = 0
+            partial: mutable i64 = 0
+            stale: mutable i64 = 0
+            unavailable: mutable i64 = 0
+            unauthorized: mutable i64 = 0
+            not_applicable: mutable i64 = 0
+            unsupported: mutable i64 = 0
+            body: mutable darray[u8] = []
+            rh_push_text(body, "[")
+            while child >= 0 |child: i64 = nodes[arr.usize()].first_child, nodes, raw, texts, body, observed, partial, stale, unavailable, unauthorized, not_applicable, unsupported|:
+                return -1 if nodes[child.usize()].kind != RH_JSON_OBJ
+                cs: mutable i64 = 0
+                ce: mutable i64 = 0
+                rs: mutable i64 = 0
+                re: mutable i64 = 0
+                return -1 if not Coverage::rh_coverage_str(nodes, texts, child, "capability", &cs, &ce)
+                return -1 if not Coverage::rh_coverage_str(nodes, texts, child, "reason", &rs, &re)
+                state_s: mutable i64 = 0
+                state_e: mutable i64 = 0
+                return -1 if not Coverage::rh_coverage_str(nodes, texts, child, "state", &state_s, &state_e)
+                state: i64 = Coverage::rh_coverage_state(texts, state_s, state_e)
+                return -1 if state < 0
+                known_ok: mutable i64 = 0
+                known_as_of: i64 = Coverage::rh_coverage_int(nodes, raw, texts, child, "known_as_of", &known_ok)
+                return -1 if known_ok == 0 or known_as_of < 0
+                start: mutable i64 = 0
+                finish: mutable i64 = 0
+                has_start: mutable i64 = 0
+                has_finish: mutable i64 = 0
+                start_json: mutable darray[u8] = []
+                finish_json: mutable darray[u8] = []
+                return -1 if not Coverage::rh_coverage_optional_int(nodes, raw, texts, child, "valid_start", start_json, &start, &has_start)
+                return -1 if not Coverage::rh_coverage_optional_int(nodes, raw, texts, child, "valid_end", finish_json, &finish, &has_finish)
+                return -1 if has_start != 0 and has_finish != 0 and finish < start
+                body.extend(bytes_view("{"))
+                body.extend(bytes_view("\"capability\":"))
+                Coverage::rh_coverage_emit_span(body, texts, cs, ce)
+                body.extend(bytes_view(",\"state\":\""))
+                rh_push_text(body, Coverage::rh_coverage_state_label(state))
+                body.extend(bytes_view("\",\"reason\":"))
+                Coverage::rh_coverage_emit_span(body, texts, rs, re)
+                body.extend(bytes_view(",\"valid_start\":"))
+                body.extend(bytes_view(start_json))
+                body.extend(bytes_view(",\"valid_end\":"))
+                body.extend(bytes_view(finish_json))
+                body.extend(bytes_view(",\"known_as_of\":"))
+                rh_push_decimal_i64(body, known_as_of)
+                body.extend(bytes_view("}"))
+                if state == 0:
+                    observed <- observed + 1
+                elif state == 1:
+                    partial <- partial + 1
+                elif state == 2:
+                    stale <- stale + 1
+                elif state == 3:
+                    unavailable <- unavailable + 1
+                elif state == 4:
+                    unauthorized <- unauthorized + 1
+                elif state == 5:
+                    not_applicable <- not_applicable + 1
+                else:
+                    unsupported <- unsupported + 1
+                child <- nodes[child.usize()].next_sibling
+                if child >= 0:
+                    body.push(44)
+            rh_push_text(body, "]")
+            rh_push_text(out, "{\"schema\":\"rh-coverage-result/1\",\"source\":")
+            Coverage::rh_coverage_emit_span(out, texts, ss, se)
+            rh_push_text(out, ",\"source_instance\":")
+            Coverage::rh_coverage_emit_span(out, texts, is_, ie)
+            rh_push_text(out, ",\"capabilities\":")
+            out.extend(bytes_view(body))
+            rh_push_text(out, ",\"state_counts\":{\"observed\":")
+            rh_push_decimal_i64(out, observed)
+            rh_push_text(out, ",\"partial\":")
+            rh_push_decimal_i64(out, partial)
+            rh_push_text(out, ",\"stale\":")
+            rh_push_decimal_i64(out, stale)
+            rh_push_text(out, ",\"unavailable\":")
+            rh_push_decimal_i64(out, unavailable)
+            rh_push_text(out, ",\"unauthorized\":")
+            rh_push_decimal_i64(out, unauthorized)
+            rh_push_text(out, ",\"not_applicable\":")
+            rh_push_decimal_i64(out, not_applicable)
+            rh_push_text(out, ",\"unsupported\":")
+            rh_push_decimal_i64(out, unsupported)
+            rh_push_text(out, "},\"note\":\"coverage intervals are source-specific; unknown endpoints remain null and capability state is not an activity or project verdict\"}")
+            0

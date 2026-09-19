@@ -56,6 +56,7 @@ include "./rh_proof.elisa"
 include "./rh_forecast.elisa"
 include "./rh_intervention.elisa"
 include "./rh_mapping.elisa"
+include "./rh_coverage.elisa"
 include "./rh_render.elisa"
 include "./rh_explain.elisa"
 include "./rh_lease_report.elisa"
@@ -120,6 +121,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli forecast --input <file> --out <file>")
     rh_cli_err("       rh_cli intervention --input <file> --out <file>")
     rh_cli_err("       rh_cli mapping --input <file> --out <file>")
+    rh_cli_err("       rh_cli coverage --input <file> --out <file>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
     rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
     rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
@@ -1623,6 +1625,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 mmq <- mmq + 1
         return rh_cli_usage(2) if mi_idx < 0 or mo_idx < 0
         return rh_do_mapping(slots[mi_idx], slots[mo_idx])
+    if rh_streq(cmd, "coverage"):
+        ci_idx, co_idx =
+            while ccq < argc |ci_idx: i64 = -1, co_idx: i64 = -1, ccq: i64 = 2, slots| -> ci_idx, co_idx:
+                a31: u8& = slots[ccq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(a31, "--input"):
+                    if ccq + 1 < argc:
+                        ccq <- ccq + 1
+                        ci_idx <- ccq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a31, "--out"):
+                    if ccq + 1 < argc:
+                        ccq <- ccq + 1
+                        co_idx <- ccq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                ccq <- ccq + 1
+        return rh_cli_usage(2) if ci_idx < 0 or co_idx < 0
+        return rh_do_coverage(slots[ci_idx], slots[co_idx])
     if rh_streq(cmd, "sign") or rh_streq(cmd, "verify"):
         key_idx, sub_idx, sig_idx =
             while m < argc |key_idx: i64 = -1, sub_idx: i64 = -1, sig_idx: i64 = -1, m: i64 = 2, slots| -> key_idx, sub_idx, sig_idx:
@@ -4744,6 +4767,34 @@ def rh_do_mapping(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, 
         rh_cli_err("mapping: cannot write --out")
         return 4
     rh_cli_out("mapping: evidence observed")
+    0
+
+# --- M05 source-specific capability coverage execution path. ---
+# Preserves bounded validity intervals and explicit unknown endpoints for each
+# source capability; coverage remains evidence and never becomes a verdict.
+def rh_do_coverage(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected coverage argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("coverage: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if Coverage::rh_coverage_report(raw, body) != 0:
+        rh_cli_err("coverage: unsupported or malformed coverage envelope (fail closed)")
+        return 4
+    body.push(10)
+    if not rh_io_write(out_path, body):
+        rh_cli_err("coverage: cannot write --out")
+        return 4
+    rh_cli_out("coverage: evidence observed")
     0
 
 # --- M02-03 job-lease execution path. ---
