@@ -27,6 +27,16 @@ assert d["schema"] == "rh-roles-result/1", d
 assert d["declaration_count"] == 4, d
 assert d["authorization_state"] == "authorized", d
 assert d["source_tally"] == {"provider": 1, "file": 2, "operator": 1}, d["source_tally"]
+assert d["role_tally"] == {"owner": 1, "maintainer": 0, "triager": 1, "member": 1, "unknown": 1}, d["role_tally"]
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["roles.owner_declaration_count"]["value"] == 1, metrics
+assert metrics["roles.maintainer_declaration_count"]["value"] == 0, metrics
+assert metrics["roles.triager_declaration_count"]["value"] == 1, metrics
+assert metrics["roles.member_declaration_count"]["value"] == 1, metrics
+assert metrics["roles.unknown_declaration_count"]["value"] == 1, metrics
+assert metrics["roles.provider_declaration_count"]["value"] == 1, metrics
+assert metrics["roles.file_declaration_count"]["value"] == 2, metrics
+assert metrics["roles.operator_declaration_count"]["value"] == 1, metrics
 roles = [(q["actor_id"], q["as_of"], q["declared_role"]) for q in d["queries"]]
 assert roles == [(1, 150, "owner"), (2, 150, "triager"), (2, 250, "unknown"),
                  (3, 250, "unknown"), (3, 350, "member"), (4, 150, "unknown")], roles
