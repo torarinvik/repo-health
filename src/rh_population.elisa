@@ -1,0 +1,399 @@
+# rh_population.elisa — bounded focal-library downstream population report.
+#
+# The population is deliberately selected and source-scoped. It preserves the
+# discovery mode/cap, mapping revision, family deduplication unit, exact path
+# witnesses, and per-metric missingness. Intrinsic values are supplied by the
+# dependent project evidence; this adapter never derives them from the focal
+# package or turns an unavailable dependent into zero.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_POP_STATUS_OBSERVED: u8 = 0
+const RH_POP_STATUS_PARTIAL: u8 = 1
+const RH_POP_STATUS_UNAVAILABLE: u8 = 2
+const RH_POP_STATUS_UNKNOWN: u8 = 3
+const RH_POP_POLICY_PASS: u8 = 0
+const RH_POP_POLICY_FAIL: u8 = 1
+const RH_POP_POLICY_UNKNOWN: u8 = 2
+
+struct RhPopulationMetric:
+    key_s: mutable i64
+    key_e: mutable i64
+    version_s: mutable i64
+    version_e: mutable i64
+
+struct RhPopulationCell:
+    metric_index: mutable i64
+    status: mutable u8
+    value: mutable i64
+    has_value: mutable bool
+    policy: mutable u8
+
+struct RhPopulationDependent:
+    id_s: mutable i64
+    id_e: mutable i64
+    family_s: mutable i64
+    family_e: mutable i64
+    package_s: mutable i64
+    package_e: mutable i64
+    version_s: mutable i64
+    version_e: mutable i64
+    relation_s: mutable i64
+    relation_e: mutable i64
+    path_index: mutable i64
+    cell_start: mutable i64
+    cell_count: mutable i64
+
+module Population:
+    private:
+        def rh_population_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_population_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, lit)
+
+        def rh_population_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Population::rh_population_get(nodes, texts, obj, key)
+            return false if idx < 0
+            rh_json_str_span(nodes, idx, start_out, end_out)
+
+        def rh_population_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Population::rh_population_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_population_bool(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Population::rh_population_get(nodes, texts, obj, key)
+            return -1 if idx < 0 or nodes[idx.usize()].kind != RH_JSON_BOOL
+            return 1 if rh_json_is_true(nodes, raw, idx)
+            0
+
+        def rh_population_status(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_POP_STATUS_OBSERVED if Population::rh_population_eq(texts, s, e, "observed")
+            return RH_POP_STATUS_PARTIAL if Population::rh_population_eq(texts, s, e, "partial")
+            return RH_POP_STATUS_UNAVAILABLE if Population::rh_population_eq(texts, s, e, "unavailable")
+            return RH_POP_STATUS_UNKNOWN if Population::rh_population_eq(texts, s, e, "unknown")
+            -1
+
+        def rh_population_status_label(status: u8) -> u8&:
+            return "observed" if status == RH_POP_STATUS_OBSERVED
+            return "partial" if status == RH_POP_STATUS_PARTIAL
+            return "unavailable" if status == RH_POP_STATUS_UNAVAILABLE
+            "unknown"
+
+        def rh_population_policy(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_POP_POLICY_PASS if Population::rh_population_eq(texts, s, e, "pass")
+            return RH_POP_POLICY_FAIL if Population::rh_population_eq(texts, s, e, "fail")
+            return RH_POP_POLICY_UNKNOWN if Population::rh_population_eq(texts, s, e, "unknown")
+            -1
+
+        def rh_population_policy_label(policy: u8) -> u8&:
+            return "pass" if policy == RH_POP_POLICY_PASS
+            return "fail" if policy == RH_POP_POLICY_FAIL
+            "unknown"
+
+        def rh_population_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, s.usize(), e.usize())
+            out.push(34)
+
+        def rh_population_metric_index(metrics: darray[RhPopulationMetric]&, texts: darray[u8]&, key_s: i64, key_e: i64, version_s: i64, version_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < metrics.count |i: usize = 0, metrics, texts, key_s, key_e, version_s, version_e|:
+                m: RhPopulationMetric = metrics[i]
+                return i.i64() if rh_bytes_equal_span(texts, m.key_s, m.key_e, texts, key_s, key_e) and rh_bytes_equal_span(texts, m.version_s, m.version_e, texts, version_s, version_e)
+                i <- i + 1
+            -1
+
+        def rh_population_seen_span(values_s: darray[i64]&, values_e: darray[i64]&, texts: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < values_s.count |i: usize = 0, values_s, values_e, texts, s, e|:
+                return true if rh_bytes_equal_span(texts, values_s[i], values_e[i], texts, s, e)
+                i <- i + 1
+            false
+
+        def rh_population_path_valid(nodes: darray[RhJsonNode]&, texts: darray[u8]&, path_idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if path_idx < 0 or nodes[path_idx.usize()].kind != RH_JSON_ARR or nodes[path_idx.usize()].child_count == 0
+            while child >= 0 |child: i64 = nodes[path_idx.usize()].first_child, nodes, texts|:
+                s: mutable i64 = 0
+                e: mutable i64 = 0
+                return false if not rh_json_str_span(nodes, child, &s, &e) or s == e
+                child <- nodes[child.usize()].next_sibling
+            true
+
+        def rh_population_emit_path(out: mutable darray[u8]&, nodes: darray[RhJsonNode]&, texts: darray[u8]&, path_idx: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(91)
+            while child >= 0 |child: i64 = nodes[path_idx.usize()].first_child, nodes, texts, out|:
+                if child != nodes[path_idx.usize()].first_child:
+                    out.push(44)
+                s: mutable i64 = 0
+                e: mutable i64 = 0
+                _ = rh_json_str_span(nodes, child, &s, &e)
+                Population::rh_population_emit_span(out, texts, s, e)
+                child <- nodes[child.usize()].next_sibling
+            out.push(93)
+
+    public:
+        def rh_population_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not Population::rh_population_str(nodes, texts, root, "schema", &schema_s, &schema_e) or not Population::rh_population_eq(texts, schema_s, schema_e, "rh-population-input/1")
+            focal_s: mutable i64 = 0
+            focal_e: mutable i64 = 0
+            policy_s: mutable i64 = 0
+            policy_e: mutable i64 = 0
+            discovery_s: mutable i64 = 0
+            discovery_e: mutable i64 = 0
+            mode_s: mutable i64 = 0
+            mode_e: mutable i64 = 0
+            unit_s: mutable i64 = 0
+            unit_e: mutable i64 = 0
+            return -1 if not Population::rh_population_str(nodes, texts, root, "focal_package", &focal_s, &focal_e) or not Population::rh_population_str(nodes, texts, root, "version_policy", &policy_s, &policy_e) or not Population::rh_population_str(nodes, texts, root, "discovery_source", &discovery_s, &discovery_e) or not Population::rh_population_str(nodes, texts, root, "discovery_mode", &mode_s, &mode_e) or not Population::rh_population_str(nodes, texts, root, "deduplication_unit", &unit_s, &unit_e)
+            return -1 if focal_s == focal_e or policy_s == policy_e or discovery_s == discovery_e or mode_s == mode_e or unit_s == unit_e
+            as_of_ok: mutable i64 = 0
+            as_of: i64 = Population::rh_population_int(nodes, raw, texts, root, "discovery_as_of", &as_of_ok)
+            page_ok: mutable i64 = 0
+            page_limit: i64 = Population::rh_population_int(nodes, raw, texts, root, "page_limit", &page_ok)
+            mapping_ok: mutable i64 = 0
+            mapping_revision: i64 = Population::rh_population_int(nodes, raw, texts, root, "mapping_revision", &mapping_ok)
+            return -1 if as_of_ok == 0 or page_ok == 0 or mapping_ok == 0 or as_of < 0 or page_limit <= 0 or mapping_revision < 0
+            truncated_code: i64 = Population::rh_population_bool(nodes, raw, texts, root, "truncated")
+            return -1 if truncated_code < 0
+            truncated: bool = truncated_code != 0
+            defs_idx: i64 = Population::rh_population_get(nodes, texts, root, "metric_definitions")
+            return -1 if defs_idx < 0 or nodes[defs_idx.usize()].kind != RH_JSON_ARR
+            metrics: mutable darray[RhPopulationMetric] = []
+            while definition >= 0 |definition: i64 = nodes[defs_idx.usize()].first_child, nodes, texts, metrics|:
+                return -1 if nodes[definition.usize()].kind != RH_JSON_OBJ
+                ks: mutable i64 = 0
+                ke: mutable i64 = 0
+                vs: mutable i64 = 0
+                ve: mutable i64 = 0
+                return -1 if not Population::rh_population_str(nodes, texts, definition, "key", &ks, &ke) or not Population::rh_population_str(nodes, texts, definition, "version", &vs, &ve) or ks == ke or vs == ve
+                return -1 if Population::rh_population_metric_index(metrics, texts, ks, ke, vs, ve) >= 0
+                metrics.push(RhPopulationMetric{key_s: ks, key_e: ke, version_s: vs, version_e: ve})
+                definition <- nodes[definition.usize()].next_sibling
+            return -1 if metrics.count == 0
+            dep_idx: i64 = Population::rh_population_get(nodes, texts, root, "dependents")
+            return -1 if dep_idx < 0 or nodes[dep_idx.usize()].kind != RH_JSON_ARR
+            dependents: mutable darray[RhPopulationDependent] = []
+            cells: mutable darray[RhPopulationCell] = []
+            families_s: mutable darray[i64] = []
+            families_e: mutable darray[i64] = []
+            observed: mutable darray[i64] = []
+            partial: mutable darray[i64] = []
+            unavailable: mutable darray[i64] = []
+            unknown: mutable darray[i64] = []
+            sums: mutable darray[i64] = []
+            mins: mutable darray[i64] = []
+            maxs: mutable darray[i64] = []
+            policy_pass: mutable darray[i64] = []
+            policy_fail: mutable darray[i64] = []
+            policy_unknown: mutable darray[i64] = []
+            while i < metrics.count |i: usize = 0, metrics, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown|:
+                observed.push(0)
+                partial.push(0)
+                unavailable.push(0)
+                unknown.push(0)
+                sums.push(0)
+                mins.push(0)
+                maxs.push(0)
+                policy_pass.push(0)
+                policy_fail.push(0)
+                policy_unknown.push(0)
+                i <- i + 1
+            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, families_s, families_e, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown|:
+                return -1 if nodes[dep.usize()].kind != RH_JSON_OBJ
+                ids: mutable i64 = 0
+                ide: mutable i64 = 0
+                fs: mutable i64 = 0
+                fe: mutable i64 = 0
+                ps: mutable i64 = 0
+                pe: mutable i64 = 0
+                vs: mutable i64 = 0
+                ve: mutable i64 = 0
+                rs: mutable i64 = 0
+                re: mutable i64 = 0
+                return -1 if not Population::rh_population_str(nodes, texts, dep, "id", &ids, &ide) or not Population::rh_population_str(nodes, texts, dep, "family", &fs, &fe) or not Population::rh_population_str(nodes, texts, dep, "package", &ps, &pe) or not Population::rh_population_str(nodes, texts, dep, "version", &vs, &ve) or not Population::rh_population_str(nodes, texts, dep, "relation", &rs, &re)
+                return -1 if ids == ide or fs == fe or ps == pe or vs == ve or rs == re or Population::rh_population_eq(texts, rs, re, "unknown")
+                while j < dependents.count |j: usize = 0, dependents, texts, ids, ide|:
+                    return -1 if rh_bytes_equal_span(texts, dependents[j].id_s, dependents[j].id_e, texts, ids, ide)
+                    j <- j + 1
+                path_idx: i64 = Population::rh_population_get(nodes, texts, dep, "path_witness")
+                return -1 if not Population::rh_population_path_valid(nodes, texts, path_idx)
+                if not Population::rh_population_seen_span(families_s, families_e, texts, fs, fe):
+                    families_s.push(fs)
+                    families_e.push(fe)
+                cell_start: i64 = cells.count.i64()
+                metric_idx: i64 = Population::rh_population_get(nodes, texts, dep, "metrics")
+                return -1 if metric_idx < 0 or nodes[metric_idx.usize()].kind != RH_JSON_ARR
+                seen_metrics: mutable darray[i64] = []
+                while cell >= 0 |cell: i64 = nodes[metric_idx.usize()].first_child, nodes, texts, raw, metrics, cells, seen_metrics, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown|:
+                    return -1 if nodes[cell.usize()].kind != RH_JSON_OBJ
+                    cks: mutable i64 = 0
+                    cke: mutable i64 = 0
+                    cvs: mutable i64 = 0
+                    cve: mutable i64 = 0
+                    css: mutable i64 = 0
+                    cse: mutable i64 = 0
+                    ps2: mutable i64 = 0
+                    pe2: mutable i64 = 0
+                    return -1 if not Population::rh_population_str(nodes, texts, cell, "key", &cks, &cke) or not Population::rh_population_str(nodes, texts, cell, "version", &cvs, &cve) or not Population::rh_population_str(nodes, texts, cell, "status", &css, &cse) or not Population::rh_population_str(nodes, texts, cell, "policy", &ps2, &pe2)
+                    mi: i64 = Population::rh_population_metric_index(metrics, texts, cks, cke, cvs, cve)
+                    status: i64 = Population::rh_population_status(texts, css, cse)
+                    policy: i64 = Population::rh_population_policy(texts, ps2, pe2)
+                    return -1 if mi < 0 or status < 0 or policy < 0
+                    while z < seen_metrics.count |z: usize = 0, seen_metrics, mi|:
+                        return -1 if seen_metrics[z] == mi
+                        z <- z + 1
+                    seen_metrics.push(mi)
+                    value_idx: i64 = Population::rh_population_get(nodes, texts, cell, "value")
+                    has_value: bool = value_idx >= 0 and nodes[value_idx.usize()].kind != RH_JSON_NULL
+                    value_ok: mutable i64 = 0
+                    value: mutable i64 = 0
+                    if has_value:
+                        value <- rh_json_int(nodes, raw, value_idx, &value_ok)
+                        return -1 if value_ok == 0
+                    return -1 if status == RH_POP_STATUS_OBSERVED and not has_value
+                    return -1 if status != RH_POP_STATUS_OBSERVED and has_value
+                    cells.push(RhPopulationCell{metric_index: mi, status: status.u8(), value: value, has_value: has_value, policy: policy.u8()})
+                    if status == RH_POP_STATUS_OBSERVED:
+                        observed[mi.usize()] <- observed[mi.usize()] + 1
+                        sums[mi.usize()] <- sums[mi.usize()] + value
+                        if observed[mi.usize()] == 1 or value < mins[mi.usize()]:
+                            mins[mi.usize()] <- value
+                        if observed[mi.usize()] == 1 or value > maxs[mi.usize()]:
+                            maxs[mi.usize()] <- value
+                    elif status == RH_POP_STATUS_PARTIAL:
+                        partial[mi.usize()] <- partial[mi.usize()] + 1
+                    elif status == RH_POP_STATUS_UNAVAILABLE:
+                        unavailable[mi.usize()] <- unavailable[mi.usize()] + 1
+                    else:
+                        unknown[mi.usize()] <- unknown[mi.usize()] + 1
+                    if policy == RH_POP_POLICY_PASS:
+                        policy_pass[mi.usize()] <- policy_pass[mi.usize()] + 1
+                    elif policy == RH_POP_POLICY_FAIL:
+                        policy_fail[mi.usize()] <- policy_fail[mi.usize()] + 1
+                    else:
+                        policy_unknown[mi.usize()] <- policy_unknown[mi.usize()] + 1
+                    cell <- nodes[cell.usize()].next_sibling
+                return -1 if seen_metrics.count != metrics.count
+                cells_added: i64 = cells.count.i64() - cell_start
+                dependents.push(RhPopulationDependent{id_s: ids, id_e: ide, family_s: fs, family_e: fe, package_s: ps, package_e: pe, version_s: vs, version_e: ve, relation_s: rs, relation_e: re, path_index: path_idx, cell_start: cell_start, cell_count: cells_added})
+                dep <- nodes[dep.usize()].next_sibling
+            unresolved_idx: i64 = Population::rh_population_get(nodes, texts, root, "unresolved")
+            return -1 if unresolved_idx < 0 or nodes[unresolved_idx.usize()].kind != RH_JSON_ARR
+            unresolved_count: i64 = nodes[unresolved_idx.usize()].child_count
+            while unresolved >= 0 |unresolved: i64 = nodes[unresolved_idx.usize()].first_child, nodes, texts|:
+                return -1 if nodes[unresolved.usize()].kind != RH_JSON_OBJ
+                us: mutable i64 = 0
+                ue: mutable i64 = 0
+                reason_s: mutable i64 = 0
+                reason_e: mutable i64 = 0
+                return -1 if not Population::rh_population_str(nodes, texts, unresolved, "package", &us, &ue) or not Population::rh_population_str(nodes, texts, unresolved, "reason", &reason_s, &reason_e) or us == ue or reason_s == reason_e
+                unresolved <- nodes[unresolved.usize()].next_sibling
+            rh_push_text(out, "{\"schema\":\"rh-population-result/1\",\"focal\":{\"package\":")
+            Population::rh_population_emit_span(out, texts, focal_s, focal_e)
+            rh_push_text(out, ",\"version_policy\":")
+            Population::rh_population_emit_span(out, texts, policy_s, policy_e)
+            rh_push_text(out, "},\"discovery\":{\"source\":")
+            Population::rh_population_emit_span(out, texts, discovery_s, discovery_e)
+            rh_push_text(out, ",\"mode\":")
+            Population::rh_population_emit_span(out, texts, mode_s, mode_e)
+            rh_push_text(out, ",\"as_of\":")
+            rh_push_decimal_i64(out, as_of)
+            rh_push_text(out, ",\"page_limit\":")
+            rh_push_decimal_i64(out, page_limit)
+            rh_push_text(out, ",\"truncated\":")
+            rh_push_text(out, "true" if truncated else "false")
+            rh_push_text(out, "},\"mapping_revision\":")
+            rh_push_decimal_i64(out, mapping_revision)
+            rh_push_text(out, ",\"deduplication_unit\":")
+            Population::rh_population_emit_span(out, texts, unit_s, unit_e)
+            rh_push_text(out, ",\"population\":{\"selected_dependents\":")
+            rh_push_decimal_i64(out, dependents.count.i64())
+            rh_push_text(out, ",\"distinct_families\":")
+            rh_push_decimal_i64(out, families_s.count.i64())
+            rh_push_text(out, ",\"unresolved\":")
+            rh_push_decimal_i64(out, unresolved_count)
+            rh_push_text(out, "},\"dependents\":[")
+            while i < dependents.count |i: usize = 0, dependents, texts, nodes, cells, out|:
+                if i > 0:
+                    out.push(44)
+                d: RhPopulationDependent = dependents[i]
+                rh_push_text(out, "{\"id\":")
+                Population::rh_population_emit_span(out, texts, d.id_s, d.id_e)
+                rh_push_text(out, ",\"family\":")
+                Population::rh_population_emit_span(out, texts, d.family_s, d.family_e)
+                rh_push_text(out, ",\"package\":")
+                Population::rh_population_emit_span(out, texts, d.package_s, d.package_e)
+                rh_push_text(out, ",\"version\":")
+                Population::rh_population_emit_span(out, texts, d.version_s, d.version_e)
+                rh_push_text(out, ",\"relation\":")
+                Population::rh_population_emit_span(out, texts, d.relation_s, d.relation_e)
+                rh_push_text(out, ",\"path_witness\":")
+                Population::rh_population_emit_path(out, nodes, texts, d.path_index)
+                rh_push_text(out, ",\"metrics\":[")
+                while j < d.cell_count |j: i64 = 0, d, cells, metrics, texts, out|:
+                    if j > 0:
+                        out.push(44)
+                    c: RhPopulationCell = cells[(d.cell_start + j).usize()]
+                    m: RhPopulationMetric = metrics[c.metric_index.usize()]
+                    rh_push_text(out, "{\"key\":")
+                    Population::rh_population_emit_span(out, texts, m.key_s, m.key_e)
+                    rh_push_text(out, ",\"version\":")
+                    Population::rh_population_emit_span(out, texts, m.version_s, m.version_e)
+                    rh_push_text(out, ",\"status\":\"")
+                    rh_push_text(out, Population::rh_population_status_label(c.status))
+                    rh_push_text(out, "\",\"value\":")
+                    rh_push_decimal_i64(out, c.value) if c.has_value
+                    rh_push_text(out, "null") if not c.has_value
+                    rh_push_text(out, ",\"policy\":\"")
+                    rh_push_text(out, Population::rh_population_policy_label(c.policy))
+                    rh_push_text(out, "\"}")
+                    j <- j + 1
+                rh_push_text(out, "]}")
+                i <- i + 1
+            rh_push_text(out, "],\"unresolved_count\":")
+            rh_push_decimal_i64(out, unresolved_count)
+            rh_push_text(out, ",\"metrics\":[")
+            while i < metrics.count |i: usize = 0, metrics, texts, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, out|:
+                if i > 0:
+                    out.push(44)
+                m: RhPopulationMetric = metrics[i]
+                rh_push_text(out, "{\"key\":")
+                Population::rh_population_emit_span(out, texts, m.key_s, m.key_e)
+                rh_push_text(out, ",\"version\":")
+                Population::rh_population_emit_span(out, texts, m.version_s, m.version_e)
+                rh_push_text(out, ",\"eligible\":")
+                rh_push_decimal_i64(out, dependents.count.i64())
+                rh_push_text(out, ",\"observed\":")
+                rh_push_decimal_i64(out, observed[i])
+                rh_push_text(out, ",\"partial\":")
+                rh_push_decimal_i64(out, partial[i])
+                rh_push_text(out, ",\"unavailable\":")
+                rh_push_decimal_i64(out, unavailable[i])
+                rh_push_text(out, ",\"unknown\":")
+                rh_push_decimal_i64(out, unknown[i])
+                rh_push_text(out, ",\"distribution\":{\"count\":")
+                rh_push_decimal_i64(out, observed[i])
+                rh_push_text(out, ",\"sum\":")
+                rh_push_decimal_i64(out, sums[i])
+                rh_push_text(out, ",\"min\":")
+                rh_push_decimal_i64(out, mins[i]) if observed[i] > 0
+                rh_push_text(out, "null") if observed[i] == 0
+                rh_push_text(out, ",\"max\":")
+                rh_push_decimal_i64(out, maxs[i]) if observed[i] > 0
+                rh_push_text(out, "null") if observed[i] == 0
+                rh_push_text(out, "},\"policy_counts\":{\"pass\":")
+                rh_push_decimal_i64(out, policy_pass[i])
+                rh_push_text(out, ",\"fail\":")
+                rh_push_decimal_i64(out, policy_fail[i])
+                rh_push_text(out, ",\"unknown\":")
+                rh_push_decimal_i64(out, policy_unknown[i])
+                rh_push_text(out, "}}")
+                i <- i + 1
+            rh_push_text(out, "],\"note\":\"selected dependent population only; provider caps and unresolved mappings remain visible; intrinsic metrics are independent evidence; unknown values are not imputed as zero; path witnesses identify the qualifying package context\"}")
+            0
