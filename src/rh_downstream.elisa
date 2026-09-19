@@ -1,154 +1,158 @@
-# rh_downstream.elisa — downstream condition joins, per-metric covered
-# denominators, adoption changes, shared maintenance exposure
-# (M05-06/07/08).
-#
-# Intrinsic measurements are computed WITHOUT downstream inputs (that
-# separation lives in the metrics engine; this module only joins already
-# computed values). Crucially, coverage is per metric: one overall number
-# must never imply every intrinsic metric is available for the same
-# dependents (a dependent may have history coverage but no review data),
-# so the join returns a covered denominator for EACH metric.
-#
-# Adoption is staged evidence, not a story: first_seen is a collector
-# observation; confirmed_introduction / confirmed_removal are separate
-# explicit facts; observing a newer version is an upgrade observation,
-# not proof that a migration happened. Absent facts stay unknown.
-
 include "./rh_graph.elisa"
 
-const RH_ADOPT_UNKNOWN: u8 = 0
-const RH_ADOPT_FIRST_SEEN_ONLY: u8 = 1
-const RH_ADOPT_CONFIRMED_INTRO: u8 = 2
-const RH_ADOPT_CONFIRMED_REMOVAL: u8 = 3
+module Downstream:
+    public:
+        # rh_downstream.elisa — downstream condition joins, per-metric covered
+        # denominators, adoption changes, shared maintenance exposure
+        # (M05-06/07/08).
+        #
+        # Intrinsic measurements are computed WITHOUT downstream inputs (that
+        # separation lives in the metrics engine; this module only joins already
+        # computed values). Crucially, coverage is per metric: one overall number
+        # must never imply every intrinsic metric is available for the same
+        # dependents (a dependent may have history coverage but no review data),
+        # so the join returns a covered denominator for EACH metric.
+        #
+        # Adoption is staged evidence, not a story: first_seen is a collector
+        # observation; confirmed_introduction / confirmed_removal are separate
+        # explicit facts; observing a newer version is an upgrade observation,
+        # not proof that a migration happened. Absent facts stay unknown.
 
-struct RhAdoption:
-    first_seen: mutable i64
-    confirmed_intro: mutable i64
-    last_seen: mutable i64
-    confirmed_removal: mutable i64
 
-def rh_adoption_status(a: RhAdoption&) -> u8:
-    return RH_ADOPT_CONFIRMED_REMOVAL if a.confirmed_removal > 0
-    return RH_ADOPT_CONFIRMED_INTRO if a.confirmed_intro > 0
-    return RH_ADOPT_FIRST_SEEN_ONLY if a.first_seen > 0
-    RH_ADOPT_UNKNOWN
 
-# Observed upgrade: two distinct version ordinals seen, newer is higher.
-# This is an observation, not proof of a replacement decision.
-def rh_observed_upgrade(first_version_ord: i64, latest_version_ord: i64) -> bool:
-    return false if first_version_ord <= 0 or latest_version_ord <= 0
-    latest_version_ord > first_version_ord
+        const RH_ADOPT_UNKNOWN: u8 = 0
+        const RH_ADOPT_FIRST_SEEN_ONLY: u8 = 1
+        const RH_ADOPT_CONFIRMED_INTRO: u8 = 2
+        const RH_ADOPT_CONFIRMED_REMOVAL: u8 = 3
 
-# Censored duration: 0 end means "still present at cutoff"; the duration
-# is then right-censored (-1) rather than measured to an imaginary end.
-def rh_censored_duration(start: i64, end: i64, cutoff: i64) -> i64:
-    # -2 invalid/missing input; -1 right-censored (still present at cutoff);
-    # >=0 the measured duration.
-    return -2 if start <= 0 or cutoff <= start
-    return -1 if end <= 0
-    return -2 if end < start
-    end - start
+        struct RhAdoption:
+            first_seen: mutable i64
+            confirmed_intro: mutable i64
+            last_seen: mutable i64
+            confirmed_removal: mutable i64
 
-# Does an observed version fall on the supported line (same major)?
-def rh_on_supported_line(observed_version_ord: i64, supported_major: i64) -> bool:
-    if observed_version_ord <= 0 or supported_major <= 0:
-        return false
-    # ordinals are major*1000000 + minor*1000 + patch in this slice
-    major: i64 = observed_version_ord / 1000000
-    major == supported_major
+        def rh_adoption_status(a: RhAdoption&) -> u8:
+            return RH_ADOPT_CONFIRMED_REMOVAL if a.confirmed_removal > 0
+            return RH_ADOPT_CONFIRMED_INTRO if a.confirmed_intro > 0
+            return RH_ADOPT_FIRST_SEEN_ONLY if a.first_seen > 0
+            RH_ADOPT_UNKNOWN
 
-# Per-metric covered denominators over a dependent population. mask[node]
-# bit m means "intrinsic metric m is present for node". out_counts gets
-# one entry per metric; out_total gets the dependent count. Metrics are
-# never merged into a single coverage number.
-def rh_downstream_coverage(dependents: darray[i64]&, mask: darray[u64]&, metric_count: i64, out_counts: mutable darray[i64]&, total_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-    total_out[0] <- dependents.count.i64()
-    while m < metric_count |m: i64 = 0, out_counts|:
-        out_counts.push(0)
-        m <- m + 1
-    while i < dependents.count |i: usize = 0, dependents, mask, metric_count, out_counts|:
-        node: i64 = dependents[i]
-        i <- i + 1
-        continue if node < 0 or node >= mask.count.i64()
-        bits: u64 = mask[node.usize()]
-        while k < metric_count |k: i64 = 0, bits, out_counts|:
-            if ((bits >> k.usize()) & 1) != 0:
-                out_counts[k.usize()] <- out_counts[k.usize()] + 1
-            k <- k + 1
-    return
+        # Observed upgrade: two distinct version ordinals seen, newer is higher.
+        # This is an observation, not proof of a replacement decision.
+        def rh_observed_upgrade(first_version_ord: i64, latest_version_ord: i64) -> bool:
+            return false if first_version_ord <= 0 or latest_version_ord <= 0
+            latest_version_ord > first_version_ord
 
-# Fixed-width histogram of per-dependent values (e.g. active-month counts
-# of the dependent population). Values above maxv land in the last bucket.
-def rh_histogram(values: darray[i64]&, buckets: i64, maxv: i64, out: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
-    while b < buckets |b: i64 = 0, out|:
-        out.push(0)
-        b <- b + 1
-    return if buckets <= 0 or maxv <= 0
-    while i < values.count |i: usize = 0, values, buckets, maxv, out|:
-        v: i64 = values[i]
-        i <- i + 1
-        continue if v < 0
-        idx: mutable i64 = (v * buckets) / maxv
-        if idx >= buckets:
-            idx <- buckets - 1
-        if idx < 0:
-            idx <- 0
-        out[idx.usize()] <- out[idx.usize()] + 1
-    return
+        # Censored duration: 0 end means "still present at cutoff"; the duration
+        # is then right-censored (-1) rather than measured to an imaginary end.
+        def rh_censored_duration(start: i64, end: i64, cutoff: i64) -> i64:
+            # -2 invalid/missing input; -1 right-censored (still present at cutoff);
+            # >=0 the measured duration.
+            return -2 if start <= 0 or cutoff <= start
+            return -1 if end <= 0
+            return -2 if end < start
+            end - start
 
-# Shared maintenance exposure: distinct actor ids present in BOTH sets.
-# Unknown identities or affiliations stay unknown; this only reports
-# observed overlap and never infers organizational independence.
-def rh_actor_overlap(a_actors: darray[i64]&, b_actors: darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    shared: mutable darray[i64] = []
-    while i < a_actors.count |i: usize = 0, a_actors, b_actors, shared|:
-        actor: i64 = a_actors[i]
-        i <- i + 1
-        if actor < 0:
-            continue
-        # BOTH sets must dedup, otherwise an actor listed twice inflates.
-        continue if rh_contains(shared, actor)
-        in_b: bool =
-            while j < b_actors.count |in_b: bool = false, j: usize = 0| -> in_b:
-                if b_actors[j] == actor:
-                    in_b <- true
-                j <- j + 1
-        if in_b:
-            shared.push(actor)
-    shared.count.i64()
+        # Does an observed version fall on the supported line (same major)?
+        def rh_on_supported_line(observed_version_ord: i64, supported_major: i64) -> bool:
+            if observed_version_ord <= 0 or supported_major <= 0:
+                return false
+            # ordinals are major*1000000 + minor*1000 + patch in this slice
+            major: i64 = observed_version_ord / 1000000
+            major == supported_major
 
-# Adoption report fields for one dependency edge: staged evidence with
-# censoring, so a reader can tell observation from confirmation.
-def rh_adoption_write(out: mutable darray[u8]&, a: RhAdoption&, cutoff: i64) -> void can[Memory.Allocate, Abort.Panic]:
-    rh_push_text(out, "{\"status\":\"")
-    s: u8 = rh_adoption_status(a)
-    if s == RH_ADOPT_CONFIRMED_REMOVAL:
-        rh_push_text(out, "confirmed_removal")
-    elif s == RH_ADOPT_CONFIRMED_INTRO:
-        rh_push_text(out, "confirmed_introduced")
-    elif s == RH_ADOPT_FIRST_SEEN_ONLY:
-        rh_push_text(out, "first_seen_only")
-    else:
-        rh_push_text(out, "unknown")
-    rh_push_text(out, "\",\"first_seen\":")
-    if a.first_seen > 0:
-        rh_push_decimal_i64(out, a.first_seen)
-    else:
-        rh_push_text(out, "null")
-    rh_push_text(out, ",\"confirmed_introduction\":")
-    if a.confirmed_intro > 0:
-        rh_push_decimal_i64(out, a.confirmed_intro)
-    else:
-        rh_push_text(out, "null")
-    rh_push_text(out, ",\"confirmed_removal\":")
-    if a.confirmed_removal > 0:
-        rh_push_decimal_i64(out, a.confirmed_removal)
-    else:
-        rh_push_text(out, "null")
-    rh_push_text(out, ",\"duration_censored\":")
-    if a.confirmed_removal > 0 and a.confirmed_intro > 0:
-        d: i64 = a.confirmed_removal - a.confirmed_intro
-        rh_push_decimal_i64(out, d)
-    else:
-        rh_push_text(out, "true")
-    rh_push_text(out, "}")
+        # Per-metric covered denominators over a dependent population. mask[node]
+        # bit m means "intrinsic metric m is present for node". out_counts gets
+        # one entry per metric; out_total gets the dependent count. Metrics are
+        # never merged into a single coverage number.
+        def rh_downstream_coverage(dependents: darray[i64]&, mask: darray[u64]&, metric_count: i64, out_counts: mutable darray[i64]&, total_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+            total_out[0] <- dependents.count.i64()
+            while m < metric_count |m: i64 = 0, out_counts|:
+                out_counts.push(0)
+                m <- m + 1
+            while i < dependents.count |i: usize = 0, dependents, mask, metric_count, out_counts|:
+                node: i64 = dependents[i]
+                i <- i + 1
+                continue if node < 0 or node >= mask.count.i64()
+                bits: u64 = mask[node.usize()]
+                while k < metric_count |k: i64 = 0, bits, out_counts|:
+                    if ((bits >> k.usize()) & 1) != 0:
+                        out_counts[k.usize()] <- out_counts[k.usize()] + 1
+                    k <- k + 1
+            return
+
+        # Fixed-width histogram of per-dependent values (e.g. active-month counts
+        # of the dependent population). Values above maxv land in the last bucket.
+        def rh_histogram(values: darray[i64]&, buckets: i64, maxv: i64, out: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while b < buckets |b: i64 = 0, out|:
+                out.push(0)
+                b <- b + 1
+            return if buckets <= 0 or maxv <= 0
+            while i < values.count |i: usize = 0, values, buckets, maxv, out|:
+                v: i64 = values[i]
+                i <- i + 1
+                continue if v < 0
+                idx: mutable i64 = (v * buckets) / maxv
+                if idx >= buckets:
+                    idx <- buckets - 1
+                if idx < 0:
+                    idx <- 0
+                out[idx.usize()] <- out[idx.usize()] + 1
+            return
+
+        # Shared maintenance exposure: distinct actor ids present in BOTH sets.
+        # Unknown identities or affiliations stay unknown; this only reports
+        # observed overlap and never infers organizational independence.
+        def rh_actor_overlap(a_actors: darray[i64]&, b_actors: darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            shared: mutable darray[i64] = []
+            while i < a_actors.count |i: usize = 0, a_actors, b_actors, shared|:
+                actor: i64 = a_actors[i]
+                i <- i + 1
+                if actor < 0:
+                    continue
+                # BOTH sets must dedup, otherwise an actor listed twice inflates.
+                continue if rh_contains(shared, actor)
+                in_b: bool =
+                    while j < b_actors.count |in_b: bool = false, j: usize = 0| -> in_b:
+                        if b_actors[j] == actor:
+                            in_b <- true
+                        j <- j + 1
+                if in_b:
+                    shared.push(actor)
+            shared.count.i64()
+
+        # Adoption report fields for one dependency edge: staged evidence with
+        # censoring, so a reader can tell observation from confirmation.
+        def rh_adoption_write(out: mutable darray[u8]&, a: RhAdoption&, cutoff: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "{\"status\":\"")
+            s: u8 = rh_adoption_status(a)
+            if s == RH_ADOPT_CONFIRMED_REMOVAL:
+                rh_push_text(out, "confirmed_removal")
+            elif s == RH_ADOPT_CONFIRMED_INTRO:
+                rh_push_text(out, "confirmed_introduced")
+            elif s == RH_ADOPT_FIRST_SEEN_ONLY:
+                rh_push_text(out, "first_seen_only")
+            else:
+                rh_push_text(out, "unknown")
+            rh_push_text(out, "\",\"first_seen\":")
+            if a.first_seen > 0:
+                rh_push_decimal_i64(out, a.first_seen)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"confirmed_introduction\":")
+            if a.confirmed_intro > 0:
+                rh_push_decimal_i64(out, a.confirmed_intro)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"confirmed_removal\":")
+            if a.confirmed_removal > 0:
+                rh_push_decimal_i64(out, a.confirmed_removal)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"duration_censored\":")
+            if a.confirmed_removal > 0 and a.confirmed_intro > 0:
+                d: i64 = a.confirmed_removal - a.confirmed_intro
+                rh_push_decimal_i64(out, d)
+            else:
+                rh_push_text(out, "true")
+            rh_push_text(out, "}")

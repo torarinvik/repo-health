@@ -1,131 +1,133 @@
-# rh_experimental.elisa — experimental-metric isolation (M11, R024).
-#
-# The plan requires advanced measurements to be isolated, explicitly
-# labelled, opt-in, costed, and removable. This module is the registry
-# gateway: a metric may only enter the experimental group when it declares
-# a wave (G), a cost class, and explicit limits; results are returned with
-# an experimental label and are excluded from the default policy path.
-#
-# The one sample advanced metric here is deliberately NOT a judgement:
-# `discontinuity.no_qualifying_release_in_horizon` reports an OBSERVABLE
-# OUTCOME among subjects with complete follow-up — "no qualifying release
-# was observed in the next H days" — and is never called abandonment,
-# unreliable, or unhealthy. It is a horizon+population result, not a
-# per-person label, and it can never silently become a default decision.
+module Experimental:
+    public:
+        # rh_experimental.elisa — experimental-metric isolation (M11, R024).
+        #
+        # The plan requires advanced measurements to be isolated, explicitly
+        # labelled, opt-in, costed, and removable. This module is the registry
+        # gateway: a metric may only enter the experimental group when it declares
+        # a wave (G), a cost class, and explicit limits; results are returned with
+        # an experimental label and are excluded from the default policy path.
+        #
+        # The one sample advanced metric here is deliberately NOT a judgement:
+        # `discontinuity.no_qualifying_release_in_horizon` reports an OBSERVABLE
+        # OUTCOME among subjects with complete follow-up — "no qualifying release
+        # was observed in the next H days" — and is never called abandonment,
+        # unreliable, or unhealthy. It is a horizon+population result, not a
+        # per-person label, and it can never silently become a default decision.
 
-const RH_EXP_WAVE_G: u8 = 7
+        const RH_EXP_WAVE_G: u8 = 7
 
-# Isolation contract. A metric is admissible to the experimental group only
-# with a wave, a cost class, and at least one explicit limit.
-struct RhExperimentalSpec:
-    key_s: i64
-    key_e: i64
-    wave: u8
-    cost: u8
-    limit_count: i64
-    opt_in: i64
+        # Isolation contract. A metric is admissible to the experimental group only
+        # with a wave, a cost class, and at least one explicit limit.
+        struct RhExperimentalSpec:
+            key_s: i64
+            key_e: i64
+            wave: u8
+            cost: u8
+            limit_count: i64
+            opt_in: i64
 
-# 1 admissible, 0 not. Rejects a metric with no wave, wrong wave, no cost,
-# or no stated limit. This is the mechanical gate R024 demands.
-def rh_exp_admissible(spec: RhExperimentalSpec&) -> i64:
-    return 0 if spec.opt_in != 1
-    return 0 if spec.wave != RH_EXP_WAVE_G
-    return 0 if spec.cost < 1 or spec.cost > 3
-    return 0 if spec.limit_count < 1
-    1
+        # 1 admissible, 0 not. Rejects a metric with no wave, wrong wave, no cost,
+        # or no stated limit. This is the mechanical gate R024 demands.
+        def rh_exp_admissible(spec: RhExperimentalSpec&) -> i64:
+            return 0 if spec.opt_in != 1
+            return 0 if spec.wave != RH_EXP_WAVE_G
+            return 0 if spec.cost < 1 or spec.cost > 3
+            return 0 if spec.limit_count < 1
+            1
 
-# Outcome of a discontinuity observation for one subject: 1 = a qualifying
-# release was observed inside the horizon, 0 = none observed, -1 = not
-# observable (incomplete follow-up / censored). None-observed is a fact
-# about the observation window, NOT a claim about the project.
-def rh_exp_discontinuity_outcome(follow_up_complete: i64, qualifying_release_in_horizon: i64) -> i64:
-    return -1 if follow_up_complete != 1
-    return 1 if qualifying_release_in_horizon == 1
-    0
+        # Outcome of a discontinuity observation for one subject: 1 = a qualifying
+        # release was observed inside the horizon, 0 = none observed, -1 = not
+        # observable (incomplete follow-up / censored). None-observed is a fact
+        # about the observation window, NOT a claim about the project.
+        def rh_exp_discontinuity_outcome(follow_up_complete: i64, qualifying_release_in_horizon: i64) -> i64:
+            return -1 if follow_up_complete != 1
+            return 1 if qualifying_release_in_horizon == 1
+            0
 
-# Aggregate over a population: exact counts and a censored tally. Returns
-# the observable denominator (0 when nothing was observable -> caller
-# reports not_applicable, never a zero rate).
-def rh_exp_discontinuity_aggregate(outcomes: darray[i64]&, with_release_out: mutable i64&, without_out: mutable i64&, censored_out: mutable i64&, denom_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-    with_release_out[0] <- 0
-    without_out[0] <- 0
-    censored_out[0] <- 0
-    denom_out[0] <- 0
-    while i < outcomes.count |i: usize = 0, outcomes, with_release_out, without_out, censored_out, denom_out|:
-        o: i64 = outcomes[i]
-        if o == 1:
-            with_release_out[0] <- with_release_out[0] + 1
-            denom_out[0] <- denom_out[0] + 1
-        elif o == 0:
-            without_out[0] <- without_out[0] + 1
-            denom_out[0] <- denom_out[0] + 1
-        else:
-            censored_out[0] <- censored_out[0] + 1
-        i <- i + 1
-    return
-
-# The mandatory caveat text for any experimental output. Callers must emit
-# it alongside the number; a result without this label is a bug.
-def rh_exp_label() -> u8&:
-    "experimental: observable horizon outcome, not a reliability or abandonment label"
-
-# --- anomaly analysis adapter (M11; R024) ---
-# A concrete first-level deviation, NOT a maliciousness/health score. Given
-# a windowed event-count series (oldest -> newest) and a declared baseline
-# window (count of leading complete windows) plus a floor, it reports the
-# windows whose count fell to or below the floor in a quiet window — a
-# named, inspectable observation per window index. It never emits a single
-# aggregated suspicion score, never names a cause, and never says a change
-# is harmful (the plan: flag != malicious; prefer concrete first-level
-# findings over generic score). A window with missing/partial coverage is
-# `not observable` (value -1) and is excluded, never coerced to zero.
-
-# Outcome per window: 1 quiet (<= floor), 0 active (> floor), -1 not
-# observable. `observable` must be 1 for the count to be trusted.
-def rh_exp_cadence_outcome(observable: i64, count: i64, floor: i64) -> i64:
-    return -1 if observable != 1
-    return 1 if count <= floor
-    0
-
-# Baseline mean over the first `baseline_windows` observable windows, as an
-# exact rational (sum/baseline). Returns -1 (not_applicable) when there is no
-# observable baseline window. Windowing is explicit and caller-declared.
-def rh_exp_cadence_baseline(observable: darray[i64]&, counts: darray[i64]&, baseline_windows: i64, sum_out: mutable i64&, den_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    sum_out[0] <- 0
-    den_out[0] <- 0
-    return -1 if baseline_windows <= 0
-    while i < counts.count and taken < baseline_windows |i: usize = 0, taken: i64 = 0, counts, observable, sum_out, den_out|:
-        if observable[i] == 1:
-            sum_out[0] <- sum_out[0] + counts[i]
-            den_out[0] <- den_out[0] + 1
-            taken <- taken + 1
-        i <- i + 1
-    return -1 if den_out[0] == 0
-    1
-
-# Concrete first-level findings: for each window at or after
-# baseline_windows, record the window index when it is quiet. Findings are
-# written to `flag_out` (window indices) and counted in `flag_n_out`; the
-# observable window denominator is returned via den_out. A not-observable
-# window is skipped and counted in censored_out. No index is ever invented.
-def rh_exp_cadence_findings(observable: darray[i64]&, counts: darray[i64]&, floor: i64, baseline_windows: i64, flag_out: mutable darray[i64]&, flag_n_out: mutable i64&, den_out: mutable i64&, censored_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-    flag_n_out[0] <- 0
-    den_out[0] <- 0
-    censored_out[0] <- 0
-    while i < counts.count |i: usize = 0, counts, observable, flag_out, flag_n_out, den_out, censored_out, floor, baseline_windows|:
-        if i.i64() >= baseline_windows:
-            o: i64 = rh_exp_cadence_outcome(observable[i], counts[i], floor)
-            if o == -1:
-                censored_out[0] <- censored_out[0] + 1
-            else:
-                den_out[0] <- den_out[0] + 1
+        # Aggregate over a population: exact counts and a censored tally. Returns
+        # the observable denominator (0 when nothing was observable -> caller
+        # reports not_applicable, never a zero rate).
+        def rh_exp_discontinuity_aggregate(outcomes: darray[i64]&, with_release_out: mutable i64&, without_out: mutable i64&, censored_out: mutable i64&, denom_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+            with_release_out[0] <- 0
+            without_out[0] <- 0
+            censored_out[0] <- 0
+            denom_out[0] <- 0
+            while i < outcomes.count |i: usize = 0, outcomes, with_release_out, without_out, censored_out, denom_out|:
+                o: i64 = outcomes[i]
                 if o == 1:
-                    flag_out.push(i.i64())
-                    flag_n_out[0] <- flag_n_out[0] + 1
-        i <- i + 1
-    return
+                    with_release_out[0] <- with_release_out[0] + 1
+                    denom_out[0] <- denom_out[0] + 1
+                elif o == 0:
+                    without_out[0] <- without_out[0] + 1
+                    denom_out[0] <- denom_out[0] + 1
+                else:
+                    censored_out[0] <- censored_out[0] + 1
+                i <- i + 1
+            return
 
-# The mandatory caveat for the anomaly adapter.
-def rh_exp_anomaly_label() -> u8&:
-    "experimental: concrete per-window cadence deviation, not a maliciousness, cause, or health judgement"
+        # The mandatory caveat text for any experimental output. Callers must emit
+        # it alongside the number; a result without this label is a bug.
+        def rh_exp_label() -> u8&:
+            "experimental: observable horizon outcome, not a reliability or abandonment label"
+
+        # --- anomaly analysis adapter (M11; R024) ---
+        # A concrete first-level deviation, NOT a maliciousness/health score. Given
+        # a windowed event-count series (oldest -> newest) and a declared baseline
+        # window (count of leading complete windows) plus a floor, it reports the
+        # windows whose count fell to or below the floor in a quiet window — a
+        # named, inspectable observation per window index. It never emits a single
+        # aggregated suspicion score, never names a cause, and never says a change
+        # is harmful (the plan: flag != malicious; prefer concrete first-level
+        # findings over generic score). A window with missing/partial coverage is
+        # `not observable` (value -1) and is excluded, never coerced to zero.
+
+        # Outcome per window: 1 quiet (<= floor), 0 active (> floor), -1 not
+        # observable. `observable` must be 1 for the count to be trusted.
+        def rh_exp_cadence_outcome(observable: i64, count: i64, floor: i64) -> i64:
+            return -1 if observable != 1
+            return 1 if count <= floor
+            0
+
+        # Baseline mean over the first `baseline_windows` observable windows, as an
+        # exact rational (sum/baseline). Returns -1 (not_applicable) when there is no
+        # observable baseline window. Windowing is explicit and caller-declared.
+        def rh_exp_cadence_baseline(observable: darray[i64]&, counts: darray[i64]&, baseline_windows: i64, sum_out: mutable i64&, den_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            sum_out[0] <- 0
+            den_out[0] <- 0
+            return -1 if baseline_windows <= 0
+            while i < counts.count and taken < baseline_windows |i: usize = 0, taken: i64 = 0, counts, observable, sum_out, den_out|:
+                if observable[i] == 1:
+                    sum_out[0] <- sum_out[0] + counts[i]
+                    den_out[0] <- den_out[0] + 1
+                    taken <- taken + 1
+                i <- i + 1
+            return -1 if den_out[0] == 0
+            1
+
+        # Concrete first-level findings: for each window at or after
+        # baseline_windows, record the window index when it is quiet. Findings are
+        # written to `flag_out` (window indices) and counted in `flag_n_out`; the
+        # observable window denominator is returned via den_out. A not-observable
+        # window is skipped and counted in censored_out. No index is ever invented.
+        def rh_exp_cadence_findings(observable: darray[i64]&, counts: darray[i64]&, floor: i64, baseline_windows: i64, flag_out: mutable darray[i64]&, flag_n_out: mutable i64&, den_out: mutable i64&, censored_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+            flag_n_out[0] <- 0
+            den_out[0] <- 0
+            censored_out[0] <- 0
+            while i < counts.count |i: usize = 0, counts, observable, flag_out, flag_n_out, den_out, censored_out, floor, baseline_windows|:
+                if i.i64() >= baseline_windows:
+                    o: i64 = rh_exp_cadence_outcome(observable[i], counts[i], floor)
+                    if o == -1:
+                        censored_out[0] <- censored_out[0] + 1
+                    else:
+                        den_out[0] <- den_out[0] + 1
+                        if o == 1:
+                            flag_out.push(i.i64())
+                            flag_n_out[0] <- flag_n_out[0] + 1
+                i <- i + 1
+            return
+
+        # The mandatory caveat for the anomaly adapter.
+        def rh_exp_anomaly_label() -> u8&:
+            "experimental: concrete per-window cadence deviation, not a maliciousness, cause, or health judgement"
 
