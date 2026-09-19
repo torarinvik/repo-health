@@ -1,0 +1,155 @@
+# rh_registry_rubygems.elisa — bounded RubyGems metadata adapter (M03-05).
+#
+# RubyGems uses `number`/`created_at`, a provider-specific yanked flag, and
+# runtime/development dependency arrays.  Keep those names at this boundary
+# and emit the canonical registry metadata shape without resolving gems.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_REGMETA_RUBYGEMS_MAX_VERSIONS: i64 = 10000
+
+module RegistryRubygems:
+    private:
+        def rh_rg_value(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_rg_string(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = RegistryRubygems::rh_rg_value(nodes, texts, obj, key)
+            return 0 if idx < 0
+            return -1 if nodes[idx.usize()].kind != RH_JSON_STR
+            out.push(34)
+            rh_json_escape(out, texts, nodes[idx.usize()].text_start.usize(), nodes[idx.usize()].text_end.usize())
+            out.push(34)
+            1
+
+        def rh_rg_repo_from(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if obj < 0 or nodes[obj.usize()].kind != RH_JSON_OBJ
+            source: i64 = RegistryRubygems::rh_rg_value(nodes, texts, obj, "source_code_uri")
+            if source >= 0 and nodes[source.usize()].kind == RH_JSON_STR:
+                out.push(34)
+                rh_json_escape(out, texts, nodes[source.usize()].text_start.usize(), nodes[source.usize()].text_end.usize())
+                out.push(34)
+                return 1
+            return -1 if source >= 0 and nodes[source.usize()].kind != RH_JSON_NULL
+            homepage: i64 = RegistryRubygems::rh_rg_value(nodes, texts, obj, "homepage_uri")
+            if homepage >= 0 and nodes[homepage.usize()].kind == RH_JSON_STR:
+                out.push(34)
+                rh_json_escape(out, texts, nodes[homepage.usize()].text_start.usize(), nodes[homepage.usize()].text_end.usize())
+                out.push(34)
+                return 1
+            return -1 if homepage >= 0 and nodes[homepage.usize()].kind != RH_JSON_NULL
+            repository: i64 = RegistryRubygems::rh_rg_value(nodes, texts, obj, "repository")
+            if repository >= 0 and nodes[repository.usize()].kind == RH_JSON_STR:
+                out.push(34)
+                rh_json_escape(out, texts, nodes[repository.usize()].text_start.usize(), nodes[repository.usize()].text_end.usize())
+                out.push(34)
+                return 1
+            return -1 if repository >= 0 and nodes[repository.usize()].kind != RH_JSON_NULL and nodes[repository.usize()].kind != RH_JSON_OBJ
+            if repository >= 0 and nodes[repository.usize()].kind == RH_JSON_OBJ:
+                state: i64 = RegistryRubygems::rh_rg_string(nodes, texts, repository, "url", out)
+                return state if state != 0
+            0
+
+        def rh_rg_repository(nodes: darray[RhJsonNode]&, texts: darray[u8]&, version: i64, root_obj: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            state: mutable i64 = RegistryRubygems::rh_rg_repo_from(nodes, texts, version, out)
+            return state if state != 0
+            metadata: i64 = RegistryRubygems::rh_rg_value(nodes, texts, version, "metadata")
+            state <- RegistryRubygems::rh_rg_repo_from(nodes, texts, metadata, out)
+            return state if state != 0
+            RegistryRubygems::rh_rg_repo_from(nodes, texts, root_obj, out)
+
+        def rh_rg_published(nodes: darray[RhJsonNode]&, texts: darray[u8]&, version: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: mutable i64 = RegistryRubygems::rh_rg_value(nodes, texts, version, "created_at")
+            if idx >= 0 and nodes[idx.usize()].kind == RH_JSON_STR:
+                out.push(34)
+                rh_json_escape(out, texts, nodes[idx.usize()].text_start.usize(), nodes[idx.usize()].text_end.usize())
+                out.push(34)
+                return 1
+            return -1 if idx >= 0 and nodes[idx.usize()].kind != RH_JSON_NULL
+            idx <- RegistryRubygems::rh_rg_value(nodes, texts, version, "built_at")
+            if idx >= 0 and nodes[idx.usize()].kind == RH_JSON_STR:
+                out.push(34)
+                rh_json_escape(out, texts, nodes[idx.usize()].text_start.usize(), nodes[idx.usize()].text_end.usize())
+                out.push(34)
+                return 1
+            return -1 if idx >= 0 and nodes[idx.usize()].kind != RH_JSON_NULL
+            rh_push_text(out, "null")
+            0
+
+        def rh_rg_yanked(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, version: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = RegistryRubygems::rh_rg_value(nodes, texts, version, "yanked")
+            if idx < 0:
+                rh_push_text(out, "null")
+                return 0
+            return -1 if nodes[idx.usize()].kind != RH_JSON_BOOL
+            rh_push_text(out, "true" if rh_json_is_true(nodes, raw, idx) else "false")
+            1
+
+        def rh_rg_emit_dep_array(nodes: darray[RhJsonNode]&, texts: darray[u8]&, deps: i64, optional: bool, kind: u8&, out: mutable darray[u8]&, emitted: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if deps < 0
+            return -1 if nodes[deps.usize()].kind != RH_JSON_ARR
+            while dep >= 0 |dep: i64 = nodes[deps.usize()].first_child, nodes, out, emitted, optional, kind|:
+                return -1 if nodes[dep.usize()].kind != RH_JSON_OBJ
+                out.push(44) if emitted[0] > 0
+                rh_push_text(out, "{\"optional\":")
+                rh_push_text(out, "true" if optional else "false")
+                rh_push_text(out, ",\"kind\":\"")
+                rh_push_text(out, kind)
+                rh_push_text(out, "\"}")
+                emitted[0] <- emitted[0] + 1
+                dep <- nodes[dep.usize()].next_sibling
+            0
+
+        def rh_rg_dependencies(nodes: darray[RhJsonNode]&, texts: darray[u8]&, version: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            deps: i64 = RegistryRubygems::rh_rg_value(nodes, texts, version, "dependencies")
+            return 0 if deps < 0
+            return -1 if nodes[deps.usize()].kind != RH_JSON_OBJ
+            emitted: mutable i64 = 0
+            return -1 if RegistryRubygems::rh_rg_emit_dep_array(nodes, texts, RegistryRubygems::rh_rg_value(nodes, texts, deps, "runtime"), false, "runtime", out, &emitted) != 0
+            return -1 if RegistryRubygems::rh_rg_emit_dep_array(nodes, texts, RegistryRubygems::rh_rg_value(nodes, texts, deps, "development"), false, "dev", out, &emitted) != 0
+            0
+
+    public:
+        # Accepts the versions endpoint array directly or a bounded wrapper
+        # `{versions:[...], source_code_uri/homepage_uri:...}` used by retained
+        # captures that include project metadata.
+        def rh_regmeta_rubygems_normalize(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count > 4194304
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0
+            root_obj: i64 = root if nodes[root.usize()].kind == RH_JSON_OBJ else -1
+            versions: mutable i64 = root if nodes[root.usize()].kind == RH_JSON_ARR else -1
+            if root_obj >= 0:
+                versions <- RegistryRubygems::rh_rg_value(nodes, texts, root_obj, "versions")
+            return -1 if versions < 0 or nodes[versions.usize()].kind != RH_JSON_ARR
+            rh_push_text(out, "{\"versions\":[")
+            emitted_versions: mutable i64 = 0
+            while version >= 0 |version: i64 = nodes[versions.usize()].first_child, nodes, raw, texts, out, emitted_versions, root_obj|:
+                return -1 if emitted_versions >= RH_REGMETA_RUBYGEMS_MAX_VERSIONS or nodes[version.usize()].kind != RH_JSON_OBJ
+                number: mutable i64 = RegistryRubygems::rh_rg_value(nodes, texts, version, "number")
+                number <- RegistryRubygems::rh_rg_value(nodes, texts, version, "version") if number < 0
+                number <- RegistryRubygems::rh_rg_value(nodes, texts, version, "num") if number < 0
+                return -1 if number < 0 or nodes[number.usize()].kind != RH_JSON_STR or nodes[number.usize()].text_end <= nodes[number.usize()].text_start
+                if emitted_versions > 0:
+                    out.push(44)
+                rh_push_text(out, "{\"num\":\"")
+                rh_json_escape(out, texts, nodes[number.usize()].text_start.usize(), nodes[number.usize()].text_end.usize())
+                rh_push_text(out, "\",\"yanked\":")
+                return -1 if RegistryRubygems::rh_rg_yanked(nodes, raw, texts, version, out) < 0
+                rh_push_text(out, ",\"published_at\":")
+                return -1 if RegistryRubygems::rh_rg_published(nodes, texts, version, out) < 0
+                rh_push_text(out, ",\"repository\":")
+                repo_state: i64 = RegistryRubygems::rh_rg_repository(nodes, texts, version, root_obj, out)
+                return -1 if repo_state < 0
+                if repo_state == 0:
+                    rh_push_text(out, "null")
+                rh_push_text(out, ",\"deps\":[")
+                return -1 if RegistryRubygems::rh_rg_dependencies(nodes, texts, version, out) != 0
+                rh_push_text(out, "]}")
+                emitted_versions <- emitted_versions + 1
+                version <- nodes[version.usize()].next_sibling
+            rh_push_text(out, "]}")
+            0

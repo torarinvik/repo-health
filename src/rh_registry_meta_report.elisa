@@ -14,6 +14,7 @@ include "./rh_inventory_report.elisa"
 include "./rh_registry_meta.elisa"
 include "./rh_registry_npm.elisa"
 include "./rh_registry_crates.elisa"
+include "./rh_registry_rubygems.elisa"
 
 # private to this file (modules retried after re-seed; see CHANGELOG).
 def rh_rmr_emit(out: mutable darray[u8]&, pool: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
@@ -28,7 +29,13 @@ def rh_registry_meta_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 c
     provider_texts: mutable darray[u8] = []
     provider_root: i64 = rh_json_parse(raw, provider_nodes, provider_texts)
     crates_shape: bool = provider_root >= 0 and provider_nodes[provider_root.usize()].kind == RH_JSON_OBJ and rh_json_obj_get(provider_nodes, provider_texts, provider_root, "crate") >= 0
-    if crates_shape:
+    rubygems_versions: i64 = provider_root if provider_root >= 0 and provider_nodes[provider_root.usize()].kind == RH_JSON_ARR else rh_json_obj_get(provider_nodes, provider_texts, provider_root, "versions")
+    rubygems_shape: bool = rubygems_versions >= 0 and provider_nodes[rubygems_versions.usize()].kind == RH_JSON_ARR and provider_nodes[rubygems_versions.usize()].first_child >= 0 and rh_json_obj_get(provider_nodes, provider_texts, provider_nodes[rubygems_versions.usize()].first_child, "number") >= 0
+    if rubygems_shape:
+        normalized: mutable darray[u8] = []
+        return -1 if RegistryRubygems::rh_regmeta_rubygems_normalize(raw, normalized) != 0
+        return -1 if rh_regmeta_parse(normalized, pool, versions, &meta) != 0
+    elif crates_shape:
         normalized: mutable darray[u8] = []
         return -1 if RegistryCrates::rh_regmeta_crates_normalize(raw, normalized) != 0
         return -1 if rh_regmeta_parse(normalized, pool, versions, &meta) != 0
@@ -38,7 +45,9 @@ def rh_registry_meta_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 c
             normalized <- []
             if RegistryNpm::rh_regmeta_npm_normalize(raw, normalized) != 0:
                 normalized <- []
-                return -1 if RegistryCrates::rh_regmeta_crates_normalize(raw, normalized) != 0
+                if RegistryCrates::rh_regmeta_crates_normalize(raw, normalized) != 0:
+                    normalized <- []
+                    return -1 if RegistryRubygems::rh_regmeta_rubygems_normalize(raw, normalized) != 0
         pool <- []
         versions <- []
         return -1 if rh_regmeta_parse(normalized, pool, versions, &meta) != 0
