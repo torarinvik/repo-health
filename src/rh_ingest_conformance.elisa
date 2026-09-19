@@ -105,6 +105,9 @@ module IngestConformance:
             ttl_ok: mutable i64 = 0
             ttl: i64 = IngestConformance::rh_ic_int(nodes, raw, texts, root_idx, "lease_ttl", &ttl_ok)
             return -1 if now_ok == 0 or ttl_ok == 0 or now < 0 or ttl <= 0
+            watermark_ok: mutable i64 = 0
+            collection_start: i64 = IngestConformance::rh_ic_int(nodes, raw, texts, root_idx, "collection_start", &watermark_ok)
+            return -1 if watermark_ok == 0 or collection_start < 0
             pages_idx: i64 = IngestConformance::rh_ic_get(nodes, texts, root_idx, "pages")
             return -1 if pages_idx < 0 or nodes[pages_idx.usize()].kind != RH_JSON_ARR
             owner: mutable darray[u8] = []
@@ -171,12 +174,17 @@ module IngestConformance:
             partial_pages: mutable i64 = 0
             crash_replays: mutable i64 = 0
             stale_rejected: mutable i64 = 0
+            attempted_pages: mutable i64 = 0
+            successful_pages: mutable i64 = 0
+            backdated_events: mutable i64 = 0
+            updates_after_start: mutable i64 = 0
             rh_push_text(out, "{\"schema\":\"rh-ingest-result/1\",\"source\":")
             IngestConformance::rh_ic_emit_span(out, texts, ss, se)
             rh_push_text(out, ",\"capability\":")
             IngestConformance::rh_ic_emit_span(out, texts, cs, ce)
             rh_push_text(out, ",\"pages\":[")
-            while page >= 0 |page: i64 = nodes[pages_idx.usize()].first_child, nodes, texts, raw, out, token, leasep, logp, ownerp, eventp, indexp, cursorp, cursor_page, cursor_count, appended, duplicates, committed_pages, empty_pages, failed_pages, partial_pages, crash_replays, stale_rejected|:
+            while page >= 0 |page: i64 = nodes[pages_idx.usize()].first_child, nodes, texts, raw, out, token, leasep, logp, ownerp, eventp, indexp, cursorp, cursor_page, cursor_count, appended, duplicates, committed_pages, empty_pages, failed_pages, partial_pages, crash_replays, stale_rejected, attempted_pages, successful_pages, backdated_events, updates_after_start|:
+                attempted_pages <- attempted_pages + 1
                 return -1 if nodes[page.usize()].kind != RH_JSON_OBJ
                 page_ok: mutable i64 = 0
                 page_no: i64 = IngestConformance::rh_ic_int(nodes, raw, texts, page, "page", &page_ok)
@@ -219,12 +227,31 @@ module IngestConformance:
                             k <- k + 1
                         chunk_nodes: mutable darray[RhJsonNode] = []
                         chunk_texts: mutable darray[u8] = []
-                        return -1 if rh_json_parse(line, chunk_nodes, chunk_texts) < 0
+                        chunk_root: i64 = rh_json_parse(line, chunk_nodes, chunk_texts)
+                        return -1 if chunk_root < 0 or chunk_nodes[chunk_root.usize()].kind != RH_JSON_OBJ
+                        occurred_idx: i64 = IngestConformance::rh_ic_get(chunk_nodes, chunk_texts, chunk_root, "occurred_at")
+                        observed_idx: i64 = IngestConformance::rh_ic_get(chunk_nodes, chunk_texts, chunk_root, "observed_at")
+                        has_event_times: mutable bool = false
+                        occurred_at: mutable i64 = 0
+                        observed_at: mutable i64 = 0
+                        if occurred_idx >= 0 or observed_idx >= 0:
+                            return -1 if occurred_idx < 0 or observed_idx < 0
+                            event_time_ok: mutable i64 = 0
+                            observed_time_ok: mutable i64 = 0
+                            occurred_at <- rh_json_int(chunk_nodes, line, occurred_idx, &event_time_ok)
+                            observed_at <- rh_json_int(chunk_nodes, line, observed_idx, &observed_time_ok)
+                            return -1 if event_time_ok == 0 or observed_time_ok == 0 or occurred_at < 0 or observed_at < 0
+                            has_event_times <- true
                         id: mutable darray[u8] = []
                         IngestConformance::rh_ic_copy(texts, es, ee, id)
                         idp: u8& = (&id[0]).cast[u8&] can Unsafe.PointerCast
                         result: i64 = rh_store_event(eventp, indexp, idp, line)
                         return -1 if result < 0
+                        if result == 1 and has_event_times:
+                            if occurred_at < collection_start and observed_at >= collection_start:
+                                backdated_events <- backdated_events + 1
+                            if occurred_at >= collection_start and observed_at > collection_start:
+                                updates_after_start <- updates_after_start + 1
                         page_appended <- page_appended + 1 if result == 1
                         page_duplicates <- page_duplicates + 1 if result == 0
                         event <- nodes[event.usize()].next_sibling
@@ -237,6 +264,7 @@ module IngestConformance:
                         cursor_page <- page_no
                         cursor_count <- stored_count
                         committed_pages <- committed_pages + 1
+                        successful_pages <- successful_pages + 1 if status == RH_IC_COMPLETE or status == RH_IC_EMPTY
                     else:
                         crash_replays <- crash_replays + 1
                     appended <- appended + page_appended
@@ -264,7 +292,19 @@ module IngestConformance:
             rh_push_decimal_i64(out, cursor_count)
             rh_push_text(out, "},\"event_store_count\":")
             rh_push_decimal_i64(out, total_events)
-            rh_push_text(out, ",\"conformance\":{\"appended\":")
+            rh_push_text(out, ",\"watermark\":{\"collection_start\":")
+            rh_push_decimal_i64(out, collection_start)
+            rh_push_text(out, ",\"published_after_events\":true,\"backdated_events\":")
+            rh_push_decimal_i64(out, backdated_events)
+            rh_push_text(out, ",\"updates_after_start\":")
+            rh_push_decimal_i64(out, updates_after_start)
+            rh_push_text(out, ",\"reconciliation_required\":")
+            rh_push_text(out, "true" if backdated_events > 0 else "false")
+            rh_push_text(out, "},\"attempts\":{\"pages\":")
+            rh_push_decimal_i64(out, attempted_pages)
+            rh_push_text(out, ",\"successful_acquisition_pages\":")
+            rh_push_decimal_i64(out, successful_pages)
+            rh_push_text(out, "},\"conformance\":{\"appended\":")
             rh_push_decimal_i64(out, appended)
             rh_push_text(out, ",\"duplicates_absorbed\":")
             rh_push_decimal_i64(out, duplicates)
@@ -280,5 +320,5 @@ module IngestConformance:
             rh_push_decimal_i64(out, crash_replays)
             rh_push_text(out, ",\"stale_token_rejected\":")
             rh_push_decimal_i64(out, stale_rejected)
-            rh_push_text(out, "},\"note\":\"events persist before cursor advancement; duplicate retries converge through the immutable id index; only complete or successful-empty pages advance the cursor; failed and partial acquisition preserve prior evidence; lease fencing rejects stale publication\"}")
+            rh_push_text(out, "},\"note\":\"collection start watermark is pinned before acquisition; events persist before cursor advancement; duplicate retries converge through the immutable id index; late or backdated events require reconciliation; only complete or successful-empty pages advance the cursor; failed and partial acquisition preserve prior evidence; lease fencing rejects stale publication\"}")
             0

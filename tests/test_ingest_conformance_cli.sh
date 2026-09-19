@@ -13,10 +13,10 @@ bash "$ROOT/tools/build.sh" >/dev/null
 rm -rf "$T-root" "$T-root-2" "$T-root-bad" "$T-root-bad2" "$T-input.json" "$T-out.json" "$T-out-2.json" "$T-bad.json" "$T-bad-status.json" "$T-x"
 python3 - "$T-input.json" <<'PY'
 import json, sys
-event = lambda ident, state: {"id": ident, "line": json.dumps({"id": ident, "state": state}, separators=(",", ":"))}
+event = lambda ident, state: {"id": ident, "line": json.dumps({"id": ident, "state": state, "occurred_at": 999 if ident == "issue:1" else 1001, "observed_at": 1000 if ident == "issue:1" else 1002}, separators=(",", ":"))}
 d = {
     "schema": "rh-ingest-input/1", "source": "github", "capability": "issues",
-    "owner": "worker-a", "lease_now": 1000, "lease_ttl": 100,
+    "owner": "worker-a", "lease_now": 1000, "lease_ttl": 100, "collection_start": 1000,
     "pages": [
         {"page": 1, "status": "complete", "commit": False, "events": [event("issue:1", "open")]},
         {"page": 1, "status": "complete", "commit": True, "events": [event("issue:1", "open"), event("issue:2", "closed")]},
@@ -35,6 +35,8 @@ d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-ingest-result/1", d
 assert d["cursor"] == {"page": 2, "event_count": 2}, d
 assert d["event_store_count"] == 2, d
+assert d["watermark"] == {"collection_start": 1000, "published_after_events": True, "backdated_events": 1, "updates_after_start": 1, "reconciliation_required": True}, d
+assert d["attempts"] == {"pages": 6, "successful_acquisition_pages": 2}, d
 c = d["conformance"]
 assert c["appended"] == 2 and c["duplicates_absorbed"] == 1, c
 assert c["committed_pages"] == 2 and c["successful_empty_pages"] == 1, c
@@ -42,7 +44,7 @@ assert c["failed_pages"] == 1 and c["partial_pages"] == 1, c
 assert c["crash_before_cursor_replays"] == 1 and c["stale_token_rejected"] == 1, c
 assert d["pages"][0]["cursor_advanced"] is False, d
 assert d["pages"][2]["status"] == "empty" and d["pages"][2]["cursor_advanced"] is True, d
-assert "failed and partial acquisition preserve prior evidence" in d["note"], d
+assert "late or backdated events require reconciliation" in d["note"], d
 print("[ingest] crash/replay, empty-vs-failure, and fencing semantics OK")
 PY
 [[ -f "$T-root/sources/github/cursors/issues.cursor" ]] || fail "cursor not stored in cursor namespace"
