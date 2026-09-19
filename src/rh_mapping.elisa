@@ -1,0 +1,203 @@
+# rh_mapping.elisa — reviewed project/package mapping assertions (M05-03).
+#
+# Mapping claims are versioned, source-stratified assertions. Only ACCEPTED
+# mirror/migration relations are eligible for downstream grouping; proposed,
+# rejected, revoked, component, and release-line records remain evidence and
+# never silently change graph identity.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_graph.elisa"
+
+const RH_MAPPING_REL_MIRROR: u8 = 1
+const RH_MAPPING_REL_MIGRATION: u8 = 2
+const RH_MAPPING_REL_COMPONENT: u8 = 3
+const RH_MAPPING_REL_RELEASE_LINE: u8 = 4
+const RH_MAPPING_STATE_PROPOSED: u8 = 0
+const RH_MAPPING_STATE_ACCEPTED: u8 = 1
+const RH_MAPPING_STATE_REJECTED: u8 = 2
+const RH_MAPPING_STATE_REVOKED: u8 = 3
+const RH_MAPPING_SOURCE_PROVIDER: u8 = 1
+const RH_MAPPING_SOURCE_FILE: u8 = 2
+const RH_MAPPING_SOURCE_OPERATOR: u8 = 3
+
+struct RhMappingAssertion:
+    a: mutable i64
+    b: mutable i64
+    state: mutable u8
+    relation: mutable u8
+    source: mutable u8
+    reviewed_at: mutable i64
+    evidence_count: mutable i64
+
+module Mapping:
+    private:
+        def rh_mapping_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if obj < 0 or nodes[obj.usize()].kind != RH_JSON_OBJ
+            want: usize = strlen(key)
+            while child >= 0 |child: i64 = nodes[obj.usize()].first_child, nodes, texts, key, want|:
+                kn: RhJsonNode = nodes[child.usize()]
+                value: i64 = kn.next_sibling
+                if kn.kind == RH_JSON_STR and value >= 0 and kn.text_end - kn.text_start == want.i64():
+                    same: mutable bool = true
+                    while k < want |k: usize = 0, texts, kn, key|:
+                        if texts[(kn.text_start + k.i64()).usize()] != key[k]:
+                            same <- false
+                        k <- k + 1
+                    return value if same
+                child <- nodes[value.usize()].next_sibling if value >= 0 else -1
+            -1
+
+        def rh_mapping_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool:
+            return false if s < 0 or e < s or e - s != strlen(lit).i64()
+            while i < e - s |i: i64 = 0, texts, s, lit|:
+                return false if texts[(s + i).usize()] != lit[i.usize()]
+                i <- i + 1
+            true
+
+        def rh_mapping_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Mapping::rh_mapping_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            n: RhJsonNode = nodes[idx.usize()]
+            s_out[0] <- n.text_start
+            e_out[0] <- n.text_end
+            true
+
+        def rh_mapping_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Mapping::rh_mapping_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_mapping_state(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_MAPPING_STATE_PROPOSED if Mapping::rh_mapping_eq(texts, s, e, "proposed")
+            return RH_MAPPING_STATE_ACCEPTED if Mapping::rh_mapping_eq(texts, s, e, "accepted")
+            return RH_MAPPING_STATE_REJECTED if Mapping::rh_mapping_eq(texts, s, e, "rejected")
+            return RH_MAPPING_STATE_REVOKED if Mapping::rh_mapping_eq(texts, s, e, "revoked")
+            -1
+
+        def rh_mapping_relation(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_MAPPING_REL_MIRROR if Mapping::rh_mapping_eq(texts, s, e, "mirror")
+            return RH_MAPPING_REL_MIGRATION if Mapping::rh_mapping_eq(texts, s, e, "migration")
+            return RH_MAPPING_REL_COMPONENT if Mapping::rh_mapping_eq(texts, s, e, "component")
+            return RH_MAPPING_REL_RELEASE_LINE if Mapping::rh_mapping_eq(texts, s, e, "release_line")
+            -1
+
+        def rh_mapping_source(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_MAPPING_SOURCE_PROVIDER if Mapping::rh_mapping_eq(texts, s, e, "provider")
+            return RH_MAPPING_SOURCE_FILE if Mapping::rh_mapping_eq(texts, s, e, "file")
+            return RH_MAPPING_SOURCE_OPERATOR if Mapping::rh_mapping_eq(texts, s, e, "operator")
+            -1
+
+        def rh_mapping_state_label(state: u8) -> u8&:
+            return "proposed" if state == RH_MAPPING_STATE_PROPOSED
+            return "accepted" if state == RH_MAPPING_STATE_ACCEPTED
+            return "rejected" if state == RH_MAPPING_STATE_REJECTED
+            "revoked"
+
+        def rh_mapping_relation_label(relation: u8) -> u8&:
+            return "mirror" if relation == RH_MAPPING_REL_MIRROR
+            return "migration" if relation == RH_MAPPING_REL_MIGRATION
+            return "component" if relation == RH_MAPPING_REL_COMPONENT
+            "release_line"
+
+        def rh_mapping_source_label(source: u8) -> u8&:
+            return "provider" if source == RH_MAPPING_SOURCE_PROVIDER
+            return "file" if source == RH_MAPPING_SOURCE_FILE
+            "operator"
+
+        def rh_mapping_count_evidence(nodes: darray[RhJsonNode]&, arr: i64) -> i64:
+            return -1 if arr < 0 or nodes[arr.usize()].kind != RH_JSON_ARR
+            nodes[arr.usize()].child_count
+
+    public:
+        def rh_mapping_parse(raw: darray[u8]&, revision_out: mutable i64&, records_out: mutable darray[RhMappingAssertion]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema: i64 = Mapping::rh_mapping_get(nodes, texts, root, "schema")
+            return -1 if schema < 0 or nodes[schema.usize()].kind != RH_JSON_STR
+            sn: RhJsonNode = nodes[schema.usize()]
+            return -1 if not Mapping::rh_mapping_eq(texts, sn.text_start, sn.text_end, "rh-mapping-input/1")
+            rok: mutable i64 = 0
+            revision: i64 = Mapping::rh_mapping_int(nodes, raw, texts, root, "revision", &rok)
+            return -1 if rok == 0 or revision < 0
+            arr_idx: i64 = Mapping::rh_mapping_get(nodes, texts, root, "assertions")
+            return -1 if arr_idx < 0 or nodes[arr_idx.usize()].kind != RH_JSON_ARR
+            while child >= 0 |child: i64 = nodes[arr_idx.usize()].first_child, nodes, raw, texts, records_out|:
+                return -1 if nodes[child.usize()].kind != RH_JSON_OBJ
+                aok: mutable i64 = 0
+                bok: mutable i64 = 0
+                time_ok: mutable i64 = 0
+                a: i64 = Mapping::rh_mapping_int(nodes, raw, texts, child, "a", &aok)
+                b: i64 = Mapping::rh_mapping_int(nodes, raw, texts, child, "b", &bok)
+                reviewed_at: i64 = Mapping::rh_mapping_int(nodes, raw, texts, child, "reviewed_at", &time_ok)
+                return -1 if aok == 0 or bok == 0 or time_ok == 0 or a < 0 or b < 0 or reviewed_at < 0
+                ss: mutable i64 = 0
+                se: mutable i64 = 0
+                rs: mutable i64 = 0
+                re: mutable i64 = 0
+                srcs: mutable i64 = 0
+                srce: mutable i64 = 0
+                return -1 if not Mapping::rh_mapping_str(nodes, texts, child, "state", &ss, &se)
+                return -1 if not Mapping::rh_mapping_str(nodes, texts, child, "relation", &rs, &re)
+                return -1 if not Mapping::rh_mapping_str(nodes, texts, child, "source", &srcs, &srce)
+                state: i64 = Mapping::rh_mapping_state(texts, ss, se)
+                relation: i64 = Mapping::rh_mapping_relation(texts, rs, re)
+                source: i64 = Mapping::rh_mapping_source(texts, srcs, srce)
+                return -1 if state < 0 or relation < 0 or source < 0
+                evidence_count: i64 = Mapping::rh_mapping_count_evidence(nodes, Mapping::rh_mapping_get(nodes, texts, child, "evidence"))
+                return -1 if evidence_count < 0
+                records_out.push(RhMappingAssertion{a: a, b: b, state: state.u8(), relation: relation.u8(), source: source.u8(), reviewed_at: reviewed_at, evidence_count: evidence_count})
+                child <- nodes[child.usize()].next_sibling
+            revision_out[0] <- revision
+            0
+
+        def rh_mapping_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            revision: mutable i64 = 0
+            records: mutable darray[RhMappingAssertion] = []
+            return -1 if Mapping::rh_mapping_parse(raw, &revision, records) != 0
+            proposed: mutable i64 = 0
+            accepted: mutable i64 = 0
+            rejected: mutable i64 = 0
+            revoked: mutable i64 = 0
+            rh_push_text(out, "{\"schema\":\"rh-mapping-result/1\",\"revision\":")
+            rh_push_decimal_i64(out, revision)
+            rh_push_text(out, ",\"assertions\":[")
+            while i < records.count |i: usize = 0, records, out, proposed, accepted, rejected, revoked|:
+                if i > 0:
+                    out.push(44)
+                a: RhMappingAssertion = records[i]
+                rh_push_text(out, "{\"a\":")
+                rh_push_decimal_i64(out, a.a)
+                rh_push_text(out, ",\"b\":")
+                rh_push_decimal_i64(out, a.b)
+                rh_push_text(out, ",\"state\":\"")
+                rh_push_text(out, Mapping::rh_mapping_state_label(a.state))
+                rh_push_text(out, "\",\"relation\":\"")
+                rh_push_text(out, Mapping::rh_mapping_relation_label(a.relation))
+                rh_push_text(out, "\",\"source\":\"")
+                rh_push_text(out, Mapping::rh_mapping_source_label(a.source))
+                rh_push_text(out, "\",\"reviewed_at\":")
+                rh_push_decimal_i64(out, a.reviewed_at)
+                rh_push_text(out, ",\"evidence_count\":")
+                rh_push_decimal_i64(out, a.evidence_count)
+                rh_push_text(out, "}")
+                if a.state == RH_MAPPING_STATE_PROPOSED:
+                    proposed <- proposed + 1
+                elif a.state == RH_MAPPING_STATE_ACCEPTED:
+                    accepted <- accepted + 1
+                elif a.state == RH_MAPPING_STATE_REJECTED:
+                    rejected <- rejected + 1
+                else:
+                    revoked <- revoked + 1
+                i <- i + 1
+            rh_push_text(out, "],\"state_counts\":{\"proposed\":")
+            rh_push_decimal_i64(out, proposed)
+            rh_push_text(out, ",\"accepted\":")
+            rh_push_decimal_i64(out, accepted)
+            rh_push_text(out, ",\"rejected\":")
+            rh_push_decimal_i64(out, rejected)
+            rh_push_text(out, ",\"revoked\":")
+            rh_push_decimal_i64(out, revoked)
+            rh_push_text(out, "},\"note\":\"mapping assertions are versioned evidence; only accepted mirror/migration relations may group downstream nodes, while component and release-line relations remain distinct\"}")
+            0

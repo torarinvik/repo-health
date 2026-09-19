@@ -55,6 +55,7 @@ include "./rh_experimental_report.elisa"
 include "./rh_proof.elisa"
 include "./rh_forecast.elisa"
 include "./rh_intervention.elisa"
+include "./rh_mapping.elisa"
 include "./rh_render.elisa"
 include "./rh_explain.elisa"
 include "./rh_lease_report.elisa"
@@ -87,7 +88,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli findings --input <file> --out <file>")
     rh_cli_err("       rh_cli resolution --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli parser-diff --native <file> --candidate <file> --out <file> [--native-parser N] [--candidate-parser N] [--config C] [--visibility public|private]")
-    rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--snapshot-root <dir>] [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
+    rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--snapshot-root <dir>] [--mapping <file>] [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
     rh_cli_err("            [--max-nodes N] [--max-depth D] [--unavailable <id>] [--private <id>]...")
     rh_cli_err("       rh_cli policy --policy <file> --input <file> --out <dir> [--state <file> | --state-store <dir>]")
     rh_cli_err("       rh_cli correct --corrections <file> --out <dir> [--state <file> | --state-store <dir>]")
@@ -118,6 +119,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli proof --input <file> --out <file>")
     rh_cli_err("       rh_cli forecast --input <file> --out <file>")
     rh_cli_err("       rh_cli intervention --input <file> --out <file>")
+    rh_cli_err("       rh_cli mapping --input <file> --out <file>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
     rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
     rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
@@ -788,11 +790,12 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         snap_idx: mutable i64 = -1
         un_idx: mutable i64 = -1
         in_idx: mutable i64 = -1
+        map_idx: mutable i64 = -1
         maxn: mutable i64 = 1000
         maxd: mutable i64 = 32
         priv: mutable darray[i64] = []
         mirrors: mutable darray[RhAssertion] = []
-        while dd < argc |dd: i64 = 2, slots, g_idx, s_idx, dw_idx, snap_idx, un_idx, in_idx, maxn, maxd, priv, mirrors|:
+        while dd < argc |dd: i64 = 2, slots, g_idx, s_idx, dw_idx, snap_idx, un_idx, in_idx, map_idx, maxn, maxd, priv, mirrors|:
             a8: u8& = slots[dd].cast[u8&] can Unsafe.PointerCast
             if rh_streq(a8, "--graph"):
                 if dd + 1 < argc:
@@ -873,15 +876,25 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                     in_idx <- dd
                 else:
                     return rh_cli_usage(2)
+            elif rh_streq(a8, "--mapping"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    map_idx <- dd
+                else:
+                    return rh_cli_usage(2)
             else:
                 return rh_cli_usage(2)
             dd <- dd + 1
         return rh_cli_usage(2) if g_idx < 0 or s_idx < 0 or dw_idx < 0
+        mapping_path: mutable cstr = ""
+        mapping_path <- slots[map_idx] if map_idx >= 0
+        has_mapping: bool = map_idx >= 0
+        intrinsic_path: mutable cstr = ""
+        intrinsic_path <- slots[in_idx] if in_idx >= 0
+        has_intrinsic: bool = in_idx >= 0
         if snap_idx >= 0:
-            return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], slots[snap_idx], true, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, slots[in_idx], true) if in_idx >= 0
-            return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], slots[snap_idx], true, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, "", false)
-        return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], "", false, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, slots[in_idx], true) if in_idx >= 0
-        return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], "", false, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, "", false)
+            return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], slots[snap_idx], true, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, intrinsic_path, has_intrinsic, mapping_path, has_mapping)
+        return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], "", false, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, intrinsic_path, has_intrinsic, mapping_path, has_mapping)
     if rh_streq(cmd, "policy"):
         p_idx, i_idx, po_idx, ps_idx, pt_idx =
             while pp < argc |p_idx: i64 = -1, i_idx: i64 = -1, po_idx: i64 = -1, ps_idx: i64 = -1, pt_idx: i64 = -1, pp: i64 = 2, slots| -> p_idx, i_idx, po_idx, ps_idx, pt_idx:
@@ -1589,6 +1602,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 iiq <- iiq + 1
         return rh_cli_usage(2) if ii_idx < 0 or io_idx < 0
         return rh_do_intervention(slots[ii_idx], slots[io_idx])
+    if rh_streq(cmd, "mapping"):
+        mi_idx, mo_idx =
+            while mmq < argc |mi_idx: i64 = -1, mo_idx: i64 = -1, mmq: i64 = 2, slots| -> mi_idx, mo_idx:
+                a30: u8& = slots[mmq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(a30, "--input"):
+                    if mmq + 1 < argc:
+                        mmq <- mmq + 1
+                        mi_idx <- mmq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a30, "--out"):
+                    if mmq + 1 < argc:
+                        mmq <- mmq + 1
+                        mo_idx <- mmq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                mmq <- mmq + 1
+        return rh_cli_usage(2) if mi_idx < 0 or mo_idx < 0
+        return rh_do_mapping(slots[mi_idx], slots[mo_idx])
     if rh_streq(cmd, "sign") or rh_streq(cmd, "verify"):
         key_idx, sub_idx, sig_idx =
             while m < argc |key_idx: i64 = -1, sub_idx: i64 = -1, sig_idx: i64 = -1, m: i64 = 2, slots| -> key_idx, sub_idx, sig_idx:
@@ -2652,7 +2686,7 @@ def rh_do_succession(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
 # direct + bounded transitive dependents under a labeled public projection,
 # SCC count, optional simulated-unavailability scenario, explicit truncation
 # (never a total), and private-node exclusion (S007/F030).
-def rh_do_downstream(graph: cstr, subject: i64, out: cstr, snapshot_root: cstr, has_snapshot: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, private_ids: darray[i64]&, asserts: darray[RhAssertion]&, intr_path: cstr, has_intr: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_downstream(graph: cstr, subject: i64, out: cstr, snapshot_root: cstr, has_snapshot: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, private_ids: darray[i64]&, asserts: darray[RhAssertion]&, intr_path: cstr, has_intr: bool, mapping_path: cstr, has_mapping: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not rh_arg_safe(graph) or not rh_arg_safe(out):
         rh_cli_err("rejected downstream argument (allowlist)")
         return 3
@@ -2660,6 +2694,9 @@ def rh_do_downstream(graph: cstr, subject: i64, out: cstr, snapshot_root: cstr, 
         if not rh_arg_safe(intr_path):
             rh_cli_err("rejected downstream argument (allowlist)")
             return 3
+    if has_mapping and not rh_arg_safe(mapping_path):
+        rh_cli_err("rejected downstream mapping argument (allowlist)")
+        return 3
     if has_snapshot:
         if not rh_arg_safe(snapshot_root):
             rh_cli_err("rejected downstream snapshot argument (allowlist)")
@@ -2685,13 +2722,35 @@ def rh_do_downstream(graph: cstr, subject: i64, out: cstr, snapshot_root: cstr, 
         if rh_io_read(ipp, intr_raw) < 0:
             rh_cli_err("downstream: cannot read intrinsics file")
             return 4
+    mapping_revision: mutable i64 = 0
+    if has_mapping:
+        mp: mutable darray[u8] =
+            mp: mutable darray[u8] = []
+            rh_push_cstr(mp, mapping_path)
+            mp.push(0)
+            mp
+        mpp: cstr = (&mp[0]).cast[cstr] can Unsafe.PointerCast
+        mapping_raw: mutable darray[u8] = []
+        if rh_io_read(mpp, mapping_raw) < 0:
+            rh_cli_err("downstream: cannot read mapping file")
+            return 4
+        mapping_records: mutable darray[RhMappingAssertion] = []
+        if Mapping::rh_mapping_parse(mapping_raw, &mapping_revision, mapping_records) != 0:
+            rh_cli_err("downstream: mapping is not a valid rh-mapping-input/1 document")
+            return 4
+        while mi < mapping_records.count |mi: usize = 0, mapping_records, asserts|:
+            mr: RhMappingAssertion = mapping_records[mi]
+            if mr.state == RH_MAPPING_STATE_ACCEPTED and (mr.relation == RH_MAPPING_REL_MIRROR or mr.relation == RH_MAPPING_REL_MIGRATION):
+                asserts.push(RhAssertion{a: mr.a, b: mr.b, state: RH_ASSERT_ACCEPTED})
+            mi <- mi + 1
+        
     if rh_ensure_dir(out) != 0:
         rh_cli_err("downstream: cannot create output directory")
         return 4
     body: mutable darray[u8] = []
     snapshot_id: mutable darray[u8] = []
     empty_snapshot: mutable darray[u8] = []
-    rc: mutable i64 = rh_downstream_report(raw, graph, subject, private_ids, asserts, intr_raw, has_intr, max_nodes, max_depth, unavailable, has_unavailable, empty_snapshot, body)
+    rc: mutable i64 = rh_downstream_report(raw, graph, subject, private_ids, asserts, mapping_revision, intr_raw, has_intr, max_nodes, max_depth, unavailable, has_unavailable, empty_snapshot, body)
     if rc == -1:
         rh_cli_err("downstream: graph is not a valid rh-dep-graph/1 document")
         return 4
@@ -2705,12 +2764,12 @@ def rh_do_downstream(graph: cstr, subject: i64, out: cstr, snapshot_root: cstr, 
         if rh_ensure_dir(snapshot_root) != 0:
             rh_cli_err("downstream: cannot create snapshot root")
             return 4
-        projection: RhProjection = rh_projection_make(1, RH_SCOPE_ALL, 0, 0, 0, 0, 0, true, max_nodes, max_depth)
+        projection: RhProjection = rh_projection_make(1, RH_SCOPE_ALL, 0, 0, 0, 0, mapping_revision, true, max_nodes, max_depth)
         if ProjectionStore::rh_projection_snapshot_store(snapshot_root, raw, projection, snapshot_id) != 0:
             rh_cli_err("downstream: cannot persist projection snapshot")
             return 4
         body <- []
-        rc <- rh_downstream_report(raw, graph, subject, private_ids, asserts, intr_raw, has_intr, max_nodes, max_depth, unavailable, has_unavailable, snapshot_id, body)
+        rc <- rh_downstream_report(raw, graph, subject, private_ids, asserts, mapping_revision, intr_raw, has_intr, max_nodes, max_depth, unavailable, has_unavailable, snapshot_id, body)
         return 4 if rc != 0
     body.push(10)
     op: mutable darray[u8] = []
@@ -4657,6 +4716,34 @@ def rh_do_intervention(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloc
         rh_cli_err("intervention: cannot write --out")
         return 4
     rh_cli_out("intervention: evidence observed")
+    0
+
+# --- M05 reviewed mapping execution path. ---
+# Normalizes versioned mapping assertions. Downstream consumes the same input
+# through --mapping and only accepted mirror/migration relations group nodes.
+def rh_do_mapping(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected mapping argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("mapping: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if Mapping::rh_mapping_report(raw, body) != 0:
+        rh_cli_err("mapping: unsupported or malformed mapping envelope (fail closed)")
+        return 4
+    body.push(10)
+    if not rh_io_write(out_path, body):
+        rh_cli_err("mapping: cannot write --out")
+        return 4
+    rh_cli_out("mapping: evidence observed")
     0
 
 # --- M02-03 job-lease execution path. ---
