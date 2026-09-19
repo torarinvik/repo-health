@@ -23,6 +23,7 @@ include "./rh_continuity.elisa"
 include "./rh_continuity_scan.elisa"
 include "./rh_package.elisa"
 include "./rh_downstream_report.elisa"
+include "./rh_projection_store.elisa"
 include "./rh_policy.elisa"
 include "./rh_policy_parse.elisa"
 include "./rh_correction_report.elisa"
@@ -73,7 +74,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli continuity --bundle <manifest> --out <dir>")
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
-    rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
+    rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--snapshot-root <dir>] [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
     rh_cli_err("            [--max-nodes N] [--max-depth D] [--unavailable <id>] [--private <id>]...")
     rh_cli_err("       rh_cli policy --policy <file> --input <file> --out <dir> [--state <file>]")
     rh_cli_err("       rh_cli correct --corrections <file> --out <dir> [--state <file>]")
@@ -636,13 +637,14 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         g_idx: mutable i64 = -1
         s_idx: mutable i64 = -1
         dw_idx: mutable i64 = -1
+        snap_idx: mutable i64 = -1
         un_idx: mutable i64 = -1
         in_idx: mutable i64 = -1
         maxn: mutable i64 = 1000
         maxd: mutable i64 = 32
         priv: mutable darray[i64] = []
         mirrors: mutable darray[RhAssertion] = []
-        while dd < argc |dd: i64 = 2, slots, g_idx, s_idx, dw_idx, un_idx, in_idx, maxn, maxd, priv, mirrors|:
+        while dd < argc |dd: i64 = 2, slots, g_idx, s_idx, dw_idx, snap_idx, un_idx, in_idx, maxn, maxd, priv, mirrors|:
             a8: u8& = slots[dd].cast[u8&] can Unsafe.PointerCast
             if rh_streq(a8, "--graph"):
                 if dd + 1 < argc:
@@ -663,6 +665,12 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 if dd + 1 < argc:
                     dd <- dd + 1
                     dw_idx <- dd
+                else:
+                    return rh_cli_usage(2)
+            elif rh_streq(a8, "--snapshot-root"):
+                if dd + 1 < argc:
+                    dd <- dd + 1
+                    snap_idx <- dd
                 else:
                     return rh_cli_usage(2)
             elif rh_streq(a8, "--unavailable"):
@@ -721,8 +729,11 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 return rh_cli_usage(2)
             dd <- dd + 1
         return rh_cli_usage(2) if g_idx < 0 or s_idx < 0 or dw_idx < 0
-        return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, slots[in_idx], true) if in_idx >= 0
-        return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, "", false)
+        if snap_idx >= 0:
+            return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], slots[snap_idx], true, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, slots[in_idx], true) if in_idx >= 0
+            return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], slots[snap_idx], true, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, "", false)
+        return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], "", false, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, slots[in_idx], true) if in_idx >= 0
+        return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], "", false, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, "", false)
     if rh_streq(cmd, "policy"):
         p_idx, i_idx, po_idx, ps_idx =
             while pp < argc |p_idx: i64 = -1, i_idx: i64 = -1, po_idx: i64 = -1, ps_idx: i64 = -1, pp: i64 = 2, slots| -> p_idx, i_idx, po_idx, ps_idx:
@@ -2224,13 +2235,17 @@ def rh_do_succession(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
 # direct + bounded transitive dependents under a labeled public projection,
 # SCC count, optional simulated-unavailability scenario, explicit truncation
 # (never a total), and private-node exclusion (S007/F030).
-def rh_do_downstream(graph: cstr, subject: i64, out: cstr, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, private_ids: darray[i64]&, asserts: darray[RhAssertion]&, intr_path: cstr, has_intr: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_downstream(graph: cstr, subject: i64, out: cstr, snapshot_root: cstr, has_snapshot: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, private_ids: darray[i64]&, asserts: darray[RhAssertion]&, intr_path: cstr, has_intr: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not rh_arg_safe(graph) or not rh_arg_safe(out):
         rh_cli_err("rejected downstream argument (allowlist)")
         return 3
     if has_intr:
         if not rh_arg_safe(intr_path):
             rh_cli_err("rejected downstream argument (allowlist)")
+            return 3
+    if has_snapshot:
+        if not rh_arg_safe(snapshot_root):
+            rh_cli_err("rejected downstream snapshot argument (allowlist)")
             return 3
     gp: mutable darray[u8] =
         gp: mutable darray[u8] = []
@@ -2257,7 +2272,9 @@ def rh_do_downstream(graph: cstr, subject: i64, out: cstr, max_nodes: i64, max_d
         rh_cli_err("downstream: cannot create output directory")
         return 4
     body: mutable darray[u8] = []
-    rc: i64 = rh_downstream_report(raw, graph, subject, private_ids, asserts, intr_raw, has_intr, max_nodes, max_depth, unavailable, has_unavailable, body)
+    snapshot_id: mutable darray[u8] = []
+    empty_snapshot: mutable darray[u8] = []
+    rc: mutable i64 = rh_downstream_report(raw, graph, subject, private_ids, asserts, intr_raw, has_intr, max_nodes, max_depth, unavailable, has_unavailable, empty_snapshot, body)
     if rc == -1:
         rh_cli_err("downstream: graph is not a valid rh-dep-graph/1 document")
         return 4
@@ -2267,6 +2284,17 @@ def rh_do_downstream(graph: cstr, subject: i64, out: cstr, max_nodes: i64, max_d
     if rc == -3:
         rh_cli_err("downstream: intrinsics is not a valid rh-intrinsics/1 document")
         return 4
+    if has_snapshot:
+        if rh_ensure_dir(snapshot_root) != 0:
+            rh_cli_err("downstream: cannot create snapshot root")
+            return 4
+        projection: RhProjection = rh_projection_make(1, RH_SCOPE_ALL, 0, 0, 0, 0, 0, true, max_nodes, max_depth)
+        if ProjectionStore::rh_projection_snapshot_store(snapshot_root, raw, projection, snapshot_id) != 0:
+            rh_cli_err("downstream: cannot persist projection snapshot")
+            return 4
+        body <- []
+        rc <- rh_downstream_report(raw, graph, subject, private_ids, asserts, intr_raw, has_intr, max_nodes, max_depth, unavailable, has_unavailable, snapshot_id, body)
+        return 4 if rc != 0
     body.push(10)
     op: mutable darray[u8] = []
     if not rh_out_path(out, "downstream.json", op):

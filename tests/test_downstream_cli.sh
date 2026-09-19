@@ -45,6 +45,33 @@ assert d["intrinsics"] is None, d["intrinsics"]
 print("[downstream] diamond OK")
 PY
 
+echo "[downstream] persist labeled projection and replay its snapshot ID"
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/snapshot-a" --snapshot-root "$T/snapshots" >/dev/null || fail "snapshot run"
+sid_a=$(python3 - "$T/snapshot-a/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+sid = d["projection"]["snapshot_id"]
+assert isinstance(sid, str) and len(sid) == 16 and all(c in "0123456789abcdef" for c in sid), sid
+print(sid)
+PY
+)
+"$ROOT/build/rh_cli" store verify --root "$T/snapshots" --name "$sid_a" >/dev/null || fail "snapshot verification"
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/snapshot-b" --snapshot-root "$T/snapshots" >/dev/null || fail "snapshot replay"
+sid_b=$(python3 - "$T/snapshot-b/downstream.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["projection"]["snapshot_id"])
+PY
+)
+[[ "$sid_a" == "$sid_b" ]] || fail "identical graph/projection must replay the same snapshot ID"
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/snapshot-c" --snapshot-root "$T/snapshots" --max-depth 1 >/dev/null || fail "changed projection snapshot"
+sid_c=$(python3 - "$T/snapshot-c/downstream.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["projection"]["snapshot_id"])
+PY
+)
+[[ "$sid_a" != "$sid_c" ]] || fail "changed projection must create a new snapshot ID"
+echo "[downstream] projection snapshot OK"
+
 echo "[downstream] per-metric intrinsic join has its own denominators (R011)"
 cat > "$T/intr.json" <<'JSON'
 {"schema":"rh-intrinsics/1","metrics":["history.months_active","review.count","release.count"],"values":[{"id":1,"mask":1},{"id":2,"mask":3},{"id":3,"mask":5}]}
