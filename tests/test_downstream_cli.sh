@@ -46,6 +46,8 @@ metrics = {m["key"]: m for m in d["metrics"]}
 assert metrics["graph.direct_dependents_count"]["value"] == 2, metrics
 assert metrics["graph.transitive_dependents_count"]["value"] == 3, metrics
 assert metrics["graph.scc_component_count"]["value"] == 4, metrics
+assert metrics["graph.strongly_connected_components"]["value"] == 4, metrics
+assert metrics["graph.reverse_reachability_count"]["value"] == 3, metrics
 assert metrics["graph.cyclic_node_share"]["value"] == {"num": 0, "den": 5}, metrics
 assert metrics["graph.traversal_truncated"]["value"] is False, metrics
 assert metrics["graph.scenario_affected_count"]["status"] == "not_applicable", metrics
