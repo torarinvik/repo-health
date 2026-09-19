@@ -185,6 +185,21 @@ assert d["versions"][0]["repository"] is None, d
 print("[registry-meta] RubyGems versions array OK")
 PY
 
+echo "[registry-meta] NuGet registration pages normalize listed/yanked metadata"
+cp "$ROOT/fixtures/packages/nuget-registration.json" "$T/nuget.json"
+"$ROOT/build/rh_cli" registry-meta --input "$T/nuget.json" --out "$T/nuget.out" >/dev/null || fail "NuGet adapter"
+python3 - "$T/nuget.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["counts"] == {"versions": 2, "yanked": 1, "unknown_yank": 0, "with_repo": 1,
+                       "declared_deps": 2, "optional_deps": 0, "dev_deps": 0}, d["counts"]
+v = d["versions"]
+assert v[0]["version"] == "1.0.0" and v[0]["yanked"] is False, v[0]
+assert v[0]["repository"] == "https://example.invalid/nuget/demo" and v[0]["dep_count"] == 2, v[0]
+assert v[1]["version"] == "1.1.0" and v[1]["yanked"] is True, v[1]
+print("[registry-meta] NuGet registration normalization OK")
+PY
+
 echo "[registry-meta] bounded file transport capture"
 URL="file://$T/in.json"
 "$ROOT/build/rh_cli" registry-meta --url "$URL" --out "$T/fetched.json" >/dev/null || fail "file fetch"
@@ -222,8 +237,10 @@ printf '{"crate":{},"versions":[42]}' > "$T/crates-bad.json"
 "$ROOT/build/rh_cli" registry-meta --input "$T/crates-bad.json" --out "$T/x" >/dev/null 2>&1; rc_crates=$?
 printf '[{"number":42}]' > "$T/rubygems-bad.json"
 "$ROOT/build/rh_cli" registry-meta --input "$T/rubygems-bad.json" --out "$T/x" >/dev/null 2>&1; rc_rubygems=$?
+printf '{"items":[{"catalogEntry":{"version":42}}]}' > "$T/nuget-bad.json"
+"$ROOT/build/rh_cli" registry-meta --input "$T/nuget-bad.json" --out "$T/x" >/dev/null 2>&1; rc_nuget=$?
 set -e
-for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked" "$rc_npm" "$rc_crates" "$rc_rubygems"; do
+for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked" "$rc_npm" "$rc_crates" "$rc_rubygems" "$rc_nuget"; do
   [[ "$rc" -eq 4 ]] || fail "malformed registry-meta input must exit 4 (got $rc)"
 done
 

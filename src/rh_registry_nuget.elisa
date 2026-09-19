@@ -1,0 +1,126 @@
+# rh_registry_nuget.elisa — bounded NuGet registration metadata adapter (M08).
+#
+# NuGet registration documents expose version entries through `items` pages;
+# each entry carries a `catalogEntry`. This adapter keeps the provider shape at
+# the edge, maps `listed=false` to a retained yanked version, preserves the
+# project URL as an assertion, and counts dependency declarations without
+# resolving package ranges.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_REGMETA_NUGET_MAX_VERSIONS: i64 = 10000
+
+module RegistryNuget:
+    private:
+        def rh_nuget_value(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_nuget_yanked(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, entry: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            listed: i64 = RegistryNuget::rh_nuget_value(nodes, texts, entry, "listed")
+            if listed < 0 or nodes[listed.usize()].kind == RH_JSON_NULL:
+                rh_push_text(out, "null")
+                return 0
+            return -1 if nodes[listed.usize()].kind != RH_JSON_BOOL
+            rh_push_text(out, "false" if rh_json_is_true(nodes, raw, listed) else "true")
+            1
+
+        def rh_nuget_dependencies(nodes: darray[RhJsonNode]&, texts: darray[u8]&, entry: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            groups: i64 = RegistryNuget::rh_nuget_value(nodes, texts, entry, "dependencyGroups")
+            return 0 if groups < 0
+            return -1 if nodes[groups.usize()].kind != RH_JSON_ARR
+            emitted: mutable i64 = 0
+            group: mutable i64 = nodes[groups.usize()].first_child
+            while group >= 0 |group, nodes, texts, out, emitted|:
+                return -1 if nodes[group.usize()].kind != RH_JSON_OBJ
+                deps: i64 = RegistryNuget::rh_nuget_value(nodes, texts, group, "dependencies")
+                if deps >= 0:
+                    return -1 if nodes[deps.usize()].kind != RH_JSON_ARR
+                    dep: mutable i64 = nodes[deps.usize()].first_child
+                    while dep >= 0 |dep, nodes, out, emitted|:
+                        return -1 if nodes[dep.usize()].kind != RH_JSON_OBJ
+                        out.push(44) if emitted > 0
+                        rh_push_text(out, "{\"optional\":false,\"kind\":\"runtime\"}")
+                        emitted <- emitted + 1
+                        dep <- nodes[dep.usize()].next_sibling
+                group <- nodes[group.usize()].next_sibling
+            0
+
+        def rh_nuget_emit_entry(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, entry: i64, out: mutable darray[u8]&, emitted: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if entry < 0 or nodes[entry.usize()].kind != RH_JSON_OBJ
+            version_s: mutable i64 = 0
+            version_e: mutable i64 = 0
+            version_idx: i64 = RegistryNuget::rh_nuget_value(nodes, texts, entry, "version")
+            return -1 if version_idx < 0 or nodes[version_idx.usize()].kind != RH_JSON_STR
+            version_s <- nodes[version_idx.usize()].text_start
+            version_e <- nodes[version_idx.usize()].text_end
+            return -1 if version_e <= version_s
+            return -1 if emitted[0] >= RH_REGMETA_NUGET_MAX_VERSIONS
+            if emitted[0] > 0:
+                out.push(44)
+            rh_push_text(out, "{\"num\":\"")
+            rh_json_escape(out, texts, version_s.usize(), version_e.usize())
+            rh_push_text(out, "\",\"yanked\":")
+            return -1 if RegistryNuget::rh_nuget_yanked(nodes, raw, texts, entry, out) < 0
+            rh_push_text(out, ",\"published_at\":")
+            published_s: mutable i64 = 0
+            published_e: mutable i64 = 0
+            published_idx: i64 = RegistryNuget::rh_nuget_value(nodes, texts, entry, "published")
+            if published_idx >= 0 and nodes[published_idx.usize()].kind != RH_JSON_NULL:
+                return -1 if nodes[published_idx.usize()].kind != RH_JSON_STR
+                published_s <- nodes[published_idx.usize()].text_start
+                published_e <- nodes[published_idx.usize()].text_end
+                return -1 if published_e <= published_s
+                out.push(34)
+                rh_json_escape(out, texts, published_s.usize(), published_e.usize())
+                out.push(34)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"repository\":")
+            project_s: mutable i64 = 0
+            project_e: mutable i64 = 0
+            project_idx: i64 = RegistryNuget::rh_nuget_value(nodes, texts, entry, "projectUrl")
+            if project_idx >= 0 and nodes[project_idx.usize()].kind != RH_JSON_NULL:
+                return -1 if nodes[project_idx.usize()].kind != RH_JSON_STR
+                project_s <- nodes[project_idx.usize()].text_start
+                project_e <- nodes[project_idx.usize()].text_end
+                return -1 if project_e <= project_s
+                out.push(34)
+                rh_json_escape(out, texts, project_s.usize(), project_e.usize())
+                out.push(34)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"deps\":[")
+            return -1 if RegistryNuget::rh_nuget_dependencies(nodes, texts, entry, out) != 0
+            rh_push_text(out, "]}")
+            emitted[0] <- emitted[0] + 1
+            0
+
+        def rh_nuget_emit_items(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, items: i64, out: mutable darray[u8]&, emitted: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if items < 0 or nodes[items.usize()].kind != RH_JSON_ARR
+            item: mutable i64 = nodes[items.usize()].first_child
+            while item >= 0 |item, nodes, raw, texts, out, emitted|:
+                return -1 if nodes[item.usize()].kind != RH_JSON_OBJ
+                entry: i64 = RegistryNuget::rh_nuget_value(nodes, texts, item, "catalogEntry")
+                if entry >= 0:
+                    return -1 if RegistryNuget::rh_nuget_emit_entry(nodes, raw, texts, entry, out, emitted) != 0
+                else:
+                    page: i64 = RegistryNuget::rh_nuget_value(nodes, texts, item, "items")
+                    return -1 if page < 0 or RegistryNuget::rh_nuget_emit_items(nodes, raw, texts, page, out, emitted) != 0
+                item <- nodes[item.usize()].next_sibling
+            0
+
+    public:
+        def rh_regmeta_nuget_normalize(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count > 4194304
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            items: i64 = RegistryNuget::rh_nuget_value(nodes, texts, root, "items")
+            return -1 if items < 0
+            rh_push_text(out, "{\"versions\":[")
+            emitted: mutable i64 = 0
+            return -1 if RegistryNuget::rh_nuget_emit_items(nodes, raw, texts, items, out, &emitted) != 0
+            rh_push_text(out, "]}")
+            0
