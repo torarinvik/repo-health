@@ -28,6 +28,14 @@ python3 - "$DIR" "$OUT" <<'PY'
 import html, json, os, sys
 d, out = sys.argv[1], sys.argv[2]
 r = json.load(open(os.path.join(d, "report.json")))
+continuity = None
+continuity_metrics = None
+continuity_path = os.path.join(d, "continuity.json")
+continuity_metrics_path = os.path.join(d, "continuity-metrics.json")
+if os.path.isfile(continuity_path):
+    continuity = json.load(open(continuity_path))
+if os.path.isfile(continuity_metrics_path):
+    continuity_metrics = json.load(open(continuity_metrics_path))
 
 def esc(v):
     return html.escape(str(v))
@@ -87,6 +95,44 @@ parts.append("<tbody>")
 for k in sorted(r.get("capabilities", {}).keys()):
     parts.append("<tr><th scope=\"row\">%s</th><td>%s</td></tr>" % (esc(k), esc(r["capabilities"][k])))
 parts.append("</tbody></table>")
+
+if continuity is not None:
+    parts.append("<h2>Continuity</h2>")
+    parts.append("<table>")
+    parts.append("<caption>Observed continuity aggregates with their coverage basis; unknown values remain explicit.</caption>")
+    parts.append("<thead><tr><th scope=\"col\">field</th><th scope=\"col\">value</th></tr></thead><tbody>")
+    window = continuity.get("window", {})
+    basis = continuity.get("coverage", {})
+    continuity_rows = [
+        ("coverage basis", basis.get("basis", continuity.get("basis", "unknown"))),
+        ("first observation basis", continuity.get("first_observation_basis", "unknown")),
+        ("activity change claims supported", basis.get("activity_change_claims_supported", "unknown")),
+        ("actors observed", continuity.get("actors_total", "unknown")),
+        ("persistent actors", continuity.get("persistent", "unknown")),
+        ("commit events", continuity.get("event_totals", {}).get("commits", "unknown")),
+        ("release events", continuity.get("event_totals", {}).get("releases", "unknown")),
+        ("review events", continuity.get("event_totals", {}).get("reviews", "unknown")),
+        ("identity revision", continuity.get("identity_revision", "unknown")),
+        ("window start month", window.get("first_month_index", "unknown")),
+    ]
+    for key, value in continuity_rows:
+        parts.append("<tr><th scope=\"row\">%s</th><td>%s</td></tr>" % (esc(key), esc(value)))
+    parts.append("</tbody></table>")
+    if continuity_metrics is not None:
+        parts.append("<h3>Continuity metrics</h3>")
+        parts.append("<table>")
+        parts.append("<caption>Continuity metric observations; status and denominator context are retained.</caption>")
+        parts.append("<thead><tr><th scope=\"col\">metric</th><th scope=\"col\">version</th><th scope=\"col\">status</th><th scope=\"col\">value</th></tr></thead><tbody>")
+        for metric in continuity_metrics.get("metrics", []):
+            value = metric.get("value", "unknown")
+            if isinstance(value, dict) and "num" in value and "den" in value:
+                value = "%s/%s" % (value["num"], value["den"])
+            elif isinstance(value, dict) and "label" in value:
+                value = value["label"]
+            parts.append("<tr><th scope=\"row\">%s</th><td>%s</td><td>%s</td><td>%s</td></tr>" %
+                         (esc(metric.get("key", "")), esc(metric.get("version", "")),
+                          esc(metric.get("status", "unknown")), esc(value)))
+        parts.append("</tbody></table>")
 
 parts.append("<h2>Limitations</h2>")
 parts.append("<p>Raw commit authors are not maintainers. Unknown values are not zero. "

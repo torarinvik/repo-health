@@ -61,6 +61,24 @@ assert "<h2>Graph neighborhood</h2>" in h and "pkg&lt;&amp;" in h, "neighborhood
 print("[render] escaping OK")
 PY
 
+echo "[render] continuity artifacts appear as accessible tables"
+cat > "$T/rep/continuity.json" <<'JSON'
+{"schema":"rh-continuity/1","window":{"first_month_index":651,"months":12},"coverage":{"basis":"full","activity_change_claims_supported":true},"first_observation_basis":"first-ever","actors_total":4,"persistent":2,"event_totals":{"commits":12,"releases":3,"reviews":1},"identity_revision":7}
+JSON
+cat > "$T/rep/continuity-metrics.json" <<'JSON'
+{"schema":"rh-continuity-metrics/1","metrics":[{"key":"persistence.retained_90d","version":"1.0.0","status":"observed","value":{"num":1,"den":3}},{"key":"concentration.change_hhi","version":"1.0.0","status":"unknown","reason":"windowed"}]}
+JSON
+"$ROOT/tools/render-project.sh" "$T/rep" "$T/rep/project.html" >/dev/null || fail "continuity render"
+python3 - "$T/rep/project.html" <<'PY'
+import sys
+h = open(sys.argv[1], encoding="utf-8").read()
+assert "<h2>Continuity</h2>" in h and "coverage basis" in h, h
+assert "first-ever" in h and "651" in h and "4" in h, h
+assert "<h3>Continuity metrics</h3>" in h and "persistence.retained_90d" in h and "1/3" in h, h
+assert "unknown" in h and 'scope="row"' in h, h
+print("[render] continuity tables OK")
+PY
+
 echo "[render] determinism + fail-closed negatives"
 "$ROOT/build/rh_cli" render --report "$T/rep/report.json" --out "$T/rep/page2.html" >/dev/null || fail "rerun"
 cmp -s "$T/rep/page.html" "$T/rep/page2.html" || fail "render not deterministic"
