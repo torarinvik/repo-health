@@ -11,210 +11,213 @@ include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_ops.elisa"
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_or_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    Base::rh_bytes_equal_literal(texts, s, e, lit)
+module OpsReport:
+    private:
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_or_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, s, e, lit)
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_or_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-    idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
-    return false if idx < 0
-    Json::rh_json_str_span(nodes, idx, s_out, e_out)
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_or_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
+            return false if idx < 0
+            Json::rh_json_str_span(nodes, idx, s_out, e_out)
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_or_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, default_v: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    ok: mutable i64 = 0
-    v: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, obj, key), &ok)
-    return default_v if ok == 0
-    v
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_or_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, default_v: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            ok: mutable i64 = 0
+            v: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, obj, key), &ok)
+            return default_v if ok == 0
+            v
 
-def rh_monitor_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    nodes: mutable darray[Json::RhJsonNode] = []
-    texts: mutable darray[u8] = []
-    root: i64 = Json::rh_json_parse(raw, nodes, texts)
-    return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
-    sspan: mutable i64 = 0
-    espan: mutable i64 = 0
-    sc: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
-    return -1 if sc < 0 or not Json::rh_json_str_span(nodes, sc, &sspan, &espan)
-    return -1 if not rh_or_eq(texts, sspan, espan, "rh-monitor-input/1")
-    now: i64 = rh_or_int(nodes, raw, texts, root, "now", 0)
-    interval: i64 = rh_or_int(nodes, raw, texts, root, "expected_interval", 0)
-    ev_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "events")
-    return -1 if ev_idx < 0 or nodes[ev_idx.usize()].kind != Json::RH_JSON_ARR
-    m: mutable Ops::RhMon = Ops::rh_mon_new(interval)
-    arr: Json::RhJsonNode = nodes[ev_idx.usize()]
-    while child >= 0 |child: i64 = arr.first_child, nodes, texts, raw, m|:
-        return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
-        ks: mutable i64 = 0
-        ke: mutable i64 = 0
-        return -1 if not rh_or_str(nodes, texts, child, "kind", &ks, &ke)
-        if rh_or_eq(texts, ks, ke, "observed"):
-            Ops::rh_mon_observed(m)
-        elif rh_or_eq(texts, ks, ke, "unknown"):
-            Ops::rh_mon_unknown(m)
-        elif rh_or_eq(texts, ks, ke, "stale_partial"):
-            Ops::rh_mon_stale_partial(m)
-        elif rh_or_eq(texts, ks, ke, "error"):
-            Ops::rh_mon_error(m)
-        elif rh_or_eq(texts, ks, ke, "parser_reject"):
-            Ops::rh_mon_parser_reject(m)
-        elif rh_or_eq(texts, ks, ke, "object_failure"):
-            Ops::rh_mon_object_failure(m)
-        elif rh_or_eq(texts, ks, ke, "truncation"):
-            Ops::rh_mon_truncation(m)
-        elif rh_or_eq(texts, ks, ke, "success"):
-            Ops::rh_mon_success(m, rh_or_int(nodes, raw, texts, child, "now", 0))
-        elif rh_or_eq(texts, ks, ke, "queue_age"):
-            v: i64 = rh_or_int(nodes, raw, texts, child, "value", 0)
-            if v > m.queue_age_max:
-                m.queue_age_max <- v
-        elif rh_or_eq(texts, ks, ke, "cursor_lag"):
-            v2: i64 = rh_or_int(nodes, raw, texts, child, "value", 0)
-            if v2 > m.cursor_lag_max:
-                m.cursor_lag_max <- v2
-        else:
-            return -1
-        child <- nodes[child.usize()].next_sibling
-    rate: i64 = Ops::rh_mon_observed_rate_bp(m)
-    fresh: i64 = Ops::rh_mon_freshness_age(m, now)
-    Base::rh_push_text(out, "{\"schema\":\"rh-monitor-result/1\",\"expected_interval\":")
-    Base::rh_push_decimal_i64(out, interval)
-    Base::rh_push_text(out, ",\"now\":")
-    Base::rh_push_decimal_i64(out, now)
-    Base::rh_push_text(out, ",\"service\":{\"queue_age_max\":")
-    Base::rh_push_decimal_i64(out, m.queue_age_max)
-    Base::rh_push_text(out, ",\"cursor_lag_max\":")
-    Base::rh_push_decimal_i64(out, m.cursor_lag_max)
-    Base::rh_push_text(out, ",\"last_success_epoch\":")
-    Base::rh_push_decimal_i64(out, m.last_success_epoch)
-    Base::rh_push_text(out, ",\"freshness_age\":")
-    if fresh < 0:
-        Base::rh_push_text(out, "null")
-    else:
-        Base::rh_push_decimal_i64(out, fresh)
-    Base::rh_push_text(out, ",\"errors\":")
-    Base::rh_push_decimal_i64(out, m.errors)
-    Base::rh_push_text(out, ",\"parser_rejects\":")
-    Base::rh_push_decimal_i64(out, m.parser_rejects)
-    Base::rh_push_text(out, ",\"object_failures\":")
-    Base::rh_push_decimal_i64(out, m.object_failures)
-    Base::rh_push_text(out, "},\"project\":{\"observed\":")
-    Base::rh_push_decimal_i64(out, m.observed)
-    Base::rh_push_text(out, ",\"unknown\":")
-    Base::rh_push_decimal_i64(out, m.unknown)
-    Base::rh_push_text(out, ",\"observed_rate_bp\":")
-    if rate < 0:
-        Base::rh_push_text(out, "null")
-    else:
-        Base::rh_push_decimal_i64(out, rate)
-    Base::rh_push_text(out, ",\"stale_partial\":")
-    Base::rh_push_decimal_i64(out, m.stale_partial)
-    Base::rh_push_text(out, ",\"truncations\":")
-    Base::rh_push_decimal_i64(out, m.truncations)
-    Base::rh_push_text(out, "},\"exposition\":[")
-    expo: mutable darray[u8] = []
-    Ops::rh_mon_text(m, now, expo)
-    while e < expo.count |e: usize = 0, first_line: bool = true, expo, out|:
-        stop: i64 = Base::rh_find_byte(expo, e, 10)
-        line_end: usize = stop.usize() if stop >= 0 else expo.count
-        if line_end > e:
-            if not first_line:
-                out.push(44)
-            first_line <- false
-            Base::rh_push_text(out, "\"")
-            Base::rh_json_escape(out, expo, e, line_end)
-            Base::rh_push_text(out, "\"")
-        if stop < 0:
-            e <- expo.count
-        else:
-            e <- stop.usize() + 1
-    Base::rh_push_text(out, "],\"note\":\"service and project series are separate; a source outage moves service counters, not project activity/unknown; observed_rate_bp null means no denominator (unknown, not 0)\"}")
-    0
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_or_load_policy(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64) -> Ops::RhHostPolicy can[Memory.Allocate, Abort.Panic]:
+            Ops::RhHostPolicy{capacity: rh_or_int(nodes, raw, texts, root, "capacity", 1), refill_per_second: rh_or_int(nodes, raw, texts, root, "refill_per_second", 0), base_backoff_seconds: rh_or_int(nodes, raw, texts, root, "base_backoff_seconds", 0), max_backoff_seconds: rh_or_int(nodes, raw, texts, root, "max_backoff_seconds", 0)}
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_or_load_policy(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64) -> Ops::RhHostPolicy can[Memory.Allocate, Abort.Panic]:
-    Ops::RhHostPolicy{capacity: rh_or_int(nodes, raw, texts, root, "capacity", 1), refill_per_second: rh_or_int(nodes, raw, texts, root, "refill_per_second", 0), base_backoff_seconds: rh_or_int(nodes, raw, texts, root, "base_backoff_seconds", 0), max_backoff_seconds: rh_or_int(nodes, raw, texts, root, "max_backoff_seconds", 0)}
-
-def rh_quota_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    nodes: mutable darray[Json::RhJsonNode] = []
-    texts: mutable darray[u8] = []
-    root: i64 = Json::rh_json_parse(raw, nodes, texts)
-    return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
-    sspan: mutable i64 = 0
-    espan: mutable i64 = 0
-    sc: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
-    return -1 if sc < 0 or not Json::rh_json_str_span(nodes, sc, &sspan, &espan)
-    return -1 if not rh_or_eq(texts, sspan, espan, "rh-quota-input/1")
-    host_id: i64 = rh_or_int(nodes, raw, texts, root, "host_id", 0)
-    policy: Ops::RhHostPolicy = rh_or_load_policy(nodes, raw, texts, root)
-    st: mutable Ops::RhHostState = Ops::rh_host_new(host_id, policy.capacity)
-    ops_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "ops")
-    return -1 if ops_idx < 0 or nodes[ops_idx.usize()].kind != Json::RH_JSON_ARR
-    results: mutable darray[u8] = []
-    arr: Json::RhJsonNode = nodes[ops_idx.usize()]
-    while child >= 0 |child: i64 = arr.first_child, first: bool = true, nodes, texts, raw, st, policy, results|:
-        return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
-        ops: mutable i64 = 0
-        ope: mutable i64 = 0
-        return -1 if not rh_or_str(nodes, texts, child, "op", &ops, &ope)
-        now: i64 = rh_or_int(nodes, raw, texts, child, "now", 0)
-        if not first:
-            results.push(44)
-        first <- false
-        Base::rh_push_text(results, "{\"op\":\"")
-        if rh_or_eq(texts, ops, ope, "allow"):
-            Base::rh_push_text(results, "allow\",\"allowed\":")
-            if Ops::rh_host_allow(st, policy, now) == 1:
-                Base::rh_push_text(results, "true")
+    public:
+        def rh_monitor_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            sspan: mutable i64 = 0
+            espan: mutable i64 = 0
+            sc: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
+            return -1 if sc < 0 or not Json::rh_json_str_span(nodes, sc, &sspan, &espan)
+            return -1 if not rh_or_eq(texts, sspan, espan, "rh-monitor-input/1")
+            now: i64 = rh_or_int(nodes, raw, texts, root, "now", 0)
+            interval: i64 = rh_or_int(nodes, raw, texts, root, "expected_interval", 0)
+            ev_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "events")
+            return -1 if ev_idx < 0 or nodes[ev_idx.usize()].kind != Json::RH_JSON_ARR
+            m: mutable Ops::RhMon = Ops::rh_mon_new(interval)
+            arr: Json::RhJsonNode = nodes[ev_idx.usize()]
+            while child >= 0 |child: i64 = arr.first_child, nodes, texts, raw, m|:
+                return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                ks: mutable i64 = 0
+                ke: mutable i64 = 0
+                return -1 if not rh_or_str(nodes, texts, child, "kind", &ks, &ke)
+                if rh_or_eq(texts, ks, ke, "observed"):
+                    Ops::rh_mon_observed(m)
+                elif rh_or_eq(texts, ks, ke, "unknown"):
+                    Ops::rh_mon_unknown(m)
+                elif rh_or_eq(texts, ks, ke, "stale_partial"):
+                    Ops::rh_mon_stale_partial(m)
+                elif rh_or_eq(texts, ks, ke, "error"):
+                    Ops::rh_mon_error(m)
+                elif rh_or_eq(texts, ks, ke, "parser_reject"):
+                    Ops::rh_mon_parser_reject(m)
+                elif rh_or_eq(texts, ks, ke, "object_failure"):
+                    Ops::rh_mon_object_failure(m)
+                elif rh_or_eq(texts, ks, ke, "truncation"):
+                    Ops::rh_mon_truncation(m)
+                elif rh_or_eq(texts, ks, ke, "success"):
+                    Ops::rh_mon_success(m, rh_or_int(nodes, raw, texts, child, "now", 0))
+                elif rh_or_eq(texts, ks, ke, "queue_age"):
+                    v: i64 = rh_or_int(nodes, raw, texts, child, "value", 0)
+                    if v > m.queue_age_max:
+                        m.queue_age_max <- v
+                elif rh_or_eq(texts, ks, ke, "cursor_lag"):
+                    v2: i64 = rh_or_int(nodes, raw, texts, child, "value", 0)
+                    if v2 > m.cursor_lag_max:
+                        m.cursor_lag_max <- v2
+                else:
+                    return -1
+                child <- nodes[child.usize()].next_sibling
+            rate: i64 = Ops::rh_mon_observed_rate_bp(m)
+            fresh: i64 = Ops::rh_mon_freshness_age(m, now)
+            Base::rh_push_text(out, "{\"schema\":\"rh-monitor-result/1\",\"expected_interval\":")
+            Base::rh_push_decimal_i64(out, interval)
+            Base::rh_push_text(out, ",\"now\":")
+            Base::rh_push_decimal_i64(out, now)
+            Base::rh_push_text(out, ",\"service\":{\"queue_age_max\":")
+            Base::rh_push_decimal_i64(out, m.queue_age_max)
+            Base::rh_push_text(out, ",\"cursor_lag_max\":")
+            Base::rh_push_decimal_i64(out, m.cursor_lag_max)
+            Base::rh_push_text(out, ",\"last_success_epoch\":")
+            Base::rh_push_decimal_i64(out, m.last_success_epoch)
+            Base::rh_push_text(out, ",\"freshness_age\":")
+            if fresh < 0:
+                Base::rh_push_text(out, "null")
             else:
-                Base::rh_push_text(results, "false")
-        elif rh_or_eq(texts, ops, ope, "consume"):
-            Base::rh_push_text(results, "consume\",\"consumed\":")
-            if Ops::rh_host_consume(st, policy, now) == 1:
-                Base::rh_push_text(results, "true")
+                Base::rh_push_decimal_i64(out, fresh)
+            Base::rh_push_text(out, ",\"errors\":")
+            Base::rh_push_decimal_i64(out, m.errors)
+            Base::rh_push_text(out, ",\"parser_rejects\":")
+            Base::rh_push_decimal_i64(out, m.parser_rejects)
+            Base::rh_push_text(out, ",\"object_failures\":")
+            Base::rh_push_decimal_i64(out, m.object_failures)
+            Base::rh_push_text(out, "},\"project\":{\"observed\":")
+            Base::rh_push_decimal_i64(out, m.observed)
+            Base::rh_push_text(out, ",\"unknown\":")
+            Base::rh_push_decimal_i64(out, m.unknown)
+            Base::rh_push_text(out, ",\"observed_rate_bp\":")
+            if rate < 0:
+                Base::rh_push_text(out, "null")
             else:
-                Base::rh_push_text(results, "false")
-        elif rh_or_eq(texts, ops, ope, "failure"):
-            w: i64 = Ops::rh_host_record_failure(st, policy, now)
-            Base::rh_push_text(results, "failure\",\"backoff_seconds\":")
-            Base::rh_push_decimal_i64(results, w)
-        elif rh_or_eq(texts, ops, ope, "success"):
-            Ops::rh_host_record_success(st)
-            Base::rh_push_text(results, "success\",\"ok\":true")
-        elif rh_or_eq(texts, ops, ope, "stop"):
-            Ops::rh_host_stop(st)
-            Base::rh_push_text(results, "stop\",\"ok\":true")
-        elif rh_or_eq(texts, ops, ope, "cancel"):
-            Ops::rh_host_cancel(st, policy)
-            Base::rh_push_text(results, "cancel\",\"ok\":true")
-        else:
-            return -1
-        Base::rh_push_text(results, ",\"tokens\":")
-        Base::rh_push_decimal_i64(results, st.tokens)
-        Base::rh_push_text(results, ",\"backoff_until\":")
-        Base::rh_push_decimal_i64(results, st.backoff_until)
-        Base::rh_push_text(results, ",\"stopped\":")
-        if st.stopped != 0:
-            Base::rh_push_text(results, "true")
-        else:
-            Base::rh_push_text(results, "false")
-        Base::rh_push_text(results, "}")
-        child <- nodes[child.usize()].next_sibling
-    Base::rh_push_text(out, "{\"schema\":\"rh-quota-result/1\",\"host_id\":")
-    Base::rh_push_decimal_i64(out, host_id)
-    Base::rh_push_text(out, ",\"final\":{\"tokens\":")
-    Base::rh_push_decimal_i64(out, st.tokens)
-    Base::rh_push_text(out, ",\"backoff_until\":")
-    Base::rh_push_decimal_i64(out, st.backoff_until)
-    Base::rh_push_text(out, ",\"consecutive_failures\":")
-    Base::rh_push_decimal_i64(out, st.consecutive_failures)
-    Base::rh_push_text(out, ",\"stopped\":")
-    if st.stopped != 0:
-        Base::rh_push_text(out, "true")
-    else:
-        Base::rh_push_text(out, "false")
-    Base::rh_push_text(out, "},\"ops\":[")
-    _ = Base::rh_absorb_bytes(results, out)
-    Base::rh_push_text(out, "],\"note\":\"token bucket with exponential backoff; a failing host is not contacted while backing off; stop is an operator kill switch; cancel refunds a token\"}")
-    0
+                Base::rh_push_decimal_i64(out, rate)
+            Base::rh_push_text(out, ",\"stale_partial\":")
+            Base::rh_push_decimal_i64(out, m.stale_partial)
+            Base::rh_push_text(out, ",\"truncations\":")
+            Base::rh_push_decimal_i64(out, m.truncations)
+            Base::rh_push_text(out, "},\"exposition\":[")
+            expo: mutable darray[u8] = []
+            Ops::rh_mon_text(m, now, expo)
+            while e < expo.count |e: usize = 0, first_line: bool = true, expo, out|:
+                stop: i64 = Base::rh_find_byte(expo, e, 10)
+                line_end: usize = stop.usize() if stop >= 0 else expo.count
+                if line_end > e:
+                    if not first_line:
+                        out.push(44)
+                    first_line <- false
+                    Base::rh_push_text(out, "\"")
+                    Base::rh_json_escape(out, expo, e, line_end)
+                    Base::rh_push_text(out, "\"")
+                if stop < 0:
+                    e <- expo.count
+                else:
+                    e <- stop.usize() + 1
+            Base::rh_push_text(out, "],\"note\":\"service and project series are separate; a source outage moves service counters, not project activity/unknown; observed_rate_bp null means no denominator (unknown, not 0)\"}")
+            0
+
+        def rh_quota_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            sspan: mutable i64 = 0
+            espan: mutable i64 = 0
+            sc: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
+            return -1 if sc < 0 or not Json::rh_json_str_span(nodes, sc, &sspan, &espan)
+            return -1 if not rh_or_eq(texts, sspan, espan, "rh-quota-input/1")
+            host_id: i64 = rh_or_int(nodes, raw, texts, root, "host_id", 0)
+            policy: Ops::RhHostPolicy = rh_or_load_policy(nodes, raw, texts, root)
+            st: mutable Ops::RhHostState = Ops::rh_host_new(host_id, policy.capacity)
+            ops_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "ops")
+            return -1 if ops_idx < 0 or nodes[ops_idx.usize()].kind != Json::RH_JSON_ARR
+            results: mutable darray[u8] = []
+            arr: Json::RhJsonNode = nodes[ops_idx.usize()]
+            while child >= 0 |child: i64 = arr.first_child, first: bool = true, nodes, texts, raw, st, policy, results|:
+                return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                ops: mutable i64 = 0
+                ope: mutable i64 = 0
+                return -1 if not rh_or_str(nodes, texts, child, "op", &ops, &ope)
+                now: i64 = rh_or_int(nodes, raw, texts, child, "now", 0)
+                if not first:
+                    results.push(44)
+                first <- false
+                Base::rh_push_text(results, "{\"op\":\"")
+                if rh_or_eq(texts, ops, ope, "allow"):
+                    Base::rh_push_text(results, "allow\",\"allowed\":")
+                    if Ops::rh_host_allow(st, policy, now) == 1:
+                        Base::rh_push_text(results, "true")
+                    else:
+                        Base::rh_push_text(results, "false")
+                elif rh_or_eq(texts, ops, ope, "consume"):
+                    Base::rh_push_text(results, "consume\",\"consumed\":")
+                    if Ops::rh_host_consume(st, policy, now) == 1:
+                        Base::rh_push_text(results, "true")
+                    else:
+                        Base::rh_push_text(results, "false")
+                elif rh_or_eq(texts, ops, ope, "failure"):
+                    w: i64 = Ops::rh_host_record_failure(st, policy, now)
+                    Base::rh_push_text(results, "failure\",\"backoff_seconds\":")
+                    Base::rh_push_decimal_i64(results, w)
+                elif rh_or_eq(texts, ops, ope, "success"):
+                    Ops::rh_host_record_success(st)
+                    Base::rh_push_text(results, "success\",\"ok\":true")
+                elif rh_or_eq(texts, ops, ope, "stop"):
+                    Ops::rh_host_stop(st)
+                    Base::rh_push_text(results, "stop\",\"ok\":true")
+                elif rh_or_eq(texts, ops, ope, "cancel"):
+                    Ops::rh_host_cancel(st, policy)
+                    Base::rh_push_text(results, "cancel\",\"ok\":true")
+                else:
+                    return -1
+                Base::rh_push_text(results, ",\"tokens\":")
+                Base::rh_push_decimal_i64(results, st.tokens)
+                Base::rh_push_text(results, ",\"backoff_until\":")
+                Base::rh_push_decimal_i64(results, st.backoff_until)
+                Base::rh_push_text(results, ",\"stopped\":")
+                if st.stopped != 0:
+                    Base::rh_push_text(results, "true")
+                else:
+                    Base::rh_push_text(results, "false")
+                Base::rh_push_text(results, "}")
+                child <- nodes[child.usize()].next_sibling
+            Base::rh_push_text(out, "{\"schema\":\"rh-quota-result/1\",\"host_id\":")
+            Base::rh_push_decimal_i64(out, host_id)
+            Base::rh_push_text(out, ",\"final\":{\"tokens\":")
+            Base::rh_push_decimal_i64(out, st.tokens)
+            Base::rh_push_text(out, ",\"backoff_until\":")
+            Base::rh_push_decimal_i64(out, st.backoff_until)
+            Base::rh_push_text(out, ",\"consecutive_failures\":")
+            Base::rh_push_decimal_i64(out, st.consecutive_failures)
+            Base::rh_push_text(out, ",\"stopped\":")
+            if st.stopped != 0:
+                Base::rh_push_text(out, "true")
+            else:
+                Base::rh_push_text(out, "false")
+            Base::rh_push_text(out, "},\"ops\":[")
+            _ = Base::rh_absorb_bytes(results, out)
+            Base::rh_push_text(out, "],\"note\":\"token bucket with exponential backoff; a failing host is not contacted while backing off; stop is an operator kill switch; cancel refunds a token\"}")
+            0
