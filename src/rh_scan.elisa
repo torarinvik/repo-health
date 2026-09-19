@@ -17,257 +17,259 @@ include "./rh_base.elisa"
 include "./rh_temporal.elisa"
 include "./rh_evidence.elisa"
 
-struct RhSnapshot:
-    commits_all: mutable i64
-    commits: mutable i64
-    rejected: mutable i64
-    merges: mutable i64
-    future: mutable i64
-    skew: mutable i64
-    has_commits: mutable i64
-    min_at: mutable i64
-    max_at: mutable i64
-    min_ct: mutable i64
-    max_ct: mutable i64
-    oldest_at: mutable i64
-    email_lines: mutable i64
-    shallow: mutable i64
-    truncated: mutable i64
-    manifest: mutable i64
-    digest: mutable u64
+module Scan:
+    public:
+        struct RhSnapshot:
+            commits_all: mutable i64
+            commits: mutable i64
+            rejected: mutable i64
+            merges: mutable i64
+            future: mutable i64
+            skew: mutable i64
+            has_commits: mutable i64
+            min_at: mutable i64
+            max_at: mutable i64
+            min_ct: mutable i64
+            max_ct: mutable i64
+            oldest_at: mutable i64
+            email_lines: mutable i64
+            shallow: mutable i64
+            truncated: mutable i64
+            manifest: mutable i64
+            digest: mutable u64
 
-def rh_snapshot_init(snap: mutable RhSnapshot&) -> void:
-    snap.commits_all <- 0
-    snap.commits <- 0
-    snap.rejected <- 0
-    snap.merges <- 0
-    snap.future <- 0
-    snap.skew <- 0
-    snap.has_commits <- 0
-    snap.min_at <- 9223372036854775807
-    snap.max_at <- 0
-    snap.min_ct <- 9223372036854775807
-    snap.max_ct <- 0
-    snap.oldest_at <- 9223372036854775807
-    snap.email_lines <- 0
-    snap.shallow <- 0
-    snap.truncated <- 0
-    snap.manifest <- 0
-    snap.digest <- Evidence::rh_fnv_begin()
+        def rh_snapshot_init(snap: mutable RhSnapshot&) -> void:
+            snap.commits_all <- 0
+            snap.commits <- 0
+            snap.rejected <- 0
+            snap.merges <- 0
+            snap.future <- 0
+            snap.skew <- 0
+            snap.has_commits <- 0
+            snap.min_at <- 9223372036854775807
+            snap.max_at <- 0
+            snap.min_ct <- 9223372036854775807
+            snap.max_ct <- 0
+            snap.oldest_at <- 9223372036854775807
+            snap.email_lines <- 0
+            snap.shallow <- 0
+            snap.truncated <- 0
+            snap.manifest <- 0
+            snap.digest <- Evidence::rh_fnv_begin()
 
-# True when the byte span contains "[bot]" (case-sensitive) or starts with
-# "github-actions". Declared M01 heuristic; provider-declared bot
-# inventories arrive in M02/M04 (stratified reporting).
-def rh_email_is_bot(log: darray[u8]&, start: usize, end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
-    ga: u8& = "github-actions"
-    gan: usize = strlen(ga)
-    if end - start >= gan:
-        hit: bool =
-            while k < gan |hit: bool = true, k: usize = 0| -> hit:
-                if log[start + k] != ga[k]:
-                    hit <- false
-                k <- k + 1
-        return true if hit
-    if end - start >= 5:
-        while i + 5 <= end |i: usize = start, log, end|:
-            return true if log[i] == 91 and log[i + 1] == 98 and log[i + 2] == 111 and log[i + 3] == 116 and log[i + 4] == 93
-            i <- i + 1
-    false
+        # True when the byte span contains "[bot]" (case-sensitive) or starts with
+        # "github-actions". Declared M01 heuristic; provider-declared bot
+        # inventories arrive in M02/M04 (stratified reporting).
+        def rh_email_is_bot(log: darray[u8]&, start: usize, end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            ga: u8& = "github-actions"
+            gan: usize = strlen(ga)
+            if end - start >= gan:
+                hit: bool =
+                    while k < gan |hit: bool = true, k: usize = 0| -> hit:
+                        if log[start + k] != ga[k]:
+                            hit <- false
+                        k <- k + 1
+                return true if hit
+            if end - start >= 5:
+                while i + 5 <= end |i: usize = start, log, end|:
+                    return true if log[i] == 91 and log[i + 1] == 98 and log[i + 2] == 111 and log[i + 3] == 116 and log[i + 4] == 93
+                    i <- i + 1
+            false
 
-# Mix one byte span into the evidence digest.
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_digest_span(hash: u64, log: darray[u8]&, start: usize, end: usize) -> u64 can[Memory.Allocate, Abort.Panic]:
-    while i < end |h: u64 = hash, i: usize = start| -> h:
-        h <- Evidence::rh_fnv_byte(h, log[i])
-        i <- i + 1
+        # Mix one byte span into the evidence digest.
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_digest_span(hash: u64, log: darray[u8]&, start: usize, end: usize) -> u64 can[Memory.Allocate, Abort.Panic]:
+            while i < end |h: u64 = hash, i: usize = start| -> h:
+                h <- Evidence::rh_fnv_byte(h, log[i])
+                i <- i + 1
 
-# Parse the log. months collects distinct in-window month indices;
-# emails_tmp collects in-window author-email lines (caller dedups via
-# sort -u). Returns 0 on structural success (rejected records are counted
-# in snap, not in the return).
-def rh_parse_log(log: darray[u8]&, window_start: i64, now: i64, snap: mutable RhSnapshot&, months: mutable darray[i64]&, emails_tmp: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    while pos < log.count |pos: usize = 0, log, window_start, now, snap, months, emails_tmp|:
-        span_end: usize =
-            rec_end: i64 = Base::rh_find_byte(log, pos, 0)
-            rec_end.usize() if rec_end >= 0 else log.count
-        if span_end == pos:
-            pos <- span_end + 1
-            continue
-        f0: i64 = Base::rh_find_byte(log, pos, 1)
-        if f0 < 0 or f0.usize() >= span_end:
-            blank: bool =
-                while b < span_end |blank: bool = true, b: usize = pos| -> blank:
-                    if log[b] > 32:
-                        blank <- false
-                    b <- b + 1
-            if blank:
-                pos <- log.count
-                continue
-            snap.rejected <- snap.rejected + 1
-            pos <- span_end + 1
-            continue
-        f1: i64 = Base::rh_find_byte(log, f0.usize() + 1, 1)
-        if f1 < 0 or f1.usize() >= span_end:
-            snap.rejected <- snap.rejected + 1
-            pos <- span_end + 1
-            continue
-        f2: i64 = Base::rh_find_byte(log, f1.usize() + 1, 1)
-        if f2 < 0 or f2.usize() >= span_end:
-            snap.rejected <- snap.rejected + 1
-            pos <- span_end + 1
-            continue
-        f3: i64 = Base::rh_find_byte(log, f2.usize() + 1, 1)
-        if f3 < 0 or f3.usize() >= span_end:
-            snap.rejected <- snap.rejected + 1
-            pos <- span_end + 1
-            continue
-        f4: i64 = Base::rh_find_byte(log, f3.usize() + 1, 1)
-        if f4 < 0 or f4.usize() >= span_end:
-            snap.rejected <- snap.rejected + 1
-            pos <- span_end + 1
-            continue
-        hash_start: usize = pos
-        hash_end: usize = f0.usize()
-        ae_start: usize = f1.usize() + 1
-        ae_end: usize = f2.usize()
-        at_start: usize = f2.usize() + 1
-        at_end: usize = f3.usize()
-        ct_start: usize = f3.usize() + 1
-        ct_end: usize = f4.usize()
-        par_start: usize = f4.usize() + 1
-        par_end: usize = span_end
-        at_ok: mutable i64 = 0
-        at: i64 = Base::rh_parse_i64(log, at_start, at_end, &at_ok)
-        ct_ok: mutable i64 = 0
-        ct: i64 = Base::rh_parse_i64(log, ct_start, ct_end, &ct_ok)
-        if at_ok == 0 or ct_ok == 0:
-            snap.rejected <- snap.rejected + 1
-            pos <- span_end + 1
-            continue
-        snap.commits_all <- snap.commits_all + 1
-        if at < snap.oldest_at:
-            snap.oldest_at <- at
-        snap.digest <- rh_digest_span(snap.digest, log, hash_start, hash_end)
-        snap.digest <- Evidence::rh_fnv_i64(snap.digest, at)
-        snap.digest <- Evidence::rh_fnv_i64(snap.digest, ct)
-        snap.digest <- rh_digest_span(snap.digest, log, ae_start, ae_end)
-        parents: mutable i64 = 0
-        if par_end > par_start:
-            spaces: i64 =
-                while q < par_end |spaces: i64 = 0, q: usize = par_start| -> spaces:
-                    if log[q] == 32:
-                        spaces <- spaces + 1
-                    q <- q + 1
-            parents <- spaces + 1
-        if parents > 1:
-            snap.merges <- snap.merges + 1
-        if at >= window_start:
-            snap.commits <- snap.commits + 1
-            snap.has_commits <- 1
-            if at < snap.min_at:
-                snap.min_at <- at
-            if at > snap.max_at:
-                snap.max_at <- at
-            if ct < snap.min_ct:
-                snap.min_ct <- ct
-            if ct > snap.max_ct:
-                snap.max_ct <- ct
-            if at > now or ct > now:
-                snap.future <- snap.future + 1
-            if at != ct:
-                snap.skew <- snap.skew + 1
-            mo: mutable i64 = 0
-            Temporal::rh_month_of_instant(at, &mo)
-            seen: bool =
-                for m in 0..<months.count |seen: bool = false, months, mo| -> seen:
-                    if months[m] == mo:
-                        seen <- true
-            if not seen:
-                months.push(mo)
-            while e < ae_end |e: usize = ae_start, log, ae_end, emails_tmp|:
-                emails_tmp.push(log[e])
-                e <- e + 1
-            emails_tmp.push(10)
-            snap.email_lines <- snap.email_lines + 1
-        pos <- span_end + 1
-    0
+        # Parse the log. months collects distinct in-window month indices;
+        # emails_tmp collects in-window author-email lines (caller dedups via
+        # sort -u). Returns 0 on structural success (rejected records are counted
+        # in snap, not in the return).
+        def rh_parse_log(log: darray[u8]&, window_start: i64, now: i64, snap: mutable RhSnapshot&, months: mutable darray[i64]&, emails_tmp: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while pos < log.count |pos: usize = 0, log, window_start, now, snap, months, emails_tmp|:
+                span_end: usize =
+                    rec_end: i64 = Base::rh_find_byte(log, pos, 0)
+                    rec_end.usize() if rec_end >= 0 else log.count
+                if span_end == pos:
+                    pos <- span_end + 1
+                    continue
+                f0: i64 = Base::rh_find_byte(log, pos, 1)
+                if f0 < 0 or f0.usize() >= span_end:
+                    blank: bool =
+                        while b < span_end |blank: bool = true, b: usize = pos| -> blank:
+                            if log[b] > 32:
+                                blank <- false
+                            b <- b + 1
+                    if blank:
+                        pos <- log.count
+                        continue
+                    snap.rejected <- snap.rejected + 1
+                    pos <- span_end + 1
+                    continue
+                f1: i64 = Base::rh_find_byte(log, f0.usize() + 1, 1)
+                if f1 < 0 or f1.usize() >= span_end:
+                    snap.rejected <- snap.rejected + 1
+                    pos <- span_end + 1
+                    continue
+                f2: i64 = Base::rh_find_byte(log, f1.usize() + 1, 1)
+                if f2 < 0 or f2.usize() >= span_end:
+                    snap.rejected <- snap.rejected + 1
+                    pos <- span_end + 1
+                    continue
+                f3: i64 = Base::rh_find_byte(log, f2.usize() + 1, 1)
+                if f3 < 0 or f3.usize() >= span_end:
+                    snap.rejected <- snap.rejected + 1
+                    pos <- span_end + 1
+                    continue
+                f4: i64 = Base::rh_find_byte(log, f3.usize() + 1, 1)
+                if f4 < 0 or f4.usize() >= span_end:
+                    snap.rejected <- snap.rejected + 1
+                    pos <- span_end + 1
+                    continue
+                hash_start: usize = pos
+                hash_end: usize = f0.usize()
+                ae_start: usize = f1.usize() + 1
+                ae_end: usize = f2.usize()
+                at_start: usize = f2.usize() + 1
+                at_end: usize = f3.usize()
+                ct_start: usize = f3.usize() + 1
+                ct_end: usize = f4.usize()
+                par_start: usize = f4.usize() + 1
+                par_end: usize = span_end
+                at_ok: mutable i64 = 0
+                at: i64 = Base::rh_parse_i64(log, at_start, at_end, &at_ok)
+                ct_ok: mutable i64 = 0
+                ct: i64 = Base::rh_parse_i64(log, ct_start, ct_end, &ct_ok)
+                if at_ok == 0 or ct_ok == 0:
+                    snap.rejected <- snap.rejected + 1
+                    pos <- span_end + 1
+                    continue
+                snap.commits_all <- snap.commits_all + 1
+                if at < snap.oldest_at:
+                    snap.oldest_at <- at
+                snap.digest <- rh_digest_span(snap.digest, log, hash_start, hash_end)
+                snap.digest <- Evidence::rh_fnv_i64(snap.digest, at)
+                snap.digest <- Evidence::rh_fnv_i64(snap.digest, ct)
+                snap.digest <- rh_digest_span(snap.digest, log, ae_start, ae_end)
+                parents: mutable i64 = 0
+                if par_end > par_start:
+                    spaces: i64 =
+                        while q < par_end |spaces: i64 = 0, q: usize = par_start| -> spaces:
+                            if log[q] == 32:
+                                spaces <- spaces + 1
+                            q <- q + 1
+                    parents <- spaces + 1
+                if parents > 1:
+                    snap.merges <- snap.merges + 1
+                if at >= window_start:
+                    snap.commits <- snap.commits + 1
+                    snap.has_commits <- 1
+                    if at < snap.min_at:
+                        snap.min_at <- at
+                    if at > snap.max_at:
+                        snap.max_at <- at
+                    if ct < snap.min_ct:
+                        snap.min_ct <- ct
+                    if ct > snap.max_ct:
+                        snap.max_ct <- ct
+                    if at > now or ct > now:
+                        snap.future <- snap.future + 1
+                    if at != ct:
+                        snap.skew <- snap.skew + 1
+                    mo: mutable i64 = 0
+                    Temporal::rh_month_of_instant(at, &mo)
+                    seen: bool =
+                        for m in 0..<months.count |seen: bool = false, months, mo| -> seen:
+                            if months[m] == mo:
+                                seen <- true
+                    if not seen:
+                        months.push(mo)
+                    while e < ae_end |e: usize = ae_start, log, ae_end, emails_tmp|:
+                        emails_tmp.push(log[e])
+                        e <- e + 1
+                    emails_tmp.push(10)
+                    snap.email_lines <- snap.email_lines + 1
+                pos <- span_end + 1
+            0
 
-# Coverage of the requested window (collection completeness, NOT activity).
-# v1 is scoped to the observed history: its denominator is the complete
-# month span that was actually reachable. v2 keeps that numerator but uses
-# the full eligible requested window as denominator, so shallow/truncated
-# history cannot look complete merely because its reachable prefix is dense.
-# state_out: 0 complete, 1 shallow, 2 truncated. Empty windows are 0/0.
-def rh_coverage(snap: RhSnapshot&, window_start: i64, now: i64, v1_num_out: mutable i64&, v1_den_out: mutable i64&, v2_num_out: mutable i64&, v2_den_out: mutable i64&, state_out: mutable i64&) -> void:
-    eligible: i64 = Temporal::rh_complete_months_between(window_start, now)
-    if eligible <= 0:
-        v1_num_out[0] <- 0
-        v1_den_out[0] <- 0
-        v2_num_out[0] <- 0
-        v2_den_out[0] <- 0
-        state_out[0] <- 0
-        return
-    if snap.shallow == 1:
-        covered: mutable i64 = Temporal::rh_complete_months_between(snap.oldest_at, now)
-        if covered < 0:
-            covered <- 0
-        v1_num_out[0] <- covered
-        v1_den_out[0] <- covered
-        v2_num_out[0] <- covered
-        v2_den_out[0] <- eligible
-        state_out[0] <- 1
-        return
-    if snap.truncated == 1:
-        covered2: mutable i64 = Temporal::rh_complete_months_between(snap.oldest_at, now)
-        if covered2 < 0:
-            covered2 <- 0
-        v1_num_out[0] <- covered2
-        v1_den_out[0] <- covered2
-        v2_num_out[0] <- covered2
-        v2_den_out[0] <- eligible
-        state_out[0] <- 2
-        return
-    v1_num_out[0] <- eligible
-    v1_den_out[0] <- eligible
-    v2_num_out[0] <- eligible
-    v2_den_out[0] <- eligible
-    state_out[0] <- 0
+        # Coverage of the requested window (collection completeness, NOT activity).
+        # v1 is scoped to the observed history: its denominator is the complete
+        # month span that was actually reachable. v2 keeps that numerator but uses
+        # the full eligible requested window as denominator, so shallow/truncated
+        # history cannot look complete merely because its reachable prefix is dense.
+        # state_out: 0 complete, 1 shallow, 2 truncated. Empty windows are 0/0.
+        def rh_coverage(snap: RhSnapshot&, window_start: i64, now: i64, v1_num_out: mutable i64&, v1_den_out: mutable i64&, v2_num_out: mutable i64&, v2_den_out: mutable i64&, state_out: mutable i64&) -> void:
+            eligible: i64 = Temporal::rh_complete_months_between(window_start, now)
+            if eligible <= 0:
+                v1_num_out[0] <- 0
+                v1_den_out[0] <- 0
+                v2_num_out[0] <- 0
+                v2_den_out[0] <- 0
+                state_out[0] <- 0
+                return
+            if snap.shallow == 1:
+                covered: mutable i64 = Temporal::rh_complete_months_between(snap.oldest_at, now)
+                if covered < 0:
+                    covered <- 0
+                v1_num_out[0] <- covered
+                v1_den_out[0] <- covered
+                v2_num_out[0] <- covered
+                v2_den_out[0] <- eligible
+                state_out[0] <- 1
+                return
+            if snap.truncated == 1:
+                covered2: mutable i64 = Temporal::rh_complete_months_between(snap.oldest_at, now)
+                if covered2 < 0:
+                    covered2 <- 0
+                v1_num_out[0] <- covered2
+                v1_den_out[0] <- covered2
+                v2_num_out[0] <- covered2
+                v2_den_out[0] <- eligible
+                state_out[0] <- 2
+                return
+            v1_num_out[0] <- eligible
+            v1_den_out[0] <- eligible
+            v2_num_out[0] <- eligible
+            v2_den_out[0] <- eligible
+            state_out[0] <- 0
 
-# Manifest presence for local checkouts. Returns 1 found, 0 none,
-# 2 unavailable (non-local source: honestly unknown, never guessed).
-def rh_manifest_probe(repo: cstr, local: bool) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-    return 2 if not local
-    return 1 if rh_manifest_has(repo, "Cargo.toml")
-    return 1 if rh_manifest_has(repo, "package.json")
-    return 1 if rh_manifest_has(repo, "pyproject.toml")
-    return 1 if rh_manifest_has(repo, "requirements.txt")
-    return 1 if rh_manifest_has(repo, "go.mod")
-    0
+        # Manifest presence for local checkouts. Returns 1 found, 0 none,
+        # 2 unavailable (non-local source: honestly unknown, never guessed).
+        def rh_manifest_probe(repo: cstr, local: bool) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return 2 if not local
+            return 1 if rh_manifest_has(repo, "Cargo.toml")
+            return 1 if rh_manifest_has(repo, "package.json")
+            return 1 if rh_manifest_has(repo, "pyproject.toml")
+            return 1 if rh_manifest_has(repo, "requirements.txt")
+            return 1 if rh_manifest_has(repo, "go.mod")
+            0
 
-def rh_manifest_has(repo: cstr, name: u8&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-    return false if Base::rh_cstr_len_c(repo) == 0
-    path: mutable darray[u8] =
-        path: mutable darray[u8] = []
-        Base::rh_push_cstr(path, repo)
-        path.push(47)
-        Base::rh_push_text(path, name)
-        path.push(0)
-        path
-    file_exists((&path[0]).cast[cstr] can Unsafe.PointerCast)
+        def rh_manifest_has(repo: cstr, name: u8&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return false if Base::rh_cstr_len_c(repo) == 0
+            path: mutable darray[u8] =
+                path: mutable darray[u8] = []
+                Base::rh_push_cstr(path, repo)
+                path.push(47)
+                Base::rh_push_text(path, name)
+                path.push(0)
+                path
+            file_exists((&path[0]).cast[cstr] can Unsafe.PointerCast)
 
-# Parse exactly 16 lowercase hex nibbles -> u64 (manifest digest check).
-def rh_parse_hex64(data: darray[u8]&, start: usize, end: usize, ok_out: mutable i64&) -> u64 can[Memory.Allocate, Abort.Panic]:
-    ok_out[0] <- 0
-    return 0 if end - start != 16
-    return 0 if end > data.count
-    acc: u64 =
-        while i < end |acc: u64 = 0, i: usize = start| -> acc:
-            b: u8 = data[i]
-            digit: mutable u64 = (b - 48).u64() if b >= 48 and b <= 57 else 20
-            if b >= 97 and b <= 102:
-                digit <- (b - 87).u64()
-            return 0 if digit > 15
-            acc <- acc * 16 + digit
-            i <- i + 1
-    ok_out[0] <- 1
-    acc
+        # Parse exactly 16 lowercase hex nibbles -> u64 (manifest digest check).
+        def rh_parse_hex64(data: darray[u8]&, start: usize, end: usize, ok_out: mutable i64&) -> u64 can[Memory.Allocate, Abort.Panic]:
+            ok_out[0] <- 0
+            return 0 if end - start != 16
+            return 0 if end > data.count
+            acc: u64 =
+                while i < end |acc: u64 = 0, i: usize = start| -> acc:
+                    b: u8 = data[i]
+                    digit: mutable u64 = (b - 48).u64() if b >= 48 and b <= 57 else 20
+                    if b >= 97 and b <= 102:
+                        digit <- (b - 87).u64()
+                    return 0 if digit > 15
+                    acc <- acc * 16 + digit
+                    i <- i + 1
+            ok_out[0] <- 1
+            acc
