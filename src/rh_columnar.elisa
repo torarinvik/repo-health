@@ -1,0 +1,148 @@
+# rh_columnar.elisa — rebuildable columnar batch snapshot (M10-05).
+#
+# A snapshot is a derived export of one canonical rh-dep-graph/1 document. It
+# carries the source digest, fixed columns, row counts, and an explicit rights
+# scope so batch analysis can be rebuilt without becoming another source of
+# truth. Unknown or malformed graph fields fail closed.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+
+struct RhColumnarNode:
+    id: mutable i64
+    name_s: mutable i64
+    name_e: mutable i64
+    version_s: mutable i64
+    version_e: mutable i64
+
+struct RhColumnarEdge:
+    from_id: mutable i64
+    to_id: mutable i64
+    scope_s: mutable i64
+    scope_e: mutable i64
+
+module Columnar:
+    private:
+        def rh_columnar_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e < s or e - s != strlen(lit).i64()
+            while i < e - s |i: i64 = 0, texts, s, lit|:
+                return false if texts[(s + i).usize()] != lit[i.usize()]
+                i <- i + 1
+            true
+
+        def rh_columnar_span(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            node: RhJsonNode = nodes[idx.usize()]
+            start_out[0] <- node.text_start
+            end_out[0] <- node.text_end
+            true
+
+        def rh_columnar_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_columnar_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, finish: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, start.usize(), finish.usize())
+            out.push(34)
+
+        def rh_columnar_emit_nodes(out: mutable darray[u8]&, nodes: darray[RhColumnarNode]&, texts: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "{\"id\":[")
+            while i < nodes.count |i: usize = 0, nodes, out|:
+                if i > 0:
+                    out.push(44)
+                rh_push_decimal_i64(out, nodes[i].id)
+                i <- i + 1
+            rh_push_text(out, "],\"name\":[")
+            while j < nodes.count |j: usize = 0, nodes, texts, out|:
+                if j > 0:
+                    out.push(44)
+                Columnar::rh_columnar_emit_span(out, texts, nodes[j].name_s, nodes[j].name_e)
+                j <- j + 1
+            rh_push_text(out, "],\"version\":[")
+            while k < nodes.count |k: usize = 0, nodes, texts, out|:
+                if k > 0:
+                    out.push(44)
+                Columnar::rh_columnar_emit_span(out, texts, nodes[k].version_s, nodes[k].version_e)
+                k <- k + 1
+            rh_push_text(out, "]}")
+
+        def rh_columnar_emit_edges(out: mutable darray[u8]&, edges: darray[RhColumnarEdge]&, texts: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "{\"from\":[")
+            while i < edges.count |i: usize = 0, edges, out|:
+                if i > 0:
+                    out.push(44)
+                rh_push_decimal_i64(out, edges[i].from_id)
+                i <- i + 1
+            rh_push_text(out, "],\"to\":[")
+            while j < edges.count |j: usize = 0, edges, out|:
+                if j > 0:
+                    out.push(44)
+                rh_push_decimal_i64(out, edges[j].to_id)
+                j <- j + 1
+            rh_push_text(out, "],\"scope\":[")
+            while k < edges.count |k: usize = 0, edges, texts, out|:
+                if k > 0:
+                    out.push(44)
+                Columnar::rh_columnar_emit_span(out, texts, edges[k].scope_s, edges[k].scope_e)
+                k <- k + 1
+            rh_push_text(out, "]}")
+
+    public:
+        def rh_columnar_snapshot(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes_json: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes_json, texts)
+            return -1 if root < 0 or nodes_json[root.usize()].kind != RH_JSON_OBJ
+            schema_idx: i64 = rh_json_obj_get(nodes_json, texts, root, "schema")
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not Columnar::rh_columnar_span(nodes_json, texts, root, "schema", &schema_s, &schema_e)
+            return -1 if not Columnar::rh_columnar_eq(texts, schema_s, schema_e, "rh-dep-graph/1")
+            nodes_idx: i64 = rh_json_obj_get(nodes_json, texts, root, "nodes")
+            edges_idx: i64 = rh_json_obj_get(nodes_json, texts, root, "edges")
+            return -1 if schema_idx < 0 or nodes_idx < 0 or edges_idx < 0
+            return -1 if nodes_json[nodes_idx.usize()].kind != RH_JSON_ARR or nodes_json[edges_idx.usize()].kind != RH_JSON_ARR
+            column_nodes: mutable darray[RhColumnarNode] = []
+            node_arr: RhJsonNode = nodes_json[nodes_idx.usize()]
+            while child >= 0 |child: i64 = node_arr.first_child, nodes_json, texts, raw, column_nodes|:
+                return -1 if nodes_json[child.usize()].kind != RH_JSON_OBJ
+                ok_id: mutable i64 = 0
+                id: i64 = Columnar::rh_columnar_int(nodes_json, raw, texts, child, "id", &ok_id)
+                name_s: mutable i64 = 0
+                name_e: mutable i64 = 0
+                version_s: mutable i64 = 0
+                version_e: mutable i64 = 0
+                return -1 if ok_id == 0 or id < 0 or not Columnar::rh_columnar_span(nodes_json, texts, child, "name", &name_s, &name_e) or not Columnar::rh_columnar_span(nodes_json, texts, child, "version", &version_s, &version_e)
+                return -1 if id != column_nodes.count.i64()
+                column_nodes.push(RhColumnarNode{id: id, name_s: name_s, name_e: name_e, version_s: version_s, version_e: version_e})
+                child <- nodes_json[child.usize()].next_sibling
+            edge_rows: mutable darray[RhColumnarEdge] = []
+            edge_arr: RhJsonNode = nodes_json[edges_idx.usize()]
+            while edge_child >= 0 |edge_child: i64 = edge_arr.first_child, nodes_json, texts, raw, edge_rows|:
+                return -1 if nodes_json[edge_child.usize()].kind != RH_JSON_OBJ
+                ok_from: mutable i64 = 0
+                ok_to: mutable i64 = 0
+                from: i64 = Columnar::rh_columnar_int(nodes_json, raw, texts, edge_child, "from", &ok_from)
+                to_id: i64 = Columnar::rh_columnar_int(nodes_json, raw, texts, edge_child, "to", &ok_to)
+                scope_s: mutable i64 = 0
+                scope_e: mutable i64 = 0
+                return -1 if ok_from == 0 or ok_to == 0 or from < 0 or to_id < 0 or from >= column_nodes.count.i64() or to_id >= column_nodes.count.i64() or not Columnar::rh_columnar_span(nodes_json, texts, edge_child, "scope", &scope_s, &scope_e)
+                edge_rows.push(RhColumnarEdge{from_id: from, to_id: to_id, scope_s: scope_s, scope_e: scope_e})
+                edge_child <- nodes_json[edge_child.usize()].next_sibling
+            source_digest: mutable darray[u8] = []
+            rh_sha256(raw, source_digest)
+            rh_push_text(out, "{\"schema\":\"rh-columnar-snapshot/1\",\"source_schema\":\"rh-dep-graph/1\",\"source_sha256\":\"")
+            out.extend(bytes_view(source_digest))
+            rh_push_text(out, "\",\"rights_scope\":\"input-scoped\",\"rebuildable\":true,\"row_counts\":{\"nodes\":")
+            rh_push_decimal_i64(out, column_nodes.count.i64())
+            rh_push_text(out, ",\"edges\":")
+            rh_push_decimal_i64(out, edge_rows.count.i64())
+            rh_push_text(out, "},\"columns\":{\"nodes\":")
+            Columnar::rh_columnar_emit_nodes(out, column_nodes, texts)
+            rh_push_text(out, ",\"edges\":")
+            Columnar::rh_columnar_emit_edges(out, edge_rows, texts)
+            rh_push_text(out, "},\"note\":\"derived batch columns preserve graph row order; rebuild from the canonical input and do not replace it\"}")
+            0

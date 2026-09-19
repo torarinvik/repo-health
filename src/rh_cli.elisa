@@ -57,6 +57,7 @@ include "./rh_forecast.elisa"
 include "./rh_intervention.elisa"
 include "./rh_mapping.elisa"
 include "./rh_coverage.elisa"
+include "./rh_columnar.elisa"
 include "./rh_render.elisa"
 include "./rh_explain.elisa"
 include "./rh_lease_report.elisa"
@@ -122,6 +123,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli intervention --input <file> --out <file>")
     rh_cli_err("       rh_cli mapping --input <file> --out <file>")
     rh_cli_err("       rh_cli coverage --input <file> --out <file>")
+    rh_cli_err("       rh_cli snapshot --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
     rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
     rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
@@ -1646,6 +1648,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 ccq <- ccq + 1
         return rh_cli_usage(2) if ci_idx < 0 or co_idx < 0
         return rh_do_coverage(slots[ci_idx], slots[co_idx])
+    if rh_streq(cmd, "snapshot"):
+        si_idx, so_idx =
+            while ssq < argc |si_idx: i64 = -1, so_idx: i64 = -1, ssq: i64 = 2, slots| -> si_idx, so_idx:
+                a32: u8& = slots[ssq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(a32, "--input"):
+                    if ssq + 1 < argc:
+                        ssq <- ssq + 1
+                        si_idx <- ssq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a32, "--out"):
+                    if ssq + 1 < argc:
+                        ssq <- ssq + 1
+                        so_idx <- ssq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                ssq <- ssq + 1
+        return rh_cli_usage(2) if si_idx < 0 or so_idx < 0
+        return rh_do_snapshot(slots[si_idx], slots[so_idx])
     if rh_streq(cmd, "sign") or rh_streq(cmd, "verify"):
         key_idx, sub_idx, sig_idx =
             while m < argc |key_idx: i64 = -1, sub_idx: i64 = -1, sig_idx: i64 = -1, m: i64 = 2, slots| -> key_idx, sub_idx, sig_idx:
@@ -4795,6 +4818,34 @@ def rh_do_coverage(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
         rh_cli_err("coverage: cannot write --out")
         return 4
     rh_cli_out("coverage: evidence observed")
+    0
+
+# --- M10 rebuildable columnar snapshot execution path. ---
+# Exports one canonical dependency graph into deterministic node/edge columns,
+# retaining the input SHA-256 and an explicit input-scoped rights label.
+def rh_do_snapshot(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected snapshot argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("snapshot: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if Columnar::rh_columnar_snapshot(raw, body) != 0:
+        rh_cli_err("snapshot: unsupported or malformed rh-dep-graph/1 input (fail closed)")
+        return 4
+    body.push(10)
+    if not rh_io_write(out_path, body):
+        rh_cli_err("snapshot: cannot write --out")
+        return 4
+    rh_cli_out("snapshot: columnar export written")
     0
 
 # --- M02-03 job-lease execution path. ---
