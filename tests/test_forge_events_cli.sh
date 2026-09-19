@@ -11,6 +11,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 [[ -x "$ROOT/build/rh_cli" ]] || fail "rh_cli not built"
 rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/connectors/forge-events-input.json" "$T/input.json"
+cp "$ROOT/fixtures/connectors/forge-events-gitlab-input.json" "$T/gitlab.json"
 cp "$ROOT/fixtures/connectors/forge-events-result.json" "$T/expected.json"
 
 echo "[forge-events] valid capture reproduces the checked-in result"
@@ -28,6 +29,18 @@ PY
 echo "[forge-events] replay is deterministic"
 "$ROOT/build/rh_cli" forge events --input "$T/input.json" --out "$T/out2.json" >/dev/null || fail "replay"
 cmp -s "$T/out.json" "$T/out2.json" || fail "replay changed bytes"
+
+echo "[forge-events] GitLab native ids and release fallback remain distinct"
+"$ROOT/build/rh_cli" forge events --input "$T/gitlab.json" --out "$T/gitlab.out" >/dev/null || fail "GitLab capture"
+python3 - "$T/gitlab.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["provider"] == "gitlab" and d["authorization"]["state"] == "not_requested", d
+assert [e["native_id"] for e in d["events"]] == ["gitlab:12", "gitlab:8", "gitlab:56", "gitlab:10"], d
+assert d["events"][-1]["created_at"] == 1699900100 and d["events"][-1]["status"] == "published", d
+assert d["events"][-1]["tag"] == "v2.0.0" and d["events"][-1]["url"].startswith("https://gitlab.com/"), d
+print("[forge-events] GitLab boundary OK")
+PY
 
 echo "[forge-events] rejected records are counted per capability"
 python3 - "$T/input.json" "$T/malformed.json" <<'PY'
