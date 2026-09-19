@@ -99,6 +99,24 @@ assert len(d["events"]) == 4, d
 print("[forge-events] per-capability rejection count OK")
 PY
 
+echo "[forge-events] duplicate page observations replace by provider-native identity"
+python3 - "$T/input.json" "$T/duplicate-page.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["issues"].append({"number": 101, "state": "closed", "created_at": 1699000000, "updated_at": 1699999999, "closed_at": 1699999999, "html_url": "https://github.com/example/project/issues/101"})
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" forge events --input "$T/duplicate-page.json" --out "$T/duplicate-page.out" >/dev/null || fail "duplicate page capture"
+python3 - "$T/duplicate-page.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["issues"] == {"status": "observed", "count": 1, "rejected": 0}, d
+assert len(d["events"]) == 4, d
+issue = [e for e in d["events"] if e["kind"] == "issues"][0]
+assert issue["status"] == "closed" and issue["updated_at"] == 1699999999, issue
+print("[forge-events] duplicate replacement + count idempotence OK")
+PY
+
 python3 - "$T/input.json" "$T/negative-time.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
