@@ -53,6 +53,7 @@ include "./rh_privacy_report.elisa"
 include "./rh_roles_report.elisa"
 include "./rh_experimental_report.elisa"
 include "./rh_proof.elisa"
+include "./rh_forecast.elisa"
 include "./rh_render.elisa"
 include "./rh_explain.elisa"
 include "./rh_lease_report.elisa"
@@ -114,6 +115,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli render --report <report.json> --out <file.html>")
     rh_cli_err("       rh_cli explain --input <report.json> --out <file.md>")
     rh_cli_err("       rh_cli proof --input <file> --out <file>")
+    rh_cli_err("       rh_cli forecast --input <file> --out <file>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
     rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
     rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
@@ -1543,6 +1545,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 ppq <- ppq + 1
         return rh_cli_usage(2) if pi_idx < 0 or po_idx < 0
         return rh_do_proof(slots[pi_idx], slots[po_idx])
+    if rh_streq(cmd, "forecast"):
+        fi_idx, fo_idx =
+            while ffq2 < argc |fi_idx: i64 = -1, fo_idx: i64 = -1, ffq2: i64 = 2, slots| -> fi_idx, fo_idx:
+                a28: u8& = slots[ffq2].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(a28, "--input"):
+                    if ffq2 + 1 < argc:
+                        ffq2 <- ffq2 + 1
+                        fi_idx <- ffq2
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a28, "--out"):
+                    if ffq2 + 1 < argc:
+                        ffq2 <- ffq2 + 1
+                        fo_idx <- ffq2
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                ffq2 <- ffq2 + 1
+        return rh_cli_usage(2) if fi_idx < 0 or fo_idx < 0
+        return rh_do_forecast(slots[fi_idx], slots[fo_idx])
     if rh_streq(cmd, "sign") or rh_streq(cmd, "verify"):
         key_idx, sub_idx, sig_idx =
             while m < argc |key_idx: i64 = -1, sub_idx: i64 = -1, sig_idx: i64 = -1, m: i64 = 2, slots| -> key_idx, sub_idx, sig_idx:
@@ -4554,6 +4577,35 @@ def rh_do_proof(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Ab
         rh_cli_err("proof: cannot write --out")
         return 4
     rh_cli_out("proof: evidence observed")
+    0
+
+# --- M11 forecast evidence adapter. ---
+# Validates a captured forecast evaluation envelope with explicit temporal,
+# family-separated, and censoring-aware split metadata. It never trains a
+# model or feeds a forecast into the default policy path.
+def rh_do_forecast(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected forecast argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("forecast: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if Forecast::rh_forecast_report(raw, body) != 0:
+        rh_cli_err("forecast: unsupported or malformed evaluation envelope (fail closed)")
+        return 4
+    body.push(10)
+    if not rh_io_write(out_path, body):
+        rh_cli_err("forecast: cannot write --out")
+        return 4
+    rh_cli_out("forecast: evidence observed")
     0
 
 # --- M02-03 job-lease execution path. ---

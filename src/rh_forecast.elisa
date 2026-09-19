@@ -1,0 +1,170 @@
+# rh_forecast.elisa — forecast evidence adapter (M11-02).
+#
+# This module validates a captured forecast evaluation envelope. It does not
+# train or execute a model. Scores and calibration values remain exact
+# rationals, cutoff/horizon are explicit, and the result is never a policy
+# decision or a claim that a project will fail.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module Forecast:
+    private:
+        def rh_forecast_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if obj < 0 or nodes[obj.usize()].kind != RH_JSON_OBJ
+            want: usize = strlen(key)
+            while child >= 0 |child: i64 = nodes[obj.usize()].first_child, nodes, texts, key, want|:
+                kn: RhJsonNode = nodes[child.usize()]
+                value: i64 = kn.next_sibling
+                if kn.kind == RH_JSON_STR and value >= 0 and kn.text_end - kn.text_start == want.i64():
+                    same: mutable bool = true
+                    while k < want |k: usize = 0, texts, kn, key|:
+                        if texts[(kn.text_start + k.i64()).usize()] != key[k]:
+                            same <- false
+                        k <- k + 1
+                    return value if same
+                child <- nodes[value.usize()].next_sibling if value >= 0 else -1
+            -1
+
+        def rh_forecast_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Forecast::rh_forecast_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            n: RhJsonNode = nodes[idx.usize()]
+            s_out[0] <- n.text_start
+            e_out[0] <- n.text_end
+            true
+
+        def rh_forecast_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Forecast::rh_forecast_get(nodes, texts, obj, key)
+            return rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_forecast_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool:
+            return false if s < 0 or e < s or e - s != strlen(lit).i64()
+            while i < e - s |i: i64 = 0, texts, s, lit|:
+                return false if texts[(s + i).usize()] != lit[i.usize()]
+                i <- i + 1
+            true
+
+        def rh_forecast_emit_str(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, s.usize(), e.usize())
+            out.push(34)
+
+        def rh_forecast_ratio(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            ratio: i64 = Forecast::rh_forecast_get(nodes, texts, obj, key)
+            return false if ratio < 0 or nodes[ratio.usize()].kind != RH_JSON_OBJ
+            nok: mutable i64 = 0
+            dok: mutable i64 = 0
+            num: i64 = Forecast::rh_forecast_int(nodes, raw, texts, ratio, "num", &nok)
+            den: i64 = Forecast::rh_forecast_int(nodes, raw, texts, ratio, "den", &dok)
+            return false if nok == 0 or dok == 0 or den <= 0 or num < 0 or num > den
+            rh_push_text(out, "{\"num\":")
+            rh_push_decimal_i64(out, num)
+            rh_push_text(out, ",\"den\":")
+            rh_push_decimal_i64(out, den)
+            rh_push_text(out, "}")
+            true
+
+        def rh_forecast_true(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Forecast::rh_forecast_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_BOOL
+            rh_json_is_true(nodes, raw, idx)
+
+        def rh_forecast_predictions(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, arr: i64, out: mutable darray[u8]&, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if arr < 0 or nodes[arr.usize()].kind != RH_JSON_ARR
+            count_out[0] <- 0
+            rh_push_text(out, "[")
+            while child >= 0 |child: i64 = nodes[arr.usize()].first_child, nodes, raw, texts, out, count_out|:
+                return false if nodes[child.usize()].kind != RH_JSON_OBJ
+                sok: mutable i64 = 0
+                subject: i64 = Forecast::rh_forecast_int(nodes, raw, texts, child, "subject_id", &sok)
+                return false if sok == 0 or subject < 0
+                label_s: mutable i64 = 0
+                label_e: mutable i64 = 0
+                return false if not Forecast::rh_forecast_str(nodes, texts, child, "label", &label_s, &label_e)
+                return false if label_e <= label_s
+                out.push(44) if count_out[0] > 0
+                rh_push_text(out, "{\"subject_id\":")
+                rh_push_decimal_i64(out, subject)
+                rh_push_text(out, ",\"label\":")
+                Forecast::rh_forecast_emit_str(out, texts, label_s, label_e)
+                rh_push_text(out, ",\"score\":")
+                return false if not Forecast::rh_forecast_ratio(nodes, raw, texts, child, "score", out)
+                rh_push_text(out, "}")
+                count_out[0] <- count_out[0] + 1
+                child <- nodes[child.usize()].next_sibling
+            rh_push_text(out, "]")
+            true
+
+    public:
+        def rh_forecast_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema: i64 = Forecast::rh_forecast_get(nodes, texts, root, "schema")
+            return -1 if schema < 0 or nodes[schema.usize()].kind != RH_JSON_STR
+            sn: RhJsonNode = nodes[schema.usize()]
+            return -1 if not Forecast::rh_forecast_eq(texts, sn.text_start, sn.text_end, "rh-forecast-input/1")
+            ms: mutable i64 = 0
+            me: mutable i64 = 0
+            ps: mutable i64 = 0
+            pe: mutable i64 = 0
+            bs: mutable i64 = 0
+            be: mutable i64 = 0
+            return -1 if not Forecast::rh_forecast_str(nodes, texts, root, "model_id", &ms, &me)
+            return -1 if not Forecast::rh_forecast_str(nodes, texts, root, "population", &ps, &pe)
+            return -1 if not Forecast::rh_forecast_str(nodes, texts, root, "baseline", &bs, &be)
+            cutoff_ok: mutable i64 = 0
+            horizon_ok: mutable i64 = 0
+            cutoff: i64 = Forecast::rh_forecast_int(nodes, raw, texts, root, "cutoff", &cutoff_ok)
+            horizon: i64 = Forecast::rh_forecast_int(nodes, raw, texts, root, "horizon_days", &horizon_ok)
+            return -1 if cutoff_ok == 0 or horizon_ok == 0 or cutoff < 0 or horizon <= 0
+            split: i64 = Forecast::rh_forecast_get(nodes, texts, root, "split")
+            return -1 if split < 0 or nodes[split.usize()].kind != RH_JSON_OBJ
+            return -1 if not Forecast::rh_forecast_true(nodes, raw, texts, split, "temporal")
+            return -1 if not Forecast::rh_forecast_true(nodes, raw, texts, split, "family_separated")
+            return -1 if not Forecast::rh_forecast_true(nodes, raw, texts, split, "censoring_aware")
+            predictions: mutable darray[u8] = []
+            prediction_count: mutable i64 = 0
+            return -1 if not Forecast::rh_forecast_predictions(nodes, raw, texts, Forecast::rh_forecast_get(nodes, texts, root, "predictions"), predictions, &prediction_count)
+            calibration: i64 = Forecast::rh_forecast_get(nodes, texts, root, "calibration")
+            return -1 if calibration < 0 or nodes[calibration.usize()].kind != RH_JSON_OBJ
+            brier: mutable darray[u8] = []
+            burden: mutable darray[u8] = []
+            return -1 if not Forecast::rh_forecast_ratio(nodes, raw, texts, calibration, "brier", brier)
+            return -1 if not Forecast::rh_forecast_ratio(nodes, raw, texts, calibration, "alert_burden", burden)
+            fp_ok: mutable i64 = 0
+            subgroup_ok: mutable i64 = 0
+            sample_ok: mutable i64 = 0
+            false_positives: i64 = Forecast::rh_forecast_int(nodes, raw, texts, calibration, "false_positive_count", &fp_ok)
+            subgroup: i64 = Forecast::rh_forecast_int(nodes, raw, texts, calibration, "subgroup_coverage_percent", &subgroup_ok)
+            sample_count: i64 = Forecast::rh_forecast_int(nodes, raw, texts, calibration, "sample_count", &sample_ok)
+            return -1 if fp_ok == 0 or subgroup_ok == 0 or sample_ok == 0 or false_positives < 0 or subgroup < 0 or subgroup > 100 or sample_count <= 0
+            rh_push_text(out, "{\"schema\":\"rh-forecast-result/1\",\"model_id\":")
+            Forecast::rh_forecast_emit_str(out, texts, ms, me)
+            rh_push_text(out, ",\"population\":")
+            Forecast::rh_forecast_emit_str(out, texts, ps, pe)
+            rh_push_text(out, ",\"baseline\":")
+            Forecast::rh_forecast_emit_str(out, texts, bs, be)
+            rh_push_text(out, ",\"cutoff\":")
+            rh_push_decimal_i64(out, cutoff)
+            rh_push_text(out, ",\"horizon_days\":")
+            rh_push_decimal_i64(out, horizon)
+            rh_push_text(out, ",\"split\":{\"temporal\":true,\"family_separated\":true,\"censoring_aware\":true}")
+            rh_push_text(out, ",\"predictions\":")
+            out.extend(bytes_view(predictions))
+            rh_push_text(out, ",\"prediction_count\":")
+            rh_push_decimal_i64(out, prediction_count)
+            rh_push_text(out, ",\"calibration\":{\"brier\":")
+            out.extend(bytes_view(brier))
+            rh_push_text(out, ",\"false_positive_count\":")
+            rh_push_decimal_i64(out, false_positives)
+            rh_push_text(out, ",\"subgroup_coverage_percent\":")
+            rh_push_decimal_i64(out, subgroup)
+            rh_push_text(out, ",\"alert_burden\":")
+            out.extend(bytes_view(burden))
+            rh_push_text(out, ",\"sample_count\":")
+            rh_push_decimal_i64(out, sample_count)
+            rh_push_text(out, "},\"status\":\"experimental\",\"note\":\"forecast evidence is opt-in and evaluated at the declared cutoff and horizon; it is not a fact that the project will fail and cannot change default policy decisions\"}")
+            0
