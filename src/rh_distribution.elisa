@@ -1,0 +1,385 @@
+# rh_distribution.elisa — bounded Debian control metadata (M08).
+#
+# Distribution package versions are observations about a distribution source,
+# not upstream release identities. This parser keeps declared relations and
+# VCS/homepage mappings as assertions, never resolves them, and omits the
+# Maintainer field from the public result. It accepts a bounded debian/control
+# subset with continuation lines; malformed stanzas fail closed.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_DIST_MAX_BYTES: usize = 4194304
+const RH_DIST_MAX_STANZAS: i64 = 10000
+const RH_DIST_MAX_FIELDS: i64 = 256
+const RH_DIST_MAX_RELATIONS: i64 = 200000
+
+struct RhDistField:
+    key_s: mutable i64
+    key_e: mutable i64
+    value_s: mutable i64
+    value_e: mutable i64
+
+struct RhDistStanza:
+    field_start: mutable i64
+    field_count: mutable i64
+
+struct RhDistRequirement:
+    stanza: mutable i64
+    name_s: mutable i64
+    name_e: mutable i64
+    requirement_s: mutable i64
+    requirement_e: mutable i64
+    scope: mutable u8
+    alternatives: mutable bool
+    unresolved: mutable bool
+
+module Distribution:
+    private:
+        def rh_dist_eq(data: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(data, s, e, literal)
+
+        def rh_dist_trim(data: darray[u8]&, s: i64, e: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e < s or e > data.count.i64()
+            start_out[0] <- s
+            end_out[0] <- e
+            while start_out[0] < end_out[0] and (data[start_out[0].usize()] == 32 or data[start_out[0].usize()] == 9 or data[start_out[0].usize()] == 13 or data[start_out[0].usize()] == 10):
+                start_out[0] <- start_out[0] + 1
+            while end_out[0] > start_out[0] and (data[(end_out[0] - 1).usize()] == 32 or data[(end_out[0] - 1).usize()] == 9 or data[(end_out[0] - 1).usize()] == 13 or data[(end_out[0] - 1).usize()] == 10):
+                end_out[0] <- end_out[0] - 1
+            true
+
+        def rh_dist_key_char(value: u8) -> bool:
+            (value >= 65 and value <= 90) or (value >= 97 and value <= 122) or value == 45 or (value >= 48 and value <= 57)
+
+        def rh_dist_known_key(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if Distribution::rh_dist_eq(data, s, e, "Source")
+            return true if Distribution::rh_dist_eq(data, s, e, "Package")
+            return true if Distribution::rh_dist_eq(data, s, e, "Version")
+            return true if Distribution::rh_dist_eq(data, s, e, "Architecture")
+            return true if Distribution::rh_dist_eq(data, s, e, "Source")
+            return true if Distribution::rh_dist_eq(data, s, e, "Section")
+            return true if Distribution::rh_dist_eq(data, s, e, "Priority")
+            return true if Distribution::rh_dist_eq(data, s, e, "Maintainer")
+            return true if Distribution::rh_dist_eq(data, s, e, "Description")
+            return true if Distribution::rh_dist_eq(data, s, e, "Multi-Arch")
+            return true if Distribution::rh_dist_eq(data, s, e, "Depends")
+            return true if Distribution::rh_dist_eq(data, s, e, "Pre-Depends")
+            return true if Distribution::rh_dist_eq(data, s, e, "Recommends")
+            return true if Distribution::rh_dist_eq(data, s, e, "Suggests")
+            return true if Distribution::rh_dist_eq(data, s, e, "Breaks")
+            return true if Distribution::rh_dist_eq(data, s, e, "Conflicts")
+            return true if Distribution::rh_dist_eq(data, s, e, "Replaces")
+            return true if Distribution::rh_dist_eq(data, s, e, "Enhances")
+            return true if Distribution::rh_dist_eq(data, s, e, "Provides")
+            return true if Distribution::rh_dist_eq(data, s, e, "Build-Depends")
+            return true if Distribution::rh_dist_eq(data, s, e, "Build-Depends-Indep")
+            return true if Distribution::rh_dist_eq(data, s, e, "Build-Depends-Arch")
+            return true if Distribution::rh_dist_eq(data, s, e, "Built-Using")
+            return true if Distribution::rh_dist_eq(data, s, e, "Static-Built-Using")
+            return true if Distribution::rh_dist_eq(data, s, e, "Testsuite")
+            return true if Distribution::rh_dist_eq(data, s, e, "Rules-Requires-Root")
+            return true if Distribution::rh_dist_eq(data, s, e, "Homepage")
+            return true if Distribution::rh_dist_eq(data, s, e, "Vcs-Git")
+            return true if Distribution::rh_dist_eq(data, s, e, "Vcs-Browser")
+            false
+
+        def rh_dist_field_index(data: darray[u8]&, fields: darray[RhDistField]&, stanza: RhDistStanza, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < stanza.field_count |i: i64 = 0, fields, stanza, data, key|:
+                field: RhDistField = fields[(stanza.field_start + i).usize()]
+                return (stanza.field_start + i) if Distribution::rh_dist_eq(data, field.key_s, field.key_e, key)
+                i <- i + 1
+            -1
+
+        def rh_dist_field_value(data: darray[u8]&, fields: darray[RhDistField]&, index: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if index < 0 or index >= fields.count.i64()
+            field: RhDistField = fields[index.usize()]
+            Distribution::rh_dist_trim(data, field.value_s, field.value_e, start_out, end_out)
+
+        def rh_dist_stanza_has(data: darray[u8]&, fields: darray[RhDistField]&, stanza: RhDistStanza, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Distribution::rh_dist_field_index(data, fields, stanza, key) >= 0
+
+        def rh_dist_valid_scalar(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e <= s
+            while i < e |i: i64 = s, e, data|:
+                return false if data[i.usize()] == 10 or data[i.usize()] == 13
+                i <- i + 1
+            true
+
+        def rh_dist_valid_package_name(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e <= s
+            while i < e |i: i64 = s, e, data|:
+                b: u8 = data[i.usize()]
+                valid: bool = (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 43 or b == 45 or b == 46 or b == 58
+                return false if not valid
+                i <- i + 1
+            true
+
+        def rh_dist_relation_scope(data: darray[u8]&, s: i64, e: i64) -> i64:
+            return 0 if Distribution::rh_dist_eq(data, s, e, "Depends") or Distribution::rh_dist_eq(data, s, e, "Pre-Depends")
+            return 1 if Distribution::rh_dist_eq(data, s, e, "Build-Depends") or Distribution::rh_dist_eq(data, s, e, "Build-Depends-Indep") or Distribution::rh_dist_eq(data, s, e, "Build-Depends-Arch")
+            return 2 if Distribution::rh_dist_eq(data, s, e, "Recommends")
+            return 3 if Distribution::rh_dist_eq(data, s, e, "Suggests")
+            return 4 if Distribution::rh_dist_eq(data, s, e, "Breaks")
+            return 5 if Distribution::rh_dist_eq(data, s, e, "Conflicts")
+            return 6 if Distribution::rh_dist_eq(data, s, e, "Replaces")
+            return 7 if Distribution::rh_dist_eq(data, s, e, "Enhances")
+            -1
+
+        def rh_dist_relation_label(scope: u8) -> u8&:
+            return "runtime" if scope == 0
+            return "build" if scope == 1
+            return "recommend" if scope == 2
+            return "suggest" if scope == 3
+            return "breaks" if scope == 4
+            return "conflicts" if scope == 5
+            return "replaces" if scope == 6
+            "enhances"
+
+        def rh_dist_parse_control(data: darray[u8]&, fields: mutable darray[RhDistField]&, stanzas: mutable darray[RhDistStanza]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if data.count > RH_DIST_MAX_BYTES
+            stanza_start: mutable i64 = 0
+            stanza_count: mutable i64 = 0
+            current_field: mutable i64 = -1
+            line_start: mutable usize = 0
+            while line_start <= data.count |line_start, data, fields, stanzas, stanza_start, stanza_count, current_field|:
+                line_end: usize =
+                    while j < data.count and data[j] != 10 |j: usize = line_start| -> j:
+                        j <- j + 1
+                s: mutable i64 = line_start.i64()
+                e: mutable i64 = line_end.i64()
+                while e > s and data[(e - 1).usize()] == 13:
+                    e <- e - 1
+                if s == e:
+                    if stanza_count > 0:
+                        return -1 if stanzas.count.i64() >= RH_DIST_MAX_STANZAS
+                        stanzas.push(RhDistStanza{field_start: stanza_start, field_count: stanza_count})
+                    stanza_start <- fields.count.i64()
+                    stanza_count <- 0
+                    current_field <- -1
+                elif data[s.usize()] == 32 or data[s.usize()] == 9:
+                    return -1 if current_field < 0
+                    fields[current_field.usize()].value_e <- e
+                else:
+                    colon: mutable i64 = -1
+                    while k < e |k: i64 = s, e, data, colon|:
+                        if data[k.usize()] == 58:
+                            colon <- k
+                            break
+                        k <- k + 1
+                    return -1 if colon <= s
+                    while k < colon |k: i64 = s, colon, data|:
+                        return -1 if not Distribution::rh_dist_key_char(data[k.usize()])
+                        k <- k + 1
+                    return -1 if stanza_count >= RH_DIST_MAX_FIELDS
+                    value_s: mutable i64 = colon + 1
+                    while value_s < e and (data[value_s.usize()] == 32 or data[value_s.usize()] == 9):
+                        value_s <- value_s + 1
+                    fields.push(RhDistField{key_s: s, key_e: colon, value_s: value_s, value_e: e})
+                    current_field <- fields.count.i64() - 1
+                    stanza_count <- stanza_count + 1
+                line_start <- line_end + 1
+            if stanza_count > 0:
+                return -1 if stanzas.count.i64() >= RH_DIST_MAX_STANZAS
+                stanzas.push(RhDistStanza{field_start: stanza_start, field_count: stanza_count})
+            stanzas.count.i64()
+
+        def rh_dist_add_relation(data: darray[u8]&, reqs: mutable darray[RhDistRequirement]&, stanza: i64, s: i64, e: i64, scope: u8, unresolved_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if s >= e
+            name_end: mutable i64 = s
+            while name_end < e:
+                b: u8 = data[name_end.usize()]
+                break if b == 32 or b == 9 or b == 40 or b == 91 or b == 60 or b == 124
+                name_end <- name_end + 1
+            name_ok: bool = Distribution::rh_dist_valid_package_name(data, s, name_end)
+            alternative: mutable bool = false
+            i: mutable i64 = s
+            while i < e:
+                alternative <- true if data[i.usize()] == 124
+                i <- i + 1
+            unresolved: bool = not name_ok or alternative
+            unresolved_out[0] <- unresolved_out[0] + 1 if unresolved
+            return -1 if reqs.count.i64() >= RH_DIST_MAX_RELATIONS
+            reqs.push(RhDistRequirement{stanza: stanza, name_s: s, name_e: name_end, requirement_s: s, requirement_e: e, scope: scope, alternatives: alternative, unresolved: unresolved})
+            0
+
+        def rh_dist_collect_relations(data: darray[u8]&, fields: darray[RhDistField]&, stanzas: darray[RhDistStanza]&, reqs: mutable darray[RhDistRequirement]&, unresolved_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            unresolved_out[0] <- 0
+            while si < stanzas.count |si: i64 = 0, stanzas, fields, data, reqs, unresolved_out|:
+                stanza: RhDistStanza = stanzas[si.usize()]
+                while fi < stanza.field_count |fi: i64 = 0, si, stanzas, fields, data, reqs, unresolved_out|:
+                    field: RhDistField = fields[(stanza.field_start + fi).usize()]
+                    scope_i: i64 = Distribution::rh_dist_relation_scope(data, field.key_s, field.key_e)
+                    if scope_i >= 0:
+                        value_s: mutable i64 = 0
+                        value_e: mutable i64 = 0
+                        return -1 if not Distribution::rh_dist_trim(data, field.value_s, field.value_e, &value_s, &value_e)
+                        item_start: mutable i64 = value_s
+                        i: mutable i64 = value_s
+                        while i <= value_e:
+                            if i == value_e or data[i.usize()] == 44:
+                                item_s: mutable i64 = 0
+                                item_e: mutable i64 = 0
+                                return -1 if not Distribution::rh_dist_trim(data, item_start, i, &item_s, &item_e)
+                                return -1 if Distribution::rh_dist_add_relation(data, reqs, si, item_s, item_e, scope_i.u8(), unresolved_out) != 0
+                                item_start <- i + 1
+                            i <- i + 1
+                    fi <- fi + 1
+                si <- si + 1
+            0
+
+        def rh_dist_validate(data: darray[u8]&, fields: darray[RhDistField]&, stanzas: darray[RhDistStanza]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            unknown_out[0] <- 0
+            while si < stanzas.count |si: i64 = 0, stanzas, fields, data, unknown_out|:
+                stanza: RhDistStanza = stanzas[si.usize()]
+                return -1 if not Distribution::rh_dist_stanza_has(data, fields, stanza, "Package") and not Distribution::rh_dist_stanza_has(data, fields, stanza, "Source")
+                while fi < stanza.field_count |fi: i64 = 0, si, stanzas, fields, data, unknown_out|:
+                    field_index: i64 = stanza.field_start + fi
+                    field: RhDistField = fields[field_index.usize()]
+                    unknown_out[0] <- unknown_out[0] + 1 if not Distribution::rh_dist_known_key(data, field.key_s, field.key_e)
+                    while prior < fi |prior: i64 = 0, stanza, fields, data, field|:
+                        prior_field: RhDistField = fields[(stanza.field_start + prior).usize()]
+                        return -1 if Distribution::rh_dist_eq(data, prior_field.key_s, prior_field.key_e, "Package") and Distribution::rh_dist_eq(data, field.key_s, field.key_e, "Package")
+                        return -1 if Distribution::rh_dist_eq(data, prior_field.key_s, prior_field.key_e, "Source") and Distribution::rh_dist_eq(data, field.key_s, field.key_e, "Source")
+                        return -1 if Distribution::rh_dist_eq(data, prior_field.key_s, prior_field.key_e, "Version") and Distribution::rh_dist_eq(data, field.key_s, field.key_e, "Version")
+                        prior <- prior + 1
+                    fi <- fi + 1
+                si <- si + 1
+            0
+
+        def rh_dist_emit_value(out: mutable darray[u8]&, data: darray[u8]&, fields: darray[RhDistField]&, index: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            s: mutable i64 = 0
+            e: mutable i64 = 0
+            return false if not Distribution::rh_dist_field_value(data, fields, index, &s, &e)
+            return false if not Distribution::rh_dist_valid_scalar(data, s, e)
+            out.push(34)
+            rh_json_escape(out, data, s.usize(), e.usize())
+            out.push(34)
+            true
+
+        def rh_dist_emit_optional_value(out: mutable darray[u8]&, data: darray[u8]&, fields: darray[RhDistField]&, index: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return rh_dist_emit_value(out, data, fields, index) if index >= 0
+            rh_push_text(out, "null")
+            true
+
+        def rh_dist_emit_relations(out: mutable darray[u8]&, data: darray[u8]&, reqs: darray[RhDistRequirement]&, stanza: i64, scope: u8, first_in: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            first: mutable bool = first_in
+            while i < reqs.count |i: usize = 0, reqs, data, stanza, scope, out, first|:
+                req: RhDistRequirement = reqs[i]
+                if req.stanza == stanza and req.scope == scope:
+                    if not first:
+                        out.push(44)
+                    first <- false
+                    rh_push_text(out, "{\"name\":")
+                    if req.unresolved:
+                        rh_push_text(out, "null")
+                    else:
+                        out.push(34)
+                        rh_json_escape(out, data, req.name_s.usize(), req.name_e.usize())
+                        out.push(34)
+                    rh_push_text(out, ",\"requirement\":\"")
+                    rh_json_escape(out, data, req.requirement_s.usize(), req.requirement_e.usize())
+                    rh_push_text(out, "\",\"scope\":\"")
+                    rh_push_text(out, Distribution::rh_dist_relation_label(req.scope))
+                    rh_push_text(out, "\",\"alternatives\":")
+                    rh_push_text(out, "true" if req.alternatives else "false")
+                    rh_push_text(out, ",\"state\":\"")
+                    rh_push_text(out, "unresolved" if req.unresolved else "declared")
+                    rh_push_text(out, "\"}")
+                i <- i + 1
+            first
+
+        def rh_dist_emit_assertions(out: mutable darray[u8]&, data: darray[u8]&, fields: darray[RhDistField]&, stanza: RhDistStanza) -> void can[Memory.Allocate, Abort.Panic]:
+            first: mutable bool = true
+            while kind < 3 |kind: i64 = 0, fields, stanza, data, out, first|:
+                key: u8& = "Vcs-Git" if kind == 0 else "Vcs-Browser" if kind == 1 else "Homepage"
+                index: i64 = Distribution::rh_dist_field_index(data, fields, stanza, key)
+                if index >= 0:
+                    s: mutable i64 = 0
+                    e: mutable i64 = 0
+                    if Distribution::rh_dist_field_value(data, fields, index, &s, &e) and Distribution::rh_dist_valid_scalar(data, s, e):
+                        if not first:
+                            out.push(44)
+                        first <- false
+                        rh_push_text(out, "{\"kind\":\"")
+                        rh_push_text(out, "vcs-git" if kind == 0 else "vcs-browser" if kind == 1 else "homepage")
+                        rh_push_text(out, "\",\"value\":\"")
+                        rh_json_escape(out, data, s.usize(), e.usize())
+                        rh_push_text(out, "\"}")
+                kind <- kind + 1
+
+    public:
+        def rh_distribution_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            fields: mutable darray[RhDistField] = []
+            stanzas: mutable darray[RhDistStanza] = []
+            return -1 if Distribution::rh_dist_parse_control(raw, fields, stanzas) <= 0
+            unknown_fields: mutable i64 = 0
+            return -1 if Distribution::rh_dist_validate(raw, fields, stanzas, &unknown_fields) != 0
+            reqs: mutable darray[RhDistRequirement] = []
+            unresolved_relations: mutable i64 = 0
+            return -1 if Distribution::rh_dist_collect_relations(raw, fields, stanzas, reqs, &unresolved_relations) != 0
+
+            rh_push_text(out, "{\"schema\":\"rh-distribution-result/1\",\"format\":\"debian-control\",\"source_stanzas\":[")
+            source_first: mutable bool = true
+            while si < stanzas.count |si: i64 = 0, stanzas, fields, raw, out, source_first|:
+                stanza: RhDistStanza = stanzas[si.usize()]
+                source_index: i64 = Distribution::rh_dist_field_index(raw, fields, stanza, "Source")
+                package_index: i64 = Distribution::rh_dist_field_index(raw, fields, stanza, "Package")
+                if source_index >= 0 and package_index < 0:
+                    name_s: mutable i64 = 0
+                    name_e: mutable i64 = 0
+                    return -1 if not Distribution::rh_dist_field_value(raw, fields, source_index, &name_s, &name_e) or not Distribution::rh_dist_valid_scalar(raw, name_s, name_e)
+                    if not source_first:
+                        out.push(44)
+                    source_first <- false
+                    rh_push_text(out, "{\"name\":\"")
+                    rh_json_escape(out, raw, name_s.usize(), name_e.usize())
+                    rh_push_text(out, "\",\"version\":")
+                    return -1 if not Distribution::rh_dist_emit_optional_value(out, raw, fields, Distribution::rh_dist_field_index(raw, fields, stanza, "Version"))
+                    rh_push_text(out, ",\"build_relations\":[")
+                    Distribution::rh_dist_emit_relations(out, raw, reqs, si, 1, true)
+                    rh_push_text(out, "],\"source_assertions\":[")
+                    Distribution::rh_dist_emit_assertions(out, raw, fields, stanza)
+                    rh_push_text(out, "]}")
+                si <- si + 1
+            rh_push_text(out, "],\"binary_packages\":[")
+            bi: mutable i64 = 0
+            binary_first: mutable bool = true
+            while bi < stanzas.count |bi, stanzas, fields, raw, reqs, out, binary_first|:
+                stanza: RhDistStanza = stanzas[bi.usize()]
+                package_index: i64 = Distribution::rh_dist_field_index(raw, fields, stanza, "Package")
+                if package_index >= 0:
+                    name_s: mutable i64 = 0
+                    name_e: mutable i64 = 0
+                    return -1 if not Distribution::rh_dist_field_value(raw, fields, package_index, &name_s, &name_e) or not Distribution::rh_dist_valid_scalar(raw, name_s, name_e)
+                    if not binary_first:
+                        out.push(44)
+                    binary_first <- false
+                    rh_push_text(out, "{\"name\":\"")
+                    rh_json_escape(out, raw, name_s.usize(), name_e.usize())
+                    rh_push_text(out, "\",\"version\":")
+                    return -1 if not Distribution::rh_dist_emit_optional_value(out, raw, fields, Distribution::rh_dist_field_index(raw, fields, stanza, "Version"))
+                    rh_push_text(out, ",\"architecture\":")
+                    return -1 if not Distribution::rh_dist_emit_optional_value(out, raw, fields, Distribution::rh_dist_field_index(raw, fields, stanza, "Architecture"))
+                    rh_push_text(out, ",\"source\":")
+                    return -1 if not Distribution::rh_dist_emit_optional_value(out, raw, fields, Distribution::rh_dist_field_index(raw, fields, stanza, "Source"))
+                    rh_push_text(out, ",\"provides\":")
+                    return -1 if not Distribution::rh_dist_emit_optional_value(out, raw, fields, Distribution::rh_dist_field_index(raw, fields, stanza, "Provides"))
+                    rh_push_text(out, ",\"relations\":[")
+                    first_relation: mutable bool = true
+                    first_relation <- Distribution::rh_dist_emit_relations(out, raw, reqs, bi, 0, first_relation)
+                    first_relation <- Distribution::rh_dist_emit_relations(out, raw, reqs, bi, 1, first_relation)
+                    first_relation <- Distribution::rh_dist_emit_relations(out, raw, reqs, bi, 2, first_relation)
+                    first_relation <- Distribution::rh_dist_emit_relations(out, raw, reqs, bi, 3, first_relation)
+                    first_relation <- Distribution::rh_dist_emit_relations(out, raw, reqs, bi, 4, first_relation)
+                    first_relation <- Distribution::rh_dist_emit_relations(out, raw, reqs, bi, 5, first_relation)
+                    first_relation <- Distribution::rh_dist_emit_relations(out, raw, reqs, bi, 6, first_relation)
+                    first_relation <- Distribution::rh_dist_emit_relations(out, raw, reqs, bi, 7, first_relation)
+                    rh_push_text(out, "]}")
+                bi <- bi + 1
+            rh_push_text(out, "],\"unknown_fields\":")
+            rh_push_decimal_i64(out, unknown_fields)
+            rh_push_text(out, ",\"unresolved_relations\":")
+            rh_push_decimal_i64(out, unresolved_relations)
+            rh_push_text(out, ",\"note\":\"distribution versions and declared relations are observations; source links are assertions; Maintainer identity is omitted; no upstream identity or dependency resolution is inferred\"}")
+            0
