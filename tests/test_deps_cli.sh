@@ -78,6 +78,11 @@ assert {key: metrics[key]["value"] for key in metrics} == {
     "dependency.optional_requirements": 0,
     "dependency.peer_requirements": 1,
     "dependency.unknown_scope_requirements": 0,
+    "dependency.runtime_resolved_edges": 10,
+    "dependency.development_resolved_edges": 0,
+    "dependency.optional_resolved_edges": 0,
+    "dependency.peer_resolved_edges": 0,
+    "dependency.unknown_scope_resolved_edges": 0,
     "security.known_advisory_records": 3,
     "security.known_unique_advisories": 2,
     "security.affected_resolved_nodes": 2,
@@ -97,6 +102,8 @@ assert by["npm"]["resolved_transitive_versions"] == 6, by["npm"]
 assert by["cargo"]["runtime_requirements"] == 5, by["cargo"]
 assert by["npm"]["runtime_requirements"] == 9, by["npm"]
 assert by["npm"]["peer_requirements"] == 1, by["npm"]
+assert by["cargo"]["runtime_resolved_edges"] == 3, by["cargo"]
+assert by["npm"]["runtime_resolved_edges"] == 7, by["npm"]
 for eco in ("cargo", "npm"):
     assert by[eco]["development_requirements"] == 0, by[eco]
     assert by[eco]["optional_requirements"] == 0, by[eco]
@@ -219,6 +226,8 @@ assert [(e["to"], e["scope"]) for e in g["edges"]] == [(1, "normal"), (2, "optio
 assert sorted(u["name"] for u in g["unresolved"]) == ["coverage", "requests"], g["unresolved"]
 assert metrics["dependency.runtime_requirements"]["value"] == 2, metrics
 assert metrics["dependency.optional_requirements"]["value"] == 2, metrics
+assert metrics["dependency.runtime_resolved_edges"]["value"] == 1, metrics
+assert metrics["dependency.optional_resolved_edges"]["value"] == 1, metrics
 print("[deps] PEP 621 graph + optional scope OK")
 PY
 
@@ -312,6 +321,7 @@ rm = json.load(open(out + "/deps-metrics.json"))
 by = {b["ecosystem"]: b for b in rm["by_ecosystem"]}
 assert by["rubygems"]["unknown_scope_requirements"] == 1, by
 assert by["composer"]["development_requirements"] == 2, by
+assert by["composer"]["development_resolved_edges"] == 1, by
 print("[deps] RubyGems/Composer scopes + unresolved context OK")
 PY
 
@@ -343,6 +353,8 @@ assert by["nuget"]["resolved_edges"] == 2, by
 assert by["nuget"]["unsupported_range_count"] == 1, by
 assert by["nuget"]["runtime_requirements"] == 2, by
 assert by["nuget"]["development_requirements"] == 1, by
+assert by["nuget"]["runtime_resolved_edges"] == 1, by
+assert by["nuget"]["development_resolved_edges"] == 1, by
 print("[deps] NuGet graph + development scope OK")
 PY
 
@@ -401,6 +413,8 @@ assert by["maven"]["resolved_edges"] == 2, by
 assert by["maven"]["unsupported_range_count"] == 1, by
 assert by["maven"]["runtime_requirements"] == 2, by
 assert by["maven"]["development_requirements"] == 1, by
+assert by["maven"]["runtime_resolved_edges"] == 1, by
+assert by["maven"]["development_resolved_edges"] == 1, by
 print("[deps] Maven graph + dependency-management exclusion OK")
 PY
 
