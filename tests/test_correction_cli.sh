@@ -115,4 +115,14 @@ printf '{"schema":"rh-corrections-state/2","revision":1,"watermark":1,"supersede
 set -e
 [[ "$rc7" -eq 4 && "$rc8" -eq 4 ]] || fail "malformed correction state must exit 4 (got $rc7/$rc8)"
 
+echo "[correct] content-addressed --state-store survives restart"
+CS="$T/correction-store"
+"$ROOT/build/rh_cli" correct --corrections "$T/dur.json" --out "$T/cs1" --state-store "$CS" >/dev/null || fail "state-store run1"
+"$ROOT/build/rh_cli" correct --corrections "$T/dur.json" --out "$T/cs2" --state-store "$CS" >/dev/null || fail "state-store run2"
+rev_store="$(python3 -c "import json;print(json.load(open('$T/cs2/corrections-result.json'))['final_revision'])")"
+[[ "$rev_store" == "2" ]] || fail "state-store replay must stay at rev 2 (got $rev_store)"
+cs_id="$(tr -d '\n' < "$CS/current")"
+"$ROOT/build/rh_cli" store verify --root "$CS" --name "$cs_id" >/dev/null || fail "correction state-store blob verification"
+echo "[correct] state-store OK"
+
 echo "test_correction_cli OK"

@@ -28,6 +28,7 @@ include "./rh_policy.elisa"
 include "./rh_policy_parse.elisa"
 include "./rh_correction_report.elisa"
 include "./rh_store.elisa"
+include "./rh_state_store.elisa"
 include "./rh_ops.elisa"
 include "./rh_forge.elisa"
 include "./rh_connector.elisa"
@@ -76,8 +77,8 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
     rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--snapshot-root <dir>] [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
     rh_cli_err("            [--max-nodes N] [--max-depth D] [--unavailable <id>] [--private <id>]...")
-    rh_cli_err("       rh_cli policy --policy <file> --input <file> --out <dir> [--state <file>]")
-    rh_cli_err("       rh_cli correct --corrections <file> --out <dir> [--state <file>]")
+    rh_cli_err("       rh_cli policy --policy <file> --input <file> --out <dir> [--state <file> | --state-store <dir>]")
+    rh_cli_err("       rh_cli correct --corrections <file> --out <dir> [--state <file> | --state-store <dir>]")
     rh_cli_err("       rh_cli store put --root <dir> --file <path> | store verify --root <dir> --name <hex>")
     rh_cli_err("       rh_cli store lease --root <dir> --job <name> --input <file> --out <file>")
     rh_cli_err("       rh_cli ops backup --root <dir> --manifest <path> --names <file>")
@@ -91,7 +92,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli worker tick --input <file> --out <file>")
     rh_cli_err("       rh_cli inventory --format cyclonedx|spdx --input <file> --out <file>")
     rh_cli_err("       rh_cli vcs --format hg|svn|fossil|patch --input <file> --out <file>")
-    rh_cli_err("       rh_cli notify --input <file> --out <file>")
+    rh_cli_err("       rh_cli notify --input <file> --out <file> [--state <file> | --state-store <dir>]")
     rh_cli_err("       rh_cli query --input <file> --out <file>")
     rh_cli_err("       rh_cli identity --input <file> --out <file>")
     rh_cli_err("       rh_cli release-feed --input <file> --out <file>")
@@ -735,8 +736,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], "", false, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, slots[in_idx], true) if in_idx >= 0
         return rh_do_downstream(slots[g_idx], s_idx, slots[dw_idx], "", false, maxn, maxd, un_idx, un_idx >= 0, priv, mirrors, "", false)
     if rh_streq(cmd, "policy"):
-        p_idx, i_idx, po_idx, ps_idx =
-            while pp < argc |p_idx: i64 = -1, i_idx: i64 = -1, po_idx: i64 = -1, ps_idx: i64 = -1, pp: i64 = 2, slots| -> p_idx, i_idx, po_idx, ps_idx:
+        p_idx, i_idx, po_idx, ps_idx, pt_idx =
+            while pp < argc |p_idx: i64 = -1, i_idx: i64 = -1, po_idx: i64 = -1, ps_idx: i64 = -1, pt_idx: i64 = -1, pp: i64 = 2, slots| -> p_idx, i_idx, po_idx, ps_idx, pt_idx:
                 a9: u8& = slots[pp].cast[u8&] can Unsafe.PointerCast
                 if rh_streq(a9, "--policy"):
                     if pp + 1 < argc:
@@ -762,15 +763,23 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         ps_idx <- pp
                     else:
                         return rh_cli_usage(2)
+                elif rh_streq(a9, "--state-store"):
+                    if pp + 1 < argc:
+                        pp <- pp + 1
+                        pt_idx <- pp
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 pp <- pp + 1
         return rh_cli_usage(2) if p_idx < 0 or i_idx < 0 or po_idx < 0
-        return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[ps_idx], true) if ps_idx >= 0
-        return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[p_idx], false)
+        return rh_cli_usage(2) if ps_idx >= 0 and pt_idx >= 0
+        return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[ps_idx], true, "", false) if ps_idx >= 0
+        return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[p_idx], false, slots[pt_idx], true) if pt_idx >= 0
+        return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[p_idx], false, "", false)
     if rh_streq(cmd, "correct"):
-        cr_idx, co_idx2, cs_idx =
-            while cw < argc |cr_idx: i64 = -1, co_idx2: i64 = -1, cs_idx: i64 = -1, cw: i64 = 2, slots| -> cr_idx, co_idx2, cs_idx:
+        cr_idx, co_idx2, cs_idx, ct_idx =
+            while cw < argc |cr_idx: i64 = -1, co_idx2: i64 = -1, cs_idx: i64 = -1, ct_idx: i64 = -1, cw: i64 = 2, slots| -> cr_idx, co_idx2, cs_idx, ct_idx:
                 a10: u8& = slots[cw].cast[u8&] can Unsafe.PointerCast
                 if rh_streq(a10, "--corrections"):
                     if cw + 1 < argc:
@@ -790,12 +799,20 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         cs_idx <- cw
                     else:
                         return rh_cli_usage(2)
+                elif rh_streq(a10, "--state-store"):
+                    if cw + 1 < argc:
+                        cw <- cw + 1
+                        ct_idx <- cw
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 cw <- cw + 1
         return rh_cli_usage(2) if cr_idx < 0 or co_idx2 < 0
-        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cs_idx], true) if cs_idx >= 0
-        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false)
+        return rh_cli_usage(2) if cs_idx >= 0 and ct_idx >= 0
+        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cs_idx], true, "", false) if cs_idx >= 0
+        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false, slots[ct_idx], true) if ct_idx >= 0
+        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false, "", false)
     if rh_streq(cmd, "store"):
         return rh_cli_usage(2) if argc < 3
         sub11: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
@@ -1031,8 +1048,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if vc_idx < 0 or vi_idx < 0 or vo_idx < 0
         return rh_do_vcs(slots[vc_idx], slots[vi_idx], slots[vo_idx])
     if rh_streq(cmd, "notify"):
-        nf_idx, no_idx, ns_idx =
-            while nf < argc |nf_idx: i64 = -1, no_idx: i64 = -1, ns_idx: i64 = -1, nf: i64 = 2, slots| -> nf_idx, no_idx, ns_idx:
+        nf_idx, no_idx, ns_idx, nt_idx =
+            while nf < argc |nf_idx: i64 = -1, no_idx: i64 = -1, ns_idx: i64 = -1, nt_idx: i64 = -1, nf: i64 = 2, slots| -> nf_idx, no_idx, ns_idx, nt_idx:
                 a16: u8& = slots[nf].cast[u8&] can Unsafe.PointerCast
                 if rh_streq(a16, "--input"):
                     if nf + 1 < argc:
@@ -1052,12 +1069,20 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         ns_idx <- nf
                     else:
                         return rh_cli_usage(2)
+                elif rh_streq(a16, "--state-store"):
+                    if nf + 1 < argc:
+                        nf <- nf + 1
+                        nt_idx <- nf
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 nf <- nf + 1
         return rh_cli_usage(2) if nf_idx < 0 or no_idx < 0
-        return rh_do_notify_state(slots[nf_idx], slots[no_idx], slots[ns_idx], true) if ns_idx >= 0
-        return rh_do_notify_state(slots[nf_idx], slots[no_idx], slots[nf_idx], false)
+        return rh_cli_usage(2) if ns_idx >= 0 and nt_idx >= 0
+        return rh_do_notify_state(slots[nf_idx], slots[no_idx], slots[ns_idx], true, "", false) if ns_idx >= 0
+        return rh_do_notify_state(slots[nf_idx], slots[no_idx], slots[nf_idx], false, slots[nt_idx], true) if nt_idx >= 0
+        return rh_do_notify_state(slots[nf_idx], slots[no_idx], slots[nf_idx], false, "", false)
     if rh_streq(cmd, "query"):
         qi_idx, qo_idx =
             while qq < argc |qi_idx: i64 = -1, qo_idx: i64 = -1, qq: i64 = 2, slots| -> qi_idx, qo_idx:
@@ -2346,12 +2371,18 @@ def rh_emit_i64_array(out: mutable darray[u8]&, values: darray[i64]&) -> void ca
 # row for the same (rule_id, subject_id, digest); an exception whose
 # `expires_at` is at or before `now` is expired and never grants permission
 # (the engine already enforces this). A missing state file is a fresh state.
-def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_path: cstr, has_state: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_path: cstr, has_state: bool, state_root: cstr, has_state_root: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not rh_arg_safe(policy_path) or not rh_arg_safe(input_path) or not rh_arg_safe(out):
         rh_cli_err("rejected policy argument (allowlist)")
         return 3
     if has_state and not rh_arg_safe(state_path):
         rh_cli_err("rejected policy state argument (allowlist)")
+        return 3
+    if has_state and has_state_root:
+        rh_cli_err("policy: --state and --state-store are mutually exclusive")
+        return 2
+    if has_state_root and not rh_arg_safe(state_root):
+        rh_cli_err("rejected policy state-store argument (allowlist)")
         return 3
     ppath: mutable darray[u8] =
         ppath: mutable darray[u8] = []
@@ -2383,20 +2414,32 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
         if rh_policy_state_parse(sraw, prior) != 0:
             rh_cli_err("policy: not a valid rh-policy-state/1 document (fail closed)")
             return 4
-        # Persisted rows supplement inline exceptions: a row whose
-        # (rule_id, subject_id, digest) is already declared inline is
-        # dropped so inline (current) intent wins over stale state.
-        while ri < prior.count |ri: usize = 0, prior, excs|:
-            p: RhException = prior[ri]
-            dup: bool =
-                while xi < excs.count |dup: bool = false, xi: usize = 0, excs| -> dup:
-                    e: RhException = excs[xi]
-                    if e.rule_id == p.rule_id and e.subject_id == p.subject_id and e.digest_high == p.digest_high and e.digest_low == p.digest_low:
-                        dup <- true
-                    xi <- xi + 1
-            if not dup:
-                excs.push(p)
-            ri <- ri + 1
+    elif has_state_root:
+        if rh_ensure_dir(state_root) != 0:
+            rh_cli_err("policy: cannot create --state-store")
+            return 4
+        sraw: mutable darray[u8] = []
+        loaded: i64 = StateStore::rh_state_store_load(state_root, sraw)
+        if loaded < 0:
+            rh_cli_err("policy: corrupt --state-store (fail closed)")
+            return 4
+        if rh_policy_state_parse(sraw, prior) != 0:
+            rh_cli_err("policy: not a valid rh-policy-state/1 document (fail closed)")
+            return 4
+    # Persisted rows supplement inline exceptions: a row whose
+    # (rule_id, subject_id, digest) is already declared inline is dropped so
+    # inline (current) intent wins over stale state.
+    while ri < prior.count |ri: usize = 0, prior, excs|:
+        p: RhException = prior[ri]
+        dup: bool =
+            while xi < excs.count |dup: bool = false, xi: usize = 0, excs| -> dup:
+                e: RhException = excs[xi]
+                if e.rule_id == p.rule_id and e.subject_id == p.subject_id and e.digest_high == p.digest_high and e.digest_low == p.digest_low:
+                    dup <- true
+                xi <- xi + 1
+        if not dup:
+            excs.push(p)
+        ri <- ri + 1
     ipath: mutable darray[u8] =
         ipath: mutable darray[u8] = []
         rh_push_cstr(ipath, input_path)
@@ -2466,6 +2509,14 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
         if not rh_io_write(spp, sb):
             rh_cli_err("policy: cannot write --state file")
             return 4
+    elif has_state_root:
+        sb2: mutable darray[u8] = []
+        sid: mutable darray[u8] = []
+        rh_policy_state_emit(excs, sb2)
+        sb2.push(10)
+        if StateStore::rh_state_store_publish(state_root, sb2, sid) != 0:
+            rh_cli_err("policy: cannot publish --state-store")
+            return 4
     done: mutable darray[u8] =
         done: mutable darray[u8] = []
         rh_push_text(done, "policy: decision=")
@@ -2493,12 +2544,18 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
 # after. Replaying the same corrections file is therefore idempotent (no
 # second advance, no re-supersede), matching S005. A corrupt or wrong-schema
 # state file fails closed (exit 4), never defaults to permission.
-def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has_state: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has_state: bool, state_root: cstr, has_state_root: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not rh_arg_safe(corrections_path) or not rh_arg_safe(out):
         rh_cli_err("rejected correct argument (allowlist)")
         return 3
     if has_state and not rh_arg_safe(state_path):
         rh_cli_err("rejected correct state argument (allowlist)")
+        return 3
+    if has_state and has_state_root:
+        rh_cli_err("correct: --state and --state-store are mutually exclusive")
+        return 2
+    if has_state_root and not rh_arg_safe(state_root):
+        rh_cli_err("rejected correct state-store argument (allowlist)")
         return 3
     cp: mutable darray[u8] =
         cp: mutable darray[u8] = []
@@ -2527,6 +2584,18 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
         if CorrectionReport::rh_correction_state_parse(sraw, &p_rev, &p_wm, prior_sup) != 0:
             rh_cli_err("correct: not a valid rh-corrections-state/1 document (fail closed)")
             return 4
+    elif has_state_root:
+        if rh_ensure_dir(state_root) != 0:
+            rh_cli_err("correct: cannot create --state-store")
+            return 4
+        sraw: mutable darray[u8] = []
+        loaded: i64 = StateStore::rh_state_store_load(state_root, sraw)
+        if loaded < 0:
+            rh_cli_err("correct: corrupt --state-store (fail closed)")
+            return 4
+        if CorrectionReport::rh_correction_state_parse(sraw, &p_rev, &p_wm, prior_sup) != 0:
+            rh_cli_err("correct: not a valid rh-corrections-state/1 document (fail closed)")
+            return 4
     body: mutable darray[u8] = []
     new_sup: mutable darray[i64] = []
     final_rev: mutable i64 = 0
@@ -2546,7 +2615,7 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
     if not rh_io_write(opp, body):
         rh_cli_err("correct: cannot write corrections-result.json")
         return 4
-    if has_state:
+    if has_state or has_state_root:
         merged: mutable darray[i64] = []
         while mi < prior_sup.count |mi: usize = 0, prior_sup, merged|:
             merged.push(prior_sup[mi])
@@ -2564,9 +2633,15 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
         sb: mutable darray[u8] = []
         CorrectionReport::rh_correction_state_emit(final_rev, final_wm, merged, sb)
         sb.push(10)
-        if not rh_io_write(spp, sb):
-            rh_cli_err("correct: cannot write --state file")
-            return 4
+        if has_state:
+            if not rh_io_write(spp, sb):
+                rh_cli_err("correct: cannot write --state file")
+                return 4
+        else:
+            sid: mutable darray[u8] = []
+            if StateStore::rh_state_store_publish(state_root, sb, sid) != 0:
+                rh_cli_err("correct: cannot publish --state-store")
+                return 4
     rh_cli_out("correct: ok")
     0
 
@@ -3529,12 +3604,18 @@ def rh_do_vcs(format: cstr, input_path: cstr, out_path: cstr) -> i32 can[Memory.
 # With --state <file>, prior state is loaded (missing file = fresh) and the
 # updated state is written back, so cooldowns/acks/resolutions persist
 # across runs.
-def rh_do_notify_state(input_path: cstr, out_path: cstr, state_path: cstr, has_state: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_notify_state(input_path: cstr, out_path: cstr, state_path: cstr, has_state: bool, state_root: cstr, has_state_root: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
         rh_cli_err("rejected notify argument (allowlist)")
         return 3
     if has_state and not rh_arg_safe(state_path):
         rh_cli_err("rejected notify state argument (allowlist)")
+        return 3
+    if has_state and has_state_root:
+        rh_cli_err("notify: --state and --state-store are mutually exclusive")
+        return 2
+    if has_state_root and not rh_arg_safe(state_root):
+        rh_cli_err("rejected notify state-store argument (allowlist)")
         return 3
     ip: mutable darray[u8] =
         ip: mutable darray[u8] = []
@@ -3557,6 +3638,14 @@ def rh_do_notify_state(input_path: cstr, out_path: cstr, state_path: cstr, has_s
             if rh_io_read(sp, state_bytes) < 0:
                 rh_cli_err("notify: cannot read --state file")
                 return 4
+    elif has_state_root:
+        if rh_ensure_dir(state_root) != 0:
+            rh_cli_err("notify: cannot create --state-store")
+            return 4
+        loaded: i64 = StateStore::rh_state_store_load(state_root, state_bytes)
+        if loaded < 0:
+            rh_cli_err("notify: corrupt --state-store (fail closed)")
+            return 4
     body: mutable darray[u8] = []
     state_body: mutable darray[u8] = []
     if rh_notify_report_state(raw, state_bytes, body, state_body) != 0:
@@ -3576,6 +3665,12 @@ def rh_do_notify_state(input_path: cstr, out_path: cstr, state_path: cstr, has_s
         state_body.push(10)
         if not rh_io_write(sp, state_body):
             rh_cli_err("notify: cannot write --state file")
+            return 4
+    elif has_state_root:
+        state_body.push(10)
+        sid: mutable darray[u8] = []
+        if StateStore::rh_state_store_publish(state_root, state_body, sid) != 0:
+            rh_cli_err("notify: cannot publish --state-store")
             return 4
     rh_cli_out("notify: ok")
     0

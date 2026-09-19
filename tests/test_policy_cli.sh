@@ -167,4 +167,14 @@ printf '{"schema":"rh-policy-state/2","exceptions":[]}' > "$T/st_bad2.json"
 set -e
 [[ "$rc6" -eq 4 && "$rc7" -eq 4 ]] || fail "malformed durable state must exit 4 (got $rc6/$rc7)"
 
+echo "[policy] content-addressed --state-store survives restart"
+PS="$T/policy-store"
+seed_id="$("$ROOT/build/rh_cli" store put --root "$PS" --file "$T/st_allow.json" | awk '{print $3}')"
+printf '%s\n' "$seed_id" > "$PS/current"
+"$ROOT/build/rh_cli" policy --policy "$T/st_base.json" --input "$T/deny.json" --out "$T/ss1" --state-store "$PS" | grep -q "decision=allow" || fail "state-store exception must allow"
+"$ROOT/build/rh_cli" policy --policy "$T/st_base.json" --input "$T/deny.json" --out "$T/ss2" --state-store "$PS" | grep -q "decision=allow" || fail "state-store must survive restart"
+store_id="$(tr -d '\n' < "$PS/current")"
+"$ROOT/build/rh_cli" store verify --root "$PS" --name "$store_id" >/dev/null || fail "policy state-store blob verification"
+echo "[policy] state-store OK"
+
 echo "test_policy_cli OK"

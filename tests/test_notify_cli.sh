@@ -127,6 +127,27 @@ assert len(state["rows"]) == 1 and state["rows"][0]["subject_id"] == 7, state
 print("[notify] durable state OK")
 PY
 
+echo "[notify] content-addressed --state-store survives restart"
+NS="$T/notify-store"
+"$ROOT/build/rh_cli" notify --input "$T/pn.json" --out "$T/ns1.out" --state-store "$NS" >/dev/null || fail "state-store run1"
+"$ROOT/build/rh_cli" notify --input "$T/pn2.json" --out "$T/ns2.out" --state-store "$NS" >/dev/null || fail "state-store run2"
+python3 - "$T/ns1.out" "$T/ns2.out" <<'PY'
+import json, sys
+r1 = json.load(open(sys.argv[1]))["decisions"][0]
+r2 = json.load(open(sys.argv[2]))["decisions"][0]
+assert r1["decision"] == "new", r1
+assert r2["decision"] == "suppressed_cooldown", r2
+print("[notify] state-store OK")
+PY
+ns_id="$(tr -d '\n' < "$NS/current")"
+"$ROOT/build/rh_cli" store verify --root "$NS" --name "$ns_id" >/dev/null || fail "notify state-store blob verification"
+printf 'not-a-digest\n' > "$NS/current"
+set +e
+"$ROOT/build/rh_cli" notify --input "$T/pn.json" --out "$T/ns-bad.out" --state-store "$NS" >/dev/null 2>&1
+rc_store=$?
+set -e
+[[ "$rc_store" -eq 4 ]] || fail "corrupt state-store pointer must exit 4 (got $rc_store)"
+
 echo "[notify] determinism"
 "$ROOT/build/rh_cli" notify --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "notify output not deterministic"

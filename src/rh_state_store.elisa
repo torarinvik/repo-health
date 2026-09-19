@@ -1,0 +1,66 @@
+# rh_state_store.elisa — content-addressed durable state pointers (M06/M02).
+#
+# State documents keep their existing public schemas. This module adds an
+# opt-in store layout: immutable state bytes live under the M02 blob root and
+# `current` contains the digest of the latest committed document. A missing
+# pointer is a fresh state; a malformed pointer or corrupt blob fails closed.
+
+include "./rh_store.elisa"
+
+module StateStore:
+    private:
+        def rh_state_pointer_path(root: cstr, out: mutable darray[u8]&) -> cstr can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            rh_push_cstr(out, root)
+            out.push(47)
+            rh_push_text(out, "current")
+            out.push(0)
+            (&out[0]).cast[cstr] can Unsafe.PointerCast
+
+        def rh_state_digest_valid(raw: darray[u8]&, line_end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if line_end != 16
+            while i < line_end |i: i64 = 0, raw|:
+                b: u8 = raw[i.usize()]
+                valid: bool = (b >= 48 and b <= 57) or (b >= 97 and b <= 102)
+                return false if not valid
+                i <- i + 1
+            true
+
+    public:
+        # Load the current state document. Returns 0 when loaded, 1 when the
+        # store is fresh (no current pointer), and -1 on corruption.
+        def rh_state_store_load(root: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            pointer: mutable darray[u8] = []
+            pp: cstr = StateStore::rh_state_pointer_path(root, pointer)
+            return 1 if not file_exists(pp)
+            raw: mutable darray[u8] = []
+            return -1 if rh_io_read(pp, raw) < 0
+            line_end: mutable i64 = rh_find_byte(raw, 0, 10)
+            line_end <- raw.count.i64() if line_end < 0
+            return -1 if not StateStore::rh_state_digest_valid(raw, line_end)
+            name: mutable darray[u8] = []
+            while i < line_end |i: i64 = 0, raw, name|:
+                name.push(raw[i.usize()])
+                i <- i + 1
+            name.push(0)
+            np: u8& = (&name[0]).cast[u8&] can Unsafe.PointerCast
+            ok: mutable i64 = 0
+            return -1 if rh_store_blob_verify(root, np, &ok) != 0 or ok != 1
+            path: mutable darray[u8] = []
+            rh_push_cstr(path, root)
+            path.push(47)
+            path.extend(bytes_view(name))
+            pp2: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+            return -1 if rh_io_read(pp2, out) < 0
+            0
+
+        # Publish one state document and advance the current pointer only
+        # after the immutable blob has been accepted. id_out receives its ID.
+        def rh_state_store_publish(root: cstr, state: mutable darray[u8]&, id_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            return -1 if rh_store_blob(root, state, id_out) != 0
+            pointer: mutable darray[u8] = []
+            pp: cstr = StateStore::rh_state_pointer_path(root, pointer)
+            body: mutable darray[u8] = []
+            body.extend(bytes_view(id_out))
+            body.push(10)
+            return -1 if not rh_io_write(pp, body)
+            0
