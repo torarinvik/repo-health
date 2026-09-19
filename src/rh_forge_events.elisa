@@ -1,0 +1,294 @@
+# rh_forge_events.elisa — bounded forge workflow-event import (M02-05).
+#
+# Provider payloads are accepted only through the captured
+# rh-forge-events-input/1 envelope. GitHub and GitLab native field names stay
+# at this adapter edge; the emitted event records use one small canonical
+# shape, preserve provider status, and count malformed records instead of
+# dropping them silently. Missing capability arrays are unsupported, while an
+# explicitly empty array is an observed empty result.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_FORGE_EVENTS_MAX_BYTES: usize = 4194304
+const RH_FORGE_EVENTS_MAX_RECORDS: i64 = 10000
+
+struct RhForgeEvent:
+    kind: mutable u8
+    native_id: mutable i64
+    status_s: mutable i64
+    status_e: mutable i64
+    has_status: mutable bool
+    created_at: mutable i64
+    has_created_at: mutable bool
+    updated_at: mutable i64
+    has_updated_at: mutable bool
+    closed_at: mutable i64
+    has_closed_at: mutable bool
+    url_s: mutable i64
+    url_e: mutable i64
+    has_url: mutable bool
+    tag_s: mutable i64
+    tag_e: mutable i64
+    has_tag: mutable bool
+
+module ForgeEvents:
+    private:
+        def rh_fe_eq(texts: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, literal)
+
+        def rh_fe_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return false if idx < 0
+            rh_json_str_span(nodes, idx, &s_out[0], &e_out[0]) and e_out[0] > s_out[0]
+
+        def rh_fe_optional_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            present_out[0] <- 0
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return true if idx < 0 or nodes[idx.usize()].kind == RH_JSON_NULL
+            return false if not rh_json_str_span(nodes, idx, &s_out[0], &e_out[0]) or e_out[0] <= s_out[0]
+            present_out[0] <- 1
+            true
+
+        def rh_fe_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            present_out[0] <- 0
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return true if idx < 0 or nodes[idx.usize()].kind == RH_JSON_NULL
+            ok: mutable i64 = 0
+            value_out[0] <- rh_json_int(nodes, raw, idx, &ok)
+            return false if ok == 0
+            present_out[0] <- 1
+            true
+
+        def rh_fe_auth(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return 1 if ForgeEvents::rh_fe_eq(texts, s, e, "authorized")
+            return 2 if ForgeEvents::rh_fe_eq(texts, s, e, "unauthorized")
+            return 3 if ForgeEvents::rh_fe_eq(texts, s, e, "not_requested")
+            return 4 if ForgeEvents::rh_fe_eq(texts, s, e, "unknown")
+            -1
+
+        def rh_fe_auth_label(state: i64) -> u8&:
+            return "authorized" if state == 1
+            return "unauthorized" if state == 2
+            return "not_requested" if state == 3
+            "unknown"
+
+        def rh_fe_cap_label(kind: u8) -> u8&:
+            return "issues" if kind == 0
+            return "proposals" if kind == 1
+            return "reviews" if kind == 2
+            "releases"
+
+        def rh_fe_kind_id_key(kind: u8, github: bool) -> u8&:
+            return "number" if (kind == 0 or kind == 1) and github
+            return "iid" if kind == 0 or kind == 1
+            "id"
+
+        def rh_fe_kind_time_key(kind: u8) -> u8&:
+            return "submitted_at" if kind == 2
+            return "published_at" if kind == 3
+            "created_at"
+
+        def rh_fe_kind_status_key(kind: u8) -> u8&:
+            return "state" if kind < 3
+            "status"
+
+        def rh_fe_add_array(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, key: u8&, kind: u8, github: bool, events: mutable darray[RhForgeEvent]&, rejected_out: mutable i64&, has_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            has_out[0] <- 0
+            arr: i64 = rh_json_obj_get(nodes, texts, root, key)
+            return 0 if arr < 0
+            return -1 if nodes[arr.usize()].kind != RH_JSON_ARR
+            has_out[0] <- 1
+            array: RhJsonNode = nodes[arr.usize()]
+            while child >= 0 |child: i64 = array.first_child, nodes, raw, texts, events, rejected_out, kind, github|:
+                return -1 if events.count.i64() >= RH_FORGE_EVENTS_MAX_RECORDS
+                if nodes[child.usize()].kind != RH_JSON_OBJ:
+                    rejected_out[0] <- rejected_out[0] + 1
+                    child <- nodes[child.usize()].next_sibling
+                    continue
+                id_ok: mutable i64 = 0
+                native_id: mutable i64 = 0
+                id_key: u8& = ForgeEvents::rh_fe_kind_id_key(kind, github)
+                if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, id_key, &native_id, &id_ok) or id_ok == 0 or native_id < 0:
+                    # GitLab payloads may expose both iid and id; iid is the
+                    # project-local workflow identity, with id as fallback.
+                    if not github and (kind == 0 or kind == 1):
+                        if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "id", &native_id, &id_ok) or id_ok == 0 or native_id < 0:
+                            rejected_out[0] <- rejected_out[0] + 1
+                            child <- nodes[child.usize()].next_sibling
+                            continue
+                    else:
+                        rejected_out[0] <- rejected_out[0] + 1
+                        child <- nodes[child.usize()].next_sibling
+                        continue
+                time_ok: mutable i64 = 0
+                created_at: mutable i64 = 0
+                if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, ForgeEvents::rh_fe_kind_time_key(kind), &created_at, &time_ok) or time_ok == 0 or created_at < 0:
+                    if kind == 3:
+                        if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "created_at", &created_at, &time_ok) or time_ok == 0 or created_at < 0:
+                            rejected_out[0] <- rejected_out[0] + 1
+                            child <- nodes[child.usize()].next_sibling
+                            continue
+                    else:
+                        rejected_out[0] <- rejected_out[0] + 1
+                        child <- nodes[child.usize()].next_sibling
+                        continue
+                status_s: mutable i64 = -1
+                status_e: mutable i64 = -1
+                status_ok: mutable i64 = 0
+                status_key: u8& = ForgeEvents::rh_fe_kind_status_key(kind)
+                if not ForgeEvents::rh_fe_str(nodes, texts, child, status_key, &status_s, &status_e):
+                    if kind == 3:
+                        status_ok <- 0
+                    else:
+                        rejected_out[0] <- rejected_out[0] + 1
+                        child <- nodes[child.usize()].next_sibling
+                        continue
+                else:
+                    status_ok <- 1
+                updated_at: mutable i64 = 0
+                updated_ok: mutable i64 = 0
+                if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "updated_at", &updated_at, &updated_ok):
+                    rejected_out[0] <- rejected_out[0] + 1
+                    child <- nodes[child.usize()].next_sibling
+                    continue
+                closed_at: mutable i64 = 0
+                closed_ok: mutable i64 = 0
+                if kind == 0 or kind == 1:
+                    if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "closed_at", &closed_at, &closed_ok):
+                        rejected_out[0] <- rejected_out[0] + 1
+                        child <- nodes[child.usize()].next_sibling
+                        continue
+                url_s: mutable i64 = -1
+                url_e: mutable i64 = -1
+                url_ok: mutable i64 = 0
+                url_key: u8& = "html_url" if github else "web_url"
+                if not ForgeEvents::rh_fe_optional_str(nodes, texts, child, url_key, &url_s, &url_e, &url_ok):
+                    rejected_out[0] <- rejected_out[0] + 1
+                    child <- nodes[child.usize()].next_sibling
+                    continue
+                tag_s: mutable i64 = -1
+                tag_e: mutable i64 = -1
+                tag_ok: mutable i64 = 0
+                if kind == 3:
+                    if not ForgeEvents::rh_fe_optional_str(nodes, texts, child, "tag_name", &tag_s, &tag_e, &tag_ok):
+                        if not ForgeEvents::rh_fe_optional_str(nodes, texts, child, "tag", &tag_s, &tag_e, &tag_ok):
+                            rejected_out[0] <- rejected_out[0] + 1
+                            child <- nodes[child.usize()].next_sibling
+                            continue
+                events.push(RhForgeEvent{kind: kind, native_id: native_id, status_s: status_s, status_e: status_e, has_status: status_ok == 1, created_at: created_at, has_created_at: true, updated_at: updated_at, has_updated_at: updated_ok == 1, closed_at: closed_at, has_closed_at: closed_ok == 1, url_s: url_s, url_e: url_e, has_url: url_ok == 1, tag_s: tag_s, tag_e: tag_e, has_tag: tag_ok == 1})
+                child <- nodes[child.usize()].next_sibling
+            0
+
+        def rh_fe_emit_cap(out: mutable darray[u8]&, kind: u8, has: i64, events: darray[RhForgeEvent]&, rejected: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "\"")
+            rh_push_text(out, ForgeEvents::rh_fe_cap_label(kind))
+            rh_push_text(out, "\":{\"status\":\"")
+            rh_push_text(out, "observed" if has != 0 else "unsupported")
+            rh_push_text(out, "\",\"count\":")
+            if has != 0:
+                count: mutable i64 = 0
+                while i < events.count.i64() |i: i64 = 0, events, kind, count|:
+                    count <- count + 1 if events[i.usize()].kind == kind
+                    i <- i + 1
+                rh_push_decimal_i64(out, count)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"rejected\":")
+            rh_push_decimal_i64(out, rejected)
+            rh_push_text(out, "}")
+
+        def rh_fe_emit_event(out: mutable darray[u8]&, event: RhForgeEvent, provider: darray[u8]&, provider_s: i64, provider_e: i64, texts: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "{\"kind\":\"")
+            rh_push_text(out, ForgeEvents::rh_fe_cap_label(event.kind))
+            rh_push_text(out, "\",\"native_id\":\"")
+            rh_json_escape(out, provider, provider_s.usize(), provider_e.usize())
+            out.push(58)
+            rh_push_decimal_i64(out, event.native_id)
+            rh_push_text(out, "\",\"status\":")
+            if event.has_status:
+                out.push(34)
+                rh_json_escape(out, texts, event.status_s.usize(), event.status_e.usize())
+                out.push(34)
+            else:
+                rh_push_text(out, "\"published\"")
+            rh_push_text(out, ",\"created_at\":")
+            rh_push_decimal_i64(out, event.created_at)
+            rh_push_text(out, ",\"updated_at\":")
+            rh_push_decimal_i64(out, event.updated_at) if event.has_updated_at
+            rh_push_text(out, "null") if not event.has_updated_at
+            rh_push_text(out, ",\"closed_at\":")
+            rh_push_decimal_i64(out, event.closed_at) if event.has_closed_at
+            rh_push_text(out, "null") if not event.has_closed_at
+            if event.has_tag:
+                rh_push_text(out, ",\"tag\":\"")
+                rh_json_escape(out, texts, event.tag_s.usize(), event.tag_e.usize())
+                out.push(34)
+            if event.has_url:
+                rh_push_text(out, ",\"url\":\"")
+                rh_json_escape(out, texts, event.url_s.usize(), event.url_e.usize())
+                out.push(34)
+            rh_push_text(out, "}")
+
+    public:
+        def rh_forge_events_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count > RH_FORGE_EVENTS_MAX_BYTES
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not ForgeEvents::rh_fe_str(nodes, texts, root, "schema", &schema_s, &schema_e) or not ForgeEvents::rh_fe_eq(texts, schema_s, schema_e, "rh-forge-events-input/1")
+            provider_s: mutable i64 = 0
+            provider_e: mutable i64 = 0
+            return -1 if not ForgeEvents::rh_fe_str(nodes, texts, root, "provider", &provider_s, &provider_e)
+            github: bool = ForgeEvents::rh_fe_eq(texts, provider_s, provider_e, "github")
+            gitlab: bool = ForgeEvents::rh_fe_eq(texts, provider_s, provider_e, "gitlab")
+            return -1 if not github and not gitlab
+            captured_at: mutable i64 = 0
+            captured_ok: mutable bool = false
+            return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, root, "captured_at", &captured_at, &captured_ok) or not captured_ok or captured_at < 0
+            auth_state: mutable i64 = 4
+            auth: i64 = rh_json_obj_get(nodes, texts, root, "authorization")
+            if auth >= 0:
+                return -1 if nodes[auth.usize()].kind != RH_JSON_OBJ
+                auth_s: mutable i64 = 0
+                auth_e: mutable i64 = 0
+                return -1 if not ForgeEvents::rh_fe_str(nodes, texts, auth, "state", &auth_s, &auth_e)
+                auth_state <- ForgeEvents::rh_fe_auth(texts, auth_s, auth_e)
+                return -1 if auth_state < 0
+            events: mutable darray[RhForgeEvent] = []
+            rejected_issues: mutable i64 = 0
+            rejected_proposals: mutable i64 = 0
+            rejected_reviews: mutable i64 = 0
+            rejected_releases: mutable i64 = 0
+            has_issues: mutable i64 = 0
+            has_proposals: mutable i64 = 0
+            has_reviews: mutable i64 = 0
+            has_releases: mutable i64 = 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "issues", 0, github, events, &rejected_issues, &has_issues) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, github, events, &rejected_proposals, &has_proposals) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, github, events, &rejected_reviews, &has_reviews) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "releases", 3, github, events, &rejected_releases, &has_releases) != 0
+            rh_push_text(out, "{\"schema\":\"rh-forge-events-result/1\",\"provider\":\"")
+            rh_json_escape(out, texts, provider_s.usize(), provider_e.usize())
+            rh_push_text(out, "\",\"captured_at\":")
+            rh_push_decimal_i64(out, captured_at)
+            rh_push_text(out, ",\"authorization\":{\"state\":\"")
+            rh_push_text(out, ForgeEvents::rh_fe_auth_label(auth_state))
+            rh_push_text(out, "\"},\"capabilities\":{")
+            ForgeEvents::rh_fe_emit_cap(out, 0, has_issues, events, rejected_issues)
+            out.push(44)
+            ForgeEvents::rh_fe_emit_cap(out, 1, has_proposals, events, rejected_proposals)
+            out.push(44)
+            ForgeEvents::rh_fe_emit_cap(out, 2, has_reviews, events, rejected_reviews)
+            out.push(44)
+            ForgeEvents::rh_fe_emit_cap(out, 3, has_releases, events, rejected_releases)
+            rh_push_text(out, "},\"events\":[")
+            while i < events.count.i64() |i: i64 = 0, events, out, provider_s, provider_e, texts|:
+                out.push(44) if i > 0
+                ForgeEvents::rh_fe_emit_event(out, events[i], texts, provider_s, provider_e, texts)
+                i <- i + 1
+            rh_push_text(out, "],\"note\":\"provider-native ids and status strings are retained at the captured evidence boundary; missing capability arrays are unsupported, malformed records are counted as rejected, and no role or authority is inferred from workflow participation\"}")
+            0

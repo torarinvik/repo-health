@@ -57,6 +57,10 @@ for p in sorted(glob.glob(sys.argv[1] + "/*.canonical.json")):
 print("[m02] goldens OK")
 EOF
 
+echo "[m02] bounded workflow-event import"
+"$ROOT/tests/test_forge_events_cli.sh" >/dev/null || fail "forge events CLI"
+echo "[m02] workflow-event boundary OK"
+
 if [[ "${RH_LIVE_TESTS:-0}" == "1" ]]; then
   echo "[m02] live GitHub fetch (opt-in)"
   out="$("$FORGE" "$W" live)" || fail "live test_forge failed (provider outage is not a code regression; re-run to distinguish)"

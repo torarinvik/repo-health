@@ -36,6 +36,7 @@ include "./rh_store.elisa"
 include "./rh_state_store.elisa"
 include "./rh_ops.elisa"
 include "./rh_forge.elisa"
+include "./rh_forge_events.elisa"
 include "./rh_connector.elisa"
 include "./rh_job.elisa"
 include "./rh_reconcile.elisa"
@@ -120,6 +121,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli ops monitor --input <file> --out <file> | ops quota --input <file> --out <file>")
     rh_cli_err("       rh_cli pilot-review --input <file> --out <file>")
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
+    rh_cli_err("       rh_cli forge events --input <captured-events.json> --out <file>")
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
     rh_cli_err("       rh_cli job classify --input <file> --out <file> | job run --input <file> --out <file>")
     rh_cli_err("       rh_cli reconcile --input <file> --out <file>")
@@ -1176,6 +1178,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
     if rh_streq(cmd, "forge"):
         return rh_cli_usage(2) if argc < 3
         fsub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        if rh_streq(fsub, "events"):
+            fei_idx, feo_idx =
+                while feq < argc |fei_idx: i64 = -1, feo_idx: i64 = -1, feq: i64 = 3, slots| -> fei_idx, feo_idx:
+                    fea: u8& = slots[feq].cast[u8&] can Unsafe.PointerCast
+                    if rh_streq(fea, "--input"):
+                        if feq + 1 < argc:
+                            feq <- feq + 1
+                            fei_idx <- feq
+                        else:
+                            return rh_cli_usage(2)
+                    elif rh_streq(fea, "--out"):
+                        if feq + 1 < argc:
+                            feq <- feq + 1
+                            feo_idx <- feq
+                        else:
+                            return rh_cli_usage(2)
+                    else:
+                        return rh_cli_usage(2)
+                    feq <- feq + 1
+            return rh_cli_usage(2) if fei_idx < 0 or feo_idx < 0
+            return rh_do_forge_events(slots[fei_idx], slots[feo_idx])
         return rh_cli_usage(2) if not rh_streq(fsub, "normalize")
         fconn_idx, fin_idx, fout_idx, furl_idx, fts, fhas =
             while fi < argc |fconn_idx: i64 = -1, fin_idx: i64 = -1, fout_idx: i64 = -1, furl_idx: i64 = -1, fts: i64 = 0, fhas: bool = false, fi: i64 = 3, slots| -> fconn_idx, fin_idx, fout_idx, furl_idx, fts, fhas:
@@ -4002,6 +4025,40 @@ def rh_do_forge_normalize(conn: cstr, input_path: cstr, out_path: cstr, fetched_
         done.push(10)
         done
     rh_write_stdout(done)
+    0
+
+# --- M02-05 bounded workflow-event import path. ---
+# Provider-native captured arrays are normalized through rh-forge-events/1;
+# this path does not perform live authentication or pagination.
+def rh_do_forge_events(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected forge events argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("forge events: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if ForgeEvents::rh_forge_events_report(raw, body) != 0:
+        rh_cli_err("forge events: unsupported or malformed captured payload (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] =
+        op: mutable darray[u8] = []
+        rh_push_cstr(op, out_path)
+        op.push(0)
+        op
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("forge events: cannot write --out")
+        return 4
+    rh_cli_out("forge events: ok")
     0
 
 # --- M02-04/05 connector instance execution path. ---
