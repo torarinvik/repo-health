@@ -79,6 +79,22 @@ assert cg["advisories"] == [], cg["advisories"]
 print("[deps] no --osv -> no advisories fabricated")
 PY
 
+echo "[deps] bounded OSV URL capture retains source evidence before matching"
+osv_url="file://$T/src/osv-response.json"
+"$ROOT/build/rh_cli" deps --repo "$T/src" --out "$T/urlout" --osv-url "$osv_url" >/dev/null || fail "osv URL deps failed"
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+t = pathlib.Path(sys.argv[1])
+status = json.load(open(t / "urlout" / "osv-fetch-status.txt"))
+assert status["schema"] == "rh-osv-fetch/1", status
+assert status["state"] == "collected" and status["body_file"] == "osv-fetch-body.json", status
+assert status["source_url"].startswith("file://"), status
+assert json.load(open(t / "urlout" / "deps-cargo-graph.json"))["advisories"], "URL response was not matched"
+assert (t / "urlout" / "osv-fetch.err").exists(), "transport error evidence missing"
+print("[deps] URL provenance + advisory matching OK")
+PY
+cmp -s "$T/src/osv-response.json" "$T/urlout/osv-fetch-body.json" || fail "OSV URL body evidence differs"
+
 echo "[deps] pypi requirements.txt in a third ecosystem (M08)"
 mkdir -p "$T/pysrc"
 cp "$ROOT/fixtures/packages/python-requirements.txt" "$T/pysrc/requirements.txt"
