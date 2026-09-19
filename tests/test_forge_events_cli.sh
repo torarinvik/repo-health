@@ -78,6 +78,7 @@ assert d["capabilities"]["proposals"] == {"status": "observed", "count": 1, "rej
 assert d["capabilities"]["reviews"]["status"] == "unsupported" and d["capabilities"]["releases"]["status"] == "unsupported", d
 assert [e["native_id"] for e in d["events"]] == ["bitbucket:301", "bitbucket:17"], d["events"]
 assert d["events"][1]["status"] == "MERGED", d["events"][1]
+assert d["events"][0]["url"].startswith("https://bitbucket.org/"), d["events"][0]
 print("[forge-events] Bitbucket provider identity + unsupported states OK")
 PY
 
