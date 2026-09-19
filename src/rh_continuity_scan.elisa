@@ -23,127 +23,130 @@ include "./rh_temporal.elisa"
 include "./rh_metrics.elisa"
 include "./rh_continuity.elisa"
 
-# Locate a raw actor id whose stored email span equals log[s, e); -1 when
-# new. Linear scan: actor sets in a single repository are small relative to
-# events, and this keeps assignment deterministic without a sort.
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_cs_find_actor(pool: darray[u8]&, astart: darray[i64]&, aend: darray[i64]&, log: darray[u8]&, s: usize, e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
-    while a < astart.count |a: usize = 0, astart, aend, pool, log, s, e|:
-        ps: i64 = astart[a]
-        pe: i64 = aend[a]
-        if pe - ps == e.i64() - s.i64():
-            match_ok: bool =
-                while k < pe - ps |match_ok: bool = true, k: i64 = 0| -> match_ok:
-                    if pool[(ps + k).usize()] != log[s + k.usize()]:
-                        match_ok <- false
-                    k <- k + 1
-            return a.i64() if match_ok
-        a <- a + 1
-    -1
+module ContinuityScan:
+    private:
+        # Locate a raw actor id whose stored email span equals log[s, e); -1 when
+        # new. Linear scan: actor sets in a single repository are small relative to
+        # events, and this keeps assignment deterministic without a sort.
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_cs_find_actor(pool: darray[u8]&, astart: darray[i64]&, aend: darray[i64]&, log: darray[u8]&, s: usize, e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while a < astart.count |a: usize = 0, astart, aend, pool, log, s, e|:
+                ps: i64 = astart[a]
+                pe: i64 = aend[a]
+                if pe - ps == e.i64() - s.i64():
+                    match_ok: bool =
+                        while k < pe - ps |match_ok: bool = true, k: i64 = 0| -> match_ok:
+                            if pool[(ps + k).usize()] != log[s + k.usize()]:
+                                match_ok <- false
+                            k <- k + 1
+                    return a.i64() if match_ok
+                a <- a + 1
+            -1
 
-# Parse in-window commits. Appends one entry per accepted commit to the
-# parallel arrays (actor, month, inst, kind) and returns the accepted
-# count. n_actors_out receives the distinct raw-actor count. Returns -1 on
-# argument misuse.
-def rh_cs_parse(log: darray[u8]&, window_start: i64, now: i64, actor: mutable darray[i64]&, month: mutable darray[i64]&, inst: mutable darray[i64]&, kind: mutable darray[u8]&, n_actors_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    pool: mutable darray[u8] = []
-    astart: mutable darray[i64] = []
-    aend: mutable darray[i64] = []
-    n: mutable i64 = 0
-    accepted: mutable i64 = 0
-    if now < window_start:
-        n_actors_out[0] <- 0
-        return -1
-    while pos < log.count |pos: usize = 0, log, window_start, now, actor, month, inst, kind, pool, astart, aend, n, accepted|:
-        span_end: usize =
-            rec_end: i64 = Base::rh_find_byte(log, pos, 0)
-            rec_end.usize() if rec_end >= 0 else log.count
-        if span_end == pos:
-            pos <- span_end + 1
-            continue
-        f0: i64 = Base::rh_find_byte(log, pos, 1)
-        if f0 < 0 or f0.usize() >= span_end:
-            pos <- span_end + 1
-            continue
-        f1: i64 = Base::rh_find_byte(log, f0.usize() + 1, 1)
-        if f1 < 0 or f1.usize() >= span_end:
-            pos <- span_end + 1
-            continue
-        f2: i64 = Base::rh_find_byte(log, f1.usize() + 1, 1)
-        if f2 < 0 or f2.usize() >= span_end:
-            pos <- span_end + 1
-            continue
-        f3: i64 = Base::rh_find_byte(log, f2.usize() + 1, 1)
-        if f3 < 0 or f3.usize() >= span_end:
-            pos <- span_end + 1
-            continue
-        ae_s: usize = f1.usize() + 1
-        ae_e: usize = f2.usize()
-        at_s: usize = f2.usize() + 1
-        at_e: usize = f3.usize()
-        at_ok: mutable i64 = 0
-        at: i64 = Base::rh_parse_i64(log, at_s, at_e, &at_ok)
-        if at_ok == 0:
-            pos <- span_end + 1
-            continue
-        if at < window_start or at > now:
-            pos <- span_end + 1
-            continue
-        aid: mutable i64 = rh_cs_find_actor(pool, astart, aend, log, ae_s, ae_e)
-        if aid < 0:
-            aid <- n
-            astart.push(pool.count.i64())
-            while kk < ae_e |kk: usize = ae_s, log, ae_e, pool|:
-                pool.push(log[kk])
-                kk <- kk + 1
-            aend.push(pool.count.i64())
-            n <- n + 1
-        mo: mutable i64 = 0
-        Temporal::rh_month_of_instant(at, &mo)
-        actor.push(aid)
-        month.push(mo)
-        inst.push(at)
-        kind.push(Continuity::RH_EV_COMMIT)
-        accepted <- accepted + 1
-        pos <- span_end + 1
-    n_actors_out[0] <- n
-    accepted
+        # Parse in-window commits. Appends one entry per accepted commit to the
+        # parallel arrays (actor, month, inst, kind) and returns the accepted
+        # count. n_actors_out receives the distinct raw-actor count. Returns -1 on
+        # argument misuse.
+    public:
+        def rh_cs_parse(log: darray[u8]&, window_start: i64, now: i64, actor: mutable darray[i64]&, month: mutable darray[i64]&, inst: mutable darray[i64]&, kind: mutable darray[u8]&, n_actors_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            pool: mutable darray[u8] = []
+            astart: mutable darray[i64] = []
+            aend: mutable darray[i64] = []
+            n: mutable i64 = 0
+            accepted: mutable i64 = 0
+            if now < window_start:
+                n_actors_out[0] <- 0
+                return -1
+            while pos < log.count |pos: usize = 0, log, window_start, now, actor, month, inst, kind, pool, astart, aend, n, accepted|:
+                span_end: usize =
+                    rec_end: i64 = Base::rh_find_byte(log, pos, 0)
+                    rec_end.usize() if rec_end >= 0 else log.count
+                if span_end == pos:
+                    pos <- span_end + 1
+                    continue
+                f0: i64 = Base::rh_find_byte(log, pos, 1)
+                if f0 < 0 or f0.usize() >= span_end:
+                    pos <- span_end + 1
+                    continue
+                f1: i64 = Base::rh_find_byte(log, f0.usize() + 1, 1)
+                if f1 < 0 or f1.usize() >= span_end:
+                    pos <- span_end + 1
+                    continue
+                f2: i64 = Base::rh_find_byte(log, f1.usize() + 1, 1)
+                if f2 < 0 or f2.usize() >= span_end:
+                    pos <- span_end + 1
+                    continue
+                f3: i64 = Base::rh_find_byte(log, f2.usize() + 1, 1)
+                if f3 < 0 or f3.usize() >= span_end:
+                    pos <- span_end + 1
+                    continue
+                ae_s: usize = f1.usize() + 1
+                ae_e: usize = f2.usize()
+                at_s: usize = f2.usize() + 1
+                at_e: usize = f3.usize()
+                at_ok: mutable i64 = 0
+                at: i64 = Base::rh_parse_i64(log, at_s, at_e, &at_ok)
+                if at_ok == 0:
+                    pos <- span_end + 1
+                    continue
+                if at < window_start or at > now:
+                    pos <- span_end + 1
+                    continue
+                aid: mutable i64 = rh_cs_find_actor(pool, astart, aend, log, ae_s, ae_e)
+                if aid < 0:
+                    aid <- n
+                    astart.push(pool.count.i64())
+                    while kk < ae_e |kk: usize = ae_s, log, ae_e, pool|:
+                        pool.push(log[kk])
+                        kk <- kk + 1
+                    aend.push(pool.count.i64())
+                    n <- n + 1
+                mo: mutable i64 = 0
+                Temporal::rh_month_of_instant(at, &mo)
+                actor.push(aid)
+                month.push(mo)
+                inst.push(at)
+                kind.push(Continuity::RH_EV_COMMIT)
+                accepted <- accepted + 1
+                pos <- span_end + 1
+            n_actors_out[0] <- n
+            accepted
 
-# Retention over a parsed event stream (plan §19.3): t0 is each actor's
-# first observed in-window instant; the return interval is
-# [t0 + start_days, t0 + end_days); censored beats unobservable. Tallies
-# are written to the out-params. first_seen_supported must be false for a
-# windowed or shallow scan, where first observation cannot be established;
-# callers then publish `unsupported` instead of a misleading rate.
-def rh_cs_retention(actor: darray[i64]&, inst: darray[i64]&, n_actors: i64, cutoff: i64, coverage_start: i64, coverage_end: i64, start_days: i64, end_days: i64, first_seen_supported: bool, status_out: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
-    while a < n_actors.usize() |a: usize = 0, actor, inst, n_actors, cutoff, coverage_start, coverage_end, start_days, end_days, first_seen_supported, status_out|:
-        if not first_seen_supported:
-            status_out.push(Continuity::RH_RET_UNOBSERVABLE)
-            a <- a + 1
-            continue
-        t0: mutable i64 = 9223372036854775807
-        has_return: mutable bool = false
-        while e < actor.count |e: usize = 0, actor, inst, a, t0, has_return, start_days, end_days|:
-            aid: i64 = actor[e]
-            t: i64 = inst[e]
-            e <- e + 1
-            continue if aid.i64() != a.i64()
-            if t < t0:
-                t0 <- t
-        if t0 == 9223372036854775807:
-            status_out.push(Continuity::RH_RET_UNOBSERVABLE)
-            a <- a + 1
-            continue
-        w_start: i64 = t0 + start_days * 86400
-        w_end: i64 = t0 + end_days * 86400
-        while e2 < actor.count |e2: usize = 0, actor, inst, a, w_start, w_end, has_return|:
-            aid2: i64 = actor[e2]
-            t2: i64 = inst[e2]
-            e2 <- e2 + 1
-            continue if aid2.i64() != a.i64()
-            if t2 >= w_start and t2 < w_end and t2 != t0:
-                has_return <- true
-        s: i64 = Continuity::rh_retention_status(t0, start_days, end_days, cutoff, coverage_start, coverage_end, has_return)
-        status_out.push(s)
-        a <- a + 1
-    return
+        # Retention over a parsed event stream (plan §19.3): t0 is each actor's
+        # first observed in-window instant; the return interval is
+        # [t0 + start_days, t0 + end_days); censored beats unobservable. Tallies
+        # are written to the out-params. first_seen_supported must be false for a
+        # windowed or shallow scan, where first observation cannot be established;
+        # callers then publish `unsupported` instead of a misleading rate.
+        def rh_cs_retention(actor: darray[i64]&, inst: darray[i64]&, n_actors: i64, cutoff: i64, coverage_start: i64, coverage_end: i64, start_days: i64, end_days: i64, first_seen_supported: bool, status_out: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while a < n_actors.usize() |a: usize = 0, actor, inst, n_actors, cutoff, coverage_start, coverage_end, start_days, end_days, first_seen_supported, status_out|:
+                if not first_seen_supported:
+                    status_out.push(Continuity::RH_RET_UNOBSERVABLE)
+                    a <- a + 1
+                    continue
+                t0: mutable i64 = 9223372036854775807
+                has_return: mutable bool = false
+                while e < actor.count |e: usize = 0, actor, inst, a, t0, has_return, start_days, end_days|:
+                    aid: i64 = actor[e]
+                    t: i64 = inst[e]
+                    e <- e + 1
+                    continue if aid.i64() != a.i64()
+                    if t < t0:
+                        t0 <- t
+                if t0 == 9223372036854775807:
+                    status_out.push(Continuity::RH_RET_UNOBSERVABLE)
+                    a <- a + 1
+                    continue
+                w_start: i64 = t0 + start_days * 86400
+                w_end: i64 = t0 + end_days * 86400
+                while e2 < actor.count |e2: usize = 0, actor, inst, a, w_start, w_end, has_return|:
+                    aid2: i64 = actor[e2]
+                    t2: i64 = inst[e2]
+                    e2 <- e2 + 1
+                    continue if aid2.i64() != a.i64()
+                    if t2 >= w_start and t2 < w_end and t2 != t0:
+                        has_return <- true
+                s: i64 = Continuity::rh_retention_status(t0, start_days, end_days, cutoff, coverage_start, coverage_end, has_return)
+                status_out.push(s)
+                a <- a + 1
+            return
