@@ -25,6 +25,7 @@ include "./rh_package.elisa"
 include "./rh_depsdev.elisa"
 include "./rh_findings.elisa"
 include "./rh_resolution.elisa"
+include "./rh_parser_diff.elisa"
 include "./rh_downstream_report.elisa"
 include "./rh_projection_store.elisa"
 include "./rh_policy.elisa"
@@ -81,6 +82,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli depsdev (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli findings --input <file> --out <file>")
     rh_cli_err("       rh_cli resolution --input <rh-dep-graph/1> --out <file>")
+    rh_cli_err("       rh_cli parser-diff --native <file> --candidate <file> --out <file> [--native-parser N] [--candidate-parser N] [--config C] [--visibility public|private]")
     rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--snapshot-root <dir>] [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
     rh_cli_err("            [--max-nodes N] [--max-depth D] [--unavailable <id>] [--private <id>]...")
     rh_cli_err("       rh_cli policy --policy <file> --input <file> --out <dir> [--state <file> | --state-store <dir>]")
@@ -711,6 +713,66 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 rsq <- rsq + 1
         return rh_cli_usage(2) if rsi_idx < 0 or rso_idx < 0
         return rh_do_resolution(slots[rsi_idx], slots[rso_idx])
+    if rh_streq(cmd, "parser-diff"):
+        pdn_idx, pdc_idx, pdo_idx, pdnp_idx, pdcp_idx, pdcfg_idx, pdv_idx =
+            while pdq < argc |pdn_idx: i64 = -1, pdc_idx: i64 = -1, pdo_idx: i64 = -1, pdnp_idx: i64 = -1, pdcp_idx: i64 = -1, pdcfg_idx: i64 = -1, pdv_idx: i64 = -1, pdq: i64 = 2, slots| -> pdn_idx, pdc_idx, pdo_idx, pdnp_idx, pdcp_idx, pdcfg_idx, pdv_idx:
+                argdiff: u8& = slots[pdq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(argdiff, "--native"):
+                    if pdq + 1 < argc:
+                        pdq <- pdq + 1
+                        pdn_idx <- pdq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(argdiff, "--candidate"):
+                    if pdq + 1 < argc:
+                        pdq <- pdq + 1
+                        pdc_idx <- pdq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(argdiff, "--out"):
+                    if pdq + 1 < argc:
+                        pdq <- pdq + 1
+                        pdo_idx <- pdq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(argdiff, "--native-parser"):
+                    if pdq + 1 < argc:
+                        pdq <- pdq + 1
+                        pdnp_idx <- pdq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(argdiff, "--candidate-parser"):
+                    if pdq + 1 < argc:
+                        pdq <- pdq + 1
+                        pdcp_idx <- pdq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(argdiff, "--config"):
+                    if pdq + 1 < argc:
+                        pdq <- pdq + 1
+                        pdcfg_idx <- pdq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(argdiff, "--visibility"):
+                    if pdq + 1 < argc:
+                        pdq <- pdq + 1
+                        pdv_idx <- pdq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                pdq <- pdq + 1
+        return rh_cli_usage(2) if pdn_idx < 0 or pdc_idx < 0 or pdo_idx < 0
+        return rh_do_parser_diff(slots[pdn_idx], slots[pdc_idx], slots[pdo_idx], "native", "candidate", "default", "public") if pdnp_idx < 0 and pdcp_idx < 0 and pdcfg_idx < 0 and pdv_idx < 0
+        native_parser: mutable cstr = "native"
+        candidate_parser: mutable cstr = "candidate"
+        configuration: mutable cstr = "default"
+        visibility: mutable cstr = "public"
+        native_parser <- slots[pdnp_idx] if pdnp_idx >= 0
+        candidate_parser <- slots[pdcp_idx] if pdcp_idx >= 0
+        configuration <- slots[pdcfg_idx] if pdcfg_idx >= 0
+        visibility <- slots[pdv_idx] if pdv_idx >= 0
+        return rh_do_parser_diff(slots[pdn_idx], slots[pdc_idx], slots[pdo_idx], native_parser, candidate_parser, configuration, visibility)
     if rh_streq(cmd, "downstream"):
         g_idx: mutable i64 = -1
         s_idx: mutable i64 = -1
@@ -2080,6 +2142,31 @@ def rh_do_resolution(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
     body.push(10)
     return 4 if not rh_io_write(out_path, body)
     rh_cli_out("resolution: instances observed")
+    0
+
+# --- M03-10 parser-adoption differential path. ---
+def rh_do_parser_diff(native_path: cstr, candidate_path: cstr, out_path: cstr, native_parser: cstr, candidate_parser: cstr, configuration: cstr, visibility: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(native_path) or not rh_arg_safe(candidate_path) or not rh_arg_safe(out_path) or not rh_arg_safe(native_parser) or not rh_arg_safe(candidate_parser) or not rh_arg_safe(configuration) or not rh_arg_safe(visibility):
+        rh_cli_err("rejected parser-diff argument (allowlist)")
+        return 3
+    native_raw: mutable darray[u8] = []
+    candidate_raw: mutable darray[u8] = []
+    if rh_io_read(native_path, native_raw) < 0 or rh_io_read(candidate_path, candidate_raw) < 0:
+        rh_cli_err("parser-diff: cannot read retained input")
+        return 4
+    body: mutable darray[u8] = []
+    diff_rc: i64 = ParserDiff::rh_parser_diff_report(native_raw, candidate_raw, body, native_parser, candidate_parser, configuration, visibility)
+    if diff_rc == -1:
+        rh_cli_err("parser-diff: malformed native graph (fail closed)")
+        return 4
+    body.push(10)
+    if not rh_io_write(out_path, body):
+        rh_cli_err("parser-diff: cannot write --out")
+        return 4
+    if diff_rc == -2:
+        rh_cli_err("parser-diff: candidate parser unsupported")
+        return 3
+    rh_cli_out("parser-diff: comparison observed")
     0
 
 def rh_path_arg_ok(s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
