@@ -3603,14 +3603,14 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
     if rh_io_read(prawwp, praw) < 0:
         rh_cli_err("policy: cannot read --policy file")
         return 4
-    rules: mutable darray[RhRule] = []
-    excs: mutable darray[RhException] = []
-    if rh_policy_parse(praw, rules, excs) != 0:
+    rules: mutable darray[Policy::RhRule] = []
+    excs: mutable darray[Policy::RhException] = []
+    if PolicyParse::rh_policy_parse(praw, rules, excs) != 0:
         rh_cli_err("policy: not a valid rh-policy/1 document (fail closed)")
         return 4
     spath: mutable darray[u8] = []
     spp: mutable cstr = prawwp
-    prior: mutable darray[RhException] = []
+    prior: mutable darray[Policy::RhException] = []
     if has_state:
         rh_push_cstr(spath, state_path)
         spath.push(0)
@@ -3620,7 +3620,7 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
             if rh_io_read(spp, sraw) < 0:
                 rh_cli_err("policy: cannot read --state file")
                 return 4
-        if rh_policy_state_parse(sraw, prior) != 0:
+        if PolicyParse::rh_policy_state_parse(sraw, prior) != 0:
             rh_cli_err("policy: not a valid rh-policy-state/1 document (fail closed)")
             return 4
     elif has_state_root:
@@ -3632,17 +3632,17 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
         if loaded < 0:
             rh_cli_err("policy: corrupt --state-store (fail closed)")
             return 4
-        if rh_policy_state_parse(sraw, prior) != 0:
+        if PolicyParse::rh_policy_state_parse(sraw, prior) != 0:
             rh_cli_err("policy: not a valid rh-policy-state/1 document (fail closed)")
             return 4
     # Persisted rows supplement inline exceptions: a row whose
     # (rule_id, subject_id, digest) is already declared inline is dropped so
     # inline (current) intent wins over stale state.
     while ri < prior.count |ri: usize = 0, prior, excs|:
-        p: RhException = prior[ri]
+        p: Policy::RhException = prior[ri]
         dup: bool =
             while xi < excs.count |dup: bool = false, xi: usize = 0, excs| -> dup:
-                e: RhException = excs[xi]
+                e: Policy::RhException = excs[xi]
                 if e.rule_id == p.rule_id and e.subject_id == p.subject_id and e.digest_high == p.digest_high and e.digest_low == p.digest_low:
                     dup <- true
                 xi <- xi + 1
@@ -3660,21 +3660,21 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
         rh_cli_err("policy: cannot read --input file")
         return 4
     in_ids: mutable darray[i64] = []
-    inputs: mutable darray[RhPolicyInput] = []
+    inputs: mutable darray[Policy::RhPolicyInput] = []
     subject: mutable i64 = 0
     artifact: mutable u64 = 0
     context: mutable u64 = 0
     now: mutable i64 = 0
-    if rh_policy_input_parse(iraw, in_ids, inputs, &subject, &artifact, &context, &now) != 0:
+    if PolicyParse::rh_policy_input_parse(iraw, in_ids, inputs, &subject, &artifact, &context, &now) != 0:
         rh_cli_err("policy: not a valid rh-policy-input/1 document (fail closed)")
         return 4
-    aligned: mutable darray[RhPolicyInput] = []
+    aligned: mutable darray[Policy::RhPolicyInput] = []
     missing: mutable darray[i64] = []
-    rh_policy_align(rules, in_ids, inputs, aligned, missing)
-    digest: u64 = rh_policy_digest(rules, context, subject, artifact, now)
+    PolicyParse::rh_policy_align(rules, in_ids, inputs, aligned, missing)
+    digest: u64 = Policy::rh_policy_digest(rules, context, subject, artifact, now)
     fired: mutable darray[i64] = []
     excepted: mutable darray[i64] = []
-    decision: u8 = rh_policy_eval(rules, aligned, excs, subject, digest, 0, now, fired, excepted)
+    decision: u8 = Policy::rh_policy_eval(rules, aligned, excs, subject, digest, 0, now, fired, excepted)
     if Git::rh_ensure_dir(out) != 0:
         rh_cli_err("policy: cannot create output directory")
         return 4
@@ -3691,7 +3691,7 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
         rh_push_text(body, "\",\"now\":")
         rh_push_decimal_i64(body, now)
         rh_push_text(body, "},\"decision\":\"")
-        rh_push_text(body, rh_decision_label(decision))
+        rh_push_text(body, Policy::rh_decision_label(decision))
         rh_push_text(body, "\",\"fired_rule_ids\":")
         body
     rh_emit_i64_array(body, fired)
@@ -3700,7 +3700,7 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
     rh_push_text(body, ",\"missing_input_rule_ids\":")
     rh_emit_i64_array(body, missing)
     rh_push_text(body, ",\"explanation\":")
-    rh_policy_explain(body, rules, decision, fired, excepted)
+    Policy::rh_policy_explain(body, rules, decision, fired, excepted)
     rh_push_text(body, ",\"note\":\"unknown is never permission; warn never overrides deny; this decision is bound to the digests above (TOCTOU)\"}")
     body.push(10)
     op: mutable darray[u8] = []
@@ -3713,7 +3713,7 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
         return 4
     if has_state:
         sb: mutable darray[u8] = []
-        rh_policy_state_emit(excs, sb)
+        PolicyParse::rh_policy_state_emit(excs, sb)
         sb.push(10)
         if not rh_io_write(spp, sb):
             rh_cli_err("policy: cannot write --state file")
@@ -3721,7 +3721,7 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
     elif has_state_root:
         sb2: mutable darray[u8] = []
         sid: mutable darray[u8] = []
-        rh_policy_state_emit(excs, sb2)
+        PolicyParse::rh_policy_state_emit(excs, sb2)
         sb2.push(10)
         if StateStore::rh_state_store_publish(state_root, sb2, sid) != 0:
             rh_cli_err("policy: cannot publish --state-store")
@@ -3729,7 +3729,7 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
     done: mutable darray[u8] =
         done: mutable darray[u8] = []
         rh_push_text(done, "policy: decision=")
-        rh_push_text(done, rh_decision_label(decision))
+        rh_push_text(done, Policy::rh_decision_label(decision))
         rh_push_text(done, " fired=")
         rh_push_decimal_i64(done, fired.count.i64())
         rh_push_text(done, " excepted=")

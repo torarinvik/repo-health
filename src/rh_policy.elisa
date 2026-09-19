@@ -1,208 +1,213 @@
-# rh_policy.elisa — four-valued policy evaluation, exact comparisons,
-# freshness and sample gates, exceptions, digest binding (M06-04/05/06).
-#
-# Decisions form a lattice: DENY > UNKNOWN > WARN > ALLOW. This is what
-# makes "unknown never silently becomes permission" structural: unknown
-# outranks warn, and deny outranks unknown, so no combination of permits
-# can be manufactured from missing data. An input is decisive only when
-# it is `observed` (the rh_observation status), fresh enough for the rule,
-# and backed by at least the rule's minimum sample; every other state
-# contributes UNKNOWN. Comparisons are exact rationals — no floats.
-#
-# Every evaluation returns a digest binding it to its subject, context,
-# rule set, and input digests, so a decision cached under one
-# version/digest/scope is never reused for another (TOCTOU).
-
 include "./rh_evidence.elisa"
 include "./rh_graph.elisa"
 
-const RH_OP_LT: u8 = 0
-const RH_OP_LE: u8 = 1
-const RH_OP_GT: u8 = 2
-const RH_OP_GE: u8 = 3
-const RH_OP_EQ: u8 = 4
-const RH_OP_NE: u8 = 5
+module Policy:
+    public:
+        # rh_policy.elisa — four-valued policy evaluation, exact comparisons,
+        # freshness and sample gates, exceptions, digest binding (M06-04/05/06).
+        #
+        # Decisions form a lattice: DENY > UNKNOWN > WARN > ALLOW. This is what
+        # makes "unknown never silently becomes permission" structural: unknown
+        # outranks warn, and deny outranks unknown, so no combination of permits
+        # can be manufactured from missing data. An input is decisive only when
+        # it is `observed` (the rh_observation status), fresh enough for the rule,
+        # and backed by at least the rule's minimum sample; every other state
+        # contributes UNKNOWN. Comparisons are exact rationals — no floats.
+        #
+        # Every evaluation returns a digest binding it to its subject, context,
+        # rule set, and input digests, so a decision cached under one
+        # version/digest/scope is never reused for another (TOCTOU).
 
-const RH_DEC_ALLOW: u8 = 0
-const RH_DEC_WARN: u8 = 1
-const RH_DEC_UNKNOWN: u8 = 2
-const RH_DEC_DENY: u8 = 3
 
-const RH_RULE_ACTIVE: u8 = 0
-const RH_RULE_RETIRED: u8 = 1
 
-const RH_EXC_APPROVED: u8 = 0
 
-struct RhRule:
-    id: mutable i64
-    op: mutable u8
-    thr_num: mutable i64
-    thr_den: mutable i64
-    need_fresh_secs: mutable i64
-    min_sample: mutable i64
-    on_violation: mutable u8
-    requires_complete: mutable bool
-    state: mutable u8
+        const RH_OP_LT: u8 = 0
+        const RH_OP_LE: u8 = 1
+        const RH_OP_GT: u8 = 2
+        const RH_OP_GE: u8 = 3
+        const RH_OP_EQ: u8 = 4
+        const RH_OP_NE: u8 = 5
 
-# One typed policy input: status uses the rh_observation codes; num/den is
-# the exact observed value; sample its required denominator size; age its
-# staleness in seconds; complete whether the supplying capability finished.
-struct RhPolicyInput:
-    status: mutable u8
-    num: mutable i64
-    den: mutable i64
-    sample: mutable i64
-    age_secs: mutable i64
-    complete: mutable bool
+        const RH_DEC_ALLOW: u8 = 0
+        const RH_DEC_WARN: u8 = 1
+        const RH_DEC_UNKNOWN: u8 = 2
+        const RH_DEC_DENY: u8 = 3
 
-struct RhException:
-    rule_id: mutable i64
-    subject_id: mutable i64
-    digest_high: mutable u64
-    digest_low: mutable u64
-    expires_at: mutable i64
-    state: mutable u8
+        const RH_RULE_ACTIVE: u8 = 0
+        const RH_RULE_RETIRED: u8 = 1
 
-def rh_decision_label(d: u8) -> u8&:
-    return "deny" if d == RH_DEC_DENY
-    return "unknown" if d == RH_DEC_UNKNOWN
-    return "warn" if d == RH_DEC_WARN
-    "allow"
+        const RH_EXC_APPROVED: u8 = 0
 
-# Lattice join: the more restrictive decision wins. deny > unknown > warn > allow.
-def rh_decision_join(a: u8, b: u8) -> u8:
-    return a if a >= b
-    b
+        struct RhRule:
+            id: mutable i64
+            op: mutable u8
+            thr_num: mutable i64
+            thr_den: mutable i64
+            need_fresh_secs: mutable i64
+            min_sample: mutable i64
+            on_violation: mutable u8
+            requires_complete: mutable bool
+            state: mutable u8
 
-# Exact rational comparison: a_num/a_den OP b_num/b_den.
-# 1 true, 0 false, -1 unknown (non-positive denominator or overflow).
-def rh_cmp_rational(a_num: i64, a_den: i64, b_num: i64, b_den: i64, op: u8) -> i64:
-    if a_den <= 0 or b_den <= 0:
-        return -1
-    # Overflow-safe cross multiplication by rejecting magnitudes that
-    # could wrap; undecidable means unknown, never a guessed answer.
-    if a_num != 0:
-        return -1 if (a_num > 0 and a_num > 9223372036854775807 / b_den) or (a_num < 0 and a_num < -9223372036854775807 / b_den)
-    if b_num != 0:
-        return -1 if (b_num > 0 and b_num > 9223372036854775807 / a_den) or (b_num < 0 and b_num < -9223372036854775807 / a_den)
-    left: i64 = a_num * b_den
-    right: i64 = b_num * a_den
-    if op == RH_OP_LT:
-        return 1 if left < right else 0
-    if op == RH_OP_LE:
-        return 1 if left <= right else 0
-    if op == RH_OP_GT:
-        return 1 if left > right else 0
-    if op == RH_OP_GE:
-        return 1 if left >= right else 0
-    if op == RH_OP_EQ:
-        return 1 if left == right else 0
-    if op == RH_OP_NE:
-        return 1 if left != right else 0
-    -1
+        # One typed policy input: status uses the rh_observation codes; num/den is
+        # the exact observed value; sample its required denominator size; age its
+        # staleness in seconds; complete whether the supplying capability finished.
+        struct RhPolicyInput:
+            status: mutable u8
+            num: mutable i64
+            den: mutable i64
+            sample: mutable i64
+            age_secs: mutable i64
+            complete: mutable bool
 
-# Is an approved, unexpired exception covering rule+subject+digest?
-def rh_exception_applies(excs: darray[RhException]&, rule_id: i64, subject_id: i64, digest_high: u64, digest_low: u64, now: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    while i < excs.count |i: usize = 0, excs, rule_id, subject_id, digest_high, digest_low, now|:
-        x: RhException = excs[i]
-        i <- i + 1
-        continue if x.state != RH_EXC_APPROVED
-        continue if x.rule_id != rule_id
-        continue if x.subject_id != subject_id
-        continue if x.expires_at <= now
-        continue if x.digest_high != digest_high or x.digest_low != digest_low
-        return true
-    false
+        struct RhException:
+            rule_id: mutable i64
+            subject_id: mutable i64
+            digest_high: mutable u64
+            digest_low: mutable u64
+            expires_at: mutable i64
+            state: mutable u8
 
-# One rule's contribution. Returns a decision code; -1 marks "rule
-# skipped" (retired or excepted is handled by the caller).
-def rh_rule_verdict(r: RhRule&, inp: RhPolicyInput&) -> u8 can[Memory.Allocate, Abort.Panic]:
-    return RH_DEC_ALLOW if r.state != RH_RULE_ACTIVE
-    if inp.status != 0:
-        # Any state other than `observed` contributes unknown: partial,
-        # stale, unavailable, unauthorized, not_applicable, error,
-        # conflicted, suppressed, unsupported all fail closed.
-        return RH_DEC_UNKNOWN
-    return RH_DEC_UNKNOWN if r.requires_complete and not inp.complete
-    return RH_DEC_UNKNOWN if r.need_fresh_secs > 0 and inp.age_secs > r.need_fresh_secs
-    return RH_DEC_UNKNOWN if r.min_sample > 0 and inp.sample < r.min_sample
-    return RH_DEC_UNKNOWN if inp.den <= 0
-    hit: i64 = rh_cmp_rational(inp.num, inp.den, r.thr_num, r.thr_den, r.op)
-    return RH_DEC_UNKNOWN if hit < 0
-    return r.on_violation if hit == 1
-    RH_DEC_ALLOW
+        def rh_decision_label(d: u8) -> u8&:
+            return "deny" if d == RH_DEC_DENY
+            return "unknown" if d == RH_DEC_UNKNOWN
+            return "warn" if d == RH_DEC_WARN
+            "allow"
 
-# Evaluate a rule set over one input per rule (same index). Exceptions
-# suppress an individual rule to allow (recorded by the caller). The
-# overall decision is the lattice join, so warn can never override deny
-# and unknown can never be spent as permission.
-def rh_policy_eval(rules: darray[RhRule]&, inputs: darray[RhPolicyInput]&, excs: darray[RhException]&, subject_id: i64, digest_high: u64, digest_low: u64, now: i64, fired_out: mutable darray[i64]&, excepted_out: mutable darray[i64]&) -> u8 can[Memory.Allocate, Abort.Panic]:
-    while i < rules.count |decision: u8 = RH_DEC_ALLOW, i: usize = 0, fired_out, excepted_out| -> decision:
-        r: RhRule = rules[i]
-        if r.state != RH_RULE_ACTIVE:
-            i <- i + 1
-            continue
-        if i < inputs.count:
-            if rh_exception_applies(excs, r.id, subject_id, digest_high, digest_low, now):
-                excepted_out.push(r.id)
-            else:
-                v: u8 =
-                    inp: RhPolicyInput = inputs[i]
-                    block_result: u8 = rh_rule_verdict(r, inp)
-                    block_result
-                if v != RH_DEC_ALLOW:
+        # Lattice join: the more restrictive decision wins. deny > unknown > warn > allow.
+        def rh_decision_join(a: u8, b: u8) -> u8:
+            return a if a >= b
+            b
+
+        # Exact rational comparison: a_num/a_den OP b_num/b_den.
+        # 1 true, 0 false, -1 unknown (non-positive denominator or overflow).
+        def rh_cmp_rational(a_num: i64, a_den: i64, b_num: i64, b_den: i64, op: u8) -> i64:
+            if a_den <= 0 or b_den <= 0:
+                return -1
+            # Overflow-safe cross multiplication by rejecting magnitudes that
+            # could wrap; undecidable means unknown, never a guessed answer.
+            if a_num != 0:
+                return -1 if (a_num > 0 and a_num > 9223372036854775807 / b_den) or (a_num < 0 and a_num < -9223372036854775807 / b_den)
+            if b_num != 0:
+                return -1 if (b_num > 0 and b_num > 9223372036854775807 / a_den) or (b_num < 0 and b_num < -9223372036854775807 / a_den)
+            left: i64 = a_num * b_den
+            right: i64 = b_num * a_den
+            if op == RH_OP_LT:
+                return 1 if left < right else 0
+            if op == RH_OP_LE:
+                return 1 if left <= right else 0
+            if op == RH_OP_GT:
+                return 1 if left > right else 0
+            if op == RH_OP_GE:
+                return 1 if left >= right else 0
+            if op == RH_OP_EQ:
+                return 1 if left == right else 0
+            if op == RH_OP_NE:
+                return 1 if left != right else 0
+            -1
+
+        # Is an approved, unexpired exception covering rule+subject+digest?
+        def rh_exception_applies(excs: darray[RhException]&, rule_id: i64, subject_id: i64, digest_high: u64, digest_low: u64, now: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < excs.count |i: usize = 0, excs, rule_id, subject_id, digest_high, digest_low, now|:
+                x: RhException = excs[i]
+                i <- i + 1
+                continue if x.state != RH_EXC_APPROVED
+                continue if x.rule_id != rule_id
+                continue if x.subject_id != subject_id
+                continue if x.expires_at <= now
+                continue if x.digest_high != digest_high or x.digest_low != digest_low
+                return true
+            false
+
+        # One rule's contribution. Returns a decision code; -1 marks "rule
+        # skipped" (retired or excepted is handled by the caller).
+        def rh_rule_verdict(r: RhRule&, inp: RhPolicyInput&) -> u8 can[Memory.Allocate, Abort.Panic]:
+            return RH_DEC_ALLOW if r.state != RH_RULE_ACTIVE
+            if inp.status != 0:
+                # Any state other than `observed` contributes unknown: partial,
+                # stale, unavailable, unauthorized, not_applicable, error,
+                # conflicted, suppressed, unsupported all fail closed.
+                return RH_DEC_UNKNOWN
+            return RH_DEC_UNKNOWN if r.requires_complete and not inp.complete
+            return RH_DEC_UNKNOWN if r.need_fresh_secs > 0 and inp.age_secs > r.need_fresh_secs
+            return RH_DEC_UNKNOWN if r.min_sample > 0 and inp.sample < r.min_sample
+            return RH_DEC_UNKNOWN if inp.den <= 0
+            hit: i64 = rh_cmp_rational(inp.num, inp.den, r.thr_num, r.thr_den, r.op)
+            return RH_DEC_UNKNOWN if hit < 0
+            return r.on_violation if hit == 1
+            RH_DEC_ALLOW
+
+        # Evaluate a rule set over one input per rule (same index). Exceptions
+        # suppress an individual rule to allow (recorded by the caller). The
+        # overall decision is the lattice join, so warn can never override deny
+        # and unknown can never be spent as permission.
+        def rh_policy_eval(rules: darray[RhRule]&, inputs: darray[RhPolicyInput]&, excs: darray[RhException]&, subject_id: i64, digest_high: u64, digest_low: u64, now: i64, fired_out: mutable darray[i64]&, excepted_out: mutable darray[i64]&) -> u8 can[Memory.Allocate, Abort.Panic]:
+            while i < rules.count |decision: u8 = RH_DEC_ALLOW, i: usize = 0, fired_out, excepted_out| -> decision:
+                r: RhRule = rules[i]
+                if r.state != RH_RULE_ACTIVE:
+                    i <- i + 1
+                    continue
+                if i < inputs.count:
+                    if rh_exception_applies(excs, r.id, subject_id, digest_high, digest_low, now):
+                        excepted_out.push(r.id)
+                    else:
+                        v: u8 =
+                            inp: RhPolicyInput = inputs[i]
+                            block_result: u8 = rh_rule_verdict(r, inp)
+                            block_result
+                        if v != RH_DEC_ALLOW:
+                            fired_out.push(r.id)
+                        decision <- rh_decision_join(decision, v)
+                else:
+                    # A rule with no supplied input is unknown, not permission.
                     fired_out.push(r.id)
-                decision <- rh_decision_join(decision, v)
-        else:
-            # A rule with no supplied input is unknown, not permission.
-            fired_out.push(r.id)
-            decision <- rh_decision_join(decision, RH_DEC_UNKNOWN)
-        i <- i + 1
+                    decision <- rh_decision_join(decision, RH_DEC_UNKNOWN)
+                i <- i + 1
 
-# Binding digest: subject, context digest, rule ids/ops/thresholds, input
-# digests, and evaluation time. Two evaluations match only when all
-# inputs match — the TOCTOU guarantee. FNV-1a over i64/byte stream.
-def rh_policy_digest(rules: darray[RhRule]&, context_digest: u64, subject_id: i64, artifact_digest: u64, now: i64) -> u64 can[Memory.Allocate, Abort.Panic]:
-    h: mutable u64 = Evidence::rh_fnv_begin()
-    h <- Evidence::rh_fnv_i64(h, subject_id)
-    h <- Evidence::rh_fnv_u64(h, artifact_digest)
-    h <- Evidence::rh_fnv_u64(h, context_digest)
-    h <- Evidence::rh_fnv_i64(h, rules.count.i64())
-    while i < rules.count |i: usize = 0, rules, h|:
-        r: RhRule = rules[i]
-        i <- i + 1
-        h <- Evidence::rh_fnv_i64(h, r.id)
-        h <- Evidence::rh_fnv_byte(h, r.op)
-        h <- Evidence::rh_fnv_i64(h, r.thr_num)
-        h <- Evidence::rh_fnv_i64(h, r.thr_den)
-        h <- Evidence::rh_fnv_i64(h, r.on_violation)
-    h <- Evidence::rh_fnv_i64(h, now)
-    h
+        # Binding digest: subject, context digest, rule ids/ops/thresholds, input
+        # digests, and evaluation time. Two evaluations match only when all
+        # inputs match — the TOCTOU guarantee. FNV-1a over i64/byte stream.
+        def rh_policy_digest(rules: darray[RhRule]&, context_digest: u64, subject_id: i64, artifact_digest: u64, now: i64) -> u64 can[Memory.Allocate, Abort.Panic]:
+            h: mutable u64 = Evidence::rh_fnv_begin()
+            h <- Evidence::rh_fnv_i64(h, subject_id)
+            h <- Evidence::rh_fnv_u64(h, artifact_digest)
+            h <- Evidence::rh_fnv_u64(h, context_digest)
+            h <- Evidence::rh_fnv_i64(h, rules.count.i64())
+            while i < rules.count |i: usize = 0, rules, h|:
+                r: RhRule = rules[i]
+                i <- i + 1
+                h <- Evidence::rh_fnv_i64(h, r.id)
+                h <- Evidence::rh_fnv_byte(h, r.op)
+                h <- Evidence::rh_fnv_i64(h, r.thr_num)
+                h <- Evidence::rh_fnv_i64(h, r.thr_den)
+                h <- Evidence::rh_fnv_i64(h, r.on_violation)
+            h <- Evidence::rh_fnv_i64(h, now)
+            h
 
-# Structured explanation: one line per fired/excepted/unknown rule, built
-# ONLY from structured fields. Repository prose has no path into this
-# function; the agent contract test asserts that.
-def rh_policy_explain(out: mutable darray[u8]&, rules: darray[RhRule]&, decision: u8, fired: darray[i64]&, excepted: darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
-    rh_push_text(out, "{\"decision\":\"")
-    rh_push_text(out, rh_decision_label(decision))
-    rh_push_text(out, "\",\"rules\":[")
-    while i < rules.count |i: usize = 0, first: bool = true, rules, out, fired, excepted|:
-        r: RhRule = rules[i]
-        i <- i + 1
-        if not first:
-            out.push(44)
-        first <- false
-        rh_push_text(out, "{\"id\":")
-        rh_push_decimal_i64(out, r.id)
-        rh_push_text(out, ",\"excepted\":")
-        if Graph::rh_contains(excepted, r.id):
-            rh_push_text(out, "true")
-        else:
-            rh_push_text(out, "false")
-        rh_push_text(out, ",\"fired\":")
-        if Graph::rh_contains(fired, r.id):
-            rh_push_text(out, "true")
-        else:
-            rh_push_text(out, "false")
-        rh_push_text(out, "}")
-    rh_push_text(out, "]}")
+        # Structured explanation: one line per fired/excepted/unknown rule, built
+        # ONLY from structured fields. Repository prose has no path into this
+        # function; the agent contract test asserts that.
+        def rh_policy_explain(out: mutable darray[u8]&, rules: darray[RhRule]&, decision: u8, fired: darray[i64]&, excepted: darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "{\"decision\":\"")
+            rh_push_text(out, rh_decision_label(decision))
+            rh_push_text(out, "\",\"rules\":[")
+            while i < rules.count |i: usize = 0, first: bool = true, rules, out, fired, excepted|:
+                r: RhRule = rules[i]
+                i <- i + 1
+                if not first:
+                    out.push(44)
+                first <- false
+                rh_push_text(out, "{\"id\":")
+                rh_push_decimal_i64(out, r.id)
+                rh_push_text(out, ",\"excepted\":")
+                if Graph::rh_contains(excepted, r.id):
+                    rh_push_text(out, "true")
+                else:
+                    rh_push_text(out, "false")
+                rh_push_text(out, ",\"fired\":")
+                if Graph::rh_contains(fired, r.id):
+                    rh_push_text(out, "true")
+                else:
+                    rh_push_text(out, "false")
+                rh_push_text(out, "}")
+            rh_push_text(out, "]}")
