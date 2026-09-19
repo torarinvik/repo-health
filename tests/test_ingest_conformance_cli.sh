@@ -21,7 +21,7 @@ d = {
         {"page": 1, "status": "complete", "commit": False, "events": [event("issue:1", "open")]},
         {"page": 1, "status": "complete", "commit": True, "events": [event("issue:1", "open"), event("issue:2", "closed")]},
         {"page": 2, "status": "empty", "commit": True, "events": []},
-        {"page": 3, "status": "failed", "failure_kind": "rate_limit", "commit": True, "events": []},
+        {"page": 3, "status": "failed", "failure_kind": "rate_limit", "replaces_page": 2, "commit": True, "events": []},
         {"page": 4, "status": "partial", "commit": True, "events": [event("issue:4", "open")]},
         {"page": 5, "status": "complete", "commit": True, "token": 999, "events": [event("issue:5", "open")]},
         {"page": 6, "status": "failed", "failure_kind": "authorization", "commit": True, "events": []},
@@ -36,6 +36,7 @@ d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-ingest-result/1", d
 assert d["cursor"] == {"page": 2, "event_count": 2}, d
 assert d["event_store_count"] == 2, d
+assert d["pages"][3]["replaces_page"] == 2 and d["pages"][3]["status"] == "failed", d
 assert d["watermark"] == {"collection_start": 1000, "published_after_events": True, "backdated_events": 1, "updates_after_start": 1, "reconciliation_required": True}, d
 assert d["attempts"] == {"pages": 7, "successful_acquisition_pages": 2}, d
 c = d["conformance"]
@@ -44,6 +45,7 @@ assert c["committed_pages"] == 2 and c["successful_empty_pages"] == 1, c
 assert c["failed_pages"] == 2 and c["partial_pages"] == 1, c
 assert c["crash_before_cursor_replays"] == 1 and c["stale_token_rejected"] == 1, c
 assert c["failure_kinds"] == {"rate_limit": 1, "authorization": 1, "unsupported": 0, "transient": 0}, c
+assert d["conformance"]["stale_replacements"] == 1, d
 assert d["pages"][0]["cursor_advanced"] is False, d
 assert d["pages"][2]["status"] == "empty" and d["pages"][2]["cursor_advanced"] is True, d
 assert "late or backdated events require reconciliation" in d["note"], d

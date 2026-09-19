@@ -189,6 +189,7 @@ module IngestConformance:
             authorization_failures: mutable i64 = 0
             unsupported_failures: mutable i64 = 0
             transient_failures: mutable i64 = 0
+            stale_replacements: mutable i64 = 0
             rh_push_text(out, "{\"schema\":\"rh-ingest-result/1\",\"source\":")
             IngestConformance::rh_ic_emit_span(out, texts, ss, se)
             rh_push_text(out, ",\"capability\":")
@@ -210,6 +211,10 @@ module IngestConformance:
                 has_failure: bool = IngestConformance::rh_ic_str(nodes, texts, page, "failure_kind", &failure_s, &failure_e)
                 failure_kind: i64 = IngestConformance::rh_ic_failure_kind(texts, failure_s, failure_e) if has_failure else -1
                 return -1 if has_failure and (failure_kind < 0 or status != RH_IC_FAILED)
+                replacement_ok: mutable i64 = 0
+                replacement_page: i64 = IngestConformance::rh_ic_int(nodes, raw, texts, page, "replaces_page", &replacement_ok)
+                return -1 if replacement_ok != 0 and (replacement_page < 0 or replacement_page >= page_no or (status != RH_IC_FAILED and status != RH_IC_PARTIAL))
+                stale_replacements <- stale_replacements + 1 if replacement_ok != 0
                 if failure_kind == 0:
                     rate_limit_failures <- rate_limit_failures + 1
                 elif failure_kind == 1:
@@ -310,6 +315,9 @@ module IngestConformance:
                 rh_push_decimal_i64(out, page_duplicates)
                 rh_push_text(out, ",\"cursor_advanced\":")
                 rh_push_text(out, "true" if commit and stale_token == token and status == RH_IC_COMPLETE or commit and stale_token == token and status == RH_IC_EMPTY else "false")
+                rh_push_text(out, ",\"replaces_page\":")
+                rh_push_decimal_i64(out, replacement_page) if replacement_ok != 0
+                rh_push_text(out, "null") if replacement_ok == 0
                 rh_push_text(out, "}")
                 page <- nodes[page.usize()].next_sibling
             return -1 if not rh_lease_release(leasep, logp, token, ownerp, now + 1, 3)
@@ -349,6 +357,8 @@ module IngestConformance:
             rh_push_decimal_i64(out, crash_replays)
             rh_push_text(out, ",\"stale_token_rejected\":")
             rh_push_decimal_i64(out, stale_rejected)
+            rh_push_text(out, ",\"stale_replacements\":")
+            rh_push_decimal_i64(out, stale_replacements)
             rh_push_text(out, ",\"failure_kinds\":{\"rate_limit\":")
             rh_push_decimal_i64(out, rate_limit_failures)
             rh_push_text(out, ",\"authorization\":")
