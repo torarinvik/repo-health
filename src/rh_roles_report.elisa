@@ -23,6 +23,22 @@ def rh_rr_source(texts: darray[u8]&, s: i64, e: i64) -> i64:
     return RH_DECL_SOURCE_OPERATOR if rh_rr_eq(texts, s, e, "operator")
     -1
 
+# Authorization is evidence about how a provider declaration was obtained;
+# it never changes the declaration's role semantics. Keep the state closed
+# so an adapter cannot silently turn an unrecognized value into authorization.
+def rh_rr_authorization(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    return 1 if rh_rr_eq(texts, s, e, "authorized")
+    return 2 if rh_rr_eq(texts, s, e, "unauthorized")
+    return 3 if rh_rr_eq(texts, s, e, "not_requested")
+    return 4 if rh_rr_eq(texts, s, e, "unknown")
+    -1
+
+def rh_rr_authorization_label(state: i64) -> u8&:
+    return "authorized" if state == 1
+    return "unauthorized" if state == 2
+    return "not_requested" if state == 3
+    "unknown"
+
 # private to this file (modules retried after re-seed; see CHANGELOG).
 def rh_rr_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
     idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
@@ -49,6 +65,16 @@ def rh_roles_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memor
     decls: mutable darray[RhRoleDecl] = []
     d_idx: i64 = rh_json_obj_get(nodes, texts, root, "declarations")
     return -1 if d_idx < 0 or nodes[d_idx.usize()].kind != RH_JSON_ARR
+    auth_state: mutable i64 = 4
+    auth_idx: i64 = rh_json_obj_get(nodes, texts, root, "authorization")
+    if auth_idx >= 0:
+        return -1 if nodes[auth_idx.usize()].kind != RH_JSON_OBJ
+        auth_value: i64 = rh_json_obj_get(nodes, texts, auth_idx, "state")
+        auth_s: mutable i64 = 0
+        auth_e: mutable i64 = 0
+        return -1 if auth_value < 0 or not rh_json_str_span(nodes, auth_value, &auth_s, &auth_e)
+        auth_state <- rh_rr_authorization(texts, auth_s, auth_e)
+        return -1 if auth_state < 0
     darr: RhJsonNode = nodes[d_idx.usize()]
     while dc >= 0 |dc: i64 = darr.first_child, nodes, texts, raw, decls|:
         return -1 if nodes[dc.usize()].kind != RH_JSON_OBJ
@@ -67,6 +93,9 @@ def rh_roles_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memor
         dc <- nodes[dc.usize()].next_sibling
     rh_push_text(out, "{\"schema\":\"rh-roles-result/1\",\"declaration_count\":")
     rh_push_decimal_i64(out, decls.count.i64())
+    rh_push_text(out, ",\"authorization_state\":\"")
+    rh_push_text(out, rh_rr_authorization_label(auth_state))
+    rh_push_text(out, "\"")
     rh_push_text(out, ",\"source_tally\":{\"provider\":")
     p: mutable i64 = 0
     f: mutable i64 = 0
