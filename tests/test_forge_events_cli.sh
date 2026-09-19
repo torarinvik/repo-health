@@ -117,6 +117,27 @@ assert issue["status"] == "closed" and issue["updated_at"] == 1699999999, issue
 print("[forge-events] duplicate replacement + count idempotence OK")
 PY
 
+echo "[forge-events] opaque pagination state is retained"
+python3 - "$T/input.json" "$T/paginated.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["pagination"] = {
+    "issues": {"next": "issues-page-2", "complete": False},
+    "proposals": {"next": None, "complete": True},
+    "reviews": {"next": "reviews-page-2", "complete": False},
+    "releases": {"next": None, "complete": True},
+}
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" forge events --input "$T/paginated.json" --out "$T/paginated.out" >/dev/null || fail "pagination capture"
+python3 - "$T/paginated.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["pagination"]["issues"] == {"next": "issues-page-2", "complete": False}, d
+assert d["pagination"]["proposals"] == {"next": None, "complete": True}, d
+print("[forge-events] pagination cursor + completion state OK")
+PY
+
 python3 - "$T/input.json" "$T/negative-time.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))

@@ -274,6 +274,30 @@ module ForgeEvents:
                 out.push(34)
             rh_push_text(out, "}")
 
+        def rh_fe_emit_page(nodes: darray[RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, pagination: i64, key: u8&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            page: i64 = rh_json_obj_get(nodes, texts, pagination, key)
+            return -1 if page < 0 or nodes[page.usize()].kind != RH_JSON_OBJ
+            next_s: mutable i64 = -1
+            next_e: mutable i64 = -1
+            next_present: mutable i64 = 0
+            return -1 if not ForgeEvents::rh_fe_optional_str(nodes, texts, page, "next", &next_s, &next_e, &next_present)
+            complete: i64 = rh_json_obj_get(nodes, texts, page, "complete")
+            return -1 if complete < 0 or nodes[complete.usize()].kind != RH_JSON_BOOL
+            rh_push_text(out, "\"")
+            rh_push_text(out, key)
+            rh_push_text(out, "\":{\"next\":")
+            if next_present == 1:
+                out.push(34)
+                rh_json_escape(out, texts, next_s.usize(), next_e.usize())
+                out.push(34)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"complete\":")
+            rh_push_text(out, "true") if rh_json_is_true(nodes, raw, complete)
+            rh_push_text(out, "false") if not rh_json_is_true(nodes, raw, complete)
+            rh_push_text(out, "}")
+            0
+
     public:
         def rh_forge_events_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if raw.count > RH_FORGE_EVENTS_MAX_BYTES
@@ -315,6 +339,10 @@ module ForgeEvents:
             has_proposals: mutable i64 = 0
             has_reviews: mutable i64 = 0
             has_releases: mutable i64 = 0
+            pagination: i64 = rh_json_obj_get(nodes, texts, root, "pagination")
+            pagination_present: bool = pagination >= 0
+            if pagination_present:
+                return -1 if nodes[pagination.usize()].kind != RH_JSON_OBJ
             return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "issues", 0, githubish, bitbucket, events, &rejected_issues, &has_issues) != 0
             return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, githubish, bitbucket, events, &rejected_proposals, &has_proposals) != 0
             return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, githubish, bitbucket, events, &rejected_reviews, &has_reviews) != 0
@@ -333,7 +361,18 @@ module ForgeEvents:
             ForgeEvents::rh_fe_emit_cap(out, 2, has_reviews, events, rejected_reviews)
             out.push(44)
             ForgeEvents::rh_fe_emit_cap(out, 3, has_releases, events, rejected_releases)
-            rh_push_text(out, "},\"events\":[")
+            rh_push_text(out, "}")
+            if pagination_present:
+                rh_push_text(out, ",\"pagination\":{")
+                return -1 if ForgeEvents::rh_fe_emit_page(nodes, texts, raw, pagination, "issues", out) != 0
+                out.push(44)
+                return -1 if ForgeEvents::rh_fe_emit_page(nodes, texts, raw, pagination, "proposals", out) != 0
+                out.push(44)
+                return -1 if ForgeEvents::rh_fe_emit_page(nodes, texts, raw, pagination, "reviews", out) != 0
+                out.push(44)
+                return -1 if ForgeEvents::rh_fe_emit_page(nodes, texts, raw, pagination, "releases", out) != 0
+                out.push(125)
+            rh_push_text(out, ",\"events\":[")
             while i < events.count.i64() |i: i64 = 0, events, out, provider_s, provider_e, texts|:
                 out.push(44) if i > 0
                 ForgeEvents::rh_fe_emit_event(out, events[i], texts, provider_s, provider_e)
