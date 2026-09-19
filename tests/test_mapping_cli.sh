@@ -18,7 +18,7 @@ cat > "$T/graph.json" <<'JSON'
 {"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"iso","version":"1"},{"id":1,"name":"top","version":"1"},{"id":2,"name":"mid-a","version":"1"},{"id":3,"name":"mid-b","version":"1"},{"id":4,"name":"leaf","version":"1"}],"edges":[{"from":1,"to":2,"scope":"normal"},{"from":1,"to":3,"scope":"normal"},{"from":2,"to":4,"scope":"normal"},{"from":3,"to":4,"scope":"normal"}],"unresolved":[],"advisories":[]}
 JSON
 cat > "$T/mapping.json" <<'JSON'
-{"schema":"rh-mapping-input/1","revision":7,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"mirror","source":"operator","reviewed_at":100,"evidence":["review/1"]},{"a":1,"b":2,"state":"proposed","relation":"migration","source":"file","reviewed_at":101,"evidence":["map.md"]},{"a":4,"b":2,"state":"rejected","relation":"component","source":"provider","reviewed_at":102,"evidence":[]}]}
+{"schema":"rh-mapping-input/1","revision":7,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"mirror","source":"operator","reviewed_at":100,"evidence":["review/1"]},{"a":1,"b":2,"state":"proposed","relation":"migration","source":"file","reviewed_at":101,"evidence":["map.md"]},{"a":4,"b":2,"state":"rejected","relation":"component","source":"provider","reviewed_at":102,"evidence":[]},{"a":0,"b":1,"state":"accepted","relation":"fork","source":"provider","reviewed_at":103,"evidence":["fork/1"]},{"a":1,"b":4,"state":"accepted","relation":"issue_tracker","source":"provider","reviewed_at":104,"evidence":["issue/1"]}]}
 JSON
 "$ROOT/build/rh_cli" mapping --input "$T/mapping.json" --out "$T/mapping.out" >/dev/null || fail "mapping run"
 python3 - "$T/mapping.out" <<'PY'
@@ -26,8 +26,9 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-mapping-result/1", d
 assert d["revision"] == 7, d
-assert d["state_counts"] == {"proposed": 1, "accepted": 1, "rejected": 1, "revoked": 0}, d
+assert d["state_counts"] == {"proposed": 1, "accepted": 3, "rejected": 1, "revoked": 0}, d
 assert d["assertions"][0]["evidence_count"] == 1, d
+assert d["assertions"][3]["relation"] == "fork" and d["assertions"][4]["relation"] == "issue_tracker", d
 assert "only accepted mirror/migration" in d["note"], d
 print("[mapping] normalized reviewed assertions OK")
 PY
