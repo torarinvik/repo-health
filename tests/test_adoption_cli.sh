@@ -24,6 +24,11 @@ assert [a["status"] for a in d["adoptions"]] == ["first_seen_only", "confirmed_i
 assert d["adoptions"][0]["duration_censored"] is True, d
 assert d["adoptions"][2]["duration_censored"] == 300, d
 assert d["status_counts"] == {"unknown": 1, "first_seen_only": 1, "confirmed_introduced": 1, "confirmed_removal": 1}, d
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["adoption.unknown_count"]["value"] == 1, metrics
+assert metrics["adoption.first_seen_only_count"]["value"] == 1, metrics
+assert metrics["adoption.confirmed_introduction_count"]["value"] == 1, metrics
+assert metrics["adoption.confirmed_removal_count"]["value"] == 1, metrics
 assert "not proof of migration" in d["note"], d
 print("[adoption] staged states + right censoring OK")
 PY
