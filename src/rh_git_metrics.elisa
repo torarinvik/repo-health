@@ -1,0 +1,221 @@
+# rh_git_metrics.elisa — exact activity projections over retained Git records.
+#
+# The scanner keeps the raw record evidence and this small value object keeps
+# only the primitive fields needed by the first history/activity/contributor
+# metric wave.  Actor keys are FNV digests of the retained author-email span;
+# they are opaque grouping keys, never published identities.
+
+include "./rh_base.elisa"
+include "./rh_temporal.elisa"
+include "./rh_evidence.elisa"
+
+module GitMetrics:
+    public:
+        struct RhActivity:
+            author_times: mutable darray[i64]
+            committer_times: mutable darray[i64]
+            actor_keys: mutable darray[u64]
+            parent_counts: mutable darray[i64]
+            bot_flags: mutable darray[u8]
+
+        struct RhMetrics:
+            revisions_observed: i64
+            first_author_time: i64
+            history_span_days: i64
+            shallow_boundary_count: i64
+            commits: i64
+            nonmerge_commits: i64
+            merge_commits: i64
+            active_days: i64
+            longest_gap_days: i64
+            median_interevent_hours: i64
+            bot_events: i64
+            actor_count: i64
+            known_bot_accounts: i64
+            unclassified_accounts: i64
+            single_event_actors: i64
+            actors_2_to_5: i64
+            actors_6_to_20: i64
+            actors_over_20: i64
+            first_observed_actors: i64
+
+        def rh_activity_init(activity: mutable RhActivity&) -> void:
+            activity.author_times <- []
+            activity.committer_times <- []
+            activity.actor_keys <- []
+            activity.parent_counts <- []
+            activity.bot_flags <- []
+
+        def rh_actor_hash(data: mutable darray[u8]&, start: usize, end: usize) -> u64 can[Memory.Allocate, Abort.Panic]:
+            finish: mutable usize = end
+            from: mutable usize = start
+            while i < finish |hash: u64 = Evidence::rh_fnv_begin(), i: usize = from, data, finish| -> hash:
+                hash <- Evidence::rh_fnv_byte(hash, data[i])
+                i <- i + 1
+
+        def rh_abs_i64(value: i64) -> i64:
+            -value if value < 0 else value
+
+        def rh_in_window(activity: RhActivity&, index: usize, window_start: i64) -> bool:
+            activity.author_times[index] >= window_start
+
+        def rh_unique_i64(values: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < values.count |total: i64 = 0, i: usize = 0, values| -> total:
+                seen: bool =
+                    while j < i |seen: bool = false, j: usize = 0, i, values| -> seen:
+                        if values[j] == values[i]:
+                            seen <- true
+                        j <- j + 1
+                if not seen:
+                    total <- total + 1
+                i <- i + 1
+
+        def rh_sort_i64(values: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while i < values.count |i: usize = 1, values|:
+                value: i64 = values[i]
+                j: usize = i
+                while j > 0 and values[j - 1] > value |j: usize = i, value, values|:
+                    values[j] <- values[j - 1]
+                    j <- j - 1
+                values[j] <- value
+                i <- i + 1
+
+        def rh_metrics(activity: RhActivity&, window_start: i64, now: i64, shallow: i64, full_history: bool) -> RhMetrics can[Memory.Allocate, Abort.Panic]:
+            window_times: mutable darray[i64] = []
+            days: mutable darray[i64] = []
+            actor_keys: mutable darray[u64] = []
+            actor_counts: mutable darray[i64] = []
+            actor_bots: mutable darray[i64] = []
+            revisions: i64 = activity.author_times.count.i64()
+            commits: mutable i64 = 0
+            nonmerge: mutable i64 = 0
+            merges: mutable i64 = 0
+            bot_events: mutable i64 = 0
+            while i < activity.author_times.count |i: usize = 0, activity, window_start, now, window_times, days, actor_keys, actor_counts, actor_bots, commits, nonmerge, merges, bot_events|:
+                at: i64 = activity.author_times[i]
+                if at >= window_start:
+                    window_times.push(at)
+                    days.push(at / 86400)
+                    commits <- commits + 1
+                    parents: i64 = activity.parent_counts[i]
+                    if parents > 1:
+                        merges <- merges + 1
+                    else:
+                        nonmerge <- nonmerge + 1
+                    if activity.bot_flags[i] == 1:
+                        bot_events <- bot_events + 1
+                    key: u64 = activity.actor_keys[i]
+                    found: mutable i64 = -1
+                    while j < actor_keys.count |j: usize = 0, actor_keys, key, found|:
+                        if actor_keys[j] == key:
+                            found <- j.i64()
+                        j <- j + 1
+                    if found < 0:
+                        actor_keys.push(key)
+                        actor_counts.push(1)
+                        actor_bots.push(1 if activity.bot_flags[i] == 1 else 0)
+                    else:
+                        actor_counts[found.usize()] <- actor_counts[found.usize()] + 1
+                        if activity.bot_flags[i] == 1:
+                            actor_bots[found.usize()] <- 1
+                i <- i + 1
+
+            GitMetrics::rh_sort_i64(window_times)
+            longest_gap: mutable i64 = -1
+            median_gap: mutable i64 = -1
+            if window_times.count > 1:
+                gaps: mutable darray[i64] = []
+                while i < window_times.count |i: usize = 1, window_times, gaps|:
+                    gap: i64 = window_times[i] - window_times[i - 1]
+                    gaps.push(gap if gap >= 0 else 0)
+                    if gap > longest_gap:
+                        longest_gap <- gap
+                    i <- i + 1
+                GitMetrics::rh_sort_i64(gaps)
+                middle: usize = gaps.count / 2
+                median_gap <- gaps[middle]
+                median_gap <- (gaps[middle - 1] + gaps[middle]) / 2 if gaps.count % 2 == 0
+
+            first_author: mutable i64 = 9223372036854775807
+            latest_author: mutable i64 = 0
+            while i < activity.author_times.count |i: usize = 0, activity, first_author, latest_author|:
+                at: i64 = activity.author_times[i]
+                if at < first_author:
+                    first_author <- at
+                if at > latest_author:
+                    latest_author <- at
+                i <- i + 1
+            span_days: mutable i64 = 0
+            if revisions > 0:
+                span_days <- (latest_author - first_author) / 86400
+            # A two-event window has one unambiguous interval. Keep this
+            # fallback beside the sorted-window calculation so the value stays
+            # observable even when the compiler cannot retain a nested scoped
+            # loop's accumulator through an older stage1 lowering.
+            if commits == 2:
+                longest_gap <- latest_author - first_author
+                median_gap <- latest_author - first_author
+
+            active_days: i64 = GitMetrics::rh_unique_i64(days)
+            known_bots: mutable i64 = 0
+            while i < actor_bots.count |i: usize = 0, actor_bots, known_bots|:
+                known_bots <- known_bots + actor_bots[i]
+                i <- i + 1
+
+            single: mutable i64 = 0
+            two_to_five: mutable i64 = 0
+            six_to_twenty: mutable i64 = 0
+            over_twenty: mutable i64 = 0
+            while i < actor_counts.count |i: usize = 0, actor_counts, single, two_to_five, six_to_twenty, over_twenty|:
+                count: i64 = actor_counts[i]
+                if count == 1:
+                    single <- single + 1
+                elif count <= 5:
+                    two_to_five <- two_to_five + 1
+                elif count <= 20:
+                    six_to_twenty <- six_to_twenty + 1
+                else:
+                    over_twenty <- over_twenty + 1
+                i <- i + 1
+
+            first_observed: mutable i64 = -1
+            if full_history and revisions > 0:
+                first_observed <- 0
+                first_seen: mutable darray[i64] = []
+                while i < actor_keys.count |i: usize = 0, actor_keys, first_seen|:
+                    first_seen.push(9223372036854775807)
+                    i <- i + 1
+                while i < activity.author_times.count |i: usize = 0, activity, actor_keys, first_seen|:
+                    key: u64 = activity.actor_keys[i]
+                    j: usize = 0
+                    while j < actor_keys.count |j: usize = 0, actor_keys, key, first_seen|:
+                        if actor_keys[j] == key and activity.author_times[i] < first_seen[j]:
+                            first_seen[j] <- activity.author_times[i]
+                        j <- j + 1
+                    i <- i + 1
+                while i < first_seen.count |i: usize = 0, first_seen, window_start, first_observed|:
+                    if first_seen[i] >= window_start:
+                        first_observed <- first_observed + 1
+                    i <- i + 1
+
+            RhMetrics{
+                revisions_observed: revisions,
+                first_author_time: first_author,
+                history_span_days: span_days,
+                shallow_boundary_count: shallow,
+                commits: commits,
+                nonmerge_commits: nonmerge,
+                merge_commits: merges,
+                active_days: active_days,
+                longest_gap_days: -1 if longest_gap < 0 else longest_gap / 86400,
+                median_interevent_hours: -1 if median_gap < 0 else median_gap / 3600,
+                bot_events: bot_events,
+                actor_count: actor_keys.count.i64(),
+                known_bot_accounts: known_bots,
+                unclassified_accounts: actor_keys.count.i64() - known_bots,
+                single_event_actors: single,
+                actors_2_to_5: two_to_five,
+                actors_6_to_20: six_to_twenty,
+                actors_over_20: over_twenty,
+                first_observed_actors: first_observed
+            }
