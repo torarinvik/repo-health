@@ -56,6 +56,15 @@ assert d["schema"] == "rh-canonical-repo/1", d.get("schema")
 print("[forge] default fetched-at OK")
 PY
 
+echo "[forge] bounded --url capture retains source/status/error evidence"
+source_url="file://$T/github-repo.json"
+"$ROOT/build/rh_cli" forge normalize --connector github --url "$source_url" --out "$T/gh-url.out" --fetched-at 1700000000 >/dev/null || fail "url normalize"
+cmp -s "$T/github-repo.json" "$T/gh-url.out.source" || fail "url source evidence differs"
+[[ -f "$T/gh-url.out.source.status" && "$(cat "$T/gh-url.out.source.status")" == "000" ]] || fail "url status evidence"
+[[ -f "$T/gh-url.out.source.err" && ! -s "$T/gh-url.out.source.err" ]] || fail "url error evidence"
+cmp -s "$T/gh.out" "$T/gh-url.out" || fail "url normalization differs"
+echo "[forge] url capture OK"
+
 echo "[forge] negatives fail closed"
 set +e
 for conn in generic-git mercurial bogus ""; do
@@ -68,9 +77,13 @@ printf '{"not":"a repo"}' > "$T/bad.json"
 printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" forge normalize --connector github --input "$T/notjson.json" --out "$T/x" --fetched-at 1 >/dev/null 2>&1; rc_json=$?
 "$ROOT/build/rh_cli" forge normalize --connector github --input "$T/nope.json" --out "$T/x" --fetched-at 1 >/dev/null 2>&1; rc_missing=$?
+"$ROOT/build/rh_cli" forge normalize --connector github --out "$T/x" --fetched-at 1 >/dev/null 2>&1; rc_neither=$?
+"$ROOT/build/rh_cli" forge normalize --connector github --input "$T/github-repo.json" --url "$source_url" --out "$T/x" --fetched-at 1 >/dev/null 2>&1; rc_both=$?
 set -e
 [[ "$rc_shape" -eq 4 ]] || fail "shape mismatch must exit 4 (got $rc_shape)"
 [[ "$rc_json" -eq 4 ]] || fail "invalid JSON must exit 4 (got $rc_json)"
 [[ "$rc_missing" -eq 4 ]] || fail "missing input must exit 4 (got $rc_missing)"
+[[ "$rc_neither" -eq 2 ]] || fail "missing input/url must exit 2 (got $rc_neither)"
+[[ "$rc_both" -eq 2 ]] || fail "input and url together must exit 2 (got $rc_both)"
 
 echo "test_forge_cli OK"

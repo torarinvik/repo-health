@@ -112,7 +112,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli ops restore --root <dir> --dest <dir> --manifest <path>")
     rh_cli_err("       rh_cli ops monitor --input <file> --out <file> | ops quota --input <file> --out <file>")
     rh_cli_err("       rh_cli pilot-review --input <file> --out <file>")
-    rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket --input <file> --out <file> [--fetched-at N]")
+    rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
     rh_cli_err("       rh_cli job classify --input <file> --out <file> | job run --input <file> --out <file>")
     rh_cli_err("       rh_cli reconcile --input <file> --out <file>")
@@ -1162,8 +1162,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if argc < 3
         fsub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
         return rh_cli_usage(2) if not rh_streq(fsub, "normalize")
-        fconn_idx, fin_idx, fout_idx, fts, fhas =
-            while fi < argc |fconn_idx: i64 = -1, fin_idx: i64 = -1, fout_idx: i64 = -1, fts: i64 = 0, fhas: bool = false, fi: i64 = 3, slots| -> fconn_idx, fin_idx, fout_idx, fts, fhas:
+        fconn_idx, fin_idx, fout_idx, furl_idx, fts, fhas =
+            while fi < argc |fconn_idx: i64 = -1, fin_idx: i64 = -1, fout_idx: i64 = -1, furl_idx: i64 = -1, fts: i64 = 0, fhas: bool = false, fi: i64 = 3, slots| -> fconn_idx, fin_idx, fout_idx, furl_idx, fts, fhas:
                 a13: u8& = slots[fi].cast[u8&] can Unsafe.PointerCast
                 if rh_streq(a13, "--connector"):
                     if fi + 1 < argc:
@@ -1175,6 +1175,12 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                     if fi + 1 < argc:
                         fi <- fi + 1
                         fin_idx <- fi
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a13, "--url"):
+                    if fi + 1 < argc:
+                        fi <- fi + 1
+                        furl_idx <- fi
                     else:
                         return rh_cli_usage(2)
                 elif rh_streq(a13, "--out"):
@@ -1196,8 +1202,17 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 else:
                     return rh_cli_usage(2)
                 fi <- fi + 1
-        return rh_cli_usage(2) if fconn_idx < 0 or fin_idx < 0 or fout_idx < 0
-        return rh_do_forge_normalize(slots[fconn_idx], slots[fin_idx], slots[fout_idx], fts, fhas)
+        return rh_cli_usage(2) if fconn_idx < 0 or fout_idx < 0
+        return rh_cli_usage(2) if fin_idx >= 0 and furl_idx >= 0
+        return rh_cli_usage(2) if fin_idx < 0 and furl_idx < 0
+        forge_input: mutable cstr = slots[fconn_idx]
+        forge_url: mutable cstr = slots[fconn_idx]
+        has_url: bool = furl_idx >= 0
+        if fin_idx >= 0:
+            forge_input <- slots[fin_idx]
+        if has_url:
+            forge_url <- slots[furl_idx]
+        return rh_do_forge_normalize(slots[fconn_idx], forge_input, slots[fout_idx], fts, fhas, forge_url, has_url)
     if rh_streq(cmd, "connector"):
         return rh_cli_usage(2) if argc < 3
         csub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
@@ -3528,20 +3543,60 @@ def rh_do_ops_restore(root: cstr, dest: cstr, manifest: cstr) -> i32 can[Memory.
 # real connector id and a caller-supplied (or current) collection time.
 # Only connectors with an implemented normalizer are accepted; an unknown
 # connector is rejected, never guessed. Malformed payloads fail closed.
-def rh_do_forge_normalize(conn: cstr, input_path: cstr, out_path: cstr, fetched_at: i64, has_fetched: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not rh_arg_safe(conn) or not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+def rh_do_forge_normalize(conn: cstr, input_path: cstr, out_path: cstr, fetched_at: i64, has_fetched: bool, source_url: cstr, has_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(conn) or not rh_arg_safe(out_path):
         rh_cli_err("rejected forge argument (allowlist)")
         return 3
-    ip: mutable darray[u8] =
-        ip: mutable darray[u8] = []
-        rh_push_cstr(ip, input_path)
-        ip.push(0)
-        ip
-    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
     raw: mutable darray[u8] = []
-    if rh_io_read(ipp, raw) < 0:
-        rh_cli_err("forge: cannot read --input")
-        return 4
+    if has_url:
+        return 3 if not rh_fetch_arg_safe(source_url)
+        source_path: mutable darray[u8] =
+            source_path: mutable darray[u8] = []
+            rh_push_cstr(source_path, out_path)
+            rh_push_text(source_path, ".source")
+            source_path.push(0)
+            source_path
+        status_path: mutable darray[u8] =
+            status_path: mutable darray[u8] = []
+            rh_push_cstr(status_path, out_path)
+            rh_push_text(status_path, ".source.status")
+            status_path.push(0)
+            status_path
+        error_path: mutable darray[u8] =
+            error_path: mutable darray[u8] = []
+            rh_push_cstr(error_path, out_path)
+            rh_push_text(error_path, ".source.err")
+            error_path.push(0)
+            error_path
+        source_ptr: cstr = (&source_path[0]).cast[cstr] can Unsafe.PointerCast
+        status_ptr: cstr = (&status_path[0]).cast[cstr] can Unsafe.PointerCast
+        error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_run_https_get(source_url, source_ptr, status_ptr, error_ptr) != 0:
+            rh_cli_err("forge: fetch failed; source and stderr evidence retained")
+            return 4
+        status_raw: mutable darray[u8] = []
+        if rh_io_read(status_ptr, status_raw) < 0 or status_raw.count == 0:
+            rh_cli_err("forge: fetch did not produce a status")
+            return 4
+        ok_status: bool = status_raw[0] == 50
+        file_transport: bool = status_raw.count >= 3 and status_raw[0] == 48 and status_raw[1] == 48 and status_raw[2] == 48 and rh_cstr_starts_with(source_url, "file://")
+        if not ok_status and not file_transport:
+            rh_cli_err("forge: fetch returned non-2xx; no result published")
+            return 4
+        if rh_io_read(source_ptr, raw) < 0:
+            rh_cli_err("forge: cannot read fetched source evidence")
+            return 4
+    else:
+        return 3 if not rh_arg_safe(input_path)
+        ip: mutable darray[u8] =
+            ip: mutable darray[u8] = []
+            rh_push_cstr(ip, input_path)
+            ip.push(0)
+            ip
+        ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_io_read(ipp, raw) < 0:
+            rh_cli_err("forge: cannot read --input")
+            return 4
     nodes: mutable darray[RhJsonNode] = []
     texts: mutable darray[u8] = []
     root: i64 = rh_json_parse(raw, nodes, texts)
