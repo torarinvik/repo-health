@@ -59,6 +59,7 @@ include "./rh_mapping.elisa"
 include "./rh_coverage.elisa"
 include "./rh_columnar.elisa"
 include "./rh_aggregates.elisa"
+include "./rh_index.elisa"
 include "./rh_render.elisa"
 include "./rh_explain.elisa"
 include "./rh_lease_report.elisa"
@@ -126,6 +127,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli coverage --input <file> --out <file>")
     rh_cli_err("       rh_cli snapshot --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli aggregate --input <file> --out <file>")
+    rh_cli_err("       rh_cli index --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
     rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
     rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
@@ -1692,6 +1694,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 aaq <- aaq + 1
         return rh_cli_usage(2) if ai_idx < 0 or ao_idx < 0
         return rh_do_aggregate(slots[ai_idx], slots[ao_idx])
+    if rh_streq(cmd, "index"):
+        xi_idx, xo_idx =
+            while xxq < argc |xi_idx: i64 = -1, xo_idx: i64 = -1, xxq: i64 = 2, slots| -> xi_idx, xo_idx:
+                a34: u8& = slots[xxq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(a34, "--input"):
+                    if xxq + 1 < argc:
+                        xxq <- xxq + 1
+                        xi_idx <- xxq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a34, "--out"):
+                    if xxq + 1 < argc:
+                        xxq <- xxq + 1
+                        xo_idx <- xxq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                xxq <- xxq + 1
+        return rh_cli_usage(2) if xi_idx < 0 or xo_idx < 0
+        return rh_do_index(slots[xi_idx], slots[xo_idx])
     if rh_streq(cmd, "sign") or rh_streq(cmd, "verify"):
         key_idx, sub_idx, sig_idx =
             while m < argc |key_idx: i64 = -1, sub_idx: i64 = -1, sig_idx: i64 = -1, m: i64 = 2, slots| -> key_idx, sub_idx, sig_idx:
@@ -4897,6 +4920,34 @@ def rh_do_aggregate(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate
         rh_cli_err("aggregate: cannot write --out")
         return 4
     rh_cli_out("aggregate: validated projection written")
+    0
+
+# --- M10 rebuildable query-index execution path. ---
+# Builds incoming/outgoing CSR indexes over one canonical dependency graph and
+# records a digest so callers can reject stale plans before querying them.
+def rh_do_index(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected index argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("index: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if Index::rh_index_report(raw, body) != 0:
+        rh_cli_err("index: unsupported or malformed rh-dep-graph/1 input (fail closed)")
+        return 4
+    body.push(10)
+    if not rh_io_write(out_path, body):
+        rh_cli_err("index: cannot write --out")
+        return 4
+    rh_cli_out("index: CSR manifest written")
     0
 
 # --- M02-03 job-lease execution path. ---

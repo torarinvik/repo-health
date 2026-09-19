@@ -1,0 +1,151 @@
+# rh_index.elisa — deterministic adjacency index manifest (M10-03).
+#
+# Builds rebuildable CSR-style incoming/outgoing edge indexes over one
+# rh-dep-graph/1 input. The canonical graph remains authoritative; the index
+# only accelerates bounded queries and carries the source digest and degree
+# metadata needed to detect stale plans.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+
+struct RhIndexEdge:
+    from_id: mutable i64
+    to_id: mutable i64
+
+module Index:
+    private:
+        def rh_index_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e < s or e - s != strlen(lit).i64()
+            while i < e - s |i: i64 = 0, texts, s, lit|:
+                return false if texts[(s + i).usize()] != lit[i.usize()]
+                i <- i + 1
+            true
+
+        def rh_index_span(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            value: RhJsonNode = nodes[idx.usize()]
+            start_out[0] <- value.text_start
+            end_out[0] <- value.text_end
+            true
+
+        def rh_index_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_index_emit_i64(out: mutable darray[u8]&, values: darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(91)
+            while i < values.count |i: usize = 0, values, out|:
+                if i > 0:
+                    out.push(44)
+                rh_push_decimal_i64(out, values[i])
+                i <- i + 1
+            out.push(93)
+
+    public:
+        def rh_index_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not Index::rh_index_span(nodes, texts, root, "schema", &schema_s, &schema_e)
+            return -1 if not Index::rh_index_eq(texts, schema_s, schema_e, "rh-dep-graph/1")
+            nodes_idx: i64 = rh_json_obj_get(nodes, texts, root, "nodes")
+            edges_idx: i64 = rh_json_obj_get(nodes, texts, root, "edges")
+            return -1 if nodes_idx < 0 or edges_idx < 0 or nodes[nodes_idx.usize()].kind != RH_JSON_ARR or nodes[edges_idx.usize()].kind != RH_JSON_ARR
+            node_count: mutable i64 = 0
+            node_arr: RhJsonNode = nodes[nodes_idx.usize()]
+            while node_child >= 0 |node_child: i64 = node_arr.first_child, nodes, texts, raw, node_count|:
+                return -1 if nodes[node_child.usize()].kind != RH_JSON_OBJ
+                ok_id: mutable i64 = 0
+                id: i64 = Index::rh_index_int(nodes, raw, texts, node_child, "id", &ok_id)
+                return -1 if ok_id == 0 or id != node_count or id < 0
+                node_count <- node_count + 1
+                node_child <- nodes[node_child.usize()].next_sibling
+            edges: mutable darray[RhIndexEdge] = []
+            out_degree: mutable darray[i64] = []
+            in_degree: mutable darray[i64] = []
+            while i < node_count |i: i64 = 0, out_degree, in_degree|:
+                out_degree.push(0)
+                in_degree.push(0)
+                i <- i + 1
+            edge_arr: RhJsonNode = nodes[edges_idx.usize()]
+            while edge_child >= 0 |edge_child: i64 = edge_arr.first_child, nodes, texts, raw, edges, out_degree, in_degree, node_count|:
+                return -1 if nodes[edge_child.usize()].kind != RH_JSON_OBJ
+                ok_from: mutable i64 = 0
+                ok_to: mutable i64 = 0
+                from_id: i64 = Index::rh_index_int(nodes, raw, texts, edge_child, "from", &ok_from)
+                to_id: i64 = Index::rh_index_int(nodes, raw, texts, edge_child, "to", &ok_to)
+                return -1 if ok_from == 0 or ok_to == 0 or from_id < 0 or to_id < 0 or from_id >= node_count or to_id >= node_count
+                edges.push(RhIndexEdge{from_id: from_id, to_id: to_id})
+                out_degree[from_id.usize()] <- out_degree[from_id.usize()] + 1
+                in_degree[to_id.usize()] <- in_degree[to_id.usize()] + 1
+                edge_child <- nodes[edge_child.usize()].next_sibling
+            out_offsets: mutable darray[i64] = [0]
+            in_offsets: mutable darray[i64] = [0]
+            while i < node_count |i: i64 = 0, out_offsets, in_offsets, out_degree, in_degree|:
+                out_offsets.push(out_offsets[i.usize()] + out_degree[i.usize()])
+                in_offsets.push(in_offsets[i.usize()] + in_degree[i.usize()])
+                i <- i + 1
+            out_cursor: mutable darray[i64] = []
+            in_cursor: mutable darray[i64] = []
+            while i < node_count |i: i64 = 0, out_cursor, in_cursor, out_offsets, in_offsets|:
+                out_cursor.push(out_offsets[i.usize()])
+                in_cursor.push(in_offsets[i.usize()])
+                i <- i + 1
+            out_edges: mutable darray[i64] = []
+            in_edges: mutable darray[i64] = []
+            while i < edges.count |i: usize = 0, out_edges, in_edges|:
+                out_edges.push(-1)
+                in_edges.push(-1)
+                i <- i + 1
+            while i < edges.count |i: usize = 0, edges, out_cursor, in_cursor, out_edges, in_edges|:
+                edge: RhIndexEdge = edges[i]
+                out_pos: i64 = out_cursor[edge.from_id.usize()]
+                in_pos: i64 = in_cursor[edge.to_id.usize()]
+                out_edges[out_pos.usize()] <- i.i64()
+                in_edges[in_pos.usize()] <- i.i64()
+                out_cursor[edge.from_id.usize()] <- out_pos + 1
+                in_cursor[edge.to_id.usize()] <- in_pos + 1
+                i <- i + 1
+            max_out: mutable i64 = 0
+            max_out_node: mutable i64 = 0
+            max_in: mutable i64 = 0
+            max_in_node: mutable i64 = 0
+            while i < node_count |i: i64 = 0, out_degree, in_degree, max_out, max_out_node, max_in, max_in_node|:
+                if out_degree[i.usize()] > max_out:
+                    max_out <- out_degree[i.usize()]
+                    max_out_node <- i
+                if in_degree[i.usize()] > max_in:
+                    max_in <- in_degree[i.usize()]
+                    max_in_node <- i
+                i <- i + 1
+            digest: mutable darray[u8] = []
+            rh_sha256(raw, digest)
+            rh_push_text(out, "{\"schema\":\"rh-index-manifest/1\",\"source_schema\":\"rh-dep-graph/1\",\"source_sha256\":\"")
+            out.extend(bytes_view(digest))
+            rh_push_text(out, "\",\"node_count\":")
+            rh_push_decimal_i64(out, node_count)
+            rh_push_text(out, ",\"edge_count\":")
+            rh_push_decimal_i64(out, edges.count.i64())
+            rh_push_text(out, ",\"outgoing\":{\"offsets\":")
+            Index::rh_index_emit_i64(out, out_offsets)
+            rh_push_text(out, ",\"edge_ids\":")
+            Index::rh_index_emit_i64(out, out_edges)
+            rh_push_text(out, "},\"incoming\":{\"offsets\":")
+            Index::rh_index_emit_i64(out, in_offsets)
+            rh_push_text(out, ",\"edge_ids\":")
+            Index::rh_index_emit_i64(out, in_edges)
+            rh_push_text(out, "},\"degree_summary\":{\"max_out\":")
+            rh_push_decimal_i64(out, max_out)
+            rh_push_text(out, ",\"max_out_node\":")
+            rh_push_decimal_i64(out, max_out_node)
+            rh_push_text(out, ",\"max_in\":")
+            rh_push_decimal_i64(out, max_in)
+            rh_push_text(out, ",\"max_in_node\":")
+            rh_push_decimal_i64(out, max_in_node)
+            rh_push_text(out, "},\"rebuildable\":true,\"note\":\"CSR indexes preserve canonical edge order; rebuild when source_sha256 changes and never treat this manifest as a second source of truth\"}")
+            0
