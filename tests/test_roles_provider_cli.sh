@@ -73,6 +73,23 @@ echo "[roles-provider] deterministic replay"
 "$ROOT/build/rh_cli" roles-import --input fixtures/roles/github-provider-input.json --out "$T/github-2.json" >/dev/null || fail "replay"
 cmp -s "$T/github.json" "$T/github-2.json" || fail "output not deterministic"
 
+echo "[roles-provider] duplicate page observations replace by actor identity"
+python3 - "fixtures/roles/github-provider-input.json" "$T/duplicate-page.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["members"].append({"id": 7002, "permission": "admin"})
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" roles-import --input "$T/duplicate-page.json" --out "$T/duplicate-page.out" >/dev/null || fail "duplicate role page"
+python3 - "$T/duplicate-page.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert len(d["declarations"]) == 5, d
+actor = [x for x in d["declarations"] if x["actor_id"] == 7002]
+assert actor == [{"actor_id": 7002, "role": "owner", "permission": 1, "source": "provider", "declared_at": 1700000000}], actor
+print("[roles-provider] duplicate replacement + bounded declarations OK")
+PY
+
 echo "[roles-provider] malformed input fails closed"
 set +e
 printf '{"schema":"rh-provider-roles-input/2","provider":"github","captured_at":1,"members":[]}' > "$T/bad-schema.json"

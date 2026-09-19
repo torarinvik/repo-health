@@ -12,6 +12,12 @@ include "./rh_roles.elisa"
 
 const RH_ROLES_PROVIDER_MAX_MEMBERS: i64 = 10000
 
+struct RhProviderDeclaration:
+    actor: i64
+    role: u8
+    permission: u8
+    declared_at: i64
+
 module RolesProvider:
     private:
         def rh_rp_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -84,6 +90,12 @@ module RolesProvider:
             return 8 if role == RH_ROLE_MEMBER
             0
 
+        def rh_rp_existing(declarations: darray[RhProviderDeclaration]&, actor: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < declarations.count.i64() |i: i64 = 0, declarations, actor|:
+                return i if declarations[i.usize()].actor == actor
+                i <- i + 1
+            -1
+
     public:
         # Provider input shape:
         # {schema, provider: github|gitlab, authorization:{state},
@@ -120,15 +132,16 @@ module RolesProvider:
                 return -1 if auth_state < 0
             members: i64 = rh_json_obj_get(nodes, texts, root, "members")
             return -1 if members < 0 or nodes[members.usize()].kind != RH_JSON_ARR
+            return -1 if nodes[members.usize()].child_count > RH_ROLES_PROVIDER_MAX_MEMBERS
             rh_push_text(out, "{\"schema\":\"rh-roles-input/1\",\"provider\":\"")
             rh_json_escape(out, texts, provider_s.usize(), provider_e.usize())
             rh_push_text(out, "\",\"authorization\":{\"state\":\"")
             rh_push_text(out, RolesProvider::rh_rp_auth_label(auth_state))
             rh_push_text(out, "\"},\"declarations\":[")
-            emitted: mutable i64 = 0
+            declarations: mutable darray[RhProviderDeclaration] = []
             arr: RhJsonNode = nodes[members.usize()]
-            while member >= 0 |member: i64 = arr.first_child, nodes, raw, texts, out, emitted, github, gitlab, captured_at, auth_state|:
-                return -1 if emitted >= RH_ROLES_PROVIDER_MAX_MEMBERS or nodes[member.usize()].kind != RH_JSON_OBJ
+            while member >= 0 |member: i64 = arr.first_child, nodes, raw, texts, declarations, github, gitlab, captured_at, auth_state|:
+                return -1 if nodes[member.usize()].kind != RH_JSON_OBJ
                 actor_ok: mutable i64 = 0
                 actor: i64 = RolesProvider::rh_rp_int(nodes, raw, texts, member, "id", &actor_ok)
                 return -1 if actor_ok == 0 or actor < 0
@@ -137,18 +150,26 @@ module RolesProvider:
                     role <- RolesProvider::rh_rp_github_role(nodes, raw, texts, member) if github
                     role <- RolesProvider::rh_rp_gitlab_role(nodes, raw, texts, member) if gitlab
                 if auth_state == 1:
-                    if emitted > 0:
-                        out.push(44)
-                    rh_push_text(out, "{\"actor_id\":")
-                    rh_push_decimal_i64(out, actor)
-                    rh_push_text(out, ",\"role\":\"")
-                    rh_push_text(out, rh_role_label(role))
-                    rh_push_text(out, "\",\"permission\":")
-                    rh_push_decimal_i64(out, RolesProvider::rh_rp_permission(role).i64())
-                    rh_push_text(out, ",\"source\":\"provider\",\"declared_at\":")
-                    rh_push_decimal_i64(out, captured_at)
-                    rh_push_text(out, "}")
-                    emitted <- emitted + 1
+                    permission: u8 = RolesProvider::rh_rp_permission(role)
+                    normalized: RhProviderDeclaration = RhProviderDeclaration{actor: actor, role: role, permission: permission, declared_at: captured_at}
+                    existing: i64 = RolesProvider::rh_rp_existing(declarations, actor)
+                    if existing >= 0:
+                        declarations[existing.usize()] <- normalized
+                    else:
+                        declarations.push(normalized)
                 member <- nodes[member.usize()].next_sibling
+            while i < declarations.count.i64() |i: i64 = 0, declarations, out|:
+                out.push(44) if i > 0
+                declaration: RhProviderDeclaration = declarations[i.usize()]
+                rh_push_text(out, "{\"actor_id\":")
+                rh_push_decimal_i64(out, declaration.actor)
+                rh_push_text(out, ",\"role\":\"")
+                rh_push_text(out, rh_role_label(declaration.role))
+                rh_push_text(out, "\",\"permission\":")
+                rh_push_decimal_i64(out, declaration.permission.i64())
+                rh_push_text(out, ",\"source\":\"provider\",\"declared_at\":")
+                rh_push_decimal_i64(out, declaration.declared_at)
+                rh_push_text(out, "}")
+                i <- i + 1
             rh_push_text(out, "]}")
             0
