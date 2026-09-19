@@ -28,6 +28,16 @@ struct RhRoleCorrection:
     actor_e: mutable i64
     revision: mutable i64
 
+struct RhRoleAffiliation:
+    actor_s: mutable i64
+    actor_e: mutable i64
+    organization_s: mutable i64
+    organization_e: mutable i64
+    valid_from: mutable i64
+    has_valid_from: mutable bool
+    valid_to: mutable i64
+    has_valid_to: mutable bool
+
 module RoleGrain:
     private:
         def rh_rg_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -44,6 +54,20 @@ module RoleGrain:
         def rh_rg_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             idx: i64 = RoleGrain::rh_rg_get(nodes, texts, obj, key)
             rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_rg_optional_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = RoleGrain::rh_rg_get(nodes, texts, obj, key)
+            return false if idx < 0
+            if nodes[idx.usize()].kind == RH_JSON_NULL:
+                value_out[0] <- 0
+                present_out[0] <- 0
+                return true
+            ok: mutable i64 = 0
+            value: i64 = rh_json_int(nodes, raw, idx, &ok)
+            return false if ok == 0 or value < 0
+            value_out[0] <- value
+            present_out[0] <- 1
+            true
 
         def rh_rg_role(texts: darray[u8]&, s: i64, e: i64) -> i64:
             return RH_ROLE_AUTHOR if RoleGrain::rh_rg_eq(texts, s, e, "author")
@@ -166,6 +190,24 @@ module RoleGrain:
                 return -1 if RoleGrain::rh_rg_correction(corrections, texts, RhRoleEvent{id_s: es, id_e: ee, actor_s: 0, actor_e: 0, role: 0, at: 0}) >= 0
                 corrections.push(RhRoleCorrection{event_s: es, event_e: ee, action: action.u8(), actor_s: as_, actor_e: ae, revision: revision})
                 corr <- nodes[corr.usize()].next_sibling
+            affiliations: mutable darray[RhRoleAffiliation] = []
+            affiliations_idx: i64 = RoleGrain::rh_rg_get(nodes, texts, root, "affiliations")
+            if affiliations_idx >= 0:
+                return -1 if nodes[affiliations_idx.usize()].kind != RH_JSON_ARR
+                while affiliation >= 0 |affiliation: i64 = nodes[affiliations_idx.usize()].first_child, nodes, texts, raw, affiliations|:
+                    return -1 if nodes[affiliation.usize()].kind != RH_JSON_OBJ
+                    affiliation_actor_s: mutable i64 = 0
+                    affiliation_actor_e: mutable i64 = 0
+                    organization_s: mutable i64 = 0
+                    organization_e: mutable i64 = 0
+                    return -1 if not RoleGrain::rh_rg_str(nodes, texts, affiliation, "actor", &affiliation_actor_s, &affiliation_actor_e) or not RoleGrain::rh_rg_str(nodes, texts, affiliation, "organization", &organization_s, &organization_e) or affiliation_actor_s == affiliation_actor_e or organization_s == organization_e
+                    valid_from: mutable i64 = 0
+                    has_valid_from: mutable i64 = 0
+                    valid_to: mutable i64 = 0
+                    has_valid_to: mutable i64 = 0
+                    return -1 if not RoleGrain::rh_rg_optional_int(nodes, raw, texts, affiliation, "valid_from", &valid_from, &has_valid_from) or not RoleGrain::rh_rg_optional_int(nodes, raw, texts, affiliation, "valid_to", &valid_to, &has_valid_to) or (has_valid_from == 0 and has_valid_to == 0) or (has_valid_from != 0 and has_valid_to != 0 and valid_to < valid_from)
+                    affiliations.push(RhRoleAffiliation{actor_s: affiliation_actor_s, actor_e: affiliation_actor_e, organization_s: organization_s, organization_e: organization_e, valid_from: valid_from, has_valid_from: has_valid_from != 0, valid_to: valid_to, has_valid_to: has_valid_to != 0})
+                    affiliation <- nodes[affiliation.usize()].next_sibling
             known_counts: mutable darray[i64] = [0, 0, 0, 0]
             known_distinct: mutable darray[i64] = [0, 0, 0, 0]
             current_counts: mutable darray[i64] = [0, 0, 0, 0]
@@ -227,5 +269,37 @@ module RoleGrain:
                     out.push(44)
                 RoleGrain::rh_rg_emit_span(out, texts, corrections[i].event_s, corrections[i].event_e)
                 i <- i + 1
-            rh_push_text(out, "]},\"note\":\"each event contributes once to its declared role; corrections create a current projection and invalidate affected role aggregates while raw events and the as-known replay remain available\"}")
+            rh_push_text(out, "]},\"affiliations\":[")
+            while i < affiliations.count |i: usize = 0, affiliations, texts, out|:
+                if i > 0:
+                    out.push(44)
+                affiliation: RhRoleAffiliation = affiliations[i]
+                rh_push_text(out, "{\"actor\":")
+                RoleGrain::rh_rg_emit_span(out, texts, affiliation.actor_s, affiliation.actor_e)
+                rh_push_text(out, ",\"organization\":")
+                RoleGrain::rh_rg_emit_span(out, texts, affiliation.organization_s, affiliation.organization_e)
+                rh_push_text(out, ",\"valid_from\":")
+                rh_push_decimal_i64(out, affiliation.valid_from) if affiliation.has_valid_from
+                rh_push_text(out, "null") if not affiliation.has_valid_from
+                rh_push_text(out, ",\"valid_to\":")
+                rh_push_decimal_i64(out, affiliation.valid_to) if affiliation.has_valid_to
+                rh_push_text(out, "null") if not affiliation.has_valid_to
+                rh_push_text(out, "}")
+                i <- i + 1
+            rh_push_text(out, "],\"event_ledger\":[")
+            while i < events.count |i: usize = 0, events, texts, out|:
+                if i > 0:
+                    out.push(44)
+                event: RhRoleEvent = events[i]
+                rh_push_text(out, "{\"id\":")
+                RoleGrain::rh_rg_emit_span(out, texts, event.id_s, event.id_e)
+                rh_push_text(out, ",\"actor\":")
+                RoleGrain::rh_rg_emit_span(out, texts, event.actor_s, event.actor_e)
+                rh_push_text(out, ",\"role\":\"")
+                rh_push_text(out, RoleGrain::rh_rg_role_label(event.role))
+                rh_push_text(out, "\",\"at\":")
+                rh_push_decimal_i64(out, event.at)
+                rh_push_text(out, "}")
+                i <- i + 1
+            rh_push_text(out, "],\"note\":\"each event contributes once to its declared role; affiliation history is time-scoped evidence and never rewrites an older event actor; null affiliation endpoints remain unknown; corrections create a current projection and invalidate affected role aggregates while raw events and the as-known replay remain available\"}")
             0
