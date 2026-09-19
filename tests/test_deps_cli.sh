@@ -83,6 +83,9 @@ assert {key: metrics[key]["value"] for key in metrics} == {
     "dependency.optional_direct_count": 0,
     "dependency.unknown_scope_count": 0,
     "dependency.unpinned_requirement_count": 13,
+    "dependency.artifact_digest_coverage": {"num": 3, "den": 9},
+    "dependency.maximum_observed_depth": 2,
+    "dependency.resolution_complete": False,
     "dependency.runtime_resolved_edges": 10,
     "dependency.development_resolved_edges": 0,
     "dependency.optional_resolved_edges": 0,
@@ -114,6 +117,12 @@ assert by["cargo"]["runtime_direct_count"] == 1, by["cargo"]
 assert by["npm"]["runtime_direct_count"] == 7, by["npm"]
 assert by["cargo"]["unpinned_requirement_count"] == 3, by["cargo"]
 assert by["npm"]["unpinned_requirement_count"] == 10, by["npm"]
+assert by["cargo"]["artifact_digest_coverage"] == {"num": 2, "den": 3}, by["cargo"]
+assert by["npm"]["artifact_digest_coverage"] == {"num": 1, "den": 6}, by["npm"]
+assert by["cargo"]["maximum_observed_depth"] == 0, by["cargo"]
+assert by["npm"]["maximum_observed_depth"] == 2, by["npm"]
+assert by["cargo"]["resolution_complete"] is False, by["cargo"]
+assert by["npm"]["resolution_complete"] is False, by["npm"]
 assert by["cargo"]["runtime_resolved_edges"] == 3, by["cargo"]
 assert by["npm"]["runtime_resolved_edges"] == 7, by["npm"]
 for eco in ("cargo", "npm"):
@@ -247,6 +256,9 @@ assert metrics["dependency.optional_requirements"]["value"] == 2, metrics
 assert metrics["dependency.runtime_direct_count"]["value"] == 2, metrics
 assert metrics["dependency.optional_direct_count"]["value"] == 2, metrics
 assert metrics["dependency.unpinned_requirement_count"]["value"] == 2, metrics
+assert metrics["dependency.artifact_digest_coverage"]["value"] == {"num": 0, "den": 2}, metrics
+assert metrics["dependency.maximum_observed_depth"]["value"] == 1, metrics
+assert metrics["dependency.resolution_complete"]["value"] is False, metrics
 assert metrics["dependency.runtime_resolved_edges"]["value"] == 1, metrics
 assert metrics["dependency.optional_resolved_edges"]["value"] == 1, metrics
 print("[deps] PEP 621 graph + optional scope OK")

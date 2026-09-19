@@ -1137,6 +1137,68 @@ module Package:
                 total <- total + 1 if not rh_requirement_is_pinned(reqs[i.usize()], pool_loop)
                 i <- i + 1
 
+        # Count unique resolved destination nodes, optionally restricted to nodes
+        # carrying an observed artifact digest. Requirements and edges can repeat
+        # a destination under different scopes, so the denominator is node-based.
+        def rh_resolved_node_metric_count(pkgs: mutable darray[RhPkgNode]&, edges: mutable darray[RhDepEdge]&, known_only: bool) -> i64 can[Memory.Allocate, Abort.Panic]:
+            seen: mutable darray[i64] = []
+            known_only_loop: mutable bool = known_only
+            while i < edges.count |total: i64 = 0, i: i64 = 0, pkgs, edges, seen, known_only_loop| -> total:
+                node: i64 = edges[i.usize()].dst
+                return total if node < 0 or node >= pkgs.count.i64()
+                already: bool = rh_visited_has(seen, node)
+                if not already:
+                    seen.push(node)
+                    total <- total + 1 if not known_only_loop or pkgs[node.usize()].has_digest == 1
+                i <- i + 1
+
+        # Maximum shortest-path depth from a selected root over the observed
+        # resolved graph. The finite node count bounds traversal in cycles.
+        def rh_max_dependency_depth(edges: mutable darray[RhDepEdge]&, node_count: mutable i64, root: mutable i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if node_count <= 0 or root < 0 or root >= node_count
+            frontier: mutable darray[i64] = []
+            depths: mutable darray[i64] = []
+            seen: mutable darray[i64] = []
+            frontier.push(root)
+            depths.push(0)
+            max_depth: mutable i64 = 0
+            while fi < frontier.count |fi: i64 = 0, frontier, depths, seen, edges, max_depth|:
+                cur: i64 = frontier[fi.usize()]
+                depth: i64 = depths[fi.usize()]
+                fi <- fi + 1
+                continue if rh_visited_has(seen, cur)
+                seen.push(cur)
+                max_depth <- depth if depth > max_depth
+                while ei < edges.count |ei: i64 = 0, edges, cur, depth, frontier, depths, seen|:
+                    edge: RhDepEdge = edges[ei.usize()]
+                    if edge.from == cur and not rh_visited_has(seen, edge.dst):
+                        frontier.push(edge.dst)
+                        depths.push(depth + 1)
+                    ei <- ei + 1
+            max_depth
+
+        # True only when no unresolved requirement is attached to a node reachable
+        # from the selected root. Unresolved records outside that projection do not
+        # make the selected context incomplete.
+        def rh_resolution_complete(edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, node_count: mutable i64, root: mutable i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if node_count <= 0 or root < 0 or root >= node_count
+            reachable: mutable darray[i64] = []
+            frontier: mutable darray[i64] = []
+            frontier.push(root)
+            while fi < frontier.count |fi: i64 = 0, frontier, reachable, edges|:
+                cur: i64 = frontier[fi.usize()]
+                fi <- fi + 1
+                continue if rh_visited_has(reachable, cur)
+                reachable.push(cur)
+                while ei < edges.count |ei: i64 = 0, edges, cur, frontier, reachable|:
+                    edge: RhDepEdge = edges[ei.usize()]
+                    frontier.push(edge.dst) if edge.from == cur and not rh_visited_has(reachable, edge.dst)
+                    ei <- ei + 1
+            while i < unresolved.count |i: i64 = 0, unresolved, reachable|:
+                return false if rh_visited_has(reachable, unresolved[i.usize()].from)
+                i <- i + 1
+            true
+
         # Count resolved graph relations by their preserved source scope. A
         # declaration can remain unresolved, so these counts intentionally do
         # not have to sum to the requirement-scope counts.
@@ -2419,7 +2481,7 @@ module Package:
         # `dependencies.unsupported_range_count`, with per-ecosystem components so
         # the denominator-free count can be audited. It never claims a dependency
         # is safe or that the graph is complete (R009/F022/R030).
-        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, transitive_resolved: mutable darray[i64]&, runtime_requirements: mutable darray[i64]&, development_requirements: mutable darray[i64]&, optional_requirements: mutable darray[i64]&, peer_requirements: mutable darray[i64]&, unknown_scope_requirements: mutable darray[i64]&, runtime_direct: mutable darray[i64]&, build_direct: mutable darray[i64]&, optional_direct: mutable darray[i64]&, unknown_scope_direct: mutable darray[i64]&, unpinned: mutable darray[i64]&, runtime_edges: mutable darray[i64]&, development_edges: mutable darray[i64]&, optional_edges: mutable darray[i64]&, peer_edges: mutable darray[i64]&, unknown_scope_edges: mutable darray[i64]&, advisories: mutable darray[i64]&, advisory_records: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, affected_direct_nodes: mutable darray[i64]&, affected_transitive_nodes: mutable darray[i64]&, affected_unreachable_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, transitive_resolved: mutable darray[i64]&, runtime_requirements: mutable darray[i64]&, development_requirements: mutable darray[i64]&, optional_requirements: mutable darray[i64]&, peer_requirements: mutable darray[i64]&, unknown_scope_requirements: mutable darray[i64]&, runtime_direct: mutable darray[i64]&, build_direct: mutable darray[i64]&, optional_direct: mutable darray[i64]&, unknown_scope_direct: mutable darray[i64]&, unpinned: mutable darray[i64]&, digest_known: mutable darray[i64]&, digest_total: mutable darray[i64]&, maximum_depth: mutable darray[i64]&, resolution_complete: mutable darray[i64]&, runtime_edges: mutable darray[i64]&, development_edges: mutable darray[i64]&, optional_edges: mutable darray[i64]&, peer_edges: mutable darray[i64]&, unknown_scope_edges: mutable darray[i64]&, advisories: mutable darray[i64]&, advisory_records: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, affected_direct_nodes: mutable darray[i64]&, affected_transitive_nodes: mutable darray[i64]&, affected_unreachable_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
             total_declared: i64 =
                 while i < eco_codes.count.i64() |total_declared: i64 = 0, i: i64 = 0| -> total_declared:
                     total_declared <- total_declared + declared[i.usize()]
@@ -2491,6 +2553,22 @@ module Package:
             total_unpinned: i64 =
                 while i < eco_codes.count.i64() |total_unpinned: i64 = 0, i: i64 = 0, unpinned| -> total_unpinned:
                     total_unpinned <- total_unpinned + unpinned[i.usize()]
+                    i <- i + 1
+            total_digest_known: i64 =
+                while i < eco_codes.count.i64() |total_digest_known: i64 = 0, i: i64 = 0, digest_known| -> total_digest_known:
+                    total_digest_known <- total_digest_known + digest_known[i.usize()]
+                    i <- i + 1
+            total_digest_nodes: i64 =
+                while i < eco_codes.count.i64() |total_digest_nodes: i64 = 0, i: i64 = 0, digest_total| -> total_digest_nodes:
+                    total_digest_nodes <- total_digest_nodes + digest_total[i.usize()]
+                    i <- i + 1
+            total_maximum_depth: i64 =
+                while i < eco_codes.count.i64() |total_maximum_depth: i64 = 0, i: i64 = 0, maximum_depth| -> total_maximum_depth:
+                    total_maximum_depth <- maximum_depth[i.usize()] if maximum_depth[i.usize()] > total_maximum_depth
+                    i <- i + 1
+            all_resolutions_complete: bool =
+                while i < eco_codes.count.i64() |all_resolutions_complete: bool = true, i: i64 = 0, resolution_complete| -> all_resolutions_complete:
+                    all_resolutions_complete <- false if resolution_complete[i.usize()] == 0
                     i <- i + 1
             total_runtime_edges: i64 =
                 while i < eco_codes.count.i64() |total_runtime_edges: i64 = 0, i: i64 = 0, runtime_edges| -> total_runtime_edges:
@@ -2607,6 +2685,22 @@ module Package:
             Base::rh_push_text(out, "{\"key\":\"dependency.unpinned_requirement_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, total_unpinned)
             Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.artifact_digest_coverage\",\"version\":\"1.0.0\",\"status\":\"")
+            if total_digest_nodes > 0:
+                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
+                Base::rh_push_decimal_i64(out, total_digest_known)
+                Base::rh_push_text(out, ",\"den\":")
+                Base::rh_push_decimal_i64(out, total_digest_nodes)
+                Base::rh_push_text(out, "}")
+            else:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-resolved-artifact-nodes\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.maximum_observed_depth\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, total_maximum_depth)
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.resolution_complete\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_text(out, "true" if all_resolutions_complete else "false")
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"dependency.runtime_resolved_edges\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, total_runtime_edges)
             Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
@@ -2671,7 +2765,7 @@ module Package:
             else:
                 Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
             Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]}],\"by_ecosystem\":[")
-            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, transitive_resolved, runtime_requirements, development_requirements, optional_requirements, peer_requirements, unknown_scope_requirements, runtime_direct, build_direct, optional_direct, unknown_scope_direct, unpinned, runtime_edges, development_edges, optional_edges, peer_edges, unknown_scope_edges, advisories, advisory_records, affected_nodes, affected_direct_nodes, affected_transitive_nodes, affected_unreachable_nodes, withdrawn, out|:
+            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, transitive_resolved, runtime_requirements, development_requirements, optional_requirements, peer_requirements, unknown_scope_requirements, runtime_direct, build_direct, optional_direct, unknown_scope_direct, unpinned, digest_known, digest_total, maximum_depth, resolution_complete, runtime_edges, development_edges, optional_edges, peer_edges, unknown_scope_edges, advisories, advisory_records, affected_nodes, affected_direct_nodes, affected_transitive_nodes, affected_unreachable_nodes, withdrawn, out|:
                 if k > 0:
                     out.push(44)
                 ec: i64 = eco_codes[k.usize()]
@@ -2715,6 +2809,19 @@ module Package:
                 Base::rh_push_decimal_i64(out, unknown_scope_direct[k.usize()])
                 Base::rh_push_text(out, ",\"unpinned_requirement_count\":")
                 Base::rh_push_decimal_i64(out, unpinned[k.usize()])
+                Base::rh_push_text(out, ",\"artifact_digest_coverage\":")
+                if digest_total[k.usize()] > 0:
+                    Base::rh_push_text(out, "{\"num\":")
+                    Base::rh_push_decimal_i64(out, digest_known[k.usize()])
+                    Base::rh_push_text(out, ",\"den\":")
+                    Base::rh_push_decimal_i64(out, digest_total[k.usize()])
+                    Base::rh_push_text(out, "}")
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"maximum_observed_depth\":")
+                Base::rh_push_decimal_i64(out, maximum_depth[k.usize()])
+                Base::rh_push_text(out, ",\"resolution_complete\":")
+                Base::rh_push_text(out, "true" if resolution_complete[k.usize()] == 1 else "false")
                 Base::rh_push_text(out, ",\"runtime_resolved_edges\":")
                 Base::rh_push_decimal_i64(out, runtime_edges[k.usize()])
                 Base::rh_push_text(out, ",\"development_resolved_edges\":")
