@@ -1,0 +1,194 @@
+# rh_findings.elisa — structured external assessment adapter (M06-09).
+#
+# This adapter keeps tool observations separate from local policy decisions.
+# Assessment time is retained as known time; delivery paths never refresh it.
+# Outcome and polarity vocabularies are closed so omitted, inconclusive,
+# unknown, and error cannot silently become false or failed.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_FINDINGS_MAX: i64 = 10000
+const RH_FINDING_LOCATIONS_MAX: i64 = 256
+
+module Findings:
+    private:
+        def rh_findings_span_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e < s
+            n: i64 = e - s
+            return false if n != strlen(lit).i64()
+            while i < n |i: i64 = 0, texts, s, lit|:
+                return false if texts[(s + i).usize()] != lit[i.usize()]
+                i <- i + 1
+            true
+
+        def rh_findings_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_json_escape(out, texts, s.usize(), e.usize())
+
+        def rh_findings_emit_optional_string(out: mutable darray[u8]&, nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            if idx < 0:
+                rh_push_text(out, "null")
+                return true
+            s: mutable i64 = -1
+            e: mutable i64 = -1
+            return false if not rh_json_str_span(nodes, idx, &s, &e)
+            out.push(34)
+            Findings::rh_findings_emit_span(out, texts, s, e)
+            out.push(34)
+            true
+
+        def rh_findings_outcome(s: i64, e: i64, texts: darray[u8]&) -> i64:
+            return 0 if Findings::rh_findings_span_eq(texts, s, e, "pass")
+            return 1 if Findings::rh_findings_span_eq(texts, s, e, "fail")
+            return 2 if Findings::rh_findings_span_eq(texts, s, e, "unknown")
+            return 3 if Findings::rh_findings_span_eq(texts, s, e, "omitted")
+            return 4 if Findings::rh_findings_span_eq(texts, s, e, "inconclusive")
+            return 5 if Findings::rh_findings_span_eq(texts, s, e, "error")
+            -1
+
+        def rh_findings_polarity(s: i64, e: i64, texts: darray[u8]&) -> bool:
+            Findings::rh_findings_span_eq(texts, s, e, "positive") or Findings::rh_findings_span_eq(texts, s, e, "negative") or Findings::rh_findings_span_eq(texts, s, e, "neutral")
+
+    public:
+        # Parse and normalize one assessment envelope. The output contains
+        # exactly one origin assessment even when delivery_paths lists several
+        # transport paths for that same run.
+        def rh_findings_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema_idx: i64 = rh_json_obj_get(nodes, texts, root, "schema")
+            scs: mutable i64 = -1
+            sce: mutable i64 = -1
+            return -1 if not rh_json_str_span(nodes, schema_idx, &scs, &sce) or not Findings::rh_findings_span_eq(texts, scs, sce, "rh-scorecard-findings-input/1")
+            aid: i64 = rh_json_obj_get(nodes, texts, root, "assessment_id")
+            tool: i64 = rh_json_obj_get(nodes, texts, root, "tool")
+            tv: i64 = rh_json_obj_get(nodes, texts, root, "tool_version")
+            rev: i64 = rh_json_obj_get(nodes, texts, root, "subject_revision")
+            ass: mutable i64 = -1
+            ase: mutable i64 = -1
+            ts: mutable i64 = -1
+            te: mutable i64 = -1
+            vs: mutable i64 = -1
+            ve: mutable i64 = -1
+            rs: mutable i64 = -1
+            re: mutable i64 = -1
+            return -1 if not rh_json_str_span(nodes, aid, &ass, &ase) or ase <= ass
+            return -1 if not rh_json_str_span(nodes, tool, &ts, &te) or te <= ts
+            return -1 if not rh_json_str_span(nodes, tv, &vs, &ve) or ve <= vs
+            return -1 if not rh_json_str_span(nodes, rev, &rs, &re) or re <= rs
+            ok_time: mutable i64 = 0
+            assessed_at: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, root, "assessed_at"), &ok_time)
+            return -1 if ok_time == 0 or assessed_at < 0
+            paths_idx: i64 = rh_json_obj_get(nodes, texts, root, "delivery_paths")
+            if paths_idx >= 0:
+                return -1 if nodes[paths_idx.usize()].kind != RH_JSON_ARR
+                while path_child >= 0 |path_child: i64 = nodes[paths_idx.usize()].first_child, nodes, texts|:
+                    ps: mutable i64 = -1
+                    pe: mutable i64 = -1
+                    return -1 if not rh_json_str_span(nodes, path_child, &ps, &pe) or pe <= ps
+                    path_child <- nodes[path_child.usize()].next_sibling
+            findings_idx: i64 = rh_json_obj_get(nodes, texts, root, "findings")
+            return -1 if findings_idx < 0 or nodes[findings_idx.usize()].kind != RH_JSON_ARR
+            findings_count: i64 = nodes[findings_idx.usize()].child_count
+            return -1 if findings_count < 0 or findings_count > RH_FINDINGS_MAX
+            counts: mutable darray[i64] = [0, 0, 0, 0, 0, 0]
+            rh_push_text(out, "{\"schema\":\"rh-findings-result/1\",\"assessment\":{\"id\":\"")
+            Findings::rh_findings_emit_span(out, texts, ass, ase)
+            rh_push_text(out, "\",\"tool\":\"")
+            Findings::rh_findings_emit_span(out, texts, ts, te)
+            rh_push_text(out, "\",\"tool_version\":\"")
+            Findings::rh_findings_emit_span(out, texts, vs, ve)
+            rh_push_text(out, "\",\"subject_revision\":\"")
+            Findings::rh_findings_emit_span(out, texts, rs, re)
+            rh_push_text(out, "\",\"assessed_at\":")
+            rh_push_decimal_i64(out, assessed_at)
+            rh_push_text(out, "},\"delivery_paths\":[")
+            if paths_idx >= 0:
+                while path_child2 >= 0 |path_child2: i64 = nodes[paths_idx.usize()].first_child, nodes, texts, out|:
+                    if path_child2 != nodes[paths_idx.usize()].first_child:
+                        out.push(44)
+                    out.push(34)
+                    ps2: mutable i64 = -1
+                    pe2: mutable i64 = -1
+                    rh_json_str_span(nodes, path_child2, &ps2, &pe2)
+                    Findings::rh_findings_emit_span(out, texts, ps2, pe2)
+                    out.push(34)
+                    path_child2 <- nodes[path_child2.usize()].next_sibling
+            rh_push_text(out, "],\"findings\":[")
+            while child >= 0 |child: i64 = nodes[findings_idx.usize()].first_child, nodes, texts, raw, out, counts|:
+                return -1 if nodes[child.usize()].kind != RH_JSON_OBJ
+                check: i64 = rh_json_obj_get(nodes, texts, child, "check")
+                probe: i64 = rh_json_obj_get(nodes, texts, child, "probe")
+                polarity: i64 = rh_json_obj_get(nodes, texts, child, "polarity")
+                outcome: i64 = rh_json_obj_get(nodes, texts, child, "outcome")
+                cs: mutable i64 = -1
+                ce: mutable i64 = -1
+                prs: mutable i64 = -1
+                pre: mutable i64 = -1
+                pos: mutable i64 = -1
+                poe: mutable i64 = -1
+                os: mutable i64 = -1
+                oe: mutable i64 = -1
+                return -1 if not rh_json_str_span(nodes, check, &cs, &ce) or ce <= cs
+                return -1 if not rh_json_str_span(nodes, probe, &prs, &pre) or pre <= prs
+                return -1 if not rh_json_str_span(nodes, polarity, &pos, &poe) or not Findings::rh_findings_polarity(pos, poe, texts)
+                return -1 if not rh_json_str_span(nodes, outcome, &os, &oe)
+                outcome_code: i64 = Findings::rh_findings_outcome(os, oe, texts)
+                return -1 if outcome_code < 0
+                locations: i64 = rh_json_obj_get(nodes, texts, child, "locations")
+                return -1 if locations < 0 or nodes[locations.usize()].kind != RH_JSON_ARR or nodes[locations.usize()].child_count > RH_FINDING_LOCATIONS_MAX
+                while loc_child >= 0 |loc_child: i64 = nodes[locations.usize()].first_child, nodes, texts|:
+                    ls: mutable i64 = -1
+                    le: mutable i64 = -1
+                    return -1 if not rh_json_str_span(nodes, loc_child, &ls, &le)
+                    loc_child <- nodes[loc_child.usize()].next_sibling
+                if child != nodes[findings_idx.usize()].first_child:
+                    out.push(44)
+                rh_push_text(out, "{\"check\":\"")
+                Findings::rh_findings_emit_span(out, texts, cs, ce)
+                rh_push_text(out, "\",\"probe\":\"")
+                Findings::rh_findings_emit_span(out, texts, prs, pre)
+                rh_push_text(out, "\",\"probe_version\":")
+                return -1 if not Findings::rh_findings_emit_optional_string(out, nodes, texts, child, "probe_version")
+                rh_push_text(out, ",\"outcome\":\"")
+                Findings::rh_findings_emit_span(out, texts, os, oe)
+                rh_push_text(out, "\",\"polarity\":\"")
+                Findings::rh_findings_emit_span(out, texts, pos, poe)
+                rh_push_text(out, "\",\"locations\":[")
+                while loc_child2 >= 0 |loc_child2: i64 = nodes[locations.usize()].first_child, nodes, texts, out|:
+                    if loc_child2 != nodes[locations.usize()].first_child:
+                        out.push(44)
+                    out.push(34)
+                    ls2: mutable i64 = -1
+                    le2: mutable i64 = -1
+                    rh_json_str_span(nodes, loc_child2, &ls2, &le2)
+                    Findings::rh_findings_emit_span(out, texts, ls2, le2)
+                    out.push(34)
+                    loc_child2 <- nodes[loc_child2.usize()].next_sibling
+                rh_push_text(out, "],\"remediation\":")
+                return -1 if not Findings::rh_findings_emit_optional_string(out, nodes, texts, child, "remediation")
+                rh_push_text(out, "}")
+                counts[outcome_code.usize()] <- counts[outcome_code.usize()] + 1
+                child <- nodes[child.usize()].next_sibling
+            rh_push_text(out, "],\"summary\":{\"total\":")
+            rh_push_decimal_i64(out, findings_count)
+            while summary_i < 6 |summary_i: i64 = 0, counts, out|:
+                if summary_i == 0:
+                    rh_push_text(out, ",\"pass\":")
+                elif summary_i == 1:
+                    rh_push_text(out, ",\"fail\":")
+                elif summary_i == 2:
+                    rh_push_text(out, ",\"unknown\":")
+                elif summary_i == 3:
+                    rh_push_text(out, ",\"omitted\":")
+                elif summary_i == 4:
+                    rh_push_text(out, ",\"inconclusive\":")
+                else:
+                    rh_push_text(out, ",\"error\":")
+                rh_push_decimal_i64(out, counts[summary_i.usize()])
+                summary_i <- summary_i + 1
+            rh_push_text(out, "},\"note\":\"assessment time is retained as known time; delivery paths do not refresh age; outcomes remain typed and are not policy verdicts\"}")
+            0
