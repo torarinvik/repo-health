@@ -40,6 +40,14 @@ module RolesProvider:
             value: i64 = rh_json_obj_get(nodes, texts, obj, key)
             rh_json_str_span(nodes, value, &s_out[0], &e_out[0])
 
+        def rh_rp_optional_cursor(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            present_out[0] <- 0
+            value: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return true if value < 0 or nodes[value.usize()].kind == RH_JSON_NULL
+            return false if not rh_json_str_span(nodes, value, &s_out[0], &e_out[0])
+            present_out[0] <- 1
+            true
+
         def rh_rp_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, obj, key), &ok_out[0])
 
@@ -133,11 +141,35 @@ module RolesProvider:
             members: i64 = rh_json_obj_get(nodes, texts, root, "members")
             return -1 if members < 0 or nodes[members.usize()].kind != RH_JSON_ARR
             return -1 if nodes[members.usize()].child_count > RH_ROLES_PROVIDER_MAX_MEMBERS
+            pagination: i64 = rh_json_obj_get(nodes, texts, root, "pagination")
+            pagination_present: bool = pagination >= 0
+            next_s: mutable i64 = -1
+            next_e: mutable i64 = -1
+            next_present: mutable i64 = 0
+            complete: mutable i64 = -1
+            if pagination_present:
+                return -1 if nodes[pagination.usize()].kind != RH_JSON_OBJ
+                return -1 if not RolesProvider::rh_rp_optional_cursor(nodes, texts, pagination, "next", &next_s, &next_e, &next_present)
+                complete <- rh_json_obj_get(nodes, texts, pagination, "complete")
+                return -1 if complete < 0 or nodes[complete.usize()].kind != RH_JSON_BOOL
             rh_push_text(out, "{\"schema\":\"rh-roles-input/1\",\"provider\":\"")
             rh_json_escape(out, texts, provider_s.usize(), provider_e.usize())
             rh_push_text(out, "\",\"authorization\":{\"state\":\"")
             rh_push_text(out, RolesProvider::rh_rp_auth_label(auth_state))
-            rh_push_text(out, "\"},\"declarations\":[")
+            rh_push_text(out, "\"}")
+            if pagination_present:
+                rh_push_text(out, ",\"pagination\":{\"next\":")
+                if next_present == 1:
+                    out.push(34)
+                    rh_json_escape(out, texts, next_s.usize(), next_e.usize())
+                    out.push(34)
+                else:
+                    rh_push_text(out, "null")
+                rh_push_text(out, ",\"complete\":")
+                rh_push_text(out, "true") if rh_json_is_true(nodes, raw, complete)
+                rh_push_text(out, "false") if not rh_json_is_true(nodes, raw, complete)
+                out.push(125)
+            rh_push_text(out, ",\"declarations\":[")
             declarations: mutable darray[RhProviderDeclaration] = []
             arr: RhJsonNode = nodes[members.usize()]
             while member >= 0 |member: i64 = arr.first_child, nodes, raw, texts, declarations, github, gitlab, captured_at, auth_state|:

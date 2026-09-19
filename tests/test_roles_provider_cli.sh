@@ -90,6 +90,21 @@ assert actor == [{"actor_id": 7002, "role": "owner", "permission": 1, "source": 
 print("[roles-provider] duplicate replacement + bounded declarations OK")
 PY
 
+echo "[roles-provider] opaque pagination state is retained"
+python3 - "fixtures/roles/github-provider-input.json" "$T/paginated.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["pagination"] = {"next": "members-page-2", "complete": False}
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" roles-import --input "$T/paginated.json" --out "$T/paginated.out" >/dev/null || fail "pagination import"
+python3 - "$T/paginated.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["pagination"] == {"next": "members-page-2", "complete": False}, d
+print("[roles-provider] pagination cursor + completion state OK")
+PY
+
 echo "[roles-provider] malformed input fails closed"
 set +e
 printf '{"schema":"rh-provider-roles-input/2","provider":"github","captured_at":1,"members":[]}' > "$T/bad-schema.json"
