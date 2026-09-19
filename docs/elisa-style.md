@@ -5,6 +5,15 @@ functions yield their final expression, value construction lives in block
 expressions, and loops keep their counters and accumulators in their headers.
 The compiler's `docs/119_expression_unification.md` defines these forms.
 
+Group a cohesive API in a named module. Put constants, reducers, comparators,
+and parser machinery that callers should not depend on under that module's
+`private:` section. Put the supported data types and entry points under
+`public:` and qualify cross-module calls (`Metrics::rh_hhi`). A private helper
+must not become an accidental cross-module dependency just to avoid a small
+local expression; keep a narrow local helper when ownership belongs to the
+caller. Module qualification is a namespace operation and has no runtime
+allocation or dispatch cost.
+
 Expose the result needed by the surrounding code. Keep calculation scratch,
 temporary buffers, and intermediate flags inside that result's block. Keep
 independent processing stages in separate blocks. A simple expression needs
