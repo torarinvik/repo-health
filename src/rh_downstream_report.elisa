@@ -17,325 +17,333 @@ include "./rh_json.elisa"
 include "./rh_graph.elisa"
 include "./rh_downstream.elisa"
 
-# Map the dep-graph scope label back to a caller-defined scope byte:
-# 1 runtime/normal, 2 dev, 3 optional, 4 peer. The projection here keeps
-# every scope (Graph::RH_SCOPE_ALL); the label is preserved in the report.
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_ds_scope(texts: darray[u8]&, s: i64, e: i64) -> u8:
-    n: i64 = e - s
-    if n == 3:
-        return 2 if texts[s.usize()] == 100 and texts[(s + 1).usize()] == 101 and texts[(s + 2).usize()] == 118
-    if n == 8:
-        return 3 if rh_ds_lit(texts, s, e, "optional")
-    if n == 4:
-        return 4 if rh_ds_lit(texts, s, e, "peer")
-    1
+module DownstreamReport:
+    private:
+        # Map the dep-graph scope label back to a caller-defined scope byte:
+        # 1 runtime/normal, 2 dev, 3 optional, 4 peer. The projection here keeps
+        # every scope (Graph::RH_SCOPE_ALL); the label is preserved in the report.
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_ds_scope(texts: darray[u8]&, s: i64, e: i64) -> u8:
+            n: i64 = e - s
+            if n == 3:
+                return 2 if texts[s.usize()] == 100 and texts[(s + 1).usize()] == 101 and texts[(s + 2).usize()] == 118
+            if n == 8:
+                return 3 if rh_ds_lit(texts, s, e, "optional")
+            if n == 4:
+                return 4 if rh_ds_lit(texts, s, e, "peer")
+            1
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_ds_lit(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    n: i64 = e - s
-    while k < n |k: i64 = 0, texts, lit, s|:
-        return false if lit[k.usize()] == 0
-        return false if texts[(s + k).usize()] != lit[k.usize()]
-        k <- k + 1
-    lit[n.usize()] == 0
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_ds_lit(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            n: i64 = e - s
+            while k < n |k: i64 = 0, texts, lit, s|:
+                return false if lit[k.usize()] == 0
+                return false if texts[(s + k).usize()] != lit[k.usize()]
+                k <- k + 1
+            lit[n.usize()] == 0
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_ds_parse_pair(s: u8&, a_out: mutable i64&, b_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-    a_out[0] <- -1
-    b_out[0] <- -1
-    seg, a, b, da, db =
-        while s[i] != 0 |seg: i64 = 0, a: i64 = 0, b: i64 = 0, da: i64 = 0, db: i64 = 0, i: usize = 0| -> seg, a, b, da, db:
-            c: u8 = s[i]
-            if c == 58:
-                return false if seg != 0
-                seg <- 1
-            elif c >= 48 and c <= 57:
-                if seg == 0:
-                    a <- a * 10 + (c.i64() - 48)
-                    da <- da + 1
-                else:
-                    b <- b * 10 + (c.i64() - 48)
-                    db <- db + 1
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_ds_parse_pair(s: u8&, a_out: mutable i64&, b_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            a_out[0] <- -1
+            b_out[0] <- -1
+            seg, a, b, da, db =
+                while s[i] != 0 |seg: i64 = 0, a: i64 = 0, b: i64 = 0, da: i64 = 0, db: i64 = 0, i: usize = 0| -> seg, a, b, da, db:
+                    c: u8 = s[i]
+                    if c == 58:
+                        return false if seg != 0
+                        seg <- 1
+                    elif c >= 48 and c <= 57:
+                        if seg == 0:
+                            a <- a * 10 + (c.i64() - 48)
+                            da <- da + 1
+                        else:
+                            b <- b * 10 + (c.i64() - 48)
+                            db <- db + 1
+                    else:
+                        return false
+                    i <- i + 1
+            return false if seg != 1 or da == 0 or db == 0
+            a_out[0] <- a
+            b_out[0] <- b
+            true
+
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_ds_id_in(private_ids: darray[i64]&, node: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < private_ids.count |i: usize = 0, private_ids, node|:
+                return true if private_ids[i] == node
+                i <- i + 1
+            false
+
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_ds_emit_node(out: mutable darray[u8]&, id: i64, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, name_idx: darray[i64]&, ver_idx: darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "{\"id\":")
+            Base::rh_push_decimal_i64(out, id)
+            nm: mutable i64 = -1
+            vv: mutable i64 = -1
+            if id >= 0 and id < name_idx.count.i64():
+                nm <- name_idx[id.usize()]
+            if id >= 0 and id < ver_idx.count.i64():
+                vv <- ver_idx[id.usize()]
+            Base::rh_push_text(out, ",\"name\":\"")
+            if nm >= 0:
+                ns: mutable i64 = 0
+                ne: mutable i64 = 0
+                if Json::rh_json_str_span(nodes, nm, &ns, &ne):
+                    Base::rh_json_escape(out, texts, ns.usize(), ne.usize())
+            Base::rh_push_text(out, "\",\"version\":\"")
+            if vv >= 0:
+                vs: mutable i64 = 0
+                ve: mutable i64 = 0
+                if Json::rh_json_str_span(nodes, vv, &vs, &ve):
+                    Base::rh_json_escape(out, texts, vs.usize(), ve.usize())
+            Base::rh_push_text(out, "\"}")
+
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_ds_emit_list(out: mutable darray[u8]&, ids: darray[i64]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, name_idx: darray[i64]&, ver_idx: darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while i < ids.count |i: usize = 0, ids, out, nodes, texts, name_idx, ver_idx|:
+                if i > 0:
+                    out.push(44)
+                rh_ds_emit_node(out, ids[i], nodes, texts, name_idx, ver_idx)
+                i <- i + 1
+
+        # Parse a dep graph and emit a downstream report. Returns:
+        #   0 ok, -1 malformed/unsupported shape, -2 subject id not present,
+        #   -3 malformed intrinsics document.
+    public:
+        def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, private_ids: darray[i64]&, asserts: darray[Graph::RhAssertion]&, mapping_revision: i64, intr_raw: darray[u8]&, has_intr: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, snapshot_id: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0
+            rootn: Json::RhJsonNode = nodes[root.usize()]
+            return -1 if rootn.kind != Json::RH_JSON_OBJ
+            nodes_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "nodes")
+            edges_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "edges")
+            return -1 if nodes_idx < 0 or edges_idx < 0
+            return -1 if nodes[nodes_idx.usize()].kind != Json::RH_JSON_ARR
+            if nodes[edges_idx.usize()].kind != Json::RH_JSON_ARR:
+                return -1
+
+            # Node span tables (id == array position), plus visibility.
+            name_idx: mutable darray[i64] = []
+            ver_idx: mutable darray[i64] = []
+            vis: mutable darray[u8] = []
+            arr: Json::RhJsonNode = nodes[nodes_idx.usize()]
+            while child >= 0 |child: i64 = arr.first_child, nodes, nodes_idx, name_idx, ver_idx, vis, private_ids|:
+                c: Json::RhJsonNode = nodes[child.usize()]
+                nid: mutable i64 = -1
+                if c.kind == Json::RH_JSON_OBJ:
+                    idk: i64 = Json::rh_json_obj_get(nodes, texts, child, "id")
+                    ok: mutable i64 = 0
+                    nid <- Json::rh_json_int(nodes, raw, idk, &ok)
+                    nmk: i64 = Json::rh_json_obj_get(nodes, texts, child, "name")
+                    vvk: i64 = Json::rh_json_obj_get(nodes, texts, child, "version")
+                    while name_idx.count.i64() <= nid |nid, name_idx, ver_idx, vis|:
+                        name_idx.push(-1)
+                        ver_idx.push(-1)
+                        vis.push(Graph::RH_VIS_PUBLIC)
+                    if nid >= 0:
+                        name_idx[nid.usize()] <- nmk
+                        ver_idx[nid.usize()] <- vvk
+                        if rh_ds_id_in(private_ids, nid):
+                            vis[nid.usize()] <- Graph::RH_VIS_PRIVATE
+                child <- nodes[child.usize()].next_sibling
+
+            node_count: i64 = name_idx.count.i64()
+            if subject < 0 or subject >= node_count:
+                return -2
+
+            # Edges.
+            edges: mutable darray[Graph::RhGraphEdge] = []
+            earr: Json::RhJsonNode = nodes[edges_idx.usize()]
+            while echild >= 0 |echild: i64 = earr.first_child, nodes, edges, texts, raw|:
+                ec: Json::RhJsonNode = nodes[echild.usize()]
+                if ec.kind == Json::RH_JSON_OBJ:
+                    fromk: i64 = Json::rh_json_obj_get(nodes, texts, echild, "from")
+                    tok: i64 = Json::rh_json_obj_get(nodes, texts, echild, "to")
+                    sc: i64 = Json::rh_json_obj_get(nodes, texts, echild, "scope")
+                    okf: mutable i64 = 0
+                    okt: mutable i64 = 0
+                    frm: i64 = Json::rh_json_int(nodes, raw, fromk, &okf)
+                    dst: i64 = Json::rh_json_int(nodes, raw, tok, &okt)
+                    scb: mutable u8 = 1
+                    if sc >= 0:
+                        ss: mutable i64 = 0
+                        se: mutable i64 = 0
+                        if Json::rh_json_str_span(nodes, sc, &ss, &se):
+                            scb <- rh_ds_scope(texts, ss, se)
+                    if okf == 1 and okt == 1:
+                        edges.push(Graph::RhGraphEdge{from: frm, dst: dst, scope: scb, platform: 0, introduced: 0, removed: 0, first_seen: 0})
+                echild <- nodes[echild.usize()].next_sibling
+
+            p: Graph::RhProjection = Graph::rh_projection_make(1, Graph::RH_SCOPE_ALL, 0, 0, 0, 0, mapping_revision, true, max_nodes, max_depth)
+            direct: mutable darray[i64] = []
+            dc: i64 = Graph::rh_direct_dependents(edges, vis, subject, &p, direct)
+            trans: mutable darray[i64] = []
+            trunc: mutable i64 = 0
+            tc: i64 = Graph::rh_transitive_dependents(edges, vis, subject, &p, trans, &trunc)
+            scc: i64 = Graph::rh_scc_count(edges, vis, node_count, &p)
+            scen: mutable darray[i64] = []
+            strunc: mutable i64 = 0
+            scount: i64 = Graph::rh_scenario_unavailable(edges, vis, subject, unavailable, &p, scen, &strunc) if has_unavailable else 0
+
+            # Mirror/family dedup: only ACCEPTED grouping assertions collapse nodes;
+            # forks stay distinct. With no assertions this is an order-preserving
+            # identity, so the label below records whether grouping was applied.
+            direct2: mutable darray[i64] = []
+            dc2: i64 = Graph::rh_family_dedup(direct, asserts, direct2)
+            trans2: mutable darray[i64] = []
+            tc2: i64 = Graph::rh_family_dedup(trans, asserts, trans2)
+            scen2: mutable darray[i64] = []
+            scount2: i64 = Graph::rh_family_dedup(scen, asserts, scen2)
+
+            # Optional per-metric intrinsic join (R011): the caller supplies
+            # independently computed intrinsic measurements (a presence bitmask per
+            # dependent node) so downstream condition is never derived from
+            # downstream inputs. Coverage stays per metric; a dependent missing a
+            # metric is not counted for that metric.
+            imetrics: mutable darray[i64] = []
+            imask: mutable darray[u64] = []
+            icount: mutable i64 = 0
+            icounts: mutable darray[i64] = []
+            itotal: mutable i64 = 0
+            ijoin: mutable bool = false
+            if has_intr:
+                iroot: i64 = Json::rh_json_parse(intr_raw, nodes, texts)
+                return -3 if iroot < 0
+                inode: Json::RhJsonNode = nodes[iroot.usize()]
+                return -3 if inode.kind != Json::RH_JSON_OBJ
+                scheme: i64 = Json::rh_json_obj_get(nodes, texts, iroot, "schema")
+                schema_ok: mutable bool = false
+                if scheme >= 0:
+                    ss: mutable i64 = 0
+                    se: mutable i64 = 0
+                    if Json::rh_json_str_span(nodes, scheme, &ss, &se):
+                        if se - ss == 15:
+                            if rh_ds_lit(texts, ss, se, "rh-intrinsics/1"):
+                                schema_ok <- true
+                metrics_idx: i64 = Json::rh_json_obj_get(nodes, texts, iroot, "metrics")
+                values_idx: i64 = Json::rh_json_obj_get(nodes, texts, iroot, "values")
+                return -3 if not schema_ok or metrics_idx < 0 or values_idx < 0
+                return -3 if nodes[metrics_idx.usize()].kind != Json::RH_JSON_ARR or nodes[values_idx.usize()].kind != Json::RH_JSON_ARR
+                marr: Json::RhJsonNode = nodes[metrics_idx.usize()]
+                while mchild >= 0 |mchild: i64 = marr.first_child, nodes, imetrics, icount|:
+                    mc: Json::RhJsonNode = nodes[mchild.usize()]
+                    if mc.kind == Json::RH_JSON_STR:
+                        imetrics.push(mchild)
+                        icount <- icount + 1
+                    mchild <- nodes[mchild.usize()].next_sibling
+                while k < node_count |k: i64 = 0, imask|:
+                    imask.push(0)
+                    k <- k + 1
+                varr: Json::RhJsonNode = nodes[values_idx.usize()]
+                while vchild >= 0 |vchild: i64 = varr.first_child, nodes, texts, intr_raw, imask, node_count|:
+                    vc: Json::RhJsonNode = nodes[vchild.usize()]
+                    if vc.kind == Json::RH_JSON_OBJ:
+                        idk: i64 = Json::rh_json_obj_get(nodes, texts, vchild, "id")
+                        mkk: i64 = Json::rh_json_obj_get(nodes, texts, vchild, "mask")
+                        okid: mutable i64 = 0
+                        vid: i64 = Json::rh_json_int(nodes, intr_raw, idk, &okid)
+                        okmk: mutable i64 = 0
+                        vmk: i64 = Json::rh_json_int(nodes, intr_raw, mkk, &okmk)
+                        if okid == 1 and okmk == 1 and vid >= 0 and vid < node_count and vmk >= 0:
+                            imask[vid.usize()] <- vmk.u64()
+                    vchild <- nodes[vchild.usize()].next_sibling
+                Downstream::rh_downstream_coverage(trans2, imask, icount, icounts, &itotal)
+                ijoin <- true
+
+            Base::rh_push_text(out, "{\"schema\":\"rh-downstream/1\",\"graph_source\":\"")
+            Base::rh_push_cstr(out, graph_source)
+            Base::rh_push_text(out, "\",\"subject\":")
+            Base::rh_push_decimal_i64(out, subject)
+            Base::rh_push_text(out, ",\"projection\":{\"edge_scope\":\"all\",\"public_only\":true,\"max_nodes\":")
+            Base::rh_push_decimal_i64(out, max_nodes)
+            Base::rh_push_text(out, ",\"max_depth\":")
+            Base::rh_push_decimal_i64(out, max_depth)
+            Base::rh_push_text(out, ",\"identity_revision\":0,\"mapping_revision\":")
+            Base::rh_push_decimal_i64(out, mapping_revision)
+            Base::rh_push_text(out, ",\"snapshot_id\":")
+            if snapshot_id.count > 0:
+                out.push(34)
+                out.extend(bytes_view(snapshot_id))
+                out.push(34)
             else:
-                return false
-            i <- i + 1
-    return false if seg != 1 or da == 0 or db == 0
-    a_out[0] <- a
-    b_out[0] <- b
-    true
-
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_ds_id_in(private_ids: darray[i64]&, node: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    while i < private_ids.count |i: usize = 0, private_ids, node|:
-        return true if private_ids[i] == node
-        i <- i + 1
-    false
-
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_ds_emit_node(out: mutable darray[u8]&, id: i64, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, name_idx: darray[i64]&, ver_idx: darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
-    Base::rh_push_text(out, "{\"id\":")
-    Base::rh_push_decimal_i64(out, id)
-    nm: mutable i64 = -1
-    vv: mutable i64 = -1
-    if id >= 0 and id < name_idx.count.i64():
-        nm <- name_idx[id.usize()]
-    if id >= 0 and id < ver_idx.count.i64():
-        vv <- ver_idx[id.usize()]
-    Base::rh_push_text(out, ",\"name\":\"")
-    if nm >= 0:
-        ns: mutable i64 = 0
-        ne: mutable i64 = 0
-        if Json::rh_json_str_span(nodes, nm, &ns, &ne):
-            Base::rh_json_escape(out, texts, ns.usize(), ne.usize())
-    Base::rh_push_text(out, "\",\"version\":\"")
-    if vv >= 0:
-        vs: mutable i64 = 0
-        ve: mutable i64 = 0
-        if Json::rh_json_str_span(nodes, vv, &vs, &ve):
-            Base::rh_json_escape(out, texts, vs.usize(), ve.usize())
-    Base::rh_push_text(out, "\"}")
-
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_ds_emit_list(out: mutable darray[u8]&, ids: darray[i64]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, name_idx: darray[i64]&, ver_idx: darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
-    while i < ids.count |i: usize = 0, ids, out, nodes, texts, name_idx, ver_idx|:
-        if i > 0:
-            out.push(44)
-        rh_ds_emit_node(out, ids[i], nodes, texts, name_idx, ver_idx)
-        i <- i + 1
-
-# Parse a dep graph and emit a downstream report. Returns:
-#   0 ok, -1 malformed/unsupported shape, -2 subject id not present,
-#   -3 malformed intrinsics document.
-def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, private_ids: darray[i64]&, asserts: darray[Graph::RhAssertion]&, mapping_revision: i64, intr_raw: darray[u8]&, has_intr: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, snapshot_id: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-    nodes: mutable darray[Json::RhJsonNode] = []
-    texts: mutable darray[u8] = []
-    root: i64 = Json::rh_json_parse(raw, nodes, texts)
-    return -1 if root < 0
-    rootn: Json::RhJsonNode = nodes[root.usize()]
-    return -1 if rootn.kind != Json::RH_JSON_OBJ
-    nodes_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "nodes")
-    edges_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "edges")
-    return -1 if nodes_idx < 0 or edges_idx < 0
-    return -1 if nodes[nodes_idx.usize()].kind != Json::RH_JSON_ARR
-    if nodes[edges_idx.usize()].kind != Json::RH_JSON_ARR:
-        return -1
-
-    # Node span tables (id == array position), plus visibility.
-    name_idx: mutable darray[i64] = []
-    ver_idx: mutable darray[i64] = []
-    vis: mutable darray[u8] = []
-    arr: Json::RhJsonNode = nodes[nodes_idx.usize()]
-    while child >= 0 |child: i64 = arr.first_child, nodes, nodes_idx, name_idx, ver_idx, vis, private_ids|:
-        c: Json::RhJsonNode = nodes[child.usize()]
-        nid: mutable i64 = -1
-        if c.kind == Json::RH_JSON_OBJ:
-            idk: i64 = Json::rh_json_obj_get(nodes, texts, child, "id")
-            ok: mutable i64 = 0
-            nid <- Json::rh_json_int(nodes, raw, idk, &ok)
-            nmk: i64 = Json::rh_json_obj_get(nodes, texts, child, "name")
-            vvk: i64 = Json::rh_json_obj_get(nodes, texts, child, "version")
-            while name_idx.count.i64() <= nid |nid, name_idx, ver_idx, vis|:
-                name_idx.push(-1)
-                ver_idx.push(-1)
-                vis.push(Graph::RH_VIS_PUBLIC)
-            if nid >= 0:
-                name_idx[nid.usize()] <- nmk
-                ver_idx[nid.usize()] <- vvk
-                if rh_ds_id_in(private_ids, nid):
-                    vis[nid.usize()] <- Graph::RH_VIS_PRIVATE
-        child <- nodes[child.usize()].next_sibling
-
-    node_count: i64 = name_idx.count.i64()
-    if subject < 0 or subject >= node_count:
-        return -2
-
-    # Edges.
-    edges: mutable darray[Graph::RhGraphEdge] = []
-    earr: Json::RhJsonNode = nodes[edges_idx.usize()]
-    while echild >= 0 |echild: i64 = earr.first_child, nodes, edges, texts, raw|:
-        ec: Json::RhJsonNode = nodes[echild.usize()]
-        if ec.kind == Json::RH_JSON_OBJ:
-            fromk: i64 = Json::rh_json_obj_get(nodes, texts, echild, "from")
-            tok: i64 = Json::rh_json_obj_get(nodes, texts, echild, "to")
-            sc: i64 = Json::rh_json_obj_get(nodes, texts, echild, "scope")
-            okf: mutable i64 = 0
-            okt: mutable i64 = 0
-            frm: i64 = Json::rh_json_int(nodes, raw, fromk, &okf)
-            dst: i64 = Json::rh_json_int(nodes, raw, tok, &okt)
-            scb: mutable u8 = 1
-            if sc >= 0:
-                ss: mutable i64 = 0
-                se: mutable i64 = 0
-                if Json::rh_json_str_span(nodes, sc, &ss, &se):
-                    scb <- rh_ds_scope(texts, ss, se)
-            if okf == 1 and okt == 1:
-                edges.push(Graph::RhGraphEdge{from: frm, dst: dst, scope: scb, platform: 0, introduced: 0, removed: 0, first_seen: 0})
-        echild <- nodes[echild.usize()].next_sibling
-
-    p: Graph::RhProjection = Graph::rh_projection_make(1, Graph::RH_SCOPE_ALL, 0, 0, 0, 0, mapping_revision, true, max_nodes, max_depth)
-    direct: mutable darray[i64] = []
-    dc: i64 = Graph::rh_direct_dependents(edges, vis, subject, &p, direct)
-    trans: mutable darray[i64] = []
-    trunc: mutable i64 = 0
-    tc: i64 = Graph::rh_transitive_dependents(edges, vis, subject, &p, trans, &trunc)
-    scc: i64 = Graph::rh_scc_count(edges, vis, node_count, &p)
-    scen: mutable darray[i64] = []
-    strunc: mutable i64 = 0
-    scount: i64 = Graph::rh_scenario_unavailable(edges, vis, subject, unavailable, &p, scen, &strunc) if has_unavailable else 0
-
-    # Mirror/family dedup: only ACCEPTED grouping assertions collapse nodes;
-    # forks stay distinct. With no assertions this is an order-preserving
-    # identity, so the label below records whether grouping was applied.
-    direct2: mutable darray[i64] = []
-    dc2: i64 = Graph::rh_family_dedup(direct, asserts, direct2)
-    trans2: mutable darray[i64] = []
-    tc2: i64 = Graph::rh_family_dedup(trans, asserts, trans2)
-    scen2: mutable darray[i64] = []
-    scount2: i64 = Graph::rh_family_dedup(scen, asserts, scen2)
-
-    # Optional per-metric intrinsic join (R011): the caller supplies
-    # independently computed intrinsic measurements (a presence bitmask per
-    # dependent node) so downstream condition is never derived from
-    # downstream inputs. Coverage stays per metric; a dependent missing a
-    # metric is not counted for that metric.
-    imetrics: mutable darray[i64] = []
-    imask: mutable darray[u64] = []
-    icount: mutable i64 = 0
-    icounts: mutable darray[i64] = []
-    itotal: mutable i64 = 0
-    ijoin: mutable bool = false
-    if has_intr:
-        iroot: i64 = Json::rh_json_parse(intr_raw, nodes, texts)
-        return -3 if iroot < 0
-        inode: Json::RhJsonNode = nodes[iroot.usize()]
-        return -3 if inode.kind != Json::RH_JSON_OBJ
-        scheme: i64 = Json::rh_json_obj_get(nodes, texts, iroot, "schema")
-        schema_ok: mutable bool = false
-        if scheme >= 0:
-            ss: mutable i64 = 0
-            se: mutable i64 = 0
-            if Json::rh_json_str_span(nodes, scheme, &ss, &se):
-                if se - ss == 15:
-                    if rh_ds_lit(texts, ss, se, "rh-intrinsics/1"):
-                        schema_ok <- true
-        metrics_idx: i64 = Json::rh_json_obj_get(nodes, texts, iroot, "metrics")
-        values_idx: i64 = Json::rh_json_obj_get(nodes, texts, iroot, "values")
-        return -3 if not schema_ok or metrics_idx < 0 or values_idx < 0
-        return -3 if nodes[metrics_idx.usize()].kind != Json::RH_JSON_ARR or nodes[values_idx.usize()].kind != Json::RH_JSON_ARR
-        marr: Json::RhJsonNode = nodes[metrics_idx.usize()]
-        while mchild >= 0 |mchild: i64 = marr.first_child, nodes, imetrics, icount|:
-            mc: Json::RhJsonNode = nodes[mchild.usize()]
-            if mc.kind == Json::RH_JSON_STR:
-                imetrics.push(mchild)
-                icount <- icount + 1
-            mchild <- nodes[mchild.usize()].next_sibling
-        while k < node_count |k: i64 = 0, imask|:
-            imask.push(0)
-            k <- k + 1
-        varr: Json::RhJsonNode = nodes[values_idx.usize()]
-        while vchild >= 0 |vchild: i64 = varr.first_child, nodes, texts, intr_raw, imask, node_count|:
-            vc: Json::RhJsonNode = nodes[vchild.usize()]
-            if vc.kind == Json::RH_JSON_OBJ:
-                idk: i64 = Json::rh_json_obj_get(nodes, texts, vchild, "id")
-                mkk: i64 = Json::rh_json_obj_get(nodes, texts, vchild, "mask")
-                okid: mutable i64 = 0
-                vid: i64 = Json::rh_json_int(nodes, intr_raw, idk, &okid)
-                okmk: mutable i64 = 0
-                vmk: i64 = Json::rh_json_int(nodes, intr_raw, mkk, &okmk)
-                if okid == 1 and okmk == 1 and vid >= 0 and vid < node_count and vmk >= 0:
-                    imask[vid.usize()] <- vmk.u64()
-            vchild <- nodes[vchild.usize()].next_sibling
-        Downstream::rh_downstream_coverage(trans2, imask, icount, icounts, &itotal)
-        ijoin <- true
-
-    Base::rh_push_text(out, "{\"schema\":\"rh-downstream/1\",\"graph_source\":\"")
-    Base::rh_push_cstr(out, graph_source)
-    Base::rh_push_text(out, "\",\"subject\":")
-    Base::rh_push_decimal_i64(out, subject)
-    Base::rh_push_text(out, ",\"projection\":{\"edge_scope\":\"all\",\"public_only\":true,\"max_nodes\":")
-    Base::rh_push_decimal_i64(out, max_nodes)
-    Base::rh_push_text(out, ",\"max_depth\":")
-    Base::rh_push_decimal_i64(out, max_depth)
-    Base::rh_push_text(out, ",\"identity_revision\":0,\"mapping_revision\":")
-    Base::rh_push_decimal_i64(out, mapping_revision)
-    Base::rh_push_text(out, ",\"snapshot_id\":")
-    if snapshot_id.count > 0:
-        out.push(34)
-        out.extend(bytes_view(snapshot_id))
-        out.push(34)
-    else:
-        Base::rh_push_text(out, "null")
-    Base::rh_push_text(out, "},\"direct\":[")
-    rh_ds_emit_list(out, direct2, nodes, texts, name_idx, ver_idx)
-    Base::rh_push_text(out, "],\"direct_count\":")
-    Base::rh_push_decimal_i64(out, dc2)
-    Base::rh_push_text(out, ",\"transitive\":[")
-    rh_ds_emit_list(out, trans2, nodes, texts, name_idx, ver_idx)
-    Base::rh_push_text(out, "],\"transitive_count\":")
-    Base::rh_push_decimal_i64(out, tc2)
-    Base::rh_push_text(out, ",\"truncated\":")
-    if trunc == 1:
-        Base::rh_push_text(out, "true")
-    else:
-        Base::rh_push_text(out, "false")
-    Base::rh_push_text(out, ",\"scc_components\":")
-    Base::rh_push_decimal_i64(out, scc)
-    Base::rh_push_text(out, ",\"grouping\":{\"accepted_assertions\":")
-    Base::rh_push_decimal_i64(out, asserts.count.i64())
-    Base::rh_push_text(out, ",\"family_dedup\":")
-    if asserts.count > 0:
-        Base::rh_push_text(out, "true")
-    else:
-        Base::rh_push_text(out, "false")
-    Base::rh_push_text(out, "}")
-    Base::rh_push_text(out, ",\"intrinsics\":")
-    if ijoin:
-        Base::rh_push_text(out, "{\"metrics\":[")
-        while mi < imetrics.count |mi: usize = 0, imetrics, out, nodes, texts|:
-            if mi > 0:
-                out.push(44)
-            out.push(34)
-            ms: mutable i64 = 0
-            me: mutable i64 = 0
-            if Json::rh_json_str_span(nodes, imetrics[mi], &ms, &me):
-                Base::rh_json_escape(out, texts, ms.usize(), me.usize())
-            out.push(34)
-            mi <- mi + 1
-        Base::rh_push_text(out, "],\"covered\":[")
-        while mj < imetrics.count |mj: usize = 0, imetrics, icounts, out, nodes, texts|:
-            if mj > 0:
-                out.push(44)
-            Base::rh_push_text(out, "{\"key\":\"")
-            ms2: mutable i64 = 0
-            me2: mutable i64 = 0
-            if Json::rh_json_str_span(nodes, imetrics[mj], &ms2, &me2):
-                Base::rh_json_escape(out, texts, ms2.usize(), me2.usize())
-            Base::rh_push_text(out, "\",\"observed\":")
-            cnt: i64 = icounts[mj] if mj < icounts.count else 0
-            Base::rh_push_decimal_i64(out, cnt)
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, "},\"direct\":[")
+            rh_ds_emit_list(out, direct2, nodes, texts, name_idx, ver_idx)
+            Base::rh_push_text(out, "],\"direct_count\":")
+            Base::rh_push_decimal_i64(out, dc2)
+            Base::rh_push_text(out, ",\"transitive\":[")
+            rh_ds_emit_list(out, trans2, nodes, texts, name_idx, ver_idx)
+            Base::rh_push_text(out, "],\"transitive_count\":")
+            Base::rh_push_decimal_i64(out, tc2)
+            Base::rh_push_text(out, ",\"truncated\":")
+            if trunc == 1:
+                Base::rh_push_text(out, "true")
+            else:
+                Base::rh_push_text(out, "false")
+            Base::rh_push_text(out, ",\"scc_components\":")
+            Base::rh_push_decimal_i64(out, scc)
+            Base::rh_push_text(out, ",\"grouping\":{\"accepted_assertions\":")
+            Base::rh_push_decimal_i64(out, asserts.count.i64())
+            Base::rh_push_text(out, ",\"family_dedup\":")
+            if asserts.count > 0:
+                Base::rh_push_text(out, "true")
+            else:
+                Base::rh_push_text(out, "false")
             Base::rh_push_text(out, "}")
-            mj <- mj + 1
-        Base::rh_push_text(out, "],\"dependent_total\":")
-        Base::rh_push_decimal_i64(out, itotal)
-        Base::rh_push_text(out, ",\"note\":\"per-metric covered denominators over the dependent set; a dependent missing a metric is not counted for that metric; intrinsics are independent of downstream inputs (anti-circularity)\"")
-        Base::rh_push_text(out, "}")
-    else:
-        Base::rh_push_text(out, "null")
-    if has_unavailable:
-        Base::rh_push_text(out, ",\"scenario\":{\"unavailable\":")
-        Base::rh_push_decimal_i64(out, unavailable)
-        Base::rh_push_text(out, ",\"affected\":[")
-        rh_ds_emit_list(out, scen2, nodes, texts, name_idx, ver_idx)
-        Base::rh_push_text(out, "],\"affected_count\":")
-        Base::rh_push_decimal_i64(out, scount2)
-        Base::rh_push_text(out, ",\"truncated\":")
-        if strunc == 1:
-            Base::rh_push_text(out, "true")
-        else:
-            Base::rh_push_text(out, "false")
-        Base::rh_push_text(out, "}")
-    else:
-        Base::rh_push_text(out, ",\"scenario\":null")
-    Base::rh_push_text(out, ",\"note\":\"counts are within the labeled projection; truncated=true means this is NOT a total; private nodes are excluded from the public projection; mirrors/families group only on ACCEPTED assertions and forks stay distinct; dependents do not feed back into intrinsic metrics\"}")
-    0
+            Base::rh_push_text(out, ",\"intrinsics\":")
+            if ijoin:
+                Base::rh_push_text(out, "{\"metrics\":[")
+                while mi < imetrics.count |mi: usize = 0, imetrics, out, nodes, texts|:
+                    if mi > 0:
+                        out.push(44)
+                    out.push(34)
+                    ms: mutable i64 = 0
+                    me: mutable i64 = 0
+                    if Json::rh_json_str_span(nodes, imetrics[mi], &ms, &me):
+                        Base::rh_json_escape(out, texts, ms.usize(), me.usize())
+                    out.push(34)
+                    mi <- mi + 1
+                Base::rh_push_text(out, "],\"covered\":[")
+                while mj < imetrics.count |mj: usize = 0, imetrics, icounts, out, nodes, texts|:
+                    if mj > 0:
+                        out.push(44)
+                    Base::rh_push_text(out, "{\"key\":\"")
+                    ms2: mutable i64 = 0
+                    me2: mutable i64 = 0
+                    if Json::rh_json_str_span(nodes, imetrics[mj], &ms2, &me2):
+                        Base::rh_json_escape(out, texts, ms2.usize(), me2.usize())
+                    Base::rh_push_text(out, "\",\"observed\":")
+                    cnt: i64 = icounts[mj] if mj < icounts.count else 0
+                    Base::rh_push_decimal_i64(out, cnt)
+                    Base::rh_push_text(out, "}")
+                    mj <- mj + 1
+                Base::rh_push_text(out, "],\"dependent_total\":")
+                Base::rh_push_decimal_i64(out, itotal)
+                Base::rh_push_text(out, ",\"note\":\"per-metric covered denominators over the dependent set; a dependent missing a metric is not counted for that metric; intrinsics are independent of downstream inputs (anti-circularity)\"")
+                Base::rh_push_text(out, "}")
+            else:
+                Base::rh_push_text(out, "null")
+            if has_unavailable:
+                Base::rh_push_text(out, ",\"scenario\":{\"unavailable\":")
+                Base::rh_push_decimal_i64(out, unavailable)
+                Base::rh_push_text(out, ",\"affected\":[")
+                rh_ds_emit_list(out, scen2, nodes, texts, name_idx, ver_idx)
+                Base::rh_push_text(out, "],\"affected_count\":")
+                Base::rh_push_decimal_i64(out, scount2)
+                Base::rh_push_text(out, ",\"truncated\":")
+                if strunc == 1:
+                    Base::rh_push_text(out, "true")
+                else:
+                    Base::rh_push_text(out, "false")
+                Base::rh_push_text(out, "}")
+            else:
+                Base::rh_push_text(out, ",\"scenario\":null")
+            Base::rh_push_text(out, ",\"note\":\"counts are within the labeled projection; truncated=true means this is NOT a total; private nodes are excluded from the public projection; mirrors/families group only on ACCEPTED assertions and forks stay distinct; dependents do not feed back into intrinsic metrics\"}")
+            0
+
+        # Public CLI boundary for the mirror assertion syntax. The parser itself
+        # remains private so its representation cannot leak into callers.
+        def rh_downstream_parse_mirror_pair(s: u8&, a_out: mutable i64&, b_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_ds_parse_pair(s, a_out, b_out)
