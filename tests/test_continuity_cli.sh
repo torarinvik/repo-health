@@ -65,6 +65,11 @@ assert by["concentration.change_hhi"]["status"] == "observed", by
 assert by["concentration.change_hhi"]["value"] == {"num": 7, "den": 25}, by["concentration.change_hhi"]
 assert by["concentration.change_effective_actor_count"]["value"] == {"num": 25, "den": 7}, by
 assert by["concentration.change_absence_factor_50"]["value"] == 2, by
+assert by["concentration.top1_event_share"]["value"] == {"num": 2, "den": 5}, by
+assert by["concentration.hhi"]["value"] == {"num": 7, "den": 25}, by
+assert by["concentration.effective_actor_count"]["value"] == {"num": 25, "den": 7}, by
+assert by["concentration.absence_factor_50"]["value"] == 2, by
+assert by["concentration.actor_count_80"]["value"] == 3, by
 for key in ("persistence.active_3_of_12_months", "persistence.active_6_of_12_months", "persistence.active_9_of_12_months", "persistence.median_observed_tenure_days"):
     assert by[key]["status"] == "observed", (key, by[key])
 assert by["persistence.persistent_event_share"]["value"] == {"num": 0, "den": 5}, by
