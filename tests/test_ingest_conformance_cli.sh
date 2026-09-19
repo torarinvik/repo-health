@@ -10,6 +10,7 @@ echo "[ingest] build"
 bash "$ROOT/tools/build.sh" >/dev/null
 [[ -x "$ROOT/build/rh_cli" ]] || fail "rh_cli not built"
 
+rm -rf "$T-root" "$T-root-2" "$T-root-bad" "$T-root-bad2" "$T-input.json" "$T-out.json" "$T-out-2.json" "$T-bad.json" "$T-bad-status.json" "$T-x"
 python3 - "$T-input.json" <<'PY'
 import json, sys
 event = lambda ident, state: {"id": ident, "line": json.dumps({"id": ident, "state": state}, separators=(",", ":"))}
