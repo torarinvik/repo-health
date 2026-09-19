@@ -65,6 +65,9 @@ assert by["concentration.change_hhi"]["status"] == "observed", by
 assert by["concentration.change_hhi"]["value"] == {"num": 7, "den": 25}, by["concentration.change_hhi"]
 assert by["concentration.change_effective_actor_count"]["value"] == {"num": 25, "den": 7}, by
 assert by["concentration.change_absence_factor_50"]["value"] == 2, by
+for key in ("persistence.active_3_of_12_months", "persistence.active_6_of_12_months", "persistence.active_9_of_12_months", "persistence.median_observed_tenure_days"):
+    assert by[key]["status"] == "observed", (key, by[key])
+assert by["persistence.persistent_event_share"]["value"] == {"num": 0, "den": 5}, by
 print("[continuity] concentration values OK")
 PY
 
@@ -110,6 +113,14 @@ grep -q '"first_observation_basis":"first-observed"' "$T/win-cont/continuity.jso
 # R029: a windowed basis must never imply activity-change claims
 grep -q '"basis":"windowed"' "$T/win-cont/continuity.json" || fail "windowed basis label missing"
 grep -q '"activity_change_claims_supported":false' "$T/win-cont/continuity.json" || fail "windowed must not support activity-change claims"
+python3 - "$T/win-cont/continuity-metrics.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+by = {m["key"]: m for m in d["metrics"]}
+for key in ("persistence.active_3_of_12_months", "persistence.active_6_of_12_months", "persistence.active_9_of_12_months", "persistence.persistent_event_share", "persistence.median_observed_tenure_days"):
+    assert by[key]["status"] == "partial", (key, by[key])
+print("[continuity] persistence window states OK")
+PY
 
 echo "[continuity] full scan declares a full coverage basis (R029)"
 grep -q '"basis":"full"' "$CJ" || fail "full basis label missing"
