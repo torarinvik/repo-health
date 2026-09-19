@@ -23,7 +23,7 @@ python3 - "$T/match.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-parser-diff/1" and d["status"] == "match", d
-assert d["summary"] == {"mismatches": 0, "mapping": 0, "context": 0, "parser_support": 0}, d["summary"]
+assert d["summary"] == {"mismatches": 0, "mapping": 0, "context": 0, "parser_support": 0, "normalization": 0}, d["summary"]
 assert d["parsers"] == {"native": "native-lock/1", "candidate": "alt-lock/2", "configuration": "cargo-default", "visibility": "public"}, d["parsers"]
 assert len(d["cache_key"]) == 16, d
 print("[parser-diff] equal snapshot + metadata OK")
@@ -35,6 +35,8 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 d["nodes"][1]["name"] = "left-renamed"
 d["nodes"][0]["dev"] = True
+d["nodes"][3]["digest"] = False
+d["unresolved"][0]["reason"] = "context"
 d["nodes"].append({"id": 99, "name": "candidate-only", "version": "9.0.0", "source": "registry", "digest": False, "dev": False, "optional": False})
 json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
 PY
@@ -48,8 +50,9 @@ assert d["parsers"]["visibility"] == "private", d
 assert d["summary"]["mapping"] >= 1, d["summary"]
 assert d["summary"]["context"] >= 1, d["summary"]
 assert d["summary"]["parser_support"] >= 1, d["summary"]
+assert d["summary"]["normalization"] >= 2, d["summary"]
 classes = {x["class"] for x in d["mismatches"]}
-assert {"mapping", "context", "parser_support"} <= classes, classes
+assert {"mapping", "context", "parser_support", "normalization"} <= classes, classes
 print("[parser-diff] loss classes + visibility isolation OK")
 PY
 

@@ -77,6 +77,37 @@ module ParserDiff:
             return false if ai < 0 or bi < 0 or na[ai.usize()].kind != RH_JSON_BOOL or nb[bi.usize()].kind != RH_JSON_BOOL
             rh_json_is_true(na, ra, ai) == rh_json_is_true(nb, rb, bi)
 
+        def rh_diff_int_equal(na: darray[RhJsonNode]&, ra: darray[u8]&, a: i64, ta: darray[u8]&, nb: darray[RhJsonNode]&, rb: darray[u8]&, b: i64, tb: darray[u8]&, key: u8&) -> bool:
+            ai: i64 = ParserDiff::rh_diff_get(na, ta, a, key)
+            bi: i64 = ParserDiff::rh_diff_get(nb, tb, b, key)
+            return false if ai < 0 or bi < 0
+            aok: mutable i64 = 0
+            bok: mutable i64 = 0
+            av: i64 = rh_json_int(na, ra, ai, &aok)
+            bv: i64 = rh_json_int(nb, rb, bi, &bok)
+            aok == 1 and bok == 1 and av == bv
+
+        def rh_diff_optional_span_equal(na: darray[RhJsonNode]&, ta: darray[u8]&, a: i64, nb: darray[RhJsonNode]&, tb: darray[u8]&, b: i64, key: u8&) -> bool:
+            ai: i64 = ParserDiff::rh_diff_get(na, ta, a, key)
+            bi: i64 = ParserDiff::rh_diff_get(nb, tb, b, key)
+            return true if ai < 0 and bi < 0
+            return false if ai < 0 or bi < 0
+            return true if na[ai.usize()].kind == RH_JSON_NULL and nb[bi.usize()].kind == RH_JSON_NULL
+            return false if na[ai.usize()].kind == RH_JSON_NULL or nb[bi.usize()].kind == RH_JSON_NULL
+            as_: mutable i64 = -1
+            ae: mutable i64 = -1
+            bs_: mutable i64 = -1
+            be: mutable i64 = -1
+            return false if not ParserDiff::rh_diff_span(na, ai, &as_, &ae) or not ParserDiff::rh_diff_span(nb, bi, &bs_, &be)
+            ParserDiff::rh_diff_span_equal(ta, as_, ae, tb, bs_, be)
+
+        def rh_diff_edge_key_equal(na: darray[RhJsonNode]&, ra: darray[u8]&, a: i64, ta: darray[u8]&, nb: darray[RhJsonNode]&, rb: darray[u8]&, b: i64, tb: darray[u8]&) -> bool:
+            ParserDiff::rh_diff_int_equal(na, ra, a, ta, nb, rb, b, tb, "from") and ParserDiff::rh_diff_int_equal(na, ra, a, ta, nb, rb, b, tb, "to")
+
+        def rh_diff_unresolved_key_equal(na: darray[RhJsonNode]&, ra: darray[u8]&, a: i64, ta: darray[u8]&, nb: darray[RhJsonNode]&, rb: darray[u8]&, b: i64, tb: darray[u8]&) -> bool:
+            return false if not ParserDiff::rh_diff_int_equal(na, ra, a, ta, nb, rb, b, tb, "from")
+            ParserDiff::rh_diff_optional_span_equal(na, ta, a, nb, tb, b, "name") and ParserDiff::rh_diff_optional_span_equal(na, ta, a, nb, tb, b, "requirement")
+
         def rh_diff_emit_mismatch(out: mutable darray[u8]&, kind: u8&, detail: u8&, count: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
             return if count >= RH_DIFF_MAX_MISMATCHES
             if count > 0:
@@ -175,6 +206,7 @@ module ParserDiff:
             mapping_count: mutable i64 = 0
             context_count: mutable i64 = 0
             parser_count: mutable i64 = 0
+            normalization_count: mutable i64 = 0
             i: mutable i64 = 0
             while i < native_nodes.count.i64():
                 ni_obj: i64 = native_nodes[i.usize()]
@@ -194,6 +226,9 @@ module ParserDiff:
                     if not ParserDiff::rh_diff_bool_equal(nn, native_raw, ni_obj, nt, cn, candidate_raw, ci_obj, ct, "dev") or not ParserDiff::rh_diff_bool_equal(nn, native_raw, ni_obj, nt, cn, candidate_raw, ci_obj, ct, "optional"):
                         ParserDiff::rh_diff_emit_mismatch(mismatches, "context", "scope or optionality differs for a matched package", &mismatch_count)
                         context_count <- context_count + 1
+                    if not ParserDiff::rh_diff_bool_equal(nn, native_raw, ni_obj, nt, cn, candidate_raw, ci_obj, ct, "digest"):
+                        ParserDiff::rh_diff_emit_mismatch(mismatches, "normalization", "artifact digest evidence differs for a matched package", &mismatch_count)
+                        normalization_count <- normalization_count + 1
                 i <- i + 1
             j2: mutable i64 = 0
             while j2 < candidate_nodes.count.i64():
@@ -206,17 +241,91 @@ module ParserDiff:
             if edges_a < 0 or edges_b < 0 or nn[edges_a.usize()].kind != RH_JSON_ARR or cn[edges_b.usize()].kind != RH_JSON_ARR:
                 ParserDiff::rh_diff_emit_mismatch(mismatches, "parser_support", "one parser omitted the edge array", &mismatch_count)
                 parser_count <- parser_count + 1
-            elif nn[edges_a.usize()].child_count != cn[edges_b.usize()].child_count:
-                ParserDiff::rh_diff_emit_mismatch(mismatches, "context", "resolved edge count differs", &mismatch_count)
-                context_count <- context_count + 1
+            else:
+                return -1 if nn[edges_a.usize()].child_count > RH_DIFF_MAX_NODES or cn[edges_b.usize()].child_count > RH_DIFF_MAX_NODES
+                native_edges: mutable darray[i64] = []
+                candidate_edges: mutable darray[i64] = []
+                while ei >= 0 |ei: i64 = nn[edges_a.usize()].first_child, nn, native_edges|:
+                    native_edges.push(ei)
+                    ei <- nn[ei.usize()].next_sibling
+                while ei >= 0 |ei: i64 = cn[edges_b.usize()].first_child, cn, candidate_edges|:
+                    candidate_edges.push(ei)
+                    ei <- cn[ei.usize()].next_sibling
+                edge_used: mutable darray[i64] = []
+                while ei < candidate_edges.count.i64() |ei: i64 = 0, candidate_edges, edge_used|:
+                    edge_used.push(0)
+                    ei <- ei + 1
+                ei: mutable i64 = 0
+                while ei < native_edges.count.i64():
+                    native_edge: i64 = native_edges[ei.usize()]
+                    edge_match: mutable i64 = -1
+                    ej: mutable i64 = 0
+                    while ej < candidate_edges.count.i64():
+                        if edge_used[ej.usize()] == 0 and ParserDiff::rh_diff_edge_key_equal(nn, native_raw, native_edge, nt, cn, candidate_raw, candidate_edges[ej.usize()], ct):
+                            edge_match <- ej
+                            break
+                        ej <- ej + 1
+                    if edge_match < 0:
+                        ParserDiff::rh_diff_emit_mismatch(mismatches, "mapping", "resolved edge has no candidate endpoint pair", &mismatch_count)
+                        mapping_count <- mapping_count + 1
+                    else:
+                        edge_used[edge_match.usize()] <- 1
+                        candidate_edge: i64 = candidate_edges[edge_match.usize()]
+                        if not ParserDiff::rh_diff_optional_span_equal(nn, nt, native_edge, cn, ct, candidate_edge, "scope"):
+                            ParserDiff::rh_diff_emit_mismatch(mismatches, "context", "resolved edge scope differs", &mismatch_count)
+                            context_count <- context_count + 1
+                    ei <- ei + 1
+                ei <- 0
+                while ei < candidate_edges.count.i64():
+                    if edge_used[ei.usize()] == 0:
+                        ParserDiff::rh_diff_emit_mismatch(mismatches, "mapping", "candidate edge has no native endpoint pair", &mismatch_count)
+                        mapping_count <- mapping_count + 1
+                    ei <- ei + 1
             unresolved_a: i64 = ParserDiff::rh_diff_get(nn, nt, nr, "unresolved")
             unresolved_b: i64 = ParserDiff::rh_diff_get(cn, ct, cr, "unresolved")
             if unresolved_a < 0 or unresolved_b < 0 or nn[unresolved_a.usize()].kind != RH_JSON_ARR or cn[unresolved_b.usize()].kind != RH_JSON_ARR:
                 ParserDiff::rh_diff_emit_mismatch(mismatches, "parser_support", "unresolved requirement evidence is missing", &mismatch_count)
                 parser_count <- parser_count + 1
-            elif nn[unresolved_a.usize()].child_count != cn[unresolved_b.usize()].child_count:
-                ParserDiff::rh_diff_emit_mismatch(mismatches, "parser_support", "unresolved requirement count differs", &mismatch_count)
-                parser_count <- parser_count + 1
+            else:
+                return -1 if nn[unresolved_a.usize()].child_count > RH_DIFF_MAX_NODES or cn[unresolved_b.usize()].child_count > RH_DIFF_MAX_NODES
+                native_unresolved: mutable darray[i64] = []
+                candidate_unresolved: mutable darray[i64] = []
+                while ui >= 0 |ui: i64 = nn[unresolved_a.usize()].first_child, nn, native_unresolved|:
+                    native_unresolved.push(ui)
+                    ui <- nn[ui.usize()].next_sibling
+                while ui >= 0 |ui: i64 = cn[unresolved_b.usize()].first_child, cn, candidate_unresolved|:
+                    candidate_unresolved.push(ui)
+                    ui <- cn[ui.usize()].next_sibling
+                unresolved_used: mutable darray[i64] = []
+                while ui < candidate_unresolved.count.i64() |ui: i64 = 0, candidate_unresolved, unresolved_used|:
+                    unresolved_used.push(0)
+                    ui <- ui + 1
+                ui: mutable i64 = 0
+                while ui < native_unresolved.count.i64():
+                    native_item: i64 = native_unresolved[ui.usize()]
+                    unresolved_match: mutable i64 = -1
+                    uj: mutable i64 = 0
+                    while uj < candidate_unresolved.count.i64():
+                        if unresolved_used[uj.usize()] == 0 and ParserDiff::rh_diff_unresolved_key_equal(nn, native_raw, native_item, nt, cn, candidate_raw, candidate_unresolved[uj.usize()], ct):
+                            unresolved_match <- uj
+                            break
+                        uj <- uj + 1
+                    if unresolved_match < 0:
+                        ParserDiff::rh_diff_emit_mismatch(mismatches, "parser_support", "unresolved requirement identity differs", &mismatch_count)
+                        parser_count <- parser_count + 1
+                    else:
+                        unresolved_used[unresolved_match.usize()] <- 1
+                        candidate_item: i64 = candidate_unresolved[unresolved_match.usize()]
+                        if not ParserDiff::rh_diff_optional_span_equal(nn, nt, native_item, cn, ct, candidate_item, "reason"):
+                            ParserDiff::rh_diff_emit_mismatch(mismatches, "normalization", "unresolved requirement reason differs", &mismatch_count)
+                            normalization_count <- normalization_count + 1
+                    ui <- ui + 1
+                ui <- 0
+                while ui < candidate_unresolved.count.i64():
+                    if unresolved_used[ui.usize()] == 0:
+                        ParserDiff::rh_diff_emit_mismatch(mismatches, "parser_support", "candidate unresolved requirement has no native identity match", &mismatch_count)
+                        parser_count <- parser_count + 1
+                    ui <- ui + 1
             rh_push_text(out, "different\",") if mismatch_count > 0 else rh_push_text(out, "match\",")
             rh_diff_parser_meta(out, native_parser, candidate_parser, configuration, visibility)
             rh_push_text(out, ",\"inputs\":{\"native_digest\":\"")
@@ -233,6 +342,8 @@ module ParserDiff:
             rh_push_decimal_i64(out, context_count)
             rh_push_text(out, ",\"parser_support\":")
             rh_push_decimal_i64(out, parser_count)
+            rh_push_text(out, ",\"normalization\":")
+            rh_push_decimal_i64(out, normalization_count)
             rh_push_text(out, "},\"mismatches\":[")
             out.extend(bytes_view(mismatches))
             rh_push_text(out, "],\"note\":\"differential comparison preserves parser/version/configuration identity; unsupported input is distinct from successful emptiness; visibility is part of the cache identity\"}")
