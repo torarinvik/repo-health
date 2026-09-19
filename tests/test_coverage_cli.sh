@@ -23,6 +23,14 @@ d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-coverage-result/1", d
 assert d["source"] == "github" and d["source_instance"] == "github.com/acme/project", d
 assert d["state_counts"] == {"observed": 1, "partial": 1, "stale": 0, "unavailable": 0, "unauthorized": 1, "not_applicable": 0, "unsupported": 0}, d
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["coverage.observed_capability_count"]["value"] == 1, metrics
+assert metrics["coverage.partial_capability_count"]["value"] == 1, metrics
+assert metrics["coverage.stale_capability_count"]["value"] == 0, metrics
+assert metrics["coverage.unavailable_capability_count"]["value"] == 0, metrics
+assert metrics["coverage.unauthorized_capability_count"]["value"] == 1, metrics
+assert metrics["coverage.not_applicable_capability_count"]["value"] == 0, metrics
+assert metrics["coverage.unsupported_capability_count"]["value"] == 0, metrics
 assert d["capabilities"][0]["valid_start"] is None, d
 assert d["capabilities"][1]["valid_end"] is None, d
 assert "source-specific" in d["note"], d
