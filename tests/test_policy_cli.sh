@@ -35,6 +35,13 @@ assert d["fired_rule_ids"] == [1], d
 assert d["binding"]["policy_digest"] and len(d["binding"]["policy_digest"]) == 16, d
 assert d["explanation"]["decision"] == "deny", d["explanation"]
 assert "unknown is never permission" in d["note"], d["note"]
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["policy.evaluations"]["value"] == 1, metrics
+assert metrics["policy.allow_count"]["value"] == 0, metrics
+assert metrics["policy.warn_count"]["value"] == 0, metrics
+assert metrics["policy.deny_count"]["value"] == 1, metrics
+assert metrics["policy.unknown_count"]["value"] == 0, metrics
+assert metrics["policy.active_exceptions"]["value"] == 0, metrics
 print("[policy] deny OK")
 PY
 
