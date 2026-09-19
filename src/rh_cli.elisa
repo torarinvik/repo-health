@@ -119,6 +119,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli worker tick --input <file> --out <file>")
     rh_cli_err("       rh_cli inventory --format cyclonedx|spdx --input <file> --out <file>")
     rh_cli_err("       rh_cli vcs --format hg|svn|fossil|patch --input <file> --out <file>")
+    rh_cli_err("       rh_cli vcs --format hg|svn|fossil --repo <path> --out <file>")
     rh_cli_err("       rh_cli notify --input <file> --out <file> [--state <file> | --state-store <dir>]")
     rh_cli_err("       rh_cli query --input <file> --out <file>")
     rh_cli_err("       rh_cli identity --input <file> --out <file>")
@@ -1249,8 +1250,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if iv_idx < 0 or ii_idx < 0 or io_idx < 0
         return rh_do_inventory(slots[iv_idx], slots[ii_idx], slots[io_idx])
     if rh_streq(cmd, "vcs"):
-        vc_idx, vi_idx, vo_idx =
-            while vv < argc |vc_idx: i64 = -1, vi_idx: i64 = -1, vo_idx: i64 = -1, vv: i64 = 2, slots| -> vc_idx, vi_idx, vo_idx:
+        vc_idx, vi_idx, vo_idx, vr_idx =
+            while vv < argc |vc_idx: i64 = -1, vi_idx: i64 = -1, vo_idx: i64 = -1, vr_idx: i64 = -1, vv: i64 = 2, slots| -> vc_idx, vi_idx, vo_idx, vr_idx:
                 a15: u8& = slots[vv].cast[u8&] can Unsafe.PointerCast
                 if rh_streq(a15, "--format"):
                     if vv + 1 < argc:
@@ -1270,11 +1271,25 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         vo_idx <- vv
                     else:
                         return rh_cli_usage(2)
+                elif rh_streq(a15, "--repo"):
+                    if vv + 1 < argc:
+                        vv <- vv + 1
+                        vr_idx <- vv
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 vv <- vv + 1
-        return rh_cli_usage(2) if vc_idx < 0 or vi_idx < 0 or vo_idx < 0
-        return rh_do_vcs(slots[vc_idx], slots[vi_idx], slots[vo_idx])
+        return rh_cli_usage(2) if vc_idx < 0 or vo_idx < 0
+        return rh_cli_usage(2) if vi_idx >= 0 and vr_idx >= 0
+        return rh_cli_usage(2) if vi_idx < 0 and vr_idx < 0
+        vcs_input: mutable cstr = slots[vc_idx]
+        vcs_repo: mutable cstr = slots[vc_idx]
+        if vi_idx >= 0:
+            vcs_input <- slots[vi_idx]
+        if vr_idx >= 0:
+            vcs_repo <- slots[vr_idx]
+        return rh_do_vcs(slots[vc_idx], vcs_input, slots[vo_idx], vcs_repo, vr_idx >= 0)
     if rh_streq(cmd, "notify"):
         nf_idx, no_idx, ns_idx, nt_idx =
             while nf < argc |nf_idx: i64 = -1, no_idx: i64 = -1, ns_idx: i64 = -1, nt_idx: i64 = -1, nf: i64 = 2, slots| -> nf_idx, no_idx, ns_idx, nt_idx:
@@ -4298,11 +4313,19 @@ def rh_do_inventory(format: cstr, input_path: cstr, out_path: cstr) -> i32 can[M
 # `--format hg` parses `hg log -Tjson` into rh-vcs/1 (native node id, local
 # rev, raw author, tags-not-releases, rejected-not-guessed). `--format patch`
 # parses an mbox-like series into rh-patch/1 (logical-change collapse,
-# trailer counts, Fixes: is a claim). Wrong shape / unknown format fails
-# closed.
-def rh_do_vcs(format: cstr, input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not rh_arg_safe(format) or not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+# trailer counts, Fixes: is a claim). `--repo` runs a bounded native command,
+# retains its source and stderr beside the normalized report, and then uses the
+# same parser as `--input`. Wrong shape / unknown format fails closed.
+def rh_do_vcs(format: cstr, input_path: cstr, out_path: cstr, repo_path: cstr, has_repo: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(format) or not rh_arg_safe(out_path):
         rh_cli_err("rejected vcs argument (allowlist)")
+        return 3
+    if has_repo:
+        if not rh_arg_safe(repo_path):
+            rh_cli_err("rejected vcs repository argument (allowlist)")
+            return 3
+    elif not rh_arg_safe(input_path):
+        rh_cli_err("rejected vcs input argument (allowlist)")
         return 3
     fmt: mutable u8 = 0
     if rh_streq(format, "hg"):
@@ -4318,16 +4341,46 @@ def rh_do_vcs(format: cstr, input_path: cstr, out_path: cstr) -> i32 can[Memory.
     else:
         rh_cli_err("vcs: unsupported --format (hg|svn|fossil|patch|gerrit)")
         return 3
-    ip: mutable darray[u8] =
-        ip: mutable darray[u8] = []
-        rh_push_cstr(ip, input_path)
-        ip.push(0)
-        ip
-    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
     raw: mutable darray[u8] = []
-    if rh_io_read(ipp, raw) < 0:
-        rh_cli_err("vcs: cannot read --input")
-        return 4
+    if has_repo:
+        return 3 if fmt == 1 or fmt == 4
+        source_path: mutable darray[u8] =
+            source_path: mutable darray[u8] = []
+            rh_push_cstr(source_path, out_path)
+            rh_push_text(source_path, ".source")
+            source_path.push(0)
+            source_path
+        error_path: mutable darray[u8] =
+            error_path: mutable darray[u8] = []
+            rh_push_cstr(error_path, out_path)
+            rh_push_text(error_path, ".source.err")
+            error_path.push(0)
+            error_path
+        source_ptr: cstr = (&source_path[0]).cast[cstr] can Unsafe.PointerCast
+        error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
+        command_rc: i64 =
+            if fmt == 0:
+                rh_run_hg_log(repo_path, source_ptr, error_ptr)
+            elif fmt == 2:
+                rh_run_svn_log(repo_path, source_ptr, error_ptr)
+            else:
+                rh_run_fossil_timeline(repo_path, source_ptr, error_ptr)
+        if command_rc != 0:
+            rh_cli_err("vcs: native collector failed; source and stderr evidence retained")
+            return 4
+        if rh_io_read(source_ptr, raw) < 0:
+            rh_cli_err("vcs: cannot read native source evidence")
+            return 4
+    else:
+        ip: mutable darray[u8] =
+            ip: mutable darray[u8] = []
+            rh_push_cstr(ip, input_path)
+            ip.push(0)
+            ip
+        ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_io_read(ipp, raw) < 0:
+            rh_cli_err("vcs: cannot read --input")
+            return 4
     body: mutable darray[u8] = []
     if rh_vcs_report(raw, fmt, body) != 0:
         rh_cli_err("vcs: input does not parse for the requested format (fail closed)")

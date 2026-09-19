@@ -193,6 +193,38 @@ assert d["entries"][0]["has_date"] is False and d["entries"][0]["utc"] == -1, d[
 print("[vcs] fossil bad date not guessed OK")
 PY
 
+echo "[vcs] native --repo collection retains source and stderr evidence"
+mkdir -p "$T/bin" "$T/repo"
+cat > "$T/bin/hg" <<'SH'
+#!/usr/bin/env bash
+cat "$RH_HG_FIXTURE"
+SH
+cat > "$T/bin/svn" <<'SH'
+#!/usr/bin/env bash
+cat "$RH_SVN_FIXTURE"
+SH
+cat > "$T/bin/fossil" <<'SH'
+#!/usr/bin/env bash
+cat "$RH_FOSSIL_FIXTURE"
+SH
+chmod +x "$T/bin/hg" "$T/bin/svn" "$T/bin/fossil"
+PATH="$T/bin:$PATH" RH_HG_FIXTURE="$T/hg.json" \
+  "$ROOT/build/rh_cli" vcs --format hg --repo "$T/repo" --out "$T/hg-live.out" >/dev/null || fail "native hg run"
+PATH="$T/bin:$PATH" RH_SVN_FIXTURE="$T/svn-log.xml" \
+  "$ROOT/build/rh_cli" vcs --format svn --repo "$T/repo" --out "$T/svn-live.out" >/dev/null || fail "native svn run"
+PATH="$T/bin:$PATH" RH_FOSSIL_FIXTURE="$T/fossil-timeline.txt" \
+  "$ROOT/build/rh_cli" vcs --format fossil --repo "$T/repo" --out "$T/fossil-live.out" >/dev/null || fail "native fossil run"
+cmp -s "$T/hg.json" "$T/hg-live.out.source" || fail "native hg source evidence mismatch"
+cmp -s "$T/svn-log.xml" "$T/svn-live.out.source" || fail "native svn source evidence mismatch"
+cmp -s "$T/fossil-timeline.txt" "$T/fossil-live.out.source" || fail "native fossil source evidence mismatch"
+[[ -f "$T/hg-live.out.source.err" && ! -s "$T/hg-live.out.source.err" ]] || fail "native hg stderr evidence"
+[[ -f "$T/svn-live.out.source.err" && ! -s "$T/svn-live.out.source.err" ]] || fail "native svn stderr evidence"
+[[ -f "$T/fossil-live.out.source.err" && ! -s "$T/fossil-live.out.source.err" ]] || fail "native fossil stderr evidence"
+cmp -s "$T/hg.out" "$T/hg-live.out" || fail "native hg normalization mismatch"
+cmp -s "$T/svn.out" "$T/svn-live.out" || fail "native svn normalization mismatch"
+cmp -s "$T/fossil.out" "$T/fossil-live.out" || fail "native fossil normalization mismatch"
+echo "[vcs] native --repo evidence OK"
+
 echo "[vcs] determinism + negatives"
 "$ROOT/build/rh_cli" vcs --format hg --input "$T/hg.json" --out "$T/hg2.out" >/dev/null || fail "hg rerun"
 cmp -s "$T/hg.out" "$T/hg2.out" || fail "hg not deterministic"
@@ -203,11 +235,17 @@ printf '{"a":1}' > "$T/obj.json"
 "$ROOT/build/rh_cli" vcs --format hg --input "$T/obj.json" --out "$T/x" >/dev/null 2>&1; rc_shape=$?
 "$ROOT/build/rh_cli" vcs --format cvs --input "$T/hg.json" --out "$T/x" >/dev/null 2>&1; rc_fmt=$?
 "$ROOT/build/rh_cli" vcs --format hg --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
+"$ROOT/build/rh_cli" vcs --format hg --out "$T/x" >/dev/null 2>&1; rc_neither=$?
+"$ROOT/build/rh_cli" vcs --format hg --input "$T/hg.json" --repo "$T/repo" --out "$T/x" >/dev/null 2>&1; rc_both=$?
+"$ROOT/build/rh_cli" vcs --format patch --repo "$T/repo" --out "$T/x" >/dev/null 2>&1; rc_patch_repo=$?
 set -e
 [[ "$rc_json" -eq 4 ]] || fail "invalid JSON must exit 4 (got $rc_json)"
 [[ "$rc_shape" -eq 4 ]] || fail "wrong-shape JSON must exit 4 (got $rc_shape)"
 [[ "$rc_fmt" -eq 3 ]] || fail "unknown format must exit 3 (got $rc_fmt)"
 [[ "$rc_missing" -eq 4 ]] || fail "missing input must exit 4 (got $rc_missing)"
+[[ "$rc_neither" -eq 2 ]] || fail "missing input/repo must exit 2 (got $rc_neither)"
+[[ "$rc_both" -eq 2 ]] || fail "input and repo together must exit 2 (got $rc_both)"
+[[ "$rc_patch_repo" -eq 3 ]] || fail "patch repo mode must exit 3 (got $rc_patch_repo)"
 
 echo "[vcs] gerrit change folds N patch-sets into ONE logical change (R025)"
 cp "$ROOT/fixtures/vcs/gerrit-changes.json" "$T/gerrit-changes.json"
