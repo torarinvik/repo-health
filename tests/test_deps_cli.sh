@@ -72,6 +72,8 @@ assert {key: metrics[key]["value"] for key in metrics} == {
     "dependency.requirements_direct": 8,
     "dependency.resolved_direct_versions": 5,
     "dependency.unresolved_requirements": 1,
+    "dependency.resolved_transitive_versions": 6,
+    "security.known_advisory_records": 3,
     "security.known_unique_advisories": 2,
     "security.affected_resolved_nodes": 2,
     "security.withdrawn_advisory_count": 2,
@@ -85,6 +87,10 @@ assert by["cargo"]["requirements_direct"] == 1, by["cargo"]
 assert by["npm"]["requirements_direct"] == 7, by["npm"]
 assert by["cargo"]["resolved_direct_versions"] == 0, by["cargo"]
 assert by["npm"]["resolved_direct_versions"] == 5, by["npm"]
+assert by["cargo"]["resolved_transitive_versions"] == 0, by["cargo"]
+assert by["npm"]["resolved_transitive_versions"] == 6, by["npm"]
+assert by["cargo"]["known_advisory_records"] == 2, by["cargo"]
+assert by["npm"]["known_advisory_records"] == 1, by["npm"]
 assert by["cargo"]["known_unique_advisories"] == 1, by["cargo"]
 assert by["npm"]["known_unique_advisories"] == 1, by["npm"]
 assert by["cargo"]["affected_resolved_nodes"] == 1, by["cargo"]
@@ -156,6 +162,7 @@ assert by["pypi"]["unresolved_requirements"] == 5, by["pypi"]
 assert by["pypi"]["requirements_direct"] == 7, by["pypi"]
 assert by["pypi"]["resolved_direct_versions"] == 3, by["pypi"]
 assert by["pypi"]["unresolved_direct_requirements"] == 5, by["pypi"]
+assert by["pypi"]["resolved_transitive_versions"] == 3, by["pypi"]
 assert by["pypi"]["unsupported_range_count"] == 1, by["pypi"]
 assert m["metrics"][0]["value"] == 1, m["metrics"][0]
 metrics = {item["key"]: item for item in m["metrics"]}

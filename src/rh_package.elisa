@@ -1109,6 +1109,27 @@ module Package:
                 i <- i + 1
             false
 
+        # Complete reachability from one root over the finite graph. The node
+        # count bounds the walk, so cycles terminate without an arbitrary depth
+        # parameter; the root itself is excluded from the returned count.
+        def rh_reachable_dependency_count(edges: mutable darray[RhDepEdge]&, node_count: mutable i64, root: mutable i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if node_count <= 0 or root < 0 or root >= node_count
+            frontier: mutable darray[i64] = []
+            seen: mutable darray[i64] = []
+            frontier.push(root)
+            while fi < frontier.count |fi: i64 = 0, frontier, seen, edges, node_count|:
+                cur: mutable i64 = frontier[fi.usize()]
+                fi <- fi + 1
+                continue if rh_visited_has(seen, cur)
+                seen.push(cur)
+                return seen.count.i64() - 1 if seen.count.i64() >= node_count
+                while ei < edges.count.i64() |ei: i64 = 0, edges, cur, frontier, seen|:
+                    edge: mutable RhDepEdge = edges[ei.usize()]
+                    if edge.from == cur and not rh_visited_has(seen, edge.dst):
+                        frontier.push(edge.dst)
+                    ei <- ei + 1
+            seen.count.i64() - 1
+
         # Forward BFS from roots. visited_out collects unique reachable nodes
         # EXCLUDING the roots themselves; trunc_out 1 when a budget/depth limit
         # stopped the walk. Returns the visited count, or -1 on bad input.
@@ -1517,6 +1538,14 @@ module Package:
                         j <- j + 1
                 if not already:
                     seen.push(node)
+                i <- i + 1
+
+        # Raw matched advisory records before accepted id/alias group
+        # deduplication. `alias_count` stores the additional candidates folded
+        # into each published advisory group.
+        def rh_advisory_record_count(findings: mutable darray[RhAdvisory]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < findings.count |total: i64 = 0, i: i64 = 0, findings| -> total:
+                total <- total + findings[i.usize()].alias_count + 1
                 i <- i + 1
 
         # Triples (kind, vstart, vend) per range event: 0 introduced, 1 fixed,
@@ -2302,7 +2331,7 @@ module Package:
         # `dependencies.unsupported_range_count`, with per-ecosystem components so
         # the denominator-free count can be audited. It never claims a dependency
         # is safe or that the graph is complete (R009/F022/R030).
-        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, advisories: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, transitive_resolved: mutable darray[i64]&, advisories: mutable darray[i64]&, advisory_records: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
             total_declared: i64 =
                 while i < eco_codes.count.i64() |total_declared: i64 = 0, i: i64 = 0| -> total_declared:
                     total_declared <- total_declared + declared[i.usize()]
@@ -2331,13 +2360,21 @@ module Package:
                 while i < eco_codes.count.i64() |total_direct_unresolved: i64 = 0, i: i64 = 0, direct_unresolved| -> total_direct_unresolved:
                     total_direct_unresolved <- total_direct_unresolved + direct_unresolved[i.usize()]
                     i <- i + 1
+            total_transitive_resolved: i64 =
+                while i < eco_codes.count.i64() |total_transitive_resolved: i64 = 0, i: i64 = 0, transitive_resolved| -> total_transitive_resolved:
+                    total_transitive_resolved <- total_transitive_resolved + transitive_resolved[i.usize()]
+                    i <- i + 1
             security_observed: bool = advisories.count == eco_codes.count and eco_codes.count > 0 and advisories[0] >= 0
             total_advisories: mutable i64 = 0
+            total_advisory_records: mutable i64 = 0
             total_affected_nodes: mutable i64 = 0
             total_withdrawn: mutable i64 = 0
             if security_observed:
                 total_advisories <- while i < eco_codes.count.i64() |total_advisories: i64 = 0, i: i64 = 0, advisories| -> total_advisories:
                     total_advisories <- total_advisories + advisories[i.usize()]
+                    i <- i + 1
+                total_advisory_records <- while i < eco_codes.count.i64() |total_advisory_records: i64 = 0, i: i64 = 0, advisory_records| -> total_advisory_records:
+                    total_advisory_records <- total_advisory_records + advisory_records[i.usize()]
                     i <- i + 1
                 total_affected_nodes <- while i < eco_codes.count.i64() |total_affected_nodes: i64 = 0, i: i64 = 0, affected_nodes| -> total_affected_nodes:
                     total_affected_nodes <- total_affected_nodes + affected_nodes[i.usize()]
@@ -2377,6 +2414,16 @@ module Package:
             Base::rh_push_text(out, "{\"key\":\"dependency.unresolved_requirements\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, total_direct_unresolved)
             Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.resolved_transitive_versions\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, total_transitive_resolved)
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"security.known_advisory_records\",\"version\":\"1.0.0\",\"status\":\"")
+            if security_observed:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, total_advisory_records)
+            else:
+                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"security.known_unique_advisories\",\"version\":\"1.0.0\",\"status\":\"")
             if security_observed:
                 Base::rh_push_text(out, "observed\",\"value\":")
@@ -2398,7 +2445,7 @@ module Package:
             else:
                 Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
             Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]}],\"by_ecosystem\":[")
-            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, advisories, affected_nodes, withdrawn, out|:
+            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, transitive_resolved, advisories, advisory_records, affected_nodes, withdrawn, out|:
                 if k > 0:
                     out.push(44)
                 ec: i64 = eco_codes[k.usize()]
@@ -2420,6 +2467,13 @@ module Package:
                 Base::rh_push_decimal_i64(out, direct_resolved[k.usize()])
                 Base::rh_push_text(out, ",\"unresolved_direct_requirements\":")
                 Base::rh_push_decimal_i64(out, direct_unresolved[k.usize()])
+                Base::rh_push_text(out, ",\"resolved_transitive_versions\":")
+                Base::rh_push_decimal_i64(out, transitive_resolved[k.usize()])
+                Base::rh_push_text(out, ",\"known_advisory_records\":")
+                if security_observed:
+                    Base::rh_push_decimal_i64(out, advisory_records[k.usize()])
+                else:
+                    Base::rh_push_text(out, "null")
                 Base::rh_push_text(out, ",\"known_unique_advisories\":")
                 if security_observed:
                     Base::rh_push_decimal_i64(out, advisories[k.usize()])
