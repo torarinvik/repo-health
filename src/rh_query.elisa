@@ -34,7 +34,7 @@ const RH_JOB_CANCELED: u8 = 5
 const RH_QPAGE_MAX: i64 = 1000
 
 def rh_query_kind_valid(kind: u8) -> bool:
-    return kind <= RH_Q_SCAN_STATUS
+    kind <= RH_Q_SCAN_STATUS
 
 # Pagination over an ascending-sorted id list. The cursor is the last id
 # already delivered (exclusive); ids lower than the cursor are skipped so
@@ -48,12 +48,10 @@ def rh_query_page(ids: darray[i64]&, cursor: i64, limit: i64, out: mutable darra
         next_cursor[0] <- -1
         return out.count.i64()
     cap: i64 = limit if limit <= RH_QPAGE_MAX else RH_QPAGE_MAX
-    i: mutable usize = 0
-    while i < ids.count |i, ids, cursor, cap, out, next_cursor, complete|:
+    while i < ids.count |i: usize = 0, ids, cursor, cap, out, next_cursor, complete|:
         v: i64 = ids[i]
         i <- i + 1
-        if v <= cursor:
-            continue
+        continue if v <= cursor
         if out.count.i64() >= cap:
             complete[0] <- 0
             last_i: usize = out.count - 1
@@ -62,7 +60,7 @@ def rh_query_page(ids: darray[i64]&, cursor: i64, limit: i64, out: mutable darra
         out.push(v)
     complete[0] <- 1
     next_cursor[0] <- -1
-    return out.count.i64()
+    out.count.i64()
 
 # Counts per capability state over a scan's capability rows. States use
 # rh_observation codes (0 observed, 2 unavailable, 4 partial, 5 stale,
@@ -76,8 +74,7 @@ def rh_scan_status_tally(states: darray[u8]&, observed_out: mutable i64&, stale_
     unavailable_out[0] <- 0
     unauthorized_out[0] <- 0
     other_out[0] <- 0
-    i: mutable usize = 0
-    while i < states.count |i, states, observed_out, stale_out, partial_out, unavailable_out, unauthorized_out, other_out|:
+    while i < states.count |i: usize = 0, states, observed_out, stale_out, partial_out, unavailable_out, unauthorized_out, other_out|:
         s: u8 = states[i]
         i <- i + 1
         if s == 0:
@@ -98,8 +95,7 @@ def rh_scan_status_tally(states: darray[u8]&, observed_out: mutable i64&, stale_
 # that previously had data becomes stale; one without data becomes
 # unavailable. Other capabilities are untouched.
 def rh_capability_failure(states: mutable darray[u8]&, capability: i64, had_data: bool) -> void can[Memory.Allocate, Abort.Panic]:
-    if capability < 0 or capability >= states.count.i64():
-        return
+    return if capability < 0 or capability >= states.count.i64()
     states[capability.usize()] <- (5 if had_data else 2)
     return
 
@@ -114,45 +110,35 @@ struct RhJobLease:
     phase: mutable u8
 
 def rh_job_make(job_id: i64) -> RhJobLease:
-    return RhJobLease{job_id: job_id, token: 0, owner_id: -1, expires_at: 0, phase: RH_JOB_QUEUED}
+    RhJobLease{job_id: job_id, token: 0, owner_id: -1, expires_at: 0, phase: RH_JOB_QUEUED}
 
 def rh_job_claim(l: mutable RhJobLease&, owner_id: i64, now: i64, ttl: i64) -> i64:
-    if ttl <= 0:
-        return -1
-    if l.phase == RH_JOB_SUCCEEDED or l.phase == RH_JOB_FAILED_TERMINAL or l.phase == RH_JOB_CANCELED:
-        return -2
-    if l.phase != RH_JOB_QUEUED and now < l.expires_at:
-        return -1
+    return -1 if ttl <= 0
+    return -2 if l.phase == RH_JOB_SUCCEEDED or l.phase == RH_JOB_FAILED_TERMINAL or l.phase == RH_JOB_CANCELED
+    return -1 if l.phase != RH_JOB_QUEUED and now < l.expires_at
     l.token <- l.token + 1
     l.owner_id <- owner_id
     l.expires_at <- now + ttl
     l.phase <- RH_JOB_LEASED
-    return l.token
+    l.token
 
 def rh_job_renew(l: mutable RhJobLease&, token: i64, now: i64, ttl: i64) -> bool:
-    if l.token != token:
-        return false
-    if l.phase == RH_JOB_SUCCEEDED or l.phase == RH_JOB_FAILED_TERMINAL or l.phase == RH_JOB_CANCELED:
-        return false
-    if ttl <= 0:
-        return false
+    return false if l.token != token
+    return false if l.phase == RH_JOB_SUCCEEDED or l.phase == RH_JOB_FAILED_TERMINAL or l.phase == RH_JOB_CANCELED
+    return false if ttl <= 0
     l.expires_at <- now + ttl
     if l.phase == RH_JOB_LEASED:
         l.phase <- RH_JOB_RUNNING
-    return true
+    true
 
 def rh_job_finish(l: mutable RhJobLease&, token: i64, final_phase: u8) -> bool:
-    if l.token != token:
-        return false
-    if l.phase == RH_JOB_SUCCEEDED or l.phase == RH_JOB_FAILED_TERMINAL or l.phase == RH_JOB_CANCELED:
-        return false
+    return false if l.token != token
+    return false if l.phase == RH_JOB_SUCCEEDED or l.phase == RH_JOB_FAILED_TERMINAL or l.phase == RH_JOB_CANCELED
     l.phase <- final_phase
-    return true
+    true
 
 # Budget check for a bounded graph job: within node and wall-clock limits.
 def rh_job_within_budget(visited_nodes: i64, deadline: i64, now: i64, max_nodes: i64) -> bool:
-    if visited_nodes > max_nodes:
-        return false
-    if deadline > 0 and now > deadline:
-        return false
-    return true
+    return false if visited_nodes > max_nodes
+    return false if deadline > 0 and now > deadline
+    true

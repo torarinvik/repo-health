@@ -41,72 +41,48 @@ struct RhHgChange:
     phase: u8
 
 def rh_hg_phase_label(phase: u8) -> u8&:
-    if phase == RH_HG_PHASE_PUBLIC:
-        return "public"
-    if phase == RH_HG_PHASE_DRAFT:
-        return "draft"
-    if phase == RH_HG_PHASE_SECRET:
-        return "secret"
-    return "unknown"
+    return "public" if phase == RH_HG_PHASE_PUBLIC
+    return "draft" if phase == RH_HG_PHASE_DRAFT
+    return "secret" if phase == RH_HG_PHASE_SECRET
+    "unknown"
 
 def rh_hg_phase_of(texts: darray[u8]&, s: i64, e: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
-    if s < 0 or e < s:
-        return RH_HG_PHASE_UNKNOWN
+    return RH_HG_PHASE_UNKNOWN if s < 0 or e < s
     n: i64 = e - s
-    if n == 6 and rh_hg_span_eq(texts, s, e, "public"):
-        return RH_HG_PHASE_PUBLIC
-    if n == 5 and rh_hg_span_eq(texts, s, e, "draft"):
-        return RH_HG_PHASE_DRAFT
-    if n == 6 and rh_hg_span_eq(texts, s, e, "secret"):
-        return RH_HG_PHASE_SECRET
-    return RH_HG_PHASE_UNKNOWN
+    return RH_HG_PHASE_PUBLIC if n == 6 and rh_hg_span_eq(texts, s, e, "public")
+    return RH_HG_PHASE_DRAFT if n == 5 and rh_hg_span_eq(texts, s, e, "draft")
+    return RH_HG_PHASE_SECRET if n == 6 and rh_hg_span_eq(texts, s, e, "secret")
+    RH_HG_PHASE_UNKNOWN
 
 # (private to this file)
 def rh_hg_span_eq(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    if s < 0 or e < s:
-        return false
-    n: i64 = strlen(lit).i64()
-    if e - s != n:
-        return false
-    k: mutable i64 = 0
-    while k < n |k, data, s, lit|:
-        if data[(s + k).usize()] != lit[k.usize()]:
-            return false
-        k <- k + 1
-    return true
+    rh_bytes_equal_literal(data, s, e, lit)
 
 # 40 lowercase hex characters only; a Mercurial node is not a Git hash and
 # this function only validates the native form.
 def rh_hg_is_node_hex(texts: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    if s < 0 or e < s or e - s != RH_HG_NODE_HEX:
-        return false
-    i: mutable i64 = s
-    while i < e |i, e, texts|:
+    return false if s < 0 or e < s or e - s != RH_HG_NODE_HEX
+    while i < e |i: i64 = s, e, texts|:
         b: u8 = texts[i.usize()]
-        if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102)):
-            return false
+        return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
         i <- i + 1
-    return true
+    true
 
 # (private to this file)
 def rh_hg_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    if s < 0 or e < s:
-        return -1
+    return -1 if s < 0 or e < s
     start: i64 = pool.count.i64()
-    k: mutable i64 = s
-    while k < e |k, texts, pool, e|:
+    while k < e |k: i64 = s, texts, pool, e|:
         pool.push(texts[k.usize()])
         k <- k + 1
-    return start
+    start
 
 # (private to this file)
 def rh_hg_arr_count(nodes: darray[RhJsonNode]&, arr: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    if arr < 0:
-        return 0
+    return 0 if arr < 0
     o: RhJsonNode = nodes[arr.usize()]
-    if o.kind != RH_JSON_ARR:
-        return 0
-    return o.child_count
+    return 0 if o.kind != RH_JSON_ARR
+    o.child_count
 
 # Parse `hg log -Tjson` bytes. Returns 0 on success, -1 when the payload is
 # not a JSON array or the change cap is exceeded. Entries with a missing or
@@ -120,16 +96,12 @@ def rh_hg_parse(raw: darray[u8]&, max_changes: i64, pool: mutable darray[u8]&, o
     nodes: mutable darray[RhJsonNode] = []
     texts: mutable darray[u8] = []
     root: i64 = rh_json_parse(raw, nodes, texts)
-    if root < 0:
-        return -1
+    return -1 if root < 0
     rn: RhJsonNode = nodes[root.usize()]
-    if rn.kind != RH_JSON_ARR:
-        return -1
-    child: mutable i64 = rn.first_child
-    while child >= 0 |child, nodes, texts, pool, out, reject_out, cap|:
+    return -1 if rn.kind != RH_JSON_ARR
+    while child >= 0 |child: i64 = rn.first_child, nodes, texts, pool, out, reject_out, cap|:
         nxt: i64 = nodes[child.usize()].next_sibling
-        if out.count.i64() >= cap:
-            return -1
+        return -1 if out.count.i64() >= cap
         ok: mutable i64 = 0
         chg: RhHgChange = rh_hg_one(raw, nodes, texts, pool, child, &ok)
         if ok == 1:
@@ -137,7 +109,7 @@ def rh_hg_parse(raw: darray[u8]&, max_changes: i64, pool: mutable darray[u8]&, o
         else:
             reject_out[0] <- reject_out[0] + 1
         child <- nxt
-    return 0
+    0
 
 # Extract one change object. ok_out 1 = usable, 0 = rejected (no/invalid node).
 # (private to this file)
@@ -146,8 +118,7 @@ def rh_hg_one(raw: darray[u8]&, nodes: darray[RhJsonNode]&, texts: darray[u8]&, 
     ns: mutable i64 = -1
     ne: mutable i64 = -1
     _ = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, obj, "node"), &ns, &ne)
-    if not rh_hg_is_node_hex(texts, ns, ne):
-        return RhHgChange{node_s: -1, node_e: -1, rev: -1, author_s: -1, author_e: -1, desc_s: -1, desc_e: -1, utc: -1, tz_offset: -1, has_date: 0, branch_s: -1, branch_e: -1, tag_count: 0, phase: RH_HG_PHASE_UNKNOWN}
+    return RhHgChange{node_s: -1, node_e: -1, rev: -1, author_s: -1, author_e: -1, desc_s: -1, desc_e: -1, utc: -1, tz_offset: -1, has_date: 0, branch_s: -1, branch_e: -1, tag_count: 0, phase: RH_HG_PHASE_UNKNOWN} if not rh_hg_is_node_hex(texts, ns, ne)
     ok_out[0] <- 1
     node_s: i64 = rh_hg_copy(pool, texts, ns, ne)
     node_e: i64 = node_s + (ne - ns)
@@ -160,42 +131,40 @@ def rh_hg_one(raw: darray[u8]&, nodes: darray[RhJsonNode]&, texts: darray[u8]&, 
     aue: mutable i64 = -1
     _ = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, obj, "user"), &aus, &aue)
     author_s: i64 = rh_hg_copy(pool, texts, aus, aue)
-    author_e: mutable i64 = -1
-    if author_s >= 0:
-        author_e <- author_s + (aue - aus)
+    author_e: i64 = author_s + (aue - aus) if author_s >= 0 else -1
     ds: mutable i64 = -1
     de: mutable i64 = -1
     _ = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, obj, "desc"), &ds, &de)
     desc_s: i64 = rh_hg_copy(pool, texts, ds, de)
-    desc_e: mutable i64 = -1
-    if desc_s >= 0:
-        desc_e <- desc_s + (de - ds)
+    desc_e: i64 = desc_s + (de - ds) if desc_s >= 0 else -1
     bs: mutable i64 = -1
     be: mutable i64 = -1
     _ = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, obj, "branch"), &bs, &be)
     branch_s: i64 = rh_hg_copy(pool, texts, bs, be)
-    branch_e: mutable i64 = -1
-    if branch_s >= 0:
-        branch_e <- branch_s + (be - bs)
-    utc: mutable i64 = -1
-    tz: mutable i64 = -1
-    has_date: mutable i64 = 0
-    date_arr: i64 = rh_json_obj_get(nodes, texts, obj, "date")
-    if date_arr >= 0:
-        e0: i64 = rh_json_arr_get(nodes, date_arr, 0)
-        e1: i64 = rh_json_arr_get(nodes, date_arr, 1)
-        o0: mutable i64 = 0
-        o1: mutable i64 = 0
-        utc <- rh_json_int(nodes, raw, e0, &o0)
-        tz <- rh_json_int(nodes, raw, e1, &o1)
-        if o0 == 1 and o1 == 1:
-            has_date <- 1
-        else:
-            utc <- -1
-            tz <- -1
-    ps: mutable i64 = -1
-    pe: mutable i64 = -1
-    _ = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, obj, "phase"), &ps, &pe)
-    phase: u8 = rh_hg_phase_of(texts, ps, pe)
+    branch_e: i64 = branch_s + (be - bs) if branch_s >= 0 else -1
+    utc, tz, has_date =
+        utc: mutable i64 = -1
+        tz: mutable i64 = -1
+        has_date: mutable i64 = 0
+        date_arr: i64 = rh_json_obj_get(nodes, texts, obj, "date")
+        if date_arr >= 0:
+            e0: i64 = rh_json_arr_get(nodes, date_arr, 0)
+            e1: i64 = rh_json_arr_get(nodes, date_arr, 1)
+            o0: mutable i64 = 0
+            o1: mutable i64 = 0
+            utc <- rh_json_int(nodes, raw, e0, &o0)
+            tz <- rh_json_int(nodes, raw, e1, &o1)
+            if o0 == 1 and o1 == 1:
+                has_date <- 1
+            else:
+                utc <- -1
+                tz <- -1
+        utc, tz, has_date
+    phase: u8 =
+        ps: mutable i64 = -1
+        pe: mutable i64 = -1
+        _ = rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, obj, "phase"), &ps, &pe)
+        value: u8 = rh_hg_phase_of(texts, ps, pe)
+        value
     tags: i64 = rh_hg_arr_count(nodes, rh_json_obj_get(nodes, texts, obj, "tags"))
-    return RhHgChange{node_s: node_s, node_e: node_e, rev: rev, author_s: author_s, author_e: author_e, desc_s: desc_s, desc_e: desc_e, utc: utc, tz_offset: tz, has_date: has_date, branch_s: branch_s, branch_e: branch_e, tag_count: tags, phase: phase}
+    RhHgChange{node_s: node_s, node_e: node_e, rev: rev, author_s: author_s, author_e: author_e, desc_s: desc_s, desc_e: desc_e, utc: utc, tz_offset: tz, has_date: has_date, branch_s: branch_s, branch_e: branch_e, tag_count: tags, phase: phase}

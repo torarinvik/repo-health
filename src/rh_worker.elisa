@@ -39,7 +39,7 @@ struct RhWorkerDecision:
     debt: mutable i64
 
 def rh_worker_source(source_id: i64, interval: i64, last_full: i64, has_cursor: bool, cursor_time: i64, overlap: i64) -> RhSourceJob:
-    return RhSourceJob{source_id: source_id, interval_secs: interval, last_full: last_full, has_cursor: has_cursor, cursor_time: cursor_time, overlap_secs: overlap}
+    RhSourceJob{source_id: source_id, interval_secs: interval, last_full: last_full, has_cursor: has_cursor, cursor_time: cursor_time, overlap_secs: overlap}
 
 # Run one scheduling pass. `sources` is scanned in the given order; a source
 # whose reconcile is due takes priority over an incremental one, and within a
@@ -51,9 +51,7 @@ def rh_worker_source(source_id: i64, interval: i64, last_full: i64, has_cursor: 
 # `quota_owner` is the synthetic owner id used for the quota gate; this pass
 # only decides *what to enqueue*, it does not claim/lease the jobs.
 def rh_worker_pass(sources: darray[RhSourceJob]&, h: mutable RhHost&, slots: mutable darray[RhSlot]&, now: i64, quota_owner: i64, decisions: mutable darray[RhWorkerDecision]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    enqueued: mutable i64 = 0
-    i: mutable usize = 0
-    while i < sources.count |i, sources, h, slots, now, quota_owner, decisions, enqueued|:
+    while i < sources.count |enqueued: i64 = 0, i: usize = 0, h, slots, decisions| -> enqueued:
         s: RhSourceJob = sources[i]
         due: bool = rh_reconcile_due(s.last_full, s.interval_secs, now)
         mode: u8 = rh_reconcile_mode(s.last_full, s.interval_secs, s.has_cursor, now)
@@ -79,7 +77,6 @@ def rh_worker_pass(sources: darray[RhSourceJob]&, h: mutable RhHost&, slots: mut
             decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 2, slot: idx, horizon_secs: horizon, overlap_start: ovl, debt: debt})
         enqueued <- enqueued + 1
         i <- i + 1
-    return enqueued
 
 # Aggregate service-health signal: the maximum schedule debt across all
 # sources, and how many sources are overdue. Used by monitoring (M07-11); a
@@ -92,17 +89,14 @@ struct RhWorkerHealth:
     skipped: mutable i64
 
 def rh_worker_health(decisions: darray[RhWorkerDecision]&, enqueued: i64) -> RhWorkerHealth:
-    maxd: mutable i64 = 0
-    over: mutable i64 = 0
-    skip: mutable i64 = 0
-    i: mutable usize = 0
-    while i < decisions.count |i, decisions, maxd, over, skip|:
-        d: RhWorkerDecision = decisions[i]
-        if d.debt > maxd:
-            maxd <- d.debt
-        if d.debt > 0:
-            over <- over + 1
-        if d.mode == 0:
-            skip <- skip + 1
-        i <- i + 1
-    return RhWorkerHealth{max_debt: maxd, overdue: over, enqueued: enqueued, skipped: skip}
+    maxd, over, skip =
+        while i < decisions.count |maxd: i64 = 0, over: i64 = 0, skip: i64 = 0, i: usize = 0| -> maxd, over, skip:
+            d: RhWorkerDecision = decisions[i]
+            if d.debt > maxd:
+                maxd <- d.debt
+            if d.debt > 0:
+                over <- over + 1
+            if d.mode == 0:
+                skip <- skip + 1
+            i <- i + 1
+    RhWorkerHealth{max_debt: maxd, overdue: over, enqueued: enqueued, skipped: skip}

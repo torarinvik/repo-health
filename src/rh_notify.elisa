@@ -46,51 +46,40 @@ struct RhNotifyState:
     resolved: mutable bool
 
 def rh_key_matches(s: RhNotifyState&, k: RhFindingKey&) -> bool:
-    if s.rule_id != k.rule_id:
-        return false
-    if s.subject_id != k.subject_id:
-        return false
-    if s.artifact_high != k.artifact_high or s.artifact_low != k.artifact_low:
-        return false
-    return true
+    return false if s.rule_id != k.rule_id
+    return false if s.subject_id != k.subject_id
+    return false if s.artifact_high != k.artifact_high or s.artifact_low != k.artifact_low
+    true
 
 def rh_state_find(states: darray[RhNotifyState]&, k: RhFindingKey&, idx_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
     idx_out[0] <- -1
-    i: mutable usize = 0
-    while i < states.count |i, states, k, idx_out|:
+    while i < states.count |i: usize = 0, states, k, idx_out|:
         s: RhNotifyState = states[i]
         if rh_key_matches(s, k):
             idx_out[0] <- i.i64()
             return true
         i <- i + 1
-    return false
+    false
 
 # Destination allowed at all? Subscribers/self/operators must carry the
 # authorization flag; upstream maintainers must BOTH carry it and be
 # explicitly subscribed — an unauthorized upstream address is refused
 # before dedup, cooldown, or outage logic can matter.
 def rh_target_allowed(t: RhTarget&) -> bool:
-    if t.kind == RH_TARGET_UPSTREAM_MAINTAINER:
-        return t.authorized
-    return t.authorized
+    return t.authorized if t.kind == RH_TARGET_UPSTREAM_MAINTAINER
+    t.authorized
 
 def rh_notify_decide(states: darray[RhNotifyState]&, k: RhFindingKey&, t: RhTarget&, now: i64, cooldown_secs: i64, outage: bool) -> u8 can[Memory.Allocate, Abort.Panic]:
-    if not rh_target_allowed(t):
-        return RH_NOTIFY_SUPPRESSED_UNAUTHORIZED
-    if outage:
-        return RH_NOTIFY_SUPPRESSED_OUTAGE
+    return RH_NOTIFY_SUPPRESSED_UNAUTHORIZED if not rh_target_allowed(t)
+    return RH_NOTIFY_SUPPRESSED_OUTAGE if outage
     at: mutable i64 = 0
     found: bool = rh_state_find(states, k, &at)
-    if not found:
-        return RH_NOTIFY_NEW
+    return RH_NOTIFY_NEW if not found
     s: RhNotifyState = states[at.usize()]
-    if s.resolved:
-        return RH_NOTIFY_SUPPRESSED_RESOLVED
-    if s.acknowledged:
-        return RH_NOTIFY_SUPPRESSED_ACKNOWLEDGED
-    if cooldown_secs > 0 and now - s.last_sent_at < cooldown_secs:
-        return RH_NOTIFY_SUPPRESSED_COOLDOWN
-    return RH_NOTIFY_NEW
+    return RH_NOTIFY_SUPPRESSED_RESOLVED if s.resolved
+    return RH_NOTIFY_SUPPRESSED_ACKNOWLEDGED if s.acknowledged
+    return RH_NOTIFY_SUPPRESSED_COOLDOWN if cooldown_secs > 0 and now - s.last_sent_at < cooldown_secs
+    RH_NOTIFY_NEW
 
 # Record a send (or a state transition) for a key, creating the row when
 # absent. delivered reflects the returned decision; only RH_NOTIFY_NEW
@@ -116,18 +105,16 @@ def rh_notify_record(states: mutable darray[RhNotifyState]&, k: RhFindingKey&, t
 
 def rh_notify_acknowledge(states: mutable darray[RhNotifyState]&, k: RhFindingKey&) -> bool can[Memory.Allocate, Abort.Panic]:
     at: mutable i64 = 0
-    if not rh_state_find(states, k, &at):
-        return false
+    return false if not rh_state_find(states, k, &at)
     s: mutable RhNotifyState = states[at.usize()]
     s.acknowledged <- true
     states[at.usize()] <- s
-    return true
+    true
 
 def rh_notify_resolve(states: mutable darray[RhNotifyState]&, k: RhFindingKey&) -> bool can[Memory.Allocate, Abort.Panic]:
     at: mutable i64 = 0
-    if not rh_state_find(states, k, &at):
-        return false
+    return false if not rh_state_find(states, k, &at)
     s: mutable RhNotifyState = states[at.usize()]
     s.resolved <- true
     states[at.usize()] <- s
-    return true
+    true

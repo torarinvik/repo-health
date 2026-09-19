@@ -7,22 +7,25 @@ include "./rh_json.elisa"
 include "./rh_job.elisa"
 
 def jcheck(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
-    if cond:
-        return
+    return if cond
     fails[0] <- fails[0] + 1
-    b: mutable darray[u8] = []
-    rh_push_text(b, "JOB-FAIL ")
-    rh_push_text(b, label)
-    b.push(10)
+    b: mutable darray[u8] =
+        b: mutable darray[u8] = []
+        rh_push_text(b, "JOB-FAIL ")
+        rh_push_text(b, label)
+        b.push(10)
+        b
     rh_write_stdout(b)
 
 # Classify a literal string via the JSON parser (so the span compare is
 # exercised the same way the CLI will use it).
 def kind_of(lit: u8&, fails: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    raw: mutable darray[u8] = []
-    raw.push(34)
-    rh_push_text(raw, lit)
-    raw.push(34)
+    raw: mutable darray[u8] =
+        raw: mutable darray[u8] = []
+        raw.push(34)
+        rh_push_text(raw, lit)
+        raw.push(34)
+        raw
     nodes: mutable darray[RhJsonNode] = []
     texts: mutable darray[u8] = []
     root: i64 = rh_json_parse(raw, nodes, texts)
@@ -32,7 +35,7 @@ def kind_of(lit: u8&, fails: mutable i64&) -> i64 can[Memory.Allocate, Abort.Pan
     s: mutable i64 = 0
     e: mutable i64 = 0
     _ = rh_json_str_span(nodes, root, &s, &e)
-    return rh_job_classify(texts, s, e)
+    rh_job_classify(texts, s, e)
 
 def check_classify(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
     jcheck(kind_of("transient", fails) == 0, "kind-transient", fails)
@@ -72,15 +75,13 @@ def check_backoff(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]
     jcheck(rh_job_backoff(0, 3, 3) == 3, "backoff-cap-hit", fails)
     jcheck(rh_job_backoff(0, 0, 3600) == 0, "backoff-zero-attempt", fails)
     # monotone non-decreasing in attempt until the cap
-    prev: mutable i64 = 0
-    ok: mutable bool = true
-    i: mutable i64 = 1
-    while i <= 10 |i, prev, ok|:
-        v: i64 = rh_job_backoff(0, i, 100000000)
-        if v < prev:
-            ok <- false
-        prev <- v
-        i <- i + 1
+    ok: bool =
+        while i <= 10 |prev: i64 = 0, ok: bool = true, i: i64 = 1| -> ok:
+            v: i64 = rh_job_backoff(0, i, 100000000)
+            if v < prev:
+                ok <- false
+            prev <- v
+            i <- i + 1
     jcheck(ok, "backoff-monotone", fails)
     return
 
@@ -145,24 +146,27 @@ def check_scheduler(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Pani
 
 def check_scheduler_retry(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
     slots: mutable darray[RhSlot] = rh_sched_slots(1)
-    h: mutable RhHost = rh_sched_host(10, 1, 1, 100)
-    _ = rh_sched_enqueue(slots, 100)
-    idx: i64 = rh_sched_claim(slots, &h, 1, 100, 50)
-    tok: i64 = slots[idx.usize()].token
-    # transient failure -> retry_wait with backoff, host backed off
-    p: i64 = rh_sched_fail(slots, &h, 0, tok, 0, 100, 5, 3600)
-    jcheck(p == 6, "sched-fail-retry-phase", fails)
-    jcheck(slots[0].phase == RH_JOB_RETRY_WAIT_C and slots[0].attempt == 1, "sched-fail-retry-slot", fails)
-    jcheck(h.backoff_until > 100, "sched-host-backed-off", fails)
-    # not ready until wake time
-    jcheck(rh_sched_claim(slots, &h, 1, 101, 50) == -1, "sched-not-ready-before-wake", fails)
-    # ready after wake time
-    idx2: i64 = rh_sched_claim(slots, &h, 1, 100 + 100, 50)
-    tok2: i64 = slots[idx2.usize()].token
-    jcheck(idx2 == 0, "sched-ready-after-wake", fails)
-    jcheck(tok2 == 2, "sched-ready-after-wake-token", fails)
-    # malformed -> dead_letter
-    p2: i64 = rh_sched_fail(slots, &h, 0, tok2, 4, 1000, 5, 3600)
+    p2: i64 = |fails, slots|
+        h: mutable RhHost = rh_sched_host(10, 1, 1, 100)
+        _ = rh_sched_enqueue(slots, 100)
+        tok: i64 =
+            idx: i64 = rh_sched_claim(slots, &h, 1, 100, 50)
+            slots[idx.usize()].token
+        # transient failure -> retry_wait with backoff, host backed off
+        p: i64 = rh_sched_fail(slots, &h, 0, tok, 0, 100, 5, 3600)
+        jcheck(p == 6, "sched-fail-retry-phase", fails)
+        jcheck(slots[0].phase == RH_JOB_RETRY_WAIT_C and slots[0].attempt == 1, "sched-fail-retry-slot", fails)
+        jcheck(h.backoff_until > 100, "sched-host-backed-off", fails)
+        # not ready until wake time
+        jcheck(rh_sched_claim(slots, &h, 1, 101, 50) == -1, "sched-not-ready-before-wake", fails)
+        # ready after wake time
+        idx2: i64 = rh_sched_claim(slots, &h, 1, 100 + 100, 50)
+        tok2: i64 = slots[idx2.usize()].token
+        jcheck(idx2 == 0, "sched-ready-after-wake", fails)
+        jcheck(tok2 == 2, "sched-ready-after-wake-token", fails)
+        # malformed -> dead_letter
+        block_result: i64 = rh_sched_fail(slots, &h, 0, tok2, 4, 1000, 5, 3600)
+        block_result
     jcheck(p2 == 7, "sched-malformed-dead-letter", fails)
     jcheck(slots[0].phase == RH_JOB_DEAD_LETTER_C, "sched-dead-letter-slot", fails)
     return
@@ -171,8 +175,9 @@ def check_scheduler_reclaim(fails: mutable i64&) -> void can[Memory.Allocate, Ab
     slots: mutable darray[RhSlot] = rh_sched_slots(1)
     h: mutable RhHost = rh_sched_host(10, 1, 1, 100)
     _ = rh_sched_enqueue(slots, 100)
-    idx: i64 = rh_sched_claim(slots, &h, 1, 100, 50)
-    tok: i64 = slots[idx.usize()].token
+    tok: i64 =
+        idx: i64 = rh_sched_claim(slots, &h, 1, 100, 50)
+        slots[idx.usize()].token
     jcheck(tok == 1, "sched-reclaim-claim", fails)
     # not expired yet -> reclaim refused
     jcheck(not rh_sched_reclaim(slots, 0, 120), "sched-reclaim-not-expired", fails)
@@ -183,8 +188,10 @@ def check_scheduler_reclaim(fails: mutable i64&) -> void can[Memory.Allocate, Ab
     jcheck(not rh_sched_succeed(slots, 0, 1), "sched-reclaim-old-token-blocked", fails)
     # an auth failure is terminal (no retry slot state)
     idx3: i64 = rh_sched_claim(slots, &h, 1, 200, 50)
-    tok3: i64 = slots[idx3.usize()].token
-    p: i64 = rh_sched_fail(slots, &h, 0, tok3, 2, 200, 5, 3600)
+    p: i64 =
+        tok3: i64 = slots[idx3.usize()].token
+        block_result: i64 = rh_sched_fail(slots, &h, 0, tok3, 2, 200, 5, 3600)
+        block_result
     jcheck(p == 4, "sched-auth-terminal", fails)
     jcheck(slots[0].phase == RH_JOB_FAILED_TERMINAL_C, "sched-auth-terminal-slot", fails)
     return
@@ -200,9 +207,11 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_scheduler_retry(&fails)
     check_scheduler_reclaim(&fails)
     if fails == 0:
-        b: mutable darray[u8] = []
-        rh_push_text(b, "JOB OK")
-        b.push(10)
+        b: mutable darray[u8] =
+            b: mutable darray[u8] = []
+            rh_push_text(b, "JOB OK")
+            b.push(10)
+            b
         rh_write_stdout(b)
         return 0
-    return 1
+    1

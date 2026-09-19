@@ -19,17 +19,16 @@ include "./rh_store.elisa"
 # algorithm, then one evidence object name per line in caller order
 # (callers sort for determinism). Deterministic: identical input -> bytes.
 def rh_backup_write(manifest_path: cstr, names: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-    out: mutable darray[u8] = []
-    rh_push_text(out, "rh-backup/1 fnv1a-64-hex\n")
-    i: mutable usize = 0
-    while i < names.count |i, names, out|:
-        out.push(names[i])
-        i <- i + 1
+    out: mutable darray[u8] =
+        out: mutable darray[u8] = []
+        rh_push_text(out, "rh-backup/1 fnv1a-64-hex\n")
+        out.extend(bytes_view(names))
+        out
     if out.count > 0:
         last: u8 = out[out.count - 1]
         if last != 10:
             out.push(10)
-    return rh_io_write(manifest_path, out)
+    rh_io_write(manifest_path, out)
 
 # Build "root/name\0" into a caller-owned buffer; return the cstr view.
 # The caller keeps the buffer alive for the duration of the call.
@@ -39,13 +38,12 @@ def rh_backup_path_cstr(root: cstr, name: u8&, buf: mutable darray[u8]&) -> cstr
     buf.push(47)
     rh_push_text(buf, name)
     buf.push(0)
-    return (&buf[0]).cast[cstr] can Unsafe.PointerCast
+    (&buf[0]).cast[cstr] can Unsafe.PointerCast
 
 # Copy bytes in the half-open span [s0, s1) into out.
 # (private to this file)
 def rh_backup_copy_span(raw: darray[u8]&, s0: usize, s1: usize, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-    k: mutable usize = s0
-    while k < s1 |k, raw, s1, out|:
+    while k < s1 |k: usize = s0, raw, s1, out|:
         out.push(raw[k])
         k <- k + 1
 
@@ -58,16 +56,11 @@ def rh_backup_verify(evidence_root: cstr, manifest_path: cstr, present_out: muta
     missing_out[0] <- 0
     corrupt_out[0] <- 0
     raw: mutable darray[u8] = []
-    if rh_io_read(manifest_path, raw) < 0:
-        return -1
-    if not rh_backup_header_ok(raw):
-        return -1
-    start: mutable usize = rh_backup_header_end(raw)
-    while start < raw.count |start, raw, evidence_root, present_out, missing_out, corrupt_out|:
+    return -1 if rh_io_read(manifest_path, raw) < 0
+    return -1 if not rh_backup_header_ok(raw)
+    while start < raw.count |start: usize = rh_backup_header_end(raw), raw, evidence_root, present_out, missing_out, corrupt_out|:
         stop: i64 = rh_find_byte(raw, start, 10)
-        line_end: mutable usize = raw.count
-        if stop >= 0:
-            line_end <- stop.usize()
+        line_end: usize = stop.usize() if stop >= 0 else raw.count
         if line_end > start:
             name: mutable darray[u8] = []
             rh_backup_copy_span(raw, start, line_end, name)
@@ -88,7 +81,7 @@ def rh_backup_verify(evidence_root: cstr, manifest_path: cstr, present_out: muta
             start <- raw.count
         else:
             start <- stop.usize() + 1
-    return 0
+    0
 
 # Copy every verified object from evidence_root to dest_root. Unverified
 # names are skipped (never restored): a corrupt backup must not silently
@@ -96,16 +89,11 @@ def rh_backup_verify(evidence_root: cstr, manifest_path: cstr, present_out: muta
 def rh_backup_restore(evidence_root: cstr, dest_root: cstr, manifest_path: cstr, restored_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     restored_out[0] <- 0
     raw: mutable darray[u8] = []
-    if rh_io_read(manifest_path, raw) < 0:
-        return -1
-    if not rh_backup_header_ok(raw):
-        return -1
-    start: mutable usize = rh_backup_header_end(raw)
-    while start < raw.count |start, raw, evidence_root, dest_root, restored_out|:
+    return -1 if rh_io_read(manifest_path, raw) < 0
+    return -1 if not rh_backup_header_ok(raw)
+    while start < raw.count |start: usize = rh_backup_header_end(raw), raw, evidence_root, dest_root, restored_out|:
         stop: i64 = rh_find_byte(raw, start, 10)
-        line_end: mutable usize = raw.count
-        if stop >= 0:
-            line_end <- stop.usize()
+        line_end: usize = stop.usize() if stop >= 0 else raw.count
         if line_end > start:
             name: mutable darray[u8] = []
             rh_backup_copy_span(raw, start, line_end, name)
@@ -126,26 +114,23 @@ def rh_backup_restore(evidence_root: cstr, dest_root: cstr, manifest_path: cstr,
             start <- raw.count
         else:
             start <- stop.usize() + 1
-    return 0
+    0
 
 # (private to this file)
 def rh_backup_header_ok(raw: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
     want: mutable darray[u8] = []
     rh_push_text(want, "rh-backup/1 fnv1a-64-hex\n")
-    if raw.count < want.count.usize():
-        return false
-    k: mutable usize = 0
-    while k < want.count.usize() |k, raw, want|:
-        if raw[k] != want[k]:
-            return false
+    return false if raw.count < want.count.usize()
+    while k < want.count.usize() |k: usize = 0, raw, want|:
+        return false if raw[k] != want[k]
         k <- k + 1
-    return true
+    true
 
 # (private to this file)
 def rh_backup_header_end(raw: darray[u8]&) -> usize can[Memory.Allocate, Abort.Panic]:
     want: mutable darray[u8] = []
     rh_push_text(want, "rh-backup/1 fnv1a-64-hex\n")
-    return want.count.usize()
+    want.count.usize()
 
 # ---------------------------------------------------------------------------
 # M07-08 replayability label. After a deletion drill or any retention
@@ -160,33 +145,29 @@ const RH_REPLAY_NOT_REPLAYABLE: i64 = 2
 
 # referenced: newline-separated evidence object names.
 def rh_replay_label(evidence_dir: cstr, referenced: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    seen: mutable i64 = 0
-    start: mutable usize = 0
-    while start < referenced.count |start, referenced, evidence_dir, seen|:
-        stop: i64 = rh_find_byte(referenced, start, 10)
-        line_end: mutable usize = referenced.count
-        if stop >= 0:
-            line_end <- stop.usize()
-        if line_end > start:
-            seen <- seen + 1
-            path: mutable darray[u8] = []
-            rh_push_cstr(path, evidence_dir)
-            path.push(47)
-            k: mutable usize = start
-            while k < line_end |k, referenced, path, line_end|:
-                path.push(referenced[k])
-                k <- k + 1
-            path.push(0)
-            pp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
-            if rh_file_size(pp) < 0:
-                return RH_REPLAY_NOT_REPLAYABLE
-        if stop < 0:
-            start <- referenced.count
-        else:
-            start <- stop.usize() + 1
-    if seen == 0:
-        return RH_REPLAY_UNKNOWN
-    return RH_REPLAY_REPLAYABLE
+    seen: i64 =
+        while start < referenced.count |seen: i64 = 0, start: usize = 0| -> seen:
+            stop: i64 = rh_find_byte(referenced, start, 10)
+            line_end: mutable usize = stop.usize() if stop >= 0 else referenced.count
+            if line_end > start:
+                seen <- seen + 1
+                path: mutable darray[u8] =
+                    path: mutable darray[u8] = []
+                    rh_push_cstr(path, evidence_dir)
+                    path.push(47)
+                    path
+                while k < line_end |k: usize = start, referenced, path, line_end|:
+                    path.push(referenced[k])
+                    k <- k + 1
+                path.push(0)
+                pp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+                return RH_REPLAY_NOT_REPLAYABLE if rh_file_size(pp) < 0
+            if stop < 0:
+                start <- referenced.count
+            else:
+                start <- stop.usize() + 1
+    return RH_REPLAY_UNKNOWN if seen == 0
+    RH_REPLAY_REPLAYABLE
 
 # ---------------------------------------------------------------------------
 # M07-11 monitoring: service health and project health are SEPARATE series.
@@ -208,7 +189,7 @@ struct RhMon:
     expected_interval: mutable i64
 
 def rh_mon_new(expected_interval: i64) -> RhMon:
-    return RhMon{observed: 0, unknown: 0, stale_partial: 0, errors: 0, parser_rejects: 0, object_failures: 0, truncations: 0, queue_age_max: 0, cursor_lag_max: 0, last_success_epoch: 0, expected_interval: expected_interval}
+    RhMon{observed: 0, unknown: 0, stale_partial: 0, errors: 0, parser_rejects: 0, object_failures: 0, truncations: 0, queue_age_max: 0, cursor_lag_max: 0, last_success_epoch: 0, expected_interval: expected_interval}
 
 def rh_mon_observed(m: mutable RhMon&) -> void:
     m.observed <- m.observed + 1
@@ -238,16 +219,13 @@ def rh_mon_success(m: mutable RhMon&, now: i64) -> void:
 # MUST surface unknown rather than 0 (S006).
 def rh_mon_observed_rate_bp(m: mutable RhMon&) -> i64:
     total: i64 = m.observed + m.unknown
-    if total <= 0:
-        return -1
-    return (m.observed * 10000) / total
+    return -1 if total <= 0
+    (m.observed * 10000) / total
 
 def rh_mon_freshness_age(m: mutable RhMon&, now: i64) -> i64:
-    if m.last_success_epoch <= 0:
-        return -1
-    if now < m.last_success_epoch:
-        return 0
-    return now - m.last_success_epoch
+    return -1 if m.last_success_epoch <= 0
+    return 0 if now < m.last_success_epoch
+    now - m.last_success_epoch
 
 # Deterministic exposition text; field order is stable so diffs are
 # meaningful. Two series namespaces: rh_service_* and rh_project_*.
@@ -311,14 +289,14 @@ struct RhHostState:
     stopped: mutable i64
 
 def rh_host_new(host_id: i64, capacity: i64) -> RhHostState:
-    return RhHostState{host_id: host_id, tokens: capacity, last_refill: 0, backoff_until: 0, consecutive_failures: 0, stopped: 0}
+    RhHostState{host_id: host_id, tokens: capacity, last_refill: 0, backoff_until: 0, consecutive_failures: 0, stopped: 0}
 
 # (private to this file)
 def rh_host_refill(st: mutable RhHostState&, policy: RhHostPolicy&, now: i64) -> void:
-    if now <= st.last_refill:
-        return
-    delta: i64 = now - st.last_refill
-    add: i64 = delta * policy.refill_per_second
+    return if now <= st.last_refill
+    add: i64 =
+        delta: i64 = now - st.last_refill
+        delta * policy.refill_per_second
     if add > 0:
         st.tokens <- st.tokens + add
         if st.tokens > policy.capacity:
@@ -326,36 +304,31 @@ def rh_host_refill(st: mutable RhHostState&, policy: RhHostPolicy&, now: i64) ->
     st.last_refill <- now
 
 def rh_host_allow(st: mutable RhHostState&, policy: RhHostPolicy&, now: i64) -> i64:
-    if st.stopped != 0:
-        return 0
-    if st.backoff_until > now:
-        return 0
+    return 0 if st.stopped != 0
+    return 0 if st.backoff_until > now
     rh_host_refill(st, policy, now)
-    if st.tokens > 0:
-        return 1
-    return 0
+    return 1 if st.tokens > 0
+    0
 
 # 1 consumed; 0 refused (caller must not issue the request).
 def rh_host_consume(st: mutable RhHostState&, policy: RhHostPolicy&, now: i64) -> i64:
-    if rh_host_allow(st, policy, now) != 1:
-        return 0
+    return 0 if rh_host_allow(st, policy, now) != 1
     st.tokens <- st.tokens - 1
-    return 1
+    1
 
 def rh_host_record_failure(st: mutable RhHostState&, policy: RhHostPolicy&, now: i64) -> i64:
     st.consecutive_failures <- st.consecutive_failures + 1
     shift: mutable i64 = st.consecutive_failures - 1
     if shift > 20:
         shift <- 20
-    wait: mutable i64 = policy.base_backoff_seconds
-    k: mutable i64 = 0
-    while k < shift |k, wait|:
-        wait <- wait * 2
-        k <- k + 1
+    wait: mutable i64 =
+        while k < shift |wait: i64 = policy.base_backoff_seconds, k: i64 = 0| -> wait:
+            wait <- wait * 2
+            k <- k + 1
     if wait > policy.max_backoff_seconds:
         wait <- policy.max_backoff_seconds
     st.backoff_until <- now + wait
-    return wait
+    wait
 
 def rh_host_record_success(st: mutable RhHostState&) -> void:
     st.consecutive_failures <- 0

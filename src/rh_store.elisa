@@ -29,24 +29,12 @@ include "./rh_observation.elisa"
 # Compare a byte span against a literal. Private to this file.
 # (private to this file)
 def rh_span_eq(data: darray[u8]&, s: usize, e: usize, want: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    n: usize = strlen(want)
-    if e - s != n:
-        return false
-    k: mutable usize = 0
-    while k < n |k, data, s, want|:
-        if data[s + k] != want[k]:
-            return false
-        k <- k + 1
-    return true
+    rh_bytes_equal_literal(data, s.i64(), e.i64(), want)
 
 # FNV-1a hex digest of bytes into out (16 chars, no terminator).
 # (private to this file)
 def rh_digest_hex(data: darray[u8]&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-    h: mutable u64 = 14695981039346656037
-    i: mutable usize = 0
-    while i < data.count |i, data, h|:
-        h <- (h ^ data[i].u64()) * 1099511628211
-        i <- i + 1
+    h: u64 = hash_sview(bytes_view(data))
     rh_push_hex_u64(out, h)
 
 # Store bytes under evidence/<hex>. Idempotent: existing identical blobs
@@ -56,84 +44,62 @@ def rh_digest_hex(data: darray[u8]&, out: mutable darray[u8]&) -> void can[Memor
 # fresh buffer. Returns digest in hex_out.
 def rh_store_blob(root: cstr, data: mutable darray[u8]&, hex_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     rh_digest_hex(data, hex_out)
-    path: mutable darray[u8] = []
-    rh_push_cstr(path, root)
-    path.push(47)
-    k: mutable usize = 0
-    while k < hex_out.count |k, path, hex_out|:
-        path.push(hex_out[k])
-        k <- k + 1
-    path.push(0)
+    path: mutable darray[u8] =
+        path: mutable darray[u8] = []
+        rh_push_cstr(path, root)
+        path.push(47)
+        path.extend(bytes_view(hex_out))
+        path.push(0)
+        path
     pp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
     back: mutable darray[u8] = []
     if rh_io_read(pp, back) >= 0:
-        same: mutable bool = back.count == data.count
-        if same:
-            j: mutable usize = 0
-            while j < back.count |j, back, data, same|:
-                if back[j] != data[j]:
-                    same <- false
-                j <- j + 1
-        if same:
-            return 0
-        return -1
-    if rh_io_write(pp, data):
-        return 0
-    return -1
+        return 0 if string_views_eq(bytes_view(back), bytes_view(data)) == 1 else -1
+    return 0 if rh_io_write(pp, data)
+    -1
 
 # Verify a stored blob recomputes to its name. False when missing or
 # corrupt: publication from it is blocked (M02-02).
 def rh_store_blob_verify(root: cstr, hexname: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     ok_out[0] <- 0
-    path: mutable darray[u8] = []
-    rh_push_cstr(path, root)
-    path.push(47)
-    rh_push_text(path, hexname)
-    path.push(0)
+    path: mutable darray[u8] =
+        path: mutable darray[u8] = []
+        rh_push_cstr(path, root)
+        path.push(47)
+        rh_push_text(path, hexname)
+        path.push(0)
+        path
     pp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
     back: mutable darray[u8] = []
-    if rh_io_read(pp, back) < 0:
-        return -1
+    return -1 if rh_io_read(pp, back) < 0
     check: mutable darray[u8] = []
     rh_digest_hex(back, check)
-    if check.count.i64() != rh_cstr_len_c(hexname).i64():
-        return -1
-    same: mutable bool = true
-    k: mutable usize = 0
-    while k < check.count.usize() |k, check, back, hexname, same|:
-        if check[k] != hexname[k]:
-            same <- false
-        k <- k + 1
+    same: bool = string_view_eq(bytes_view(check), hexname) == 1
     if same:
         ok_out[0] <- 1
         return 0
-    return -1
+    -1
 
 # True when the name in `target[ts,te)` equals one newline-separated line
 # of `buf`. Both buffers are caller-owned byte arrays, so the compared
 # bytes come from the two different buffers on purpose.
 # (private to this file)
 def rh_names_has(buf: darray[u8]&, target: darray[u8]&, ts: usize, te: usize) -> bool can[Memory.Allocate, Abort.Panic]:
-    start: mutable usize = 0
-    while start < buf.count |start, buf, target, ts, te|:
+    while start < buf.count |start: usize = 0, buf, target, ts, te|:
         stop: i64 = rh_find_byte(buf, start, 10)
-        line_end: mutable usize = buf.count
-        if stop >= 0:
-            line_end <- stop.usize()
+        line_end: usize = stop.usize() if stop >= 0 else buf.count
         if line_end - start == te - ts and line_end > start:
-            same: mutable bool = true
-            k: mutable usize = 0
-            while k < te - ts |k, buf, target, ts, te, start, same|:
-                if buf[start + k] != target[ts + k]:
-                    same <- false
-                k <- k + 1
-            if same:
-                return true
+            same: bool =
+                while k < te - ts |same: bool = true, k: usize = 0, start| -> same:
+                    if buf[start + k] != target[ts + k]:
+                        same <- false
+                    k <- k + 1
+            return true if same
         if stop < 0:
             start <- buf.count
         else:
             start <- stop.usize() + 1
-    return false
+    false
 
 # Orphan cleanup (F033): delete every candidate blob whose name is NOT in
 # the referenced set. The candidate and referenced sets are supplied by the
@@ -143,19 +109,17 @@ def rh_names_has(buf: darray[u8]&, target: darray[u8]&, ts: usize, te: usize) ->
 # candidates count as removed). Returns 0, or -1 on a malformed name.
 def rh_store_gc(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     deleted_out[0] <- 0
-    start: mutable usize = 0
-    while start < candidates.count |start, candidates, referenced, evidence_dir, deleted_out|:
+    while start < candidates.count |start: usize = 0, candidates, referenced, evidence_dir, deleted_out|:
         stop: i64 = rh_find_byte(candidates, start, 10)
-        line_end: mutable usize = candidates.count
-        if stop >= 0:
-            line_end <- stop.usize()
+        line_end: mutable usize = stop.usize() if stop >= 0 else candidates.count
         if line_end > start:
             if not rh_names_has(referenced, candidates, start, line_end):
-                path: mutable darray[u8] = []
-                rh_push_cstr(path, evidence_dir)
-                path.push(47)
-                k: mutable usize = start
-                while k < line_end |k, candidates, path, line_end|:
+                path: mutable darray[u8] =
+                    path: mutable darray[u8] = []
+                    rh_push_cstr(path, evidence_dir)
+                    path.push(47)
+                    path
+                while k < line_end |k: usize = start, candidates, path, line_end|:
                     path.push(candidates[k])
                     k <- k + 1
                 path.push(0)
@@ -166,80 +130,66 @@ def rh_store_gc(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[
             start <- candidates.count
         else:
             start <- stop.usize() + 1
-    return 0
+    0
 
 # Delete one evidence blob by name (M07-08 deletion drill). Idempotent:
 # deleting an already-absent blob is success. Returns 0, or -1 on an empty
 # name. Removing a raw payload does NOT rewrite any derived result; it makes
 # the affected report not replayable, which callers must record.
 def rh_store_delete_blob(evidence_dir: cstr, hexname: u8&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if rh_cstr_len_c(hexname) == 0:
-        return -1
-    path: mutable darray[u8] = []
-    rh_push_cstr(path, evidence_dir)
-    path.push(47)
-    rh_push_text(path, hexname)
-    path.push(0)
+    return -1 if rh_cstr_len_c(hexname) == 0
+    path: mutable darray[u8] =
+        path: mutable darray[u8] = []
+        rh_push_cstr(path, evidence_dir)
+        path.push(47)
+        rh_push_text(path, hexname)
+        path.push(0)
+        path
     pp: u8& = (&path[0]).cast[u8&] can Unsafe.PointerCast
     _ = unlink(pp)
-    return 0
+    0
 
 # Index lookup: 1 present, 0 absent, -1 unreadable.
 def rh_index_has(index_path: cstr, id: u8&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     raw: mutable darray[u8] = []
-    if rh_io_read(index_path, raw) < 0:
-        return 0
-    start: mutable usize = 0
-    while start < raw.count |start, raw, id|:
+    return 0 if rh_io_read(index_path, raw) < 0
+    while start < raw.count |start: usize = 0, raw, id|:
         stop: i64 = rh_find_byte(raw, start, 10)
-        line_end: mutable usize = raw.count
-        if stop >= 0:
-            line_end <- stop.usize()
+        line_end: usize = stop.usize() if stop >= 0 else raw.count
         if line_end > start:
-            if rh_span_eq(raw, start, line_end, id):
-                return 1
+            return 1 if rh_span_eq(raw, start, line_end, id)
         if stop < 0:
             start <- raw.count
         else:
             start <- stop.usize() + 1
-    return 0
+    0
 
 # Append one canonical record. 1 appended, 0 duplicate-skipped, -1 error.
 # The record line must already be complete JSON (caller-built); the id is
 # indexed separately so retries converge (S005).
 def rh_store_event(events_path: cstr, index_path: cstr, id: u8&, line: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     seen: i64 = rh_index_has(index_path, id)
-    if seen < 0:
-        return -1
-    if seen == 1:
-        return 0
+    return -1 if seen < 0
+    return 0 if seen == 1
     current: mutable darray[u8] = []
     if rh_io_read(events_path, current) < 0:
-        if rh_file_size(events_path) >= 0:
-            return -1
-    i: mutable usize = 0
-    while i < line.count |i, line, current|:
-        current.push(line[i])
-        i <- i + 1
+        return -1 if rh_file_size(events_path) >= 0
+    current.extend(bytes_view(line))
     current.push(10)
-    if not rh_io_write(events_path, current):
-        return -1
+    return -1 if not rh_io_write(events_path, current)
     ids: mutable darray[u8] = []
     if rh_io_read(index_path, ids) < 0:
-        if rh_file_size(index_path) >= 0:
-            return -1
+        return -1 if rh_file_size(index_path) >= 0
     rh_push_text(ids, id)
     ids.push(10)
-    if not rh_io_write(index_path, ids):
-        return -1
-    return 1
+    return -1 if not rh_io_write(index_path, ids)
+    1
 
 # Count data lines in a file. -1 when unreadable.
 def rh_count_file_lines(path: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     raw: mutable darray[u8] = []
-    if rh_io_read(path, raw) < 0:
-        return -1
-    return rh_count_lines(raw)
+    return -1 if rh_io_read(path, raw) < 0
+    rh_count_lines(raw)
 
 # Cursor read: page/count/ok. Missing file is ok=0 (fresh job), not error.
 def rh_cursor_read(path: cstr, page_out: mutable i64&, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
@@ -248,147 +198,124 @@ def rh_cursor_read(path: cstr, page_out: mutable i64&, count_out: mutable i64&) 
         page_out[0] <- 0
         count_out[0] <- 0
         return false
-    pe: i64 = rh_find_byte(raw, 0, 10)
-    if pe < 0:
-        return false
-    pok: mutable i64 = 0
-    page_out[0] <- rh_parse_i64(raw, 0, pe.usize(), &pok)
-    if pok == 0:
-        return false
-    rest: usize = pe.usize() + 1
+    rest: usize = |page_out, raw|
+        pe: i64 = rh_find_byte(raw, 0, 10)
+        return false if pe < 0
+        pok: mutable i64 = 0
+        page_out[0] <- rh_parse_i64(raw, 0, pe.usize(), &pok)
+        return false if pok == 0
+        pe.usize() + 1
     ce: i64 = rh_find_byte(raw, rest, 10)
-    line_end: mutable usize = raw.count
-    if ce >= 0:
-        line_end <- ce.usize()
+    line_end: usize = ce.usize() if ce >= 0 else raw.count
     cok: mutable i64 = 0
     count_out[0] <- rh_parse_i64(raw, rest, line_end, &cok)
-    if cok == 0:
-        return false
-    return true
+    return false if cok == 0
+    true
 
 # Cursor commit AFTER the page is stored and verified. Plain overwrite is
 # safe here because fetch resumes AT the committed page (overlap), so a
 # torn write can only repeat a page the dedup index already absorbs.
 def rh_cursor_commit(path: cstr, page: i64, count: i64) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    body: mutable darray[u8] = []
-    rh_push_decimal_i64(body, page)
-    body.push(10)
-    rh_push_decimal_i64(body, count)
-    body.push(10)
-    return rh_io_write(path, body)
+    body: mutable darray[u8] =
+        body: mutable darray[u8] = []
+        rh_push_decimal_i64(body, page)
+        body.push(10)
+        rh_push_decimal_i64(body, count)
+        body.push(10)
+        body
+    rh_io_write(path, body)
 
 # Append one coverage interval observation "start end status".
 def rh_coverage_mark(path: cstr, start: i64, end: i64, status: u8) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     current: mutable darray[u8] = []
     if rh_io_read(path, current) < 0:
-        if rh_file_size(path) >= 0:
-            return false
+        return false if rh_file_size(path) >= 0
     rh_push_decimal_i64(current, start)
     current.push(32)
     rh_push_decimal_i64(current, end)
     current.push(32)
     rh_push_text(current, rh_status_label(status))
     current.push(10)
-    return rh_io_write(path, current)
+    rh_io_write(path, current)
 
 # Lease phase words. (private to this file)
 def rh_phase_word(phase: i64) -> u8&:
-    if phase == 1:
-        return "leased"
-    if phase == 2:
-        return "running"
-    if phase == 3:
-        return "succeeded"
-    if phase == 4:
-        return "failed_terminal"
-    if phase == 5:
-        return "canceled"
-    return "queued"
+    return "leased" if phase == 1
+    return "running" if phase == 2
+    return "succeeded" if phase == 3
+    return "failed_terminal" if phase == 4
+    return "canceled" if phase == 5
+    "queued"
 
 def rh_phase_parse(word_s: usize, word_e: usize, data: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    if rh_span_eq(data, word_s, word_e, "leased"):
-        return 1
-    if rh_span_eq(data, word_s, word_e, "running"):
-        return 2
-    if rh_span_eq(data, word_s, word_e, "succeeded"):
-        return 3
-    if rh_span_eq(data, word_s, word_e, "failed_terminal"):
-        return 4
-    if rh_span_eq(data, word_s, word_e, "canceled"):
-        return 5
-    if rh_span_eq(data, word_s, word_e, "queued"):
-        return 0
-    return -1
+    return 1 if rh_span_eq(data, word_s, word_e, "leased")
+    return 2 if rh_span_eq(data, word_s, word_e, "running")
+    return 3 if rh_span_eq(data, word_s, word_e, "succeeded")
+    return 4 if rh_span_eq(data, word_s, word_e, "failed_terminal")
+    return 5 if rh_span_eq(data, word_s, word_e, "canceled")
+    return 0 if rh_span_eq(data, word_s, word_e, "queued")
+    -1
 
 # Read a lease file into token/owner/heartbeat/phase. Returns false when
 # the file is missing or malformed (caller treats as reclaimable).
 def rh_lease_read(path: cstr, token_out: mutable i64&, owner: mutable darray[u8]&, hb_out: mutable i64&, ttl_out: mutable i64&, phase_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     raw: mutable darray[u8] = []
-    if rh_io_read(path, raw) < 0:
-        return false
-    l0: i64 = rh_find_byte(raw, 0, 10)
-    if l0 < 0:
-        return false
-    tok_ok: mutable i64 = 0
-    token_out[0] <- rh_parse_i64(raw, 0, l0.usize(), &tok_ok)
-    if tok_ok == 0:
-        return false
-    l1s: usize = l0.usize() + 1
-    l1: i64 = rh_find_byte(raw, l1s, 10)
-    if l1 < 0:
-        return false
-    k: mutable usize = l1s
-    while k < l1.usize() |k, raw, owner|:
-        owner.push(raw[k])
-        k <- k + 1
-    l2s: usize = l1.usize() + 1
-    l2: i64 = rh_find_byte(raw, l2s, 10)
-    if l2 < 0:
-        return false
-    hb_ok: mutable i64 = 0
-    hb_out[0] <- rh_parse_i64(raw, l2s, l2.usize(), &hb_ok)
-    if hb_ok == 0:
-        return false
-    l3s: usize = l2.usize() + 1
+    return false if rh_io_read(path, raw) < 0
+    l3s: usize = |token_out, owner, hb_out, raw|
+        l2s: usize = |token_out, owner, raw|
+            l1s: usize = |token_out, raw|
+                l0: i64 = rh_find_byte(raw, 0, 10)
+                return false if l0 < 0
+                tok_ok: mutable i64 = 0
+                token_out[0] <- rh_parse_i64(raw, 0, l0.usize(), &tok_ok)
+                return false if tok_ok == 0
+                l0.usize() + 1
+            l1: i64 = rh_find_byte(raw, l1s, 10)
+            return false if l1 < 0
+            while k < l1.usize() |k: usize = l1s, raw, owner|:
+                owner.push(raw[k])
+                k <- k + 1
+            l1.usize() + 1
+        l2: i64 = rh_find_byte(raw, l2s, 10)
+        return false if l2 < 0
+        hb_ok: mutable i64 = 0
+        hb_out[0] <- rh_parse_i64(raw, l2s, l2.usize(), &hb_ok)
+        return false if hb_ok == 0
+        l2.usize() + 1
     l3: i64 = rh_find_byte(raw, l3s, 10)
-    if l3 < 0:
-        return false
+    return false if l3 < 0
     tl_ok: mutable i64 = 0
     ttl_out[0] <- rh_parse_i64(raw, l3s, l3.usize(), &tl_ok)
-    if tl_ok == 0:
-        return false
-    if ttl_out[0] <= 0:
-        return false
+    return false if tl_ok == 0
+    return false if ttl_out[0] <= 0
     l4s: usize = l3.usize() + 1
     l4: i64 = rh_find_byte(raw, l4s, 10)
-    wend: mutable usize = raw.count
-    if l4 >= 0:
-        wend <- l4.usize()
+    wend: usize = l4.usize() if l4 >= 0 else raw.count
     ph: i64 = rh_phase_parse(l4s, wend, raw)
-    if ph < 0:
-        return false
+    return false if ph < 0
     phase_out[0] <- ph
-    return true
+    true
 
 def rh_lease_write(path: cstr, token: i64, owner: u8&, heartbeat: i64, ttl: i64, phase: i64) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    body: mutable darray[u8] = []
-    rh_push_decimal_i64(body, token)
-    body.push(10)
-    rh_push_cstr(body, owner)
-    body.push(10)
-    rh_push_decimal_i64(body, heartbeat)
-    body.push(10)
-    rh_push_decimal_i64(body, ttl)
-    body.push(10)
-    rh_push_text(body, rh_phase_word(phase))
-    body.push(10)
-    return rh_io_write(path, body)
+    body: mutable darray[u8] =
+        body: mutable darray[u8] = []
+        rh_push_decimal_i64(body, token)
+        body.push(10)
+        rh_push_cstr(body, owner)
+        body.push(10)
+        rh_push_decimal_i64(body, heartbeat)
+        body.push(10)
+        rh_push_decimal_i64(body, ttl)
+        body.push(10)
+        rh_push_text(body, rh_phase_word(phase))
+        body.push(10)
+        body
+    rh_io_write(path, body)
 
 def rh_lease_log(log_path: cstr, token: i64, owner: u8&, heartbeat: i64, note: u8&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     current: mutable darray[u8] = []
     if rh_io_read(log_path, current) < 0:
-        if rh_file_size(log_path) >= 0:
-            return false
+        return false if rh_file_size(log_path) >= 0
     rh_push_decimal_i64(current, token)
     current.push(32)
     rh_push_cstr(current, owner)
@@ -397,7 +324,7 @@ def rh_lease_log(log_path: cstr, token: i64, owner: u8&, heartbeat: i64, note: u
     current.push(32)
     rh_push_text(current, note)
     current.push(10)
-    return rh_io_write(log_path, current)
+    rh_io_write(log_path, current)
 
 # Acquire (or reclaim when expired) a job lease. Returns the fencing
 # token (>0), -1 when held by a live worker, -2 when terminally closed.
@@ -405,24 +332,21 @@ def rh_lease_log(log_path: cstr, token: i64, owner: u8&, heartbeat: i64, note: u
 # replacement presenting a different ttl cannot change the verdict; now
 # is caller time so tests inject fixed clocks (deterministic).
 def rh_lease_acquire(path: cstr, log_path: cstr, owner: u8&, now: i64, ttl: i64) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    token: mutable i64 = 0
-    old_owner: mutable darray[u8] = []
-    hb: mutable i64 = 0
-    recorded: mutable i64 = 0
-    phase: mutable i64 = 0
-    have: bool = rh_lease_read(path, &token, old_owner, &hb, &recorded, &phase)
-    if have:
-        if phase == 3 or phase == 4 or phase == 5:
-            return -2
-        if now - hb <= recorded:
-            return -1
-    next: i64 = token + 1
-    if ttl <= 0:
-        return -1
-    if not rh_lease_write(path, next, owner, now, ttl, 1):
-        return -1
+    next: i64 =
+        token: mutable i64 = 0
+        old_owner: mutable darray[u8] = []
+        hb: mutable i64 = 0
+        recorded: mutable i64 = 0
+        phase: mutable i64 = 0
+        have: bool = rh_lease_read(path, &token, old_owner, &hb, &recorded, &phase)
+        if have:
+            return -2 if phase == 3 or phase == 4 or phase == 5
+            return -1 if now - hb <= recorded
+        token + 1
+    return -1 if ttl <= 0
+    return -1 if not rh_lease_write(path, next, owner, now, ttl, 1)
     rh_lease_log(log_path, next, owner, now, "claim")
-    return next
+    next
 
 # Heartbeat only when the token still matches (expired workers fail).
 # The recorded ttl is preserved, never renegotiated mid-lease.
@@ -432,13 +356,10 @@ def rh_lease_heartbeat(path: cstr, token: i64, owner: u8&, now: i64) -> bool can
     hb: mutable i64 = 0
     kept: mutable i64 = 0
     phase: mutable i64 = 0
-    if not rh_lease_read(path, &cur, drop, &hb, &kept, &phase):
-        return false
-    if cur != token:
-        return false
-    if phase == 3 or phase == 4 or phase == 5:
-        return false
-    return rh_lease_write(path, token, owner, now, kept, phase)
+    return false if not rh_lease_read(path, &cur, drop, &hb, &kept, &phase)
+    return false if cur != token
+    return false if phase == 3 or phase == 4 or phase == 5
+    rh_lease_write(path, token, owner, now, kept, phase)
 
 # Release to a final phase only when the token still matches: a stale
 # worker cannot publish after losing its fencing token (M02-03).
@@ -448,12 +369,10 @@ def rh_lease_release(path: cstr, log_path: cstr, token: i64, owner: u8&, now: i6
     hb: mutable i64 = 0
     kept: mutable i64 = 0
     phase: mutable i64 = 0
-    if not rh_lease_read(path, &cur, drop, &hb, &kept, &phase):
-        return false
+    return false if not rh_lease_read(path, &cur, drop, &hb, &kept, &phase)
     if cur != token:
         rh_lease_log(log_path, token, owner, now, "stale-release-refused")
         return false
-    if not rh_lease_write(path, token, owner, now, kept, final_phase):
-        return false
+    return false if not rh_lease_write(path, token, owner, now, kept, final_phase)
     rh_lease_log(log_path, token, owner, now, "release")
-    return true
+    true

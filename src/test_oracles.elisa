@@ -18,17 +18,61 @@ include "./rh_forge.elisa"
 
 
 def check(condition: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
-    if condition:
-        return
+    return if condition
     fails[0] <- fails[0] + 1
-    buffer: mutable darray[u8] = []
-    rh_push_text(buffer, "FAIL ")
-    rh_push_text(buffer, label)
-    buffer.push(10)
+    buffer: mutable darray[u8] =
+        buffer: mutable darray[u8] = []
+        rh_push_text(buffer, "FAIL ")
+        rh_push_text(buffer, label)
+        buffer.push(10)
+        buffer
     rh_write_stdout(buffer)
+
+def check_byte_helpers(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    empty: darray[u8] = []
+    check(rh_bytes_equal_literal(empty, 0, 0, ""), "empty-span-equality", fails)
+    check(not rh_bytes_equal_literal(empty, 0, 1, ""), "invalid-span-not-clamped", fails)
+    check(rh_find_byte(empty, 0, 0) == -1, "empty-byte-search", fails)
+    check(hash_sview(bytes_view(empty)) == 14695981039346656037, "fnv-empty-offset-basis", fails)
+    binary: darray[u8] =
+        bytes: mutable darray[u8] =
+            bytes: mutable darray[u8] = []
+            bytes.push(97)
+            bytes.push(0)
+            bytes.push(98)
+            bytes
+        bytes
+    check(rh_find_byte(binary, 0, 0) == 1, "binary-search-includes-nul", fails)
+    check(rh_find_byte(binary, 1, 98) == 2, "byte-search-absolute-offset", fails)
+    check(rh_find_byte(binary, 2, 97) == -1, "byte-search-respects-start", fails)
+    check(rh_find_byte(binary, 3, 0) == -1, "byte-search-at-end", fails)
+    check(rh_find_byte(binary, 99, 0) == -1, "byte-search-past-end", fails)
+    check(rh_bytes_equal_literal(binary, 2, 3, "b"), "span-after-nul", fails)
+    check(not rh_bytes_equal_literal(binary, 0, 3, "a"), "span-not-truncated-at-nul", fails)
+    check(not rh_bytes_equal_literal(binary, -1, 1, "a"), "negative-span-rejected", fails)
+    check(not rh_bytes_equal_literal(binary, 2, 1, ""), "reversed-span-rejected", fails)
+    check(rh_bytes_equal_literal(binary, 3, 3, ""), "empty-span-at-end", fails)
+    check(not rh_bytes_equal_literal(binary, 4, 4, ""), "empty-span-past-end-rejected", fails)
+    check(rh_bytes_equal_span(binary, 0, 3, binary, 0, 3), "binary-span-self-equality", fails)
+    check(not rh_bytes_equal_span(binary, 0, 1, binary, 2, 3), "distinct-byte-spans", fails)
+    check(not rh_bytes_equal_span(binary, 0, 3, binary, 0, 4), "invalid-right-span-rejected", fails)
+    check(not rh_bytes_equal_span(binary, -1, 3, binary, 0, 3), "invalid-left-span-rejected", fails)
+    check(rh_bytes_equal_span(empty, 0, 0, binary, 3, 3), "empty-cross-buffer-spans", fails)
+    appended: darray[u8] = |fails|
+        bytes: mutable darray[u8] = []
+        rh_push_text(bytes, "x")
+        check(rh_absorb_bytes(empty, bytes) == 0, "append-empty-count", fails)
+        check(rh_absorb_bytes(binary, bytes) == 3, "append-binary-count", fails)
+        bytes
+    check(appended.count == 4 and appended[0] == 120 and appended[1] == 97 and appended[2] == 0 and appended[3] == 98, "append-preserves-binary-bytes", fails)
+    check(rh_cstr_starts_with("abc", ""), "empty-prefix", fails)
+    check(rh_cstr_starts_with("abc", "ab"), "matching-prefix", fails)
+    check(not rh_cstr_starts_with("ab", "abc"), "longer-prefix-rejected", fails)
+    check(hash_sview(sview("abc", 0, -1)) == 16654208175385433931, "fnv-abc-known-answer", fails)
 
 def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     fails: mutable i64 = 0
+    check_byte_helpers(&fails)
 
 # --- M00-02 identity invariants ---
     check(RH_KIND_ACCOUNT != RH_KIND_PERSON, "account-kind-ne-person", &fails)
@@ -48,15 +92,13 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check(rh_streq(rh_status_label(RH_ST_NOT_APPLICABLE), "not_applicable"), "label-na", &fails)
     check(rh_streq(rh_status_label(RH_ST_UNSUPPORTED), "unsupported"), "label-unsupported", &fails)
     check(not rh_streq(rh_status_label(RH_ST_NOT_APPLICABLE), "false"), "na-ne-false", &fails)
-    i: mutable i64 = 0
-    distinct: mutable bool = true
-    while i < 11 |i, distinct|:
-        j: mutable i64 = i + 1
-        while j < 11 |i, j, distinct|:
-            if rh_streq(rh_status_label(i.u8()), rh_status_label(j.u8())):
-                distinct <- false
-            j <- j + 1
-        i <- i + 1
+    distinct: bool =
+        while i < 11 |i: i64 = 0, distinct: bool = true| -> distinct:
+            while j < 11 |j: i64 = i + 1, i, distinct|:
+                if rh_streq(rh_status_label(i.u8()), rh_status_label(j.u8())):
+                    distinct <- false
+                j <- j + 1
+            i <- i + 1
     check(distinct, "eleven-distinct-labels", &fails)
     check(rh_observation_consistent(RH_ST_OBSERVED, true), "obs-with-value", &fails)
     check(not rh_observation_consistent(RH_ST_OBSERVED, false), "obs-without-value-rejected", &fails)
@@ -99,20 +141,24 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check(rh_visible_as_of(intro, rh_unix_from_civil(2026, 6, 1)), "2026-discovery-visible-retrospective", &fails)
 
 # --- M04-07 numerical oracles (plan §9.4), computed here first ---
-    c1: mutable darray[u64] = []
-    c1.push(9)
-    c1.push(3)
+    c1: mutable darray[u64] =
+        c1: mutable darray[u64] = []
+        c1.push(9)
+        c1.push(3)
+        c1
     check(rh_concentration(c1, 1, 2) == 1, "c93-half-is-1", &fails)
     check(rh_concentration(c1, 4, 5) == 2, "c93-80pct-is-2", &fails)
     n1: mutable u64 = 0
     d1: mutable u64 = 0
     check(rh_hhi(c1, &n1, &d1), "hhi93-ok", &fails)
     check(n1 == 5 and d1 == 8, "hhi93-is-5-8", &fails)
-    c2: mutable darray[u64] = []
-    c2.push(25)
-    c2.push(25)
-    c2.push(25)
-    c2.push(25)
+    c2: mutable darray[u64] =
+        c2: mutable darray[u64] = []
+        c2.push(25)
+        c2.push(25)
+        c2.push(25)
+        c2.push(25)
+        c2
     check(rh_concentration(c2, 1, 2) == 2, "c25-half-is-2", &fails)
     check(rh_concentration(c2, 4, 5) == 4, "c25-80pct-is-4", &fails)
     n2: mutable u64 = 0
@@ -267,9 +313,11 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     if fails == 0:
         rh_print_line("ORACLES OK")
         return 0
-    summary: mutable darray[u8] = []
-    rh_push_text(summary, "ORACLES FAIL count=")
-    rh_push_decimal_i64(summary, fails)
-    summary.push(10)
+    summary: mutable darray[u8] =
+        summary: mutable darray[u8] = []
+        rh_push_text(summary, "ORACLES FAIL count=")
+        rh_push_decimal_i64(summary, fails)
+        summary.push(10)
+        summary
     rh_write_stdout(summary)
-    return 1
+    1

@@ -55,15 +55,13 @@ struct RhAssertion:
     state: mutable u8
 
 def rh_projection_make(id: i64, scope_filter: u8, platform: i64, valid_as_of: i64, known_as_of: i64, identity_revision: i64, mapping_revision: i64, public_only: bool, max_nodes: i64, max_depth: i64) -> RhProjection:
-    return RhProjection{id: id, scope_filter: scope_filter, platform: platform, valid_as_of: valid_as_of, known_as_of: known_as_of, identity_revision: identity_revision, mapping_revision: mapping_revision, public_only: public_only, max_nodes: max_nodes, max_depth: max_depth}
+    RhProjection{id: id, scope_filter: scope_filter, platform: platform, valid_as_of: valid_as_of, known_as_of: known_as_of, identity_revision: identity_revision, mapping_revision: mapping_revision, public_only: public_only, max_nodes: max_nodes, max_depth: max_depth}
 
 def rh_contains(nodes: darray[i64]&, node: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    i: mutable usize = 0
-    while i < nodes.count |i, nodes, node|:
-        if nodes[i] == node:
-            return true
+    while i < nodes.count |i: usize = 0, nodes, node|:
+        return true if nodes[i] == node
         i <- i + 1
-    return false
+    false
 
 # Visibility bytes for an edge's endpoints (private nodes are invisible to
 # public projections). Missing/short vis arrays mean public.
@@ -77,44 +75,33 @@ def rh_endpoint_vis(vis: darray[u8]&, node: i64, out: mutable i64&) -> void can[
 # Edge visible under the projection? Scope/platform filter, then the two
 # time axes, then the node-visibility rule.
 def rh_edge_visible(e: RhGraphEdge&, p: RhProjection&, vis: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
-    if p.scope_filter != RH_SCOPE_ALL and e.scope != p.scope_filter:
-        return false
-    if p.platform != 0 and e.platform != p.platform:
-        return false
+    return false if p.scope_filter != RH_SCOPE_ALL and e.scope != p.scope_filter
+    return false if p.platform != 0 and e.platform != p.platform
     if p.valid_as_of > 0:
-        if e.introduced > 0 and p.valid_as_of < e.introduced:
-            return false
-        if e.removed > 0 and p.valid_as_of >= e.removed:
-            return false
+        return false if e.introduced > 0 and p.valid_as_of < e.introduced
+        return false if e.removed > 0 and p.valid_as_of >= e.removed
     if p.known_as_of > 0:
-        if e.first_seen > p.known_as_of:
-            return false
+        return false if e.first_seen > p.known_as_of
     if p.public_only:
         fp: mutable i64 = 0
         dp: mutable i64 = 0
         rh_endpoint_vis(vis, e.from, &fp)
         rh_endpoint_vis(vis, e.dst, &dp)
-        if fp == RH_VIS_PRIVATE.i64() or dp == RH_VIS_PRIVATE.i64():
-            return false
-    return true
+        return false if fp == RH_VIS_PRIVATE.i64() or dp == RH_VIS_PRIVATE.i64()
+    true
 
 # Direct dependents: unique incoming consumers of `subject`. Root
 # exclusion and dedup are structural.
 def rh_direct_dependents(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subject: i64, p: RhProjection&, out_nodes: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    e: mutable usize = 0
-    while e < edges.count |e, edges, vis, subject, p, out_nodes|:
+    while e < edges.count |e: usize = 0, edges, vis, subject, p, out_nodes|:
         ed: RhGraphEdge = edges[e]
         e <- e + 1
-        if ed.dst != subject:
-            continue
-        if ed.from == subject:
-            continue
-        if not rh_edge_visible(ed, p, vis):
-            continue
-        if rh_contains(out_nodes, ed.from):
-            continue
+        continue if ed.dst != subject
+        continue if ed.from == subject
+        continue if not rh_edge_visible(ed, p, vis)
+        continue if rh_contains(out_nodes, ed.from)
         out_nodes.push(ed.from)
-    return out_nodes.count.i64()
+    out_nodes.count.i64()
 
 # Bounded transitive dependents over incoming edges. Repeated-scan BFS
 # with an explicit frontier/depth pair; budgets and depth limits set
@@ -127,8 +114,7 @@ def rh_transitive_dependents(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subj
     frontier.push(subject)
     depths.push(0)
     seen.push(subject)
-    fi: mutable usize = 0
-    while fi < frontier.count |fi, frontier, depths, edges, vis, subject, p, out_nodes, seen, trunc_out|:
+    while fi < frontier.count |fi: usize = 0, frontier, depths, edges, vis, subject, p, out_nodes, seen, trunc_out|:
         if out_nodes.count.i64() >= p.max_nodes:
             trunc_out[0] <- 1
             fi <- frontier.count
@@ -139,109 +125,89 @@ def rh_transitive_dependents(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subj
         if dep >= p.max_depth:
             trunc_out[0] <- 1
             continue
-        e: mutable usize = 0
-        while e < edges.count |e, edges, vis, subject, p, out_nodes, seen, cur, dep, frontier, depths|:
+        while e < edges.count |e: usize = 0, edges, vis, subject, p, out_nodes, seen, cur, dep, frontier, depths|:
             ed: RhGraphEdge = edges[e]
             e <- e + 1
-            if ed.dst != cur:
-                continue
-            if ed.from == subject:
-                continue
-            if not rh_edge_visible(ed, p, vis):
-                continue
-            if rh_contains(seen, ed.from):
-                continue
+            continue if ed.dst != cur
+            continue if ed.from == subject
+            continue if not rh_edge_visible(ed, p, vis)
+            continue if rh_contains(seen, ed.from)
             seen.push(ed.from)
             out_nodes.push(ed.from)
             frontier.push(ed.from)
             depths.push(dep + 1)
-    return out_nodes.count.i64()
+    out_nodes.count.i64()
 
 # Deduplicate a node list by accepted grouping assertions (mirrors /
 # families). Forks remain separate unless an ACCEPTED assertion groups
 # them; proposed/rejected/revoked assertions never group.
 def rh_group_root(asserts: darray[RhAssertion]&, node: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    cur: mutable i64 = node
-    hops: mutable i64 = 0
-    changed: mutable bool = true
-    while changed |cur, asserts, hops, changed|:
+    while changed |cur: i64 = node, hops: i64 = 0, changed: bool = true| -> cur:
         changed <- false
         hops <- hops + 1
         if hops <= 100000:
-            i: mutable usize = 0
-            while i < asserts.count |i, asserts, cur, changed|:
+            while i < asserts.count |i: usize = 0, asserts, cur, changed|:
                 a: RhAssertion = asserts[i]
                 i <- i + 1
-                if a.state != RH_ASSERT_ACCEPTED:
-                    continue
+                continue if a.state != RH_ASSERT_ACCEPTED
                 if a.a == cur and a.b < cur:
                     cur <- a.b
                     changed <- true
                 if a.b == cur and a.a < cur:
                     cur <- a.a
                     changed <- true
-    return cur
 
 def rh_family_dedup(members: darray[i64]&, asserts: darray[RhAssertion]&, out: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    i: mutable usize = 0
-    while i < members.count |i, members, asserts, out|:
+    while i < members.count |i: usize = 0, members, asserts, out|:
         root: i64 = rh_group_root(asserts, members[i])
         if not rh_contains(out, root):
             out.push(root)
         i <- i + 1
-    return out.count.i64()
+    out.count.i64()
 
 def rh_next_succ(edges: darray[RhGraphEdge]&, vis: darray[u8]&, p: RhProjection&, u: i64, from_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    e: mutable i64 = from_e
-    while e < edges.count.i64() |e, edges, vis, p, u|:
+    while e < edges.count.i64() |e: i64 = from_e, edges, vis, p, u|:
         ed: RhGraphEdge = edges[e.usize()]
         e <- e + 1
-        if ed.from != u:
-            continue
-        if not rh_edge_visible(ed, p, vis):
-            continue
+        continue if ed.from != u
+        continue if not rh_edge_visible(ed, p, vis)
         return e - 1
-    return -1
+    -1
 
 def rh_next_pred(edges: darray[RhGraphEdge]&, vis: darray[u8]&, p: RhProjection&, u: i64, from_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    e: mutable i64 = from_e
-    while e < edges.count.i64() |e, edges, vis, p, u|:
+    while e < edges.count.i64() |e: i64 = from_e, edges, vis, p, u|:
         ed: RhGraphEdge = edges[e.usize()]
         e <- e + 1
-        if ed.dst != u:
-            continue
-        if not rh_edge_visible(ed, p, vis):
-            continue
+        continue if ed.dst != u
+        continue if not rh_edge_visible(ed, p, vis)
         return e - 1
-    return -1
+    -1
 
 # SCC count via iterative Kosaraju: two explicit-stack DFS passes (no
 # recursion, so hostile deep chains cannot overflow). Pass 1 finishes
 # nodes over outgoing edges; pass 2 walks incoming edges from each node in
 # reverse finishing order, counting components. Returns -1 on bad input.
 def rh_scc_count(edges: darray[RhGraphEdge]&, vis: darray[u8]&, node_count: i64, p: RhProjection&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    if node_count <= 0:
-        return 0
+    return 0 if node_count <= 0
     visited: mutable darray[u8] = []
     order: mutable darray[i64] = []
-    i: mutable i64 = 0
-    while i < node_count |i, visited|:
+    while i < node_count |i: i64 = 0, visited|:
         visited.push(0)
         i <- i + 1
-    root: mutable i64 = 0
-    while root < node_count |root, node_count, edges, vis, p, visited, order|:
+    while root < node_count |root: i64 = 0, node_count, edges, vis, p, visited, order|:
         if visited[root.usize()] == 0:
             sv: mutable darray[i64] = []
             se: mutable darray[i64] = []
             sv.push(root)
             se.push(0)
             visited[root.usize()] <- 1
-            depth: mutable i64 = 1
-            while depth > 0 |depth, sv, se, edges, vis, p, visited, order|:
+            while depth > 0 |depth: i64 = 1, sv, se, edges, vis, p, visited, order|:
                 top: i64 = depth - 1
                 u: i64 = sv[top.usize()]
-                at: i64 = se[top.usize()]
-                nxt: i64 = rh_next_succ(edges, vis, p, u, at)
+                nxt: i64 =
+                    at: i64 = se[top.usize()]
+                    block_result: i64 = rh_next_succ(edges, vis, p, u, at)
+                    block_result
                 if nxt < 0:
                     order.push(u)
                     depth <- depth - 1
@@ -255,17 +221,13 @@ def rh_scc_count(edges: darray[RhGraphEdge]&, vis: darray[u8]&, node_count: i64,
                         depth <- depth + 1
         root <- root + 1
     assign: mutable darray[i64] = []
-    j: mutable i64 = 0
-    while j < node_count |j, assign|:
+    while j < node_count |j: i64 = 0, assign|:
         assign.push(-1)
         j <- j + 1
-    comps: mutable i64 = 0
-    oi: mutable i64 = order.count.i64() - 1
-    while oi >= 0 |oi, order, edges, vis, p, assign, comps|:
+    while oi >= 0 |comps: i64 = 0, oi: i64 = order.count.i64() - 1, order, assign| -> comps:
         start: i64 = order[oi.usize()]
         oi <- oi - 1
-        if assign[start.usize()] >= 0:
-            continue
+        continue if assign[start.usize()] >= 0
         cid: i64 = comps
         comps <- comps + 1
         st: mutable darray[i64] = []
@@ -273,12 +235,13 @@ def rh_scc_count(edges: darray[RhGraphEdge]&, vis: darray[u8]&, node_count: i64,
         st.push(start)
         sp.push(0)
         assign[start.usize()] <- cid
-        depth2: mutable i64 = 1
-        while depth2 > 0 |depth2, st, sp, edges, vis, p, assign, cid|:
+        while depth2 > 0 |depth2: i64 = 1, st, sp, edges, vis, p, assign, cid|:
             top2: i64 = depth2 - 1
             u2: i64 = st[top2.usize()]
-            at2: i64 = sp[top2.usize()]
-            nxt2: i64 = rh_next_pred(edges, vis, p, u2, at2)
+            nxt2: i64 =
+                at2: i64 = sp[top2.usize()]
+                block_result: i64 = rh_next_pred(edges, vis, p, u2, at2)
+                block_result
             if nxt2 < 0:
                 depth2 <- depth2 - 1
             else:
@@ -289,20 +252,16 @@ def rh_scc_count(edges: darray[RhGraphEdge]&, vis: darray[u8]&, node_count: i64,
                     st.push(v2)
                     sp.push(0)
                     depth2 <- depth2 + 1
-    return comps
 
 # Scenario: unique dependents that would lose their path to `subject` if
 # `unavailable` were removed. Recomputed over the same projection (a
 # hypothetical, and labeled as such by the caller's report layer).
 def rh_scenario_unavailable(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subject: i64, unavailable: i64, p: RhProjection&, out_nodes: mutable darray[i64]&, trunc_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
     filtered: mutable darray[RhGraphEdge] = []
-    i: mutable usize = 0
-    while i < edges.count |i, edges, filtered, unavailable|:
+    while i < edges.count |i: usize = 0, edges, filtered, unavailable|:
         ed: RhGraphEdge = edges[i]
         i <- i + 1
-        if ed.from == unavailable:
-            continue
-        if ed.dst == unavailable:
-            continue
+        continue if ed.from == unavailable
+        continue if ed.dst == unavailable
         filtered.push(ed)
-    return rh_transitive_dependents(filtered, vis, subject, p, out_nodes, trunc_out)
+    rh_transitive_dependents(filtered, vis, subject, p, out_nodes, trunc_out)

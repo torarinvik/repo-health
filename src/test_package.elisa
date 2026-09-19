@@ -14,62 +14,58 @@ include "./rh_registry_meta.elisa"
 include "./rh_spdx.elisa"
 
 def pfail(text: u8&) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
-    buffer: mutable darray[u8] = []
-    rh_push_text(buffer, "PACKAGE-FAIL ")
-    rh_push_text(buffer, text)
-    buffer.push(10)
+    buffer: mutable darray[u8] =
+        buffer: mutable darray[u8] = []
+        rh_push_text(buffer, "PACKAGE-FAIL ")
+        rh_push_text(buffer, text)
+        buffer.push(10)
+        buffer
     rh_write_stdout(buffer)
-    return 1
+    1
 
 def pjoin(dir: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
-    if rh_cstr_len_c(dir) == 0:
-        return false
+    return false if rh_cstr_len_c(dir) == 0
     rh_push_cstr(out, dir)
     out.push(47)
     rh_push_text(out, name)
     out.push(0)
-    return true
+    true
 
 def pread(workdir: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     path: mutable darray[u8] = []
-    if not pjoin(workdir, name, path):
-        return false
+    return false if not pjoin(workdir, name, path)
     pp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
-    return rh_io_read(pp, out) >= 0
+    rh_io_read(pp, out) >= 0
 
 def pbytes_equal(a: darray[u8]&, b: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
-    if a.count != b.count:
-        return false
-    i: mutable usize = 0
-    while i < a.count |i, a, b|:
-        if a[i] != b[i]:
-            return false
+    return false if a.count != b.count
+    while i < a.count |i: usize = 0, a, b|:
+        return false if a[i] != b[i]
         i <- i + 1
-    return true
+    true
 
 def pcheck(cond: bool, label: u8&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
-    if cond:
-        return 0
-    buffer: mutable darray[u8] = []
-    rh_push_text(buffer, "PACKAGE-FAIL ")
-    rh_push_text(buffer, label)
-    buffer.push(10)
+    return 0 if cond
+    buffer: mutable darray[u8] =
+        buffer: mutable darray[u8] = []
+        rh_push_text(buffer, "PACKAGE-FAIL ")
+        rh_push_text(buffer, label)
+        buffer.push(10)
+        buffer
     rh_write_stdout(buffer)
-    return 1
+    1
 
 def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     fails: mutable i64 = 0
     # --- cargo inventory ---
     clock: mutable darray[u8] = []
-    if not pread(workdir, "cargo-diamond.lock", clock):
-        return pfail("read-cargo-lock")
+    return pfail("read-cargo-lock") if not pread(workdir, "cargo-diamond.lock", clock)
     cnodes: mutable darray[RhPkgNode] = []
     cpool: mutable darray[u8] = []
     creqs: mutable darray[RhRequire] = []
     cunk: mutable i64 = 0
     cn: i64 = rh_cargo_parse(clock, cnodes, cpool, creqs, &cunk)
-    if cn != 7:
-        return pfail("cargo-nodes")
+    return pfail("cargo-nodes") if cn != 7
     fails <- fails + pcheck(cunk == 0, "cargo-unknown")
     fails <- fails + pcheck(creqs.count.i64() == 5, "cargo-reqs")
     cedges: mutable darray[RhDepEdge] = []
@@ -93,11 +89,9 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
     fails <- fails + pcheck(rh_graph_rbfs(cedges, cnodes.count.i64(), roots3, 32, 1000, cback, &ctr2) == 1, "cargo-rbfs")
     # --- npm inventory ---
     nlock: mutable darray[u8] = []
-    if not pread(workdir, "npm-diamond.lock.json", nlock):
-        return pfail("read-npm-lock")
+    return pfail("read-npm-lock") if not pread(workdir, "npm-diamond.lock.json", nlock)
     npkg: mutable darray[u8] = []
-    if not pread(workdir, "npm-diamond.package.json", npkg):
-        return pfail("read-npm-pkg")
+    return pfail("read-npm-pkg") if not pread(workdir, "npm-diamond.package.json", npkg)
     nnodes: mutable darray[RhPkgNode] = []
     npool: mutable darray[u8] = []
     npaths: mutable darray[i64] = []
@@ -131,8 +125,7 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
     fails <- fails + pcheck(rh_graph_in_count(nedges, 4) == 1, "npm-direct-deps")
     # --- cycle fixture (v1 legacy): termination + exclusion + witness ---
     clock2: mutable darray[u8] = []
-    if not pread(workdir, "npm-cycle.lock.json", clock2):
-        return pfail("read-cycle-lock")
+    return pfail("read-cycle-lock") if not pread(workdir, "npm-cycle.lock.json", clock2)
     empty_pkg: mutable darray[u8] = []
     ynodes: mutable darray[RhPkgNode] = []
     ypool: mutable darray[u8] = []
@@ -142,8 +135,10 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
     fails <- fails + pcheck(yroot == 0, "cycle-root")
     fails <- fails + pcheck(ynodes.count.i64() == 3, "cycle-nodes")
     yedges: mutable darray[RhDepEdge] = []
-    yunres: mutable darray[RhUnresolved] = []
-    ymade: i64 = rh_npm_resolve(ynodes, ypaths, ypool, yreqs, yedges, yunres)
+    ymade: i64 = |ynodes, ypool, ypaths, yreqs, yedges|
+        yunres: mutable darray[RhUnresolved] = []
+        block_result: i64 = rh_npm_resolve(ynodes, ypaths, ypool, yreqs, yedges, yunres)
+        block_result
     fails <- fails + pcheck(ymade == 2, "cycle-edges")
     yvis: mutable darray[i64] = []
     ytr: mutable i64 = 0
@@ -159,17 +154,17 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
         fails <- fails + pcheck(wit[0] == 1 and wit[1] == 2, "cycle-witness-path")
     # --- OSV matching over both inventories ---
     osvraw: mutable darray[u8] = []
-    if not pread(workdir, "osv-response.json", osvraw):
-        return pfail("read-osv")
+    return pfail("read-osv") if not pread(workdir, "osv-response.json", osvraw)
     onodes: mutable darray[RhJsonNode] = []
     otexts: mutable darray[u8] = []
     oroot: i64 = rh_json_parse(osvraw, onodes, otexts)
-    if oroot < 0:
-        return pfail("parse-osv")
+    return pfail("parse-osv") if oroot < 0
     cfind: mutable darray[RhAdvisory] = []
     cwd: mutable i64 = 0
-    csk: mutable i64 = 0
-    cnum: i64 = rh_osv_match(cnodes, cpool, onodes, otexts, oroot, cfind, &cwd, &csk)
+    cnum: i64 = |cnodes, cpool, onodes, otexts, cfind, cwd|
+        csk: mutable i64 = 0
+        block_result: i64 = rh_osv_match(cnodes, cpool, onodes, otexts, oroot, cfind, &cwd, &csk)
+        block_result
     fails <- fails + pcheck(cnum == 1, "osv-cargo-count")
     fails <- fails + pcheck(cwd == 1, "osv-withdrawn")
     if cnum == 1:
@@ -177,9 +172,11 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
         fails <- fails + pcheck(cfind[0].alias_count == 1, "osv-alias-merge")
         fails <- fails + pcheck(cfind[0].fix_s >= 0, "osv-cargo-fix")
     nfind: mutable darray[RhAdvisory] = []
-    nwd: mutable i64 = 0
-    nsk: mutable i64 = 0
-    nnum: i64 = rh_osv_match(nnodes, npool, onodes, otexts, oroot, nfind, &nwd, &nsk)
+    nnum: i64 = |nnodes, npool, onodes, otexts, nfind|
+        nwd: mutable i64 = 0
+        nsk: mutable i64 = 0
+        block_result: i64 = rh_osv_match(nnodes, npool, onodes, otexts, oroot, nfind, &nwd, &nsk)
+        block_result
     fails <- fails + pcheck(nnum == 1, "osv-npm-count")
     if nnum == 1:
         fails <- fails + pcheck(nfind[0].node == 1, "osv-npm-node")
@@ -239,13 +236,11 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
 
     # --- M03-07 inventory interchange: CycloneDX with declared spec support ---
     invraw: mutable darray[u8] = []
-    if not pread(workdir, "cyclonedx-1.5.json", invraw):
-        return pfail("read-bom")
+    return pfail("read-bom") if not pread(workdir, "cyclonedx-1.5.json", invraw)
     ipool: mutable darray[u8] = []
     icomp: mutable darray[RhBomComponent] = []
     ibom: mutable RhBom = RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
-    if rh_bom_parse(invraw, ipool, icomp, &ibom) != 0:
-        return pfail("bom-parse")
+    return pfail("bom-parse") if rh_bom_parse(invraw, ipool, icomp, &ibom) != 0
     fails <- fails + pcheck(ibom.ok == 1 and ibom.spec_unsupported == 0, "bom-supported-version")
     fails <- fails + pcheck(ibom.component_count == 2, "bom-component-count")
     fails <- fails + pcheck(ibom.invalid_components == 1, "bom-invalid-skipped")
@@ -281,13 +276,11 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
 
     # --- M03-05 registry enrichment: yanks, pub times, declared deps ---
     rmraw: mutable darray[u8] = []
-    if not pread(workdir, "registry-meta.json", rmraw):
-        return pfail("read-regmeta")
+    return pfail("read-regmeta") if not pread(workdir, "registry-meta.json", rmraw)
     rmpool: mutable darray[u8] = []
     rmver: mutable darray[RhRegVersion] = []
     rmeta: mutable RhRegMeta = RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
-    if rh_regmeta_parse(rmraw, rmpool, rmver, &rmeta) != 0:
-        return pfail("regmeta-parse")
+    return pfail("regmeta-parse") if rh_regmeta_parse(rmraw, rmpool, rmver, &rmeta) != 0
     fails <- fails + pcheck(rmeta.ok == 1 and rmeta.versions == 3, "regmeta-versions")
     fails <- fails + pcheck(rmeta.yanked_count == 1, "regmeta-yanked-count")
     fails <- fails + pcheck(rmeta.unknown_yank_count == 1, "regmeta-unknown-yank-not-false")
@@ -313,13 +306,11 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
 
     # --- M08 second inventory format: SPDX 2.3 with unknown-field awareness ---
     spraw: mutable darray[u8] = []
-    if not pread(workdir, "spdx-2.3.json", spraw):
-        return pfail("read-spdx")
+    return pfail("read-spdx") if not pread(workdir, "spdx-2.3.json", spraw)
     sppool: mutable darray[u8] = []
     sppkgs: mutable darray[RhSpdxPackage] = []
     spmeta: mutable RhSpdx = RhSpdx{ok: 0, spec_unsupported: 0, packages: 0, invalid_packages: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
-    if rh_spdx_parse(spraw, sppool, sppkgs, &spmeta) != 0:
-        return pfail("spdx-parse")
+    return pfail("spdx-parse") if rh_spdx_parse(spraw, sppool, sppkgs, &spmeta) != 0
     fails <- fails + pcheck(spmeta.ok == 1 and spmeta.spec_unsupported == 0, "spdx-supported-version")
     fails <- fails + pcheck(spmeta.packages == 2 and spmeta.invalid_packages == 1, "spdx-package-counts")
     fails <- fails + pcheck(spmeta.with_purl == 2, "spdx-with-purl")
@@ -342,15 +333,16 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
 
     # --- PyPI requirements.txt (declared requirements) ---
     preq: mutable darray[u8] = []
-    if not pread(workdir, "python-requirements.txt", preq):
-        return pfail("read-python-requirements")
+    return pfail("read-python-requirements") if not pread(workdir, "python-requirements.txt", preq)
     pnodes: mutable darray[RhPkgNode] = []
     ppool: mutable darray[u8] = []
     preqs: mutable darray[RhRequire] = []
     pedges: mutable darray[RhDepEdge] = []
     punres: mutable darray[RhUnresolved] = []
-    punk: mutable i64 = 0
-    proot: i64 = rh_pypi_parse(preq, pnodes, ppool, preqs, pedges, punres, &punk)
+    proot: i64 = |preq, pnodes, ppool, preqs, pedges, punres|
+        punk: mutable i64 = 0
+        block_result: i64 = rh_pypi_parse(preq, pnodes, ppool, preqs, pedges, punres, &punk)
+        block_result
     fails <- fails + pcheck(proot == 0, "pypi-root")
     fails <- fails + pcheck(pnodes.count == 4, "pypi-node-count")
     fails <- fails + pcheck(pedges.count == 3, "pypi-edge-count")
@@ -361,15 +353,16 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
 
     # --- Go go.mod (declared requirements) ---
     gmod: mutable darray[u8] = []
-    if not pread(workdir, "go.mod.txt", gmod):
-        return pfail("read-go-mod")
+    return pfail("read-go-mod") if not pread(workdir, "go.mod.txt", gmod)
     gnodes: mutable darray[RhPkgNode] = []
     gpool: mutable darray[u8] = []
     greqs: mutable darray[RhRequire] = []
     gedges: mutable darray[RhDepEdge] = []
     gunres: mutable darray[RhUnresolved] = []
-    gunk: mutable i64 = 0
-    groot: i64 = rh_go_parse(gmod, gnodes, gpool, greqs, gedges, gunres, &gunk)
+    groot: i64 = |gmod, gnodes, gpool, greqs, gedges, gunres|
+        gunk: mutable i64 = 0
+        block_result: i64 = rh_go_parse(gmod, gnodes, gpool, greqs, gedges, gunres, &gunk)
+        block_result
     fails <- fails + pcheck(groot == 0, "go-root")
     fails <- fails + pcheck(gnodes.count == 5, "go-node-count")
     fails <- fails + pcheck(gedges.count == 4, "go-edge-count")
@@ -377,15 +370,13 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
     # root name is the module directive path (not "root")
     fails <- fails + pcheck(gnodes[0].src_kind == 3 and gnodes[0].name_e > gnodes[0].name_s, "go-root-named")
     # the exact pins resolve; pseudo-version + incompatible + directives do not
-    misses: mutable i64 = 0
-    ctxs: mutable i64 = 0
-    gi: mutable usize = 0
-    while gi < gunres.count |gi, gunres, misses, ctxs|:
-        if gunres[gi].reason == 0:
-            misses <- misses + 1
-        if gunres[gi].reason == 2:
-            ctxs <- ctxs + 1
-        gi <- gi + 1
+    misses, ctxs =
+        while gi < gunres.count |misses: i64 = 0, ctxs: i64 = 0, gi: usize = 0, gunres| -> misses, ctxs:
+            if gunres[gi].reason == 0:
+                misses <- misses + 1
+            if gunres[gi].reason == 2:
+                ctxs <- ctxs + 1
+            gi <- gi + 1
     fails <- fails + pcheck(misses == 2, "go-pseudo-incompatible-unresolved")
     fails <- fails + pcheck(ctxs == 2, "go-directives-context")
 
@@ -399,58 +390,50 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
     gg: mutable darray[u8] = []
     rh_graph_write_json(gg, 3, gnodes, gpool, gedges, gunres, nfind, otexts, groot)
     if dump:
-        if not pwrite(workdir, "cargo-graph.golden.json", cg):
-            return pfail("dump-cargo")
-        if not pwrite(workdir, "npm-graph.golden.json", ng):
-            return pfail("dump-npm")
-        if not pwrite(workdir, "python-graph.golden.json", pg):
-            return pfail("dump-python")
-        if not pwrite(workdir, "go-graph.golden.json", gg):
-            return pfail("dump-go")
+        return pfail("dump-cargo") if not pwrite(workdir, "cargo-graph.golden.json", cg)
+        return pfail("dump-npm") if not pwrite(workdir, "npm-graph.golden.json", ng)
+        return pfail("dump-python") if not pwrite(workdir, "python-graph.golden.json", pg)
+        return pfail("dump-go") if not pwrite(workdir, "go-graph.golden.json", gg)
     else:
         cgold: mutable darray[u8] = []
-        if not pread(workdir, "cargo-graph.golden.json", cgold):
-            return pfail("read-cargo-golden")
+        return pfail("read-cargo-golden") if not pread(workdir, "cargo-graph.golden.json", cgold)
         fails <- fails + pcheck(pbytes_equal(cg, cgold), "cargo-golden")
         ngold: mutable darray[u8] = []
-        if not pread(workdir, "npm-graph.golden.json", ngold):
-            return pfail("read-npm-golden")
+        return pfail("read-npm-golden") if not pread(workdir, "npm-graph.golden.json", ngold)
         fails <- fails + pcheck(pbytes_equal(ng, ngold), "npm-golden")
         pgold: mutable darray[u8] = []
-        if not pread(workdir, "python-graph.golden.json", pgold):
-            return pfail("read-python-golden")
+        return pfail("read-python-golden") if not pread(workdir, "python-graph.golden.json", pgold)
         fails <- fails + pcheck(pbytes_equal(pg, pgold), "python-golden")
         ggold: mutable darray[u8] = []
-        if not pread(workdir, "go-graph.golden.json", ggold):
-            return pfail("read-go-golden")
+        return pfail("read-go-golden") if not pread(workdir, "go-graph.golden.json", ggold)
         fails <- fails + pcheck(pbytes_equal(gg, ggold), "go-golden")
-    if fails != 0:
-        return 1
-    okbuf: mutable darray[u8] = []
-    rh_push_text(okbuf, "PACKAGE OK")
-    okbuf.push(10)
+    return 1 if fails != 0
+    okbuf: mutable darray[u8] =
+        okbuf: mutable darray[u8] = []
+        rh_push_text(okbuf, "PACKAGE OK")
+        okbuf.push(10)
+        okbuf
     rh_write_stdout(okbuf)
-    return 0
+    0
 
 def pwrite(workdir: cstr, name: u8&, data: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     path: mutable darray[u8] = []
-    if not pjoin(workdir, name, path):
-        return false
+    return false if not pjoin(workdir, name, path)
     pp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
-    return rh_io_write(pp, data)
+    rh_io_write(pp, data)
 
 def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if argc < 3:
-        buffer: mutable darray[u8] = []
-        rh_push_text(buffer, "usage: test_package <workdir> dump|check")
-        buffer.push(10)
+        buffer: mutable darray[u8] =
+            buffer: mutable darray[u8] = []
+            rh_push_text(buffer, "usage: test_package <workdir> dump|check")
+            buffer.push(10)
+            buffer
         rh_write_stderr(buffer)
         return 2
     slots: mutable cstr&& = argv.cast[mutable cstr&&]
     workdir: cstr = slots[1]
     mode: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
-    if rh_streq(mode, "dump"):
-        return pmain(workdir, true)
-    if rh_streq(mode, "check"):
-        return pmain(workdir, false)
-    return 2
+    return pmain(workdir, true) if rh_streq(mode, "dump")
+    return pmain(workdir, false) if rh_streq(mode, "check")
+    2

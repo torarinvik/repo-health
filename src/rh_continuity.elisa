@@ -21,129 +21,98 @@ const RH_RET_UNOBSERVABLE: i64 = 3
 
 # Actor-by-month presence matrix, row-major actor*n_months + month.
 def rh_presence_build(actor: darray[i64]&, month: darray[i64]&, kind: darray[u8]&, kind_filter: i64, n_actors: i64, month_lo: i64, n_months: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    if n_actors < 0 or n_months < 0:
-        return -1
+    return -1 if n_actors < 0 or n_months < 0
     total: i64 = n_actors * n_months
-    i: mutable i64 = 0
-    while i < total |i, out|:
+    while i < total |i: i64 = 0, out|:
         out.push(0)
         i <- i + 1
-    used: mutable i64 = 0
-    e: mutable usize = 0
-    while e < actor.count |e, actor, month, kind, kind_filter, n_actors, month_lo, n_months, out, used|:
+    while e < actor.count |used: i64 = 0, e: usize = 0, out| -> used:
         a: i64 = actor[e]
         m: i64 = month[e]
         k: u8 = kind[e]
         e <- e + 1
-        if kind_filter >= 0 and k.i64() != kind_filter:
-            continue
-        if a < 0 or a >= n_actors:
-            continue
+        continue if kind_filter >= 0 and k.i64() != kind_filter
+        continue if a < 0 or a >= n_actors
         idx: i64 = m - month_lo
-        if idx < 0 or idx >= n_months:
-            continue
+        continue if idx < 0 or idx >= n_months
         slot: i64 = a * n_months + idx
         if out[slot.usize()] == 0:
             out[slot.usize()] <- 1
             used <- used + 1
-    return used
 
 def rh_presence_get(presence: darray[u8]&, actor: i64, n_months: i64, month_idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    if actor < 0 or month_idx < 0 or month_idx >= n_months:
-        return false
+    return false if actor < 0 or month_idx < 0 or month_idx >= n_months
     slot: i64 = actor * n_months + month_idx
-    if slot < 0 or slot >= presence.count.i64():
-        return false
-    return presence[slot.usize()] != 0
+    return false if slot < 0 or slot >= presence.count.i64()
+    presence[slot.usize()] != 0
 
 def rh_actor_active_months(presence: darray[u8]&, actor: i64, n_months: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    total: mutable i64 = 0
-    m: mutable i64 = 0
-    while m < n_months |m, presence, actor, n_months, total|:
+    while m < n_months |total: i64 = 0, m: i64 = 0| -> total:
         if rh_presence_get(presence, actor, n_months, m):
             total <- total + 1
         m <- m + 1
-    return total
 
 # First-to-last active span in months, inclusive. 0 when never active.
 def rh_actor_span(presence: darray[u8]&, actor: i64, n_months: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    first: mutable i64 = -1
-    last: mutable i64 = -1
-    m: mutable i64 = 0
-    while m < n_months |m, presence, actor, n_months, first, last|:
-        if rh_presence_get(presence, actor, n_months, m):
-            if first < 0:
-                first <- m
-            last <- m
-        m <- m + 1
-    if first < 0:
-        return 0
-    return last - first + 1
+    first, last =
+        while m < n_months |first: i64 = -1, last: i64 = -1, m: i64 = 0| -> first, last:
+            if rh_presence_get(presence, actor, n_months, m):
+                if first < 0:
+                    first <- m
+                last <- m
+            m <- m + 1
+    return 0 if first < 0
+    last - first + 1
 
 def rh_actor_recent(presence: darray[u8]&, actor: i64, n_months: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-    return rh_presence_get(presence, actor, n_months, n_months - 1)
+    rh_presence_get(presence, actor, n_months, n_months - 1)
 
 # Persistence cohort membership. Components stay separately available to
 # callers (active months, span, recency) so explanations can show the
 # rule's parts, not just the verdict.
 def rh_persistent(active_months: i64, span: i64, recent: bool, min_active: i64, min_span: i64, need_recent: bool) -> bool:
-    if active_months < min_active:
-        return false
-    if span < min_span:
-        return false
-    if need_recent and not recent:
-        return false
-    return true
+    return false if active_months < min_active
+    return false if span < min_span
+    return false if need_recent and not recent
+    true
 
 # Count members of the persistence cohort.
 def rh_persistent_count(presence: darray[u8]&, n_actors: i64, n_months: i64, min_active: i64, min_span: i64, need_recent: bool) -> i64 can[Memory.Allocate, Abort.Panic]:
-    total: mutable i64 = 0
-    a: mutable i64 = 0
-    while a < n_actors |a, presence, n_actors, n_months, min_active, min_span, need_recent, total|:
+    while a < n_actors |total: i64 = 0, a: i64 = 0| -> total:
         active: i64 = rh_actor_active_months(presence, a, n_months)
         span: i64 = rh_actor_span(presence, a, n_months)
         recent: bool = rh_actor_recent(presence, a, n_months)
         if rh_persistent(active, span, recent, min_active, min_span, need_recent):
             total <- total + 1
         a <- a + 1
-    return total
 
 # Continuity concern: NOT about one-off ratios. A project is flagged only
 # when fewer than `min_persistent` actors meet the persistence cohort
 # rule; a high one-off ratio with a stable core is explicitly not a
 # concern (fixture A vs B).
 def rh_concern(persistent_actors: i64, min_persistent: i64) -> bool:
-    if min_persistent <= 0:
-        return false
-    return persistent_actors < min_persistent
+    return false if min_persistent <= 0
+    persistent_actors < min_persistent
 
 # Per-actor event counts in [from_idx, to_idx), optionally filtered by
 # kind (-1 = all kinds). out is filled with n_actors zeros then counted.
 def rh_actor_counts(actor: darray[i64]&, kind: darray[u8]&, kind_filter: i64, from_idx: i64, to_idx: i64, n_actors: i64, out: mutable darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    if n_actors < 0:
-        return -1
-    i: mutable i64 = 0
-    while i < n_actors |i, out|:
+    return -1 if n_actors < 0
+    while i < n_actors |i: i64 = 0, out|:
         out.push(0)
         i <- i + 1
     lo: i64 = from_idx if from_idx > 0 else 0
     hi: i64 = to_idx if to_idx < actor.count.i64() else actor.count.i64()
-    e: mutable i64 = lo
-    while e < hi |e, actor, kind, kind_filter, n_actors, out, hi|:
+    while e < hi |e: i64 = lo, actor, kind, kind_filter, n_actors, out, hi|:
         a: i64 = actor[e.usize()]
         k: u8 = kind[e.usize()]
         e <- e + 1
-        if kind_filter >= 0 and k.i64() != kind_filter:
-            continue
-        if a < 0 or a >= n_actors:
-            continue
+        continue if kind_filter >= 0 and k.i64() != kind_filter
+        continue if a < 0 or a >= n_actors
         out[a.usize()] <- out[a.usize()] + 1
-    total: mutable i64 = 0
-    j: mutable i64 = 0
-    while j < n_actors |j, out, total|:
+    while j < n_actors |total: i64 = 0, j: i64 = 0, out| -> total:
         total <- total + out[j.usize()].i64()
         j <- j + 1
-    return total
 
 # Effective actor count = reciprocal of HHI, exact rational den/num
 # reduced. False when the population is empty (not_applicable) or on
@@ -151,23 +120,21 @@ def rh_actor_counts(actor: darray[i64]&, kind: darray[u8]&, kind_filter: i64, fr
 def rh_effective_count(counts: darray[u64]&, num_out: mutable u64&, den_out: mutable u64&) -> bool can[Memory.Allocate, Abort.Panic]:
     hn: mutable u64 = 0
     hd: mutable u64 = 0
-    if not rh_hhi(counts, &hn, &hd):
-        return false
-    if hn == 0:
-        return false
+    return false if not rh_hhi(counts, &hn, &hd)
+    return false if hn == 0
     g: u64 = rh_gcd(hd, hn)
     num_out[0] <- hd / g
     den_out[0] <- hn / g
-    return true
+    true
 
 # The 50% absence factor and 80% concentration over one actor-count
 # population, returning the shared rh_concentration contract (k>=1,
 # -1 not_applicable, -2 bad threshold, -3 overflow).
 def rh_absence_factor_50(counts: mutable darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return rh_concentration(counts, 1, 2)
+    rh_concentration(counts, 1, 2)
 
 def rh_concentration_80(counts: mutable darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return rh_concentration(counts, 4, 5)
+    rh_concentration(counts, 4, 5)
 
 # Retention per actor (plan §19.3). t0 is the first observed qualifying
 # event instant under the selected history policy; the return interval is
@@ -176,15 +143,11 @@ def rh_concentration_80(counts: mutable darray[u64]&) -> i64 can[Memory.Allocate
 def rh_retention_status(t0: i64, start_days: i64, end_days: i64, cutoff: i64, coverage_start: i64, coverage_end: i64, has_return_event: bool) -> i64:
     w_start: i64 = t0 + start_days * 86400
     w_end: i64 = t0 + end_days * 86400
-    if w_end > cutoff:
-        return RH_RET_CENSORED
-    if coverage_start > w_start:
-        return RH_RET_UNOBSERVABLE
-    if coverage_end < w_end:
-        return RH_RET_UNOBSERVABLE
-    if has_return_event:
-        return RH_RET_RETAINED
-    return RH_RET_NOT_RETAINED
+    return RH_RET_CENSORED if w_end > cutoff
+    return RH_RET_UNOBSERVABLE if coverage_start > w_start
+    return RH_RET_UNOBSERVABLE if coverage_end < w_end
+    return RH_RET_RETAINED if has_return_event
+    RH_RET_NOT_RETAINED
 
 # Coverage basis for a continuity result (R029/R002). Distinguishes a
 # full-history observation from one that is limited by how the source was
@@ -197,18 +160,14 @@ def rh_retention_status(t0: i64, start_days: i64, end_days: i64, cutoff: i64, co
 #                bound; retention/first-seen are unsupported.
 # A coverage-limited result is never presented as an activity decline.
 def rh_coverage_basis(full_history: bool, shallow: bool) -> u8:
-    if shallow:
-        return 3
-    if full_history:
-        return 1
-    return 2
+    return 3 if shallow
+    return 1 if full_history
+    2
 
 def rh_coverage_basis_label(basis: u8) -> u8&:
-    if basis == 1:
-        return "full"
-    if basis == 2:
-        return "windowed"
-    return "shallow"
+    return "full" if basis == 1
+    return "windowed" if basis == 2
+    "shallow"
 
 # Coverage change vs activity change: given the coverage basis and whether a
 # qualifying event was observed in the period, returns:
@@ -218,11 +177,9 @@ def rh_coverage_basis_label(basis: u8) -> u8&:
 # This is the mechanical form of R029: a coverage gap must never be reported
 # as an activity change.
 def rh_coverage_vs_activity(basis: u8, event_observed: bool) -> i64:
-    if basis != 1:
-        return -1
-    if event_observed:
-        return 1
-    return 0
+    return -1 if basis != 1
+    return 1 if event_observed
+    0
 
 # Monotonic count of retained actors over a per-actor status array.
 def rh_retention_tally(status: darray[i64]&, retained_out: mutable i64&, eligible_out: mutable i64&, censored_out: mutable i64&, unobservable_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
@@ -230,8 +187,7 @@ def rh_retention_tally(status: darray[i64]&, retained_out: mutable i64&, eligibl
     eligible_out[0] <- 0
     censored_out[0] <- 0
     unobservable_out[0] <- 0
-    i: mutable usize = 0
-    while i < status.count |i, status, retained_out, eligible_out, censored_out, unobservable_out|:
+    while i < status.count |i: usize = 0, status, retained_out, eligible_out, censored_out, unobservable_out|:
         s: i64 = status[i]
         i <- i + 1
         if s == RH_RET_RETAINED:
@@ -248,26 +204,19 @@ def rh_retention_tally(status: darray[i64]&, retained_out: mutable i64&, eligibl
 # Primary actor by event count (deterministic: highest count, lowest
 # actor id breaks ties). -1 for an empty population.
 def rh_primary_actor(counts: darray[u64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    best: mutable i64 = -1
-    best_count: mutable u64 = 0
-    i: mutable i64 = 0
-    while i < counts.count.i64() |i, counts, best, best_count|:
+    while i < counts.count.i64() |best: i64 = -1, best_count: u64 = 0, i: i64 = 0| -> best:
         c: u64 = counts[i.usize()]
         if c > best_count:
             best_count <- c
             best <- i
         i <- i + 1
-    return best
 
 # Months in which BOTH actors are present (handover overlap measure).
 def rh_overlap_months(presence: darray[u8]&, a: i64, b: i64, n_months: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    total: mutable i64 = 0
-    m: mutable i64 = 0
-    while m < n_months |m, presence, a, b, n_months, total|:
+    while m < n_months |total: i64 = 0, m: i64 = 0| -> total:
         if rh_presence_get(presence, a, n_months, m) and rh_presence_get(presence, b, n_months, m):
             total <- total + 1
         m <- m + 1
-    return total
 
 # Top-1 share: the largest single actor's share of the qualifying event
 # population, as an exact rational (num = top count, den = total). Zero-total
@@ -277,31 +226,26 @@ def rh_overlap_months(presence: darray[u8]&, a: i64, b: i64, n_months: i64) -> i
 def rh_top1_share(counts: mutable darray[u64]&, num_out: mutable u64&, den_out: mutable u64&) -> i64 can[Memory.Allocate, Abort.Panic]:
     num_out[0] <- 0
     den_out[0] <- 0
-    total: mutable u64 = 0
-    top: mutable u64 = 0
-    i: mutable i64 = 0
-    while i < counts.count.i64() |i, counts, total, top|:
-        c: u64 = counts[i.usize()]
-        total <- total + c
-        if c > top:
-            top <- c
-        i <- i + 1
-    if total == 0:
-        return -1
+    total, top =
+        while i < counts.count.i64() |total: u64 = 0, top: u64 = 0, i: i64 = 0, counts| -> total, top:
+            c: u64 = counts[i.usize()]
+            total <- total + c
+            if c > top:
+                top <- c
+            i <- i + 1
+    return -1 if total == 0
     num_out[0] <- top
     den_out[0] <- total
-    return 1
+    1
 
 
 # Role visibility: a maintainer who reviews consistently but authors few
 # commits must remain visible through role-specific events. This is a
 # boolean statement about evidence shapes, not a score.
 def rh_role_visible(commit_count: i64, review_count: i64, min_reviews: i64) -> bool:
-    if review_count >= min_reviews:
-        return true
-    if commit_count >= min_reviews:
-        return true
-    return false
+    return true if review_count >= min_reviews
+    return true if commit_count >= min_reviews
+    false
 
 def rh_cpush_bool(out: mutable darray[u8]&, value: bool) -> void can[Memory.Allocate, Abort.Panic]:
     if value:

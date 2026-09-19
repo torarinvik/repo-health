@@ -11,84 +11,60 @@ include "./rh_store.elisa"
 
 # private to this file (modules retried after re-seed; see CHANGELOG).
 def rh_lr_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-    n: i64 = e - s
-    k: mutable i64 = 0
-    while k < n |k, texts, lit, s|:
-        if lit[k.usize()] == 0:
-            return false
-        if texts[(s + k).usize()] != lit[k.usize()]:
-            return false
-        k <- k + 1
-    return lit[n.usize()] == 0
+    rh_bytes_equal_literal(texts, s, e, lit)
 
 # private to this file (modules retried after re-seed; see CHANGELOG).
 def rh_lr_phase(texts: darray[u8]&, s: i64, e: i64) -> i64:
-    if rh_lr_eq(texts, s, e, "queued"):
-        return 0
-    if rh_lr_eq(texts, s, e, "leased"):
-        return 1
-    if rh_lr_eq(texts, s, e, "running"):
-        return 2
-    if rh_lr_eq(texts, s, e, "succeeded"):
-        return 3
-    if rh_lr_eq(texts, s, e, "failed_terminal"):
-        return 4
-    if rh_lr_eq(texts, s, e, "canceled"):
-        return 5
-    return -1
+    return 0 if rh_lr_eq(texts, s, e, "queued")
+    return 1 if rh_lr_eq(texts, s, e, "leased")
+    return 2 if rh_lr_eq(texts, s, e, "running")
+    return 3 if rh_lr_eq(texts, s, e, "succeeded")
+    return 4 if rh_lr_eq(texts, s, e, "failed_terminal")
+    return 5 if rh_lr_eq(texts, s, e, "canceled")
+    -1
 
 # private to this file (modules retried after re-seed; see CHANGELOG).
 def rh_lr_phase_label(p: i64) -> u8&:
-    if p == 0:
-        return "queued"
-    if p == 1:
-        return "leased"
-    if p == 2:
-        return "running"
-    if p == 3:
-        return "succeeded"
-    if p == 4:
-        return "failed_terminal"
-    return "canceled"
+    return "queued" if p == 0
+    return "leased" if p == 1
+    return "running" if p == 2
+    return "succeeded" if p == 3
+    return "failed_terminal" if p == 4
+    "canceled"
 
 # private to this file (modules retried after re-seed; see CHANGELOG).
 def rh_lr_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
     idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
-    if idx < 0:
-        return false
-    return rh_json_str_span(nodes, idx, s_out, e_out)
+    return false if idx < 0
+    rh_json_str_span(nodes, idx, s_out, e_out)
 
 def rh_lease_report(raw: darray[u8]&, root: cstr, job: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     nodes: mutable darray[RhJsonNode] = []
     texts: mutable darray[u8] = []
     rooti: i64 = rh_json_parse(raw, nodes, texts)
-    if rooti < 0 or nodes[rooti.usize()].kind != RH_JSON_OBJ:
-        return -1
+    return -1 if rooti < 0 or nodes[rooti.usize()].kind != RH_JSON_OBJ
     sspan: mutable i64 = 0
     espan: mutable i64 = 0
     sc: i64 = rh_json_obj_get(nodes, texts, rooti, "schema")
-    if sc < 0 or not rh_json_str_span(nodes, sc, &sspan, &espan):
-        return -1
-    if not rh_lr_eq(texts, sspan, espan, "rh-store-lease-input/1"):
-        return -1
+    return -1 if sc < 0 or not rh_json_str_span(nodes, sc, &sspan, &espan)
+    return -1 if not rh_lr_eq(texts, sspan, espan, "rh-store-lease-input/1")
     os: mutable i64 = 0
     oe: mutable i64 = 0
-    if not rh_lr_str(nodes, texts, rooti, "owner", &os, &oe):
-        return -1
+    return -1 if not rh_lr_str(nodes, texts, rooti, "owner", &os, &oe)
     owner_buf: mutable darray[u8] = []
-    k: mutable i64 = os
-    while k < oe |k, texts, owner_buf, oe|:
+    while k < oe |k: i64 = os, texts, owner_buf, oe|:
         owner_buf.push(texts[k.usize()])
         k <- k + 1
     owner_buf.push(0)
     owner: cstr = (&owner_buf[0]).cast[cstr] can Unsafe.PointerCast
     # leases dir + paths
-    ldir: mutable darray[u8] = []
-    rh_push_cstr(ldir, root)
-    rh_push_text(ldir, "/leases")
-    ldir.push(0)
-    if rh_ensure_dir((&ldir[0]).cast[cstr] can Unsafe.PointerCast) != 0:
-        return -1
+    ldir: mutable darray[u8] =
+        ldir: mutable darray[u8] = []
+        rh_push_cstr(ldir, root)
+        rh_push_text(ldir, "/leases")
+        ldir.push(0)
+        ldir
+    return -1 if rh_ensure_dir((&ldir[0]).cast[cstr] can Unsafe.PointerCast) != 0
     lpath: mutable darray[u8] = []
     logpath: mutable darray[u8] = []
     rh_push_cstr(lpath, root)
@@ -104,24 +80,18 @@ def rh_lease_report(raw: darray[u8]&, root: cstr, job: cstr, out: mutable darray
     lp: cstr = (&lpath[0]).cast[cstr] can Unsafe.PointerCast
     lgp: cstr = (&logpath[0]).cast[cstr] can Unsafe.PointerCast
     ops_idx: i64 = rh_json_obj_get(nodes, texts, rooti, "ops")
-    if ops_idx < 0 or nodes[ops_idx.usize()].kind != RH_JSON_ARR:
-        return -1
+    return -1 if ops_idx < 0 or nodes[ops_idx.usize()].kind != RH_JSON_ARR
     rh_push_text(out, "{\"schema\":\"rh-store-lease-result/1\",\"job\":\"")
     rh_push_cstr(out, job)
     rh_push_text(out, "\",\"owner\":\"")
     rh_push_cstr(out, owner)
     rh_push_text(out, "\",\"ops\":[")
     arr: RhJsonNode = nodes[ops_idx.usize()]
-    child: mutable i64 = arr.first_child
-    first: mutable bool = true
-    token: mutable i64 = 0
-    while child >= 0 |child, nodes, texts, raw, out, first, token, lp, lgp, owner|:
-        if nodes[child.usize()].kind != RH_JSON_OBJ:
-            return -1
+    while child >= 0 |child: i64 = arr.first_child, first: bool = true, token: i64 = 0, nodes, texts, raw, out, lp, lgp, owner|:
+        return -1 if nodes[child.usize()].kind != RH_JSON_OBJ
         os2: mutable i64 = 0
         oe2: mutable i64 = 0
-        if not rh_lr_str(nodes, texts, child, "op", &os2, &oe2):
-            return -1
+        return -1 if not rh_lr_str(nodes, texts, child, "op", &os2, &oe2)
         if not first:
             out.push(44)
         first <- false
@@ -131,10 +101,12 @@ def rh_lease_report(raw: darray[u8]&, root: cstr, job: cstr, out: mutable darray
         if nok == 0:
             now <- 0
         if rh_lr_eq(texts, os2, oe2, "claim"):
-            ttl: mutable i64 = 0
-            tok: mutable i64 = 0
-            ttl <- rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, child, "ttl"), &tok)
-            got: i64 = rh_lease_acquire(lp, lgp, owner, now, ttl)
+            got: i64 = |nodes, texts, now|
+                ttl: mutable i64 = 0
+                tok: mutable i64 = 0
+                ttl <- rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, child, "ttl"), &tok)
+                block_result: i64 = rh_lease_acquire(lp, lgp, owner, now, ttl)
+                block_result
             rh_push_text(out, "{\"op\":\"claim\",\"outcome\":")
             if got > 0:
                 token <- got
@@ -157,13 +129,13 @@ def rh_lease_report(raw: darray[u8]&, root: cstr, job: cstr, out: mutable darray
             rh_push_decimal_i64(out, token)
             rh_push_text(out, "}")
         elif rh_lr_eq(texts, os2, oe2, "release"):
-            ps: mutable i64 = 0
-            pe: mutable i64 = 0
-            if not rh_lr_str(nodes, texts, child, "phase", &ps, &pe):
-                return -1
-            phase: i64 = rh_lr_phase(texts, ps, pe)
-            if phase < 0:
-                return -1
+            phase: i64 = |nodes, texts|
+                ps: mutable i64 = 0
+                pe: mutable i64 = 0
+                return -1 if not rh_lr_str(nodes, texts, child, "phase", &ps, &pe)
+                block_result: i64 = rh_lr_phase(texts, ps, pe)
+                block_result
+            return -1 if phase < 0
             ok2: bool = rh_lease_release(lp, lgp, token, owner, now, phase)
             rh_push_text(out, "{\"op\":\"release\",\"applied\":")
             if ok2:
@@ -222,4 +194,4 @@ def rh_lease_report(raw: darray[u8]&, root: cstr, job: cstr, out: mutable darray
         rh_push_text(out, rh_lr_phase_label(fph))
         rh_push_text(out, "\"")
     rh_push_text(out, "},\"note\":\"a stale worker (wrong fencing token) cannot heartbeat or release; an expired lease is reclaimable; a terminal phase refuses further claims\"}")
-    return 0
+    0
