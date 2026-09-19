@@ -246,6 +246,49 @@ assert c["nodes"][2]["dev"] is True, c["nodes"][2]
 print("[deps] RubyGems/Composer scopes + unresolved context OK")
 PY
 
+echo "[deps] packages.config resolves exact NuGet pins and preserves development scope"
+mkdir -p "$T/nugetsrc"
+cat > "$T/nugetsrc/packages.config" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<packages>
+  <package id="Newtonsoft.Json" version="13.0.3" targetFramework="net8.0" />
+  <package id="NUnit" version="3.14.0" developmentDependency="true" />
+  <package id="Serilog" version="[3.0.0,4.0.0)" />
+</packages>
+EOF
+"$ROOT/build/rh_cli" deps --repo "$T/nugetsrc" --out "$T/nugetout" \
+  | grep -q "ecosystems=1 nuget=2/3 unresolved=1 unsupported=1" || fail "NuGet summary"
+python3 - "$T/nugetout" <<'PY'
+import json, sys
+out = sys.argv[1]
+g = json.load(open(out + "/deps-nuget-graph.json"))
+m = json.load(open(out + "/deps-metrics.json"))
+assert g["ecosystem"] == "nuget", g["ecosystem"]
+assert [n["name"] for n in g["nodes"]] == ["root", "Newtonsoft.Json", "NUnit"], g["nodes"]
+assert [(e["to"], e["scope"]) for e in g["edges"]] == [(1, "normal"), (2, "dev")], g["edges"]
+assert len(g["unresolved"]) == 1 and g["unresolved"][0]["name"] == "Serilog", g["unresolved"]
+assert g["unresolved"][0]["reason"] == "missing", g["unresolved"]
+by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
+assert by["nuget"]["declared_requirements"] == 3, by
+assert by["nuget"]["resolved_edges"] == 2, by
+assert by["nuget"]["unsupported_range_count"] == 1, by
+print("[deps] NuGet graph + development scope OK")
+PY
+
+echo "[deps] malformed packages.config fails closed without a partial graph"
+mkdir -p "$T/bad-nuget"
+cat > "$T/bad-nuget/packages.config" <<'EOF'
+<packages>
+  <package version="1.0.0" />
+</packages>
+EOF
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/bad-nuget" --out "$T/bad-nuget-out" >/dev/null 2>&1
+rc_bad_nuget=$?
+set -e
+[[ "$rc_bad_nuget" -eq 4 ]] || fail "malformed packages.config must exit 4 (got $rc_bad_nuget)"
+[[ ! -f "$T/bad-nuget-out/deps-nuget-graph.json" ]] || fail "partial NuGet graph written on parse failure"
+
 echo "[deps] malformed go.sum fails closed without a partial graph"
 mkdir -p "$T/bad-go"
 cp "$ROOT/fixtures/packages/go.mod.txt" "$T/bad-go/go.mod"

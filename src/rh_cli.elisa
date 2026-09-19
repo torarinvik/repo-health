@@ -2533,8 +2533,55 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         unsupported_n.push(cpunsup)
         found <- found + 1
 
+    # --- packages.config (NuGet) ---
+    ncfg: mutable darray[u8] = []
+    if not rh_out_path(repo, "packages.config", ncfg):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    ncfgp: cstr = (&ncfg[0]).cast[cstr] can Unsafe.PointerCast
+    if file_exists(ncfgp):
+        nb: mutable darray[u8] = []
+        if rh_io_read(ncfgp, nb) < 0:
+            rh_cli_err("deps: cannot read packages.config")
+            return 4
+        nupkgs: mutable darray[RhPkgNode] = []
+        nupool: mutable darray[u8] = []
+        nureqs: mutable darray[RhRequire] = []
+        nuedges: mutable darray[RhDepEdge] = []
+        nuunres: mutable darray[RhUnresolved] = []
+        nuroot: i64 = |nb, nupkgs, nupool, nureqs, nuedges, nuunres|
+            nunk: mutable i64 = 0
+            block_result: i64 = rh_nuget_parse(nb, nupkgs, nupool, nureqs, nuedges, nuunres, &nunk)
+            block_result
+        if nuroot < 0:
+            rh_cli_err("deps: malformed packages.config (structured failure, no partial graph)")
+            return 4
+        nuunsup: i64 = rh_unsupported_range_count(nureqs, nupool)
+        nufind: mutable darray[RhAdvisory] = []
+        nuwd: mutable i64 = 0
+        nusk: mutable i64 = 0
+        if resolved_has_osv:
+            _ = rh_osv_match(nupkgs, nupool, osv_nodes, osv_texts, osv_root, nufind, &nuwd, &nusk)
+        nug: mutable darray[u8] = []
+        rh_graph_write_json(nug, 6, nupkgs, nupool, nuedges, nuunres, nufind, osv_texts, nuroot)
+        nug.push(10)
+        nuf: mutable darray[u8] = []
+        if not rh_out_path(out, "deps-nuget-graph.json", nuf):
+            rh_cli_err("deps: cannot stage nuget graph path")
+            return 4
+        nufp: cstr = (&nuf[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_io_write(nufp, nug):
+            rh_cli_err("deps: cannot write nuget graph")
+            return 4
+        eco_codes.push(6)
+        declared.push(nureqs.count.i64())
+        resolved.push(nuedges.count.i64())
+        unresolved_n.push(nuunres.count.i64())
+        unsupported_n.push(nuunsup)
+        found <- found + 1
+
     if found == 0:
-        rh_cli_err("deps: no Cargo.lock, package-lock.json, requirements.txt, pyproject.toml or go.mod found in repo")
+        rh_cli_err("deps: no supported dependency manifest found in repo")
         return 4
     mf: mutable darray[u8] = []
     if not rh_out_path(out, "deps-metrics.json", mf):

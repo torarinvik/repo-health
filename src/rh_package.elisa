@@ -19,6 +19,7 @@ const RH_ECO_PYPI: u8 = 2
 const RH_ECO_GO: u8 = 3
 const RH_ECO_RUBYGEMS: u8 = 4
 const RH_ECO_COMPOSER: u8 = 5
+const RH_ECO_NUGET: u8 = 6
 
 const RH_PSRC_REGISTRY: u8 = 0
 const RH_PSRC_PATH: u8 = 1
@@ -81,6 +82,7 @@ def rh_osv_ecosystem(eco: u8) -> u8&:
     return "Go" if eco == RH_ECO_GO
     return "RubyGems" if eco == RH_ECO_RUBYGEMS
     return "Packagist" if eco == RH_ECO_COMPOSER
+    return "NuGet" if eco == RH_ECO_NUGET
     "npm"
 
 # Cargo name equality: ASCII case-insensitive, '-' and '_' equivalent
@@ -106,9 +108,23 @@ def rh_name_eq(eco: u8, pool: darray[u8]&, s1: usize, e1: usize, s2: usize, e2: 
     return rh_cargo_name_eq(pool, s1, e1, s2, e2) if eco == RH_ECO_CARGO
     return rh_pypi_name_eq(pool, s1, e1, s2, e2) if eco == RH_ECO_PYPI
     return rh_go_name_eq(pool, s1, e1, s2, e2) if eco == RH_ECO_GO
+    return rh_nuget_name_eq(pool, s1, e1, s2, e2) if eco == RH_ECO_NUGET
     return false if e1 - s1 != e2 - s2
     while k < e1 - s1 |k: usize = 0, pool, s1, s2|:
         return false if pool[s1 + k] != pool[s2 + k]
+        k <- k + 1
+    true
+
+# NuGet package IDs are compared case-insensitively by the client ecosystem;
+# punctuation remains significant. Preserve the raw spelling in graph output.
+def rh_nuget_name_eq(pool: darray[u8]&, s1: usize, e1: usize, s2: usize, e2: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if e1 - s1 != e2 - s2
+    while k < e1 - s1 |k: usize = 0, pool, s1, s2|:
+        a: mutable u8 = pool[s1 + k]
+        b: mutable u8 = pool[s2 + k]
+        a <- a + 32 if a >= 65 and a <= 90
+        b <- b + 32 if b >= 65 and b <= 90
+        return false if a != b
         k <- k + 1
     true
 
@@ -2281,6 +2297,7 @@ def rh_deps_eco(code: i64) -> u8&:
     return "go" if code == 3
     return "rubygems" if code == 4
     return "composer" if code == 5
+    return "nuget" if code == 6
     "cargo"
 
 def rh_deps_spec(code: i64) -> u8&:
@@ -2289,6 +2306,7 @@ def rh_deps_spec(code: i64) -> u8&:
     return "go.mod" if code == 3
     return "Gemfile.lock" if code == 4
     return "composer.lock" if code == 5
+    return "packages.config" if code == 6
     "Cargo.lock"
 
 # Root of a Cargo.lock graph: the workspace/root package has no `source`
@@ -2323,6 +2341,8 @@ def rh_graph_write_json(out: mutable darray[u8]&, eco: u8, pkgs: darray[RhPkgNod
         rh_push_text(out, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"rubygems\",\"nodes\":[")
     elif eco == 5:
         rh_push_text(out, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"composer\",\"nodes\":[")
+    elif eco == 6:
+        rh_push_text(out, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"nuget\",\"nodes\":[")
     else:
         rh_push_text(out, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"npm\",\"nodes\":[")
     while i < pkgs.count.i64() |i: i64 = 0, pkgs, pool, out|:
@@ -2750,6 +2770,137 @@ def rh_composer_add_array(jnodes: darray[RhJsonNode]&, pool: mutable darray[u8]&
         _ = rh_composer_add_pkg(jnodes, pool, texts, pkgs, reqs, child, depctx)
         child <- jnodes[child.usize()].next_sibling
     return
+
+# Read one XML attribute from a bounded packages.config line. Attribute names
+# are matched exactly; both quote styles are accepted and decoded values stay
+# in the caller-owned source buffer.
+# (private to this file)
+def rh_nuget_attr(line: darray[u8]&, s: usize, e: usize, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+    start_out[0] <- -1
+    end_out[0] <- -1
+    key_len: usize = strlen(key)
+    return false if key_len == 0
+    while i + key_len < e |i: usize = s, e, line, key, key_len|:
+        if rh_bytes_equal_literal(line, i.i64(), (i + key_len).i64(), key):
+            before_ok: bool = i == s or line[i - 1] == 32 or line[i - 1] == 9 or line[i - 1] == 60 or line[i - 1] == 47
+            if before_ok:
+                j: mutable usize = i + key_len
+                while j < e and (line[j] == 32 or line[j] == 9):
+                    j <- j + 1
+                if j < e and line[j] == 61:
+                    j <- j + 1
+                    while j < e and (line[j] == 32 or line[j] == 9):
+                        j <- j + 1
+                    return false if j >= e or (line[j] != 34 and line[j] != 39)
+                    quote: u8 = line[j]
+                    start_out[0] <- (j + 1).i64()
+                    k: mutable usize = j + 1
+                    while k < e and line[k] != quote |k, e, line, quote|:
+                        k <- k + 1
+                    return false if k >= e
+                    end_out[0] <- k.i64()
+                    return true
+        i <- i + 1
+    false
+
+def rh_nuget_version_exact(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if s < 0 or e <= s
+    digits: mutable i64 = 0
+    while i < e |i: i64 = s, e, data, digits|:
+        b: u8 = data[i.usize()]
+        return false if b == 32 or b == 9 or b == 91 or b == 93 or b == 40 or b == 41 or b == 44 or b == 42 or b == 60 or b == 62 or b == 124
+        digits <- 1 if b >= 48 and b <= 57
+        i <- i + 1
+    digits == 1
+
+# Parse the bounded NuGet `packages.config` format. Exact package versions
+# become resolved edges; range expressions and missing versions remain
+# explicit unresolved requirements. XML namespaces and package scripts are
+# outside this metadata-only subset and fail closed when malformed.
+def rh_nuget_parse(xml: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    root: i64 = rh_node_add(pkgs, RH_ECO_NUGET)
+    return -1 if root != 0
+    root_name: mutable darray[u8] = []
+    rh_push_text(root_name, "root")
+    root_s: i64 = rh_pool_copy(pool, root_name, 0, root_name.count)
+    root_node: mutable RhPkgNode = pkgs[0]
+    root_node.name_s <- root_s
+    root_node.name_e <- root_s + root_name.count.i64()
+    root_node.src_kind <- RH_PSRC_UNKNOWN
+    pkgs[0] <- root_node
+    found: mutable i64 = 0
+    while line_start <= xml.count |line_start: usize = 0, xml, pkgs, pool, reqs, edges, unresolved, unknown_out, found|:
+        line_end: usize =
+            while j < xml.count and xml[j] != 10 |j: usize = line_start| -> j:
+                j <- j + 1
+        s: mutable usize = line_start
+        e: mutable usize = line_end
+        while s < e and (xml[s] == 32 or xml[s] == 9 or xml[s] == 13):
+            s <- s + 1
+        while e > s and (xml[e - 1] == 32 or xml[e - 1] == 9 or xml[e - 1] == 13):
+            e <- e - 1
+        tag: mutable i64 = -1
+        k: mutable usize = s
+        while k + 8 < e |k, e, xml, tag|:
+            if xml[k] == 60 and rh_bytes_equal_literal(xml, k.i64() + 1, k.i64() + 8, "package"):
+                after: u8 = xml[k + 8]
+                if after == 32 or after == 9 or after == 47 or after == 62:
+                    tag <- k.i64()
+                    break
+            k <- k + 1
+        if tag >= 0:
+            return -1 if rh_find_byte(xml, tag.usize(), 62) < 0
+            name_s: mutable i64 = -1
+            name_e: mutable i64 = -1
+            if not rh_nuget_attr(xml, s, e, "id", &name_s, &name_e):
+                return -1 if not rh_nuget_attr(xml, s, e, "Include", &name_s, &name_e)
+            return -1 if name_e <= name_s
+            ver_s: mutable i64 = -1
+            ver_e: mutable i64 = -1
+            _ = rh_nuget_attr(xml, s, e, "version", &ver_s, &ver_e)
+            if ver_s < 0:
+                _ = rh_nuget_attr(xml, s, e, "Version", &ver_s, &ver_e)
+            dev_s: mutable i64 = -1
+            dev_e: mutable i64 = -1
+            depctx: mutable u8 = RH_SCOPE_NORMAL
+            if rh_nuget_attr(xml, s, e, "developmentDependency", &dev_s, &dev_e) or rh_nuget_attr(xml, s, e, "DevelopmentDependency", &dev_s, &dev_e):
+                if dev_e - dev_s == 4 and xml[dev_s.usize()] == 116 and xml[(dev_s + 1).usize()] == 114 and xml[(dev_s + 2).usize()] == 117 and xml[(dev_s + 3).usize()] == 101:
+                    depctx <- RH_SCOPE_DEV
+            nname: i64 = rh_pool_copy(pool, xml, name_s.usize(), name_e.usize())
+            nname_e: i64 = nname + (name_e - name_s)
+            req_ver_s: mutable i64 = -1
+            req_ver_e: mutable i64 = -1
+            if ver_s >= 0:
+                req_ver_s <- rh_pool_copy(pool, xml, ver_s.usize(), ver_e.usize())
+                req_ver_e <- req_ver_s + (ver_e - ver_s)
+            reqs.push(RhRequire{from: 0, name_s: nname, name_e: nname_e, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: req_ver_s, req_e: req_ver_e, depctx: depctx})
+            if ver_s >= 0 and rh_nuget_version_exact(xml, ver_s, ver_e):
+                existing: mutable i64 = -1
+                while p < pkgs.count.i64() |p: i64 = 0, pkgs, pool, nname, nname_e, req_ver_s, req_ver_e|:
+                    n: RhPkgNode = pkgs[p.usize()]
+                    if n.eco == RH_ECO_NUGET and n.name_s >= 0 and rh_name_eq(RH_ECO_NUGET, pool, n.name_s.usize(), n.name_e.usize(), nname.usize(), nname_e.usize()):
+                        if n.ver_s >= 0 and rh_span_eq2(pool, n.ver_s.usize(), n.ver_e.usize(), pool, req_ver_s.usize(), req_ver_e.usize()):
+                            existing <- p
+                            break
+                    p <- p + 1
+                if existing < 0:
+                    existing <- rh_node_add(pkgs, RH_ECO_NUGET)
+                    return -1 if existing < 0
+                    nd: mutable RhPkgNode = pkgs[existing.usize()]
+                    nd.name_s <- nname
+                    nd.name_e <- nname_e
+                    nd.ver_s <- req_ver_s
+                    nd.ver_e <- req_ver_e
+                    nd.src_kind <- RH_PSRC_REGISTRY
+                    nd.dev <- 1 if depctx == RH_SCOPE_DEV else 0
+                    pkgs[existing.usize()] <- nd
+                edges.push(RhDepEdge{from: 0, dst: existing, depctx: depctx})
+            else:
+                unresolved.push(RhUnresolved{from: 0, name_s: nname, name_e: nname_e, req_s: req_ver_s, req_e: req_ver_e, reason: RH_UNRES_MISSING})
+            found <- found + 1
+        line_start <- line_end + 1
+    return -1 if found == 0
+    0
 
 def rh_composer_is_platform(pool: darray[u8]&, ns: usize, ne: usize) -> bool can[Memory.Allocate, Abort.Panic]:
     return true if ne - ns == 3 and rh_name_eq_basic(pool, ns, ne, "php")
