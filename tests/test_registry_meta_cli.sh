@@ -132,6 +132,29 @@ assert v[1]["repository"] == "https://example.invalid/home" and v[1]["yanked"] i
 print("[registry-meta] npm release/time/repository/dependency normalization OK")
 PY
 
+echo "[registry-meta] crates.io provider envelope normalizes to the canonical contract"
+cat > "$T/crates.json" <<'JSON'
+{
+  "crate": {"name": "demo", "repository": "https://example.invalid/demo"},
+  "versions": [
+    {"num": "1.0.0", "yanked": false, "created_at": "2024-01-02T00:00:00Z"},
+    {"num": "1.1.0", "yanked": true},
+    {"num": "1.2.0"}
+  ]
+}
+JSON
+"$ROOT/build/rh_cli" registry-meta --input "$T/crates.json" --out "$T/crates.out" >/dev/null || fail "crates adapter"
+python3 - "$T/crates.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1, "with_repo": 3,
+                       "declared_deps": 0, "optional_deps": 0, "dev_deps": 0}, d["counts"]
+v = d["versions"]
+assert v[0]["published_at"] == "2024-01-02T00:00:00Z" and v[0]["repository"] == "https://example.invalid/demo", v[0]
+assert v[1]["yanked"] is True and v[2]["yanked"] is None, v
+print("[registry-meta] crates version/yank/time/repository normalization OK")
+PY
+
 echo "[registry-meta] bounded file transport capture"
 URL="file://$T/in.json"
 "$ROOT/build/rh_cli" registry-meta --url "$URL" --out "$T/fetched.json" >/dev/null || fail "file fetch"
@@ -165,8 +188,10 @@ printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" registry-meta --url "https://127.0.0.1/nope" --out "$T/x" >/dev/null 2>&1; rc_blocked=$?
 printf '{"versions":{"1.0.0":42}}' > "$T/npm-bad.json"
 "$ROOT/build/rh_cli" registry-meta --input "$T/npm-bad.json" --out "$T/x" >/dev/null 2>&1; rc_npm=$?
+printf '{"crate":{},"versions":[42]}' > "$T/crates-bad.json"
+"$ROOT/build/rh_cli" registry-meta --input "$T/crates-bad.json" --out "$T/x" >/dev/null 2>&1; rc_crates=$?
 set -e
-for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked" "$rc_npm"; do
+for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked" "$rc_npm" "$rc_crates"; do
   [[ "$rc" -eq 4 ]] || fail "malformed registry-meta input must exit 4 (got $rc)"
 done
 
