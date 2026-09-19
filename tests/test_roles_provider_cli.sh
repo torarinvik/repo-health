@@ -20,6 +20,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d == {
   "schema": "rh-roles-input/1",
+  "provider": "github",
   "authorization": {"state": "authorized"},
   "declarations": [
     {"actor_id": 7001, "role": "owner", "permission": 1, "source": "provider", "declared_at": 1700000000},
