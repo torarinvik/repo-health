@@ -14,6 +14,18 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/packages/cargo-graph.golden.json" "$T/in.json"
+python3 - "$T/in.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["provider_graph_context"] = {
+    "environment": "linux-x86_64",
+    "node_count": 8,
+    "unresolved_count": 1,
+    "difference_reason": "provider graph resolves target features unavailable to the local lockfile"
+}
+json.dump(d, open(p, "w"), separators=(",", ":"))
+PY
 
 echo "[resolution] separate package identity from graph instance"
 "$ROOT/build/rh_cli" resolution --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "resolution run"
@@ -29,6 +41,7 @@ d = json.load(open(sys.argv[2]))
 assert d["schema"] == "rh-resolution-instance/1", d
 assert d["graph_snapshot"] == {"digest": digest, "schema": "rh-dep-graph/1", "ecosystem": "cargo"}, d["graph_snapshot"]
 assert d["unresolved_count"] == 2, d
+assert d["provider_graph_context"] == {"environment": "linux-x86_64", "node_count": 8, "unresolved_count": 1, "difference_reason": "provider graph resolves target features unavailable to the local lockfile"}, d
 assert len(d["instances"]) == 7, d
 first = d["instances"][0]
 assert first["package_identity"] == {"ecosystem": "cargo", "name": "app", "version": "0.1.0"}, first
