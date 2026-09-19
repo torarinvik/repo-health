@@ -22,6 +22,10 @@ assert d["schema"] == "rh-population-result/1", d
 assert d["discovery"]["truncated"] is True and d["discovery"]["page_limit"] == 100, d
 assert d["discovery"]["provider_status"] == "rate_limit" and d["discovery"]["replay_attempts"] == 2, d
 assert d["population"] == {"selected_dependents": 3, "distinct_families": 2, "unresolved": 1}, d
+summary = {m["key"]: m for m in d["summary_metrics"]}
+assert summary["population.selected_dependent_count"]["value"] == 3, summary
+assert summary["population.distinct_family_count"]["value"] == 2, summary
+assert summary["population.unresolved_mapping_count"]["value"] == 1, summary
 assert d["dependents"][1]["path_witness"] == ["tool", "dep", "acme-core"], d
 assert d["dependents"][0]["published_package_count"] == 2, d
 assert d["population"]["selected_dependents"] == len(d["dependents"]), d
