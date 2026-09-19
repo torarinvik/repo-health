@@ -41,6 +41,10 @@ d = json.load(open(sys.argv[2]))
 assert d["schema"] == "rh-resolution-instance/1", d
 assert d["graph_snapshot"] == {"digest": digest, "schema": "rh-dep-graph/1", "ecosystem": "cargo"}, d["graph_snapshot"]
 assert d["unresolved_count"] == 2, d
+assert d["unresolved"] == [
+    {"from": 0, "name": "ghost", "requirement": None, "reason": "missing"},
+    {"from": 5, "name": "shared", "requirement": None, "reason": "ambiguous"},
+], d["unresolved"]
 assert d["provider_graph_context"] == {"environment": "linux-x86_64", "node_count": 8, "unresolved_count": 1, "difference_reason": "provider graph resolves target features unavailable to the local lockfile"}, d
 assert len(d["instances"]) == 7, d
 first = d["instances"][0]
@@ -77,8 +81,10 @@ printf '{"schema":"rh-dep-graph/2","ecosystem":"cargo","nodes":[],"unresolved":[
 "$ROOT/build/rh_cli" resolution --input "$T/bad-schema.json" --out "$T/bad.out" >/dev/null 2>&1; rc_schema=$?
 printf '{"schema":"rh-dep-graph/1","ecosystem":"cargo","nodes":[{"id":0,"name":"x","version":null,"source":"unknown","dev":1,"optional":false}],"unresolved":[]}' > "$T/bad-bool.json"
 "$ROOT/build/rh_cli" resolution --input "$T/bad-bool.json" --out "$T/bool.out" >/dev/null 2>&1; rc_bool=$?
+printf '{"schema":"rh-dep-graph/1","ecosystem":"cargo","nodes":[{"id":0,"name":"x","version":null,"source":"unknown","dev":false,"optional":false}],"edges":[],"unresolved":[{"from":2,"name":"ghost","requirement":null,"reason":"missing"}]}' > "$T/bad-unresolved.json"
+"$ROOT/build/rh_cli" resolution --input "$T/bad-unresolved.json" --out "$T/unresolved.out" >/dev/null 2>&1; rc_unresolved=$?
 set -e
-[[ "$rc_schema" -eq 4 && "$rc_bool" -eq 4 ]] || fail "malformed graph must exit 4 (got $rc_schema/$rc_bool)"
-[[ ! -f "$T/bad.out" && ! -f "$T/bool.out" ]] || fail "partial resolution published"
+[[ "$rc_schema" -eq 4 && "$rc_bool" -eq 4 && "$rc_unresolved" -eq 4 ]] || fail "malformed graph must exit 4 (got $rc_schema/$rc_bool/$rc_unresolved)"
+[[ ! -f "$T/bad.out" && ! -f "$T/bool.out" && ! -f "$T/unresolved.out" ]] || fail "partial resolution published"
 
 echo "test_resolution_cli OK"
