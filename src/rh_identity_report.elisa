@@ -46,6 +46,23 @@ def rh_ir_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, 
     return 0 if idx < 0
     rh_json_int(nodes, raw, idx, ok_out)
 
+struct RhIdentityActor:
+    source_s: mutable i64
+    source_e: mutable i64
+    instance_s: mutable i64
+    instance_e: mutable i64
+    native_s: mutable i64
+    native_e: mutable i64
+    display_s: mutable i64
+    display_e: mutable i64
+    alias_start: mutable i64
+    alias_count: mutable i64
+
+struct RhIdentityAlias:
+    value_s: mutable i64
+    value_e: mutable i64
+    observed_at: mutable i64
+
 def rh_identity_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
     nodes: mutable darray[RhJsonNode] = []
     texts: mutable darray[u8] = []
@@ -111,6 +128,44 @@ def rh_identity_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Me
             kc <- nodes[kc.usize()].next_sibling
         rh_actor_kinds(kinds, &humans, &bots, &unresolved)
 
+    # Optional source-native actor metadata. When present, this is an
+    # immutable namespace/alias ledger: display names never identify actors,
+    # and aliases remain attached to their source instance and observation.
+    actors: mutable darray[RhIdentityActor] = []
+    aliases: mutable darray[RhIdentityAlias] = []
+    actors_idx: i64 = rh_json_obj_get(nodes, texts, root, "actors")
+    if actors_idx >= 0:
+        return -1 if nodes[actors_idx.usize()].kind != RH_JSON_ARR
+        actor_node: RhJsonNode = nodes[actors_idx.usize()]
+        while actor >= 0 |actor: i64 = actor_node.first_child, nodes, texts, raw, actors, aliases, actor_count|:
+            return -1 if actors.count.i64() >= actor_count or nodes[actor.usize()].kind != RH_JSON_OBJ
+            source_s: mutable i64 = 0
+            source_e: mutable i64 = 0
+            instance_s: mutable i64 = 0
+            instance_e: mutable i64 = 0
+            native_s: mutable i64 = 0
+            native_e: mutable i64 = 0
+            display_s: mutable i64 = 0
+            display_e: mutable i64 = 0
+            return -1 if not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, actor, "source"), &source_s, &source_e) or not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, actor, "source_instance"), &instance_s, &instance_e) or not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, actor, "native_object_id"), &native_s, &native_e) or not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, actor, "display_name"), &display_s, &display_e)
+            return -1 if source_s == source_e or instance_s == instance_e or native_s == native_e or display_s == display_e
+            aliases_idx: i64 = rh_json_obj_get(nodes, texts, actor, "aliases")
+            return -1 if aliases_idx < 0 or nodes[aliases_idx.usize()].kind != RH_JSON_ARR
+            alias_start: i64 = aliases.count.i64()
+            while alias >= 0 |alias: i64 = nodes[aliases_idx.usize()].first_child, nodes, texts, raw, aliases|:
+                return -1 if nodes[alias.usize()].kind != RH_JSON_OBJ
+                alias_s: mutable i64 = 0
+                alias_e: mutable i64 = 0
+                return -1 if not rh_json_str_span(nodes, rh_json_obj_get(nodes, texts, alias, "value"), &alias_s, &alias_e) or alias_s == alias_e
+                alias_ok: mutable i64 = 0
+                alias_time: i64 = rh_ir_int(nodes, raw, texts, alias, "observed_at", &alias_ok)
+                return -1 if alias_ok == 0 or alias_time < 0
+                aliases.push(RhIdentityAlias{value_s: alias_s, value_e: alias_e, observed_at: alias_time})
+                alias <- nodes[alias.usize()].next_sibling
+            actors.push(RhIdentityActor{source_s: source_s, source_e: source_e, instance_s: instance_s, instance_e: instance_e, native_s: native_s, native_e: native_e, display_s: display_s, display_e: display_e, alias_start: alias_start, alias_count: aliases.count.i64() - alias_start})
+            actor <- nodes[actor.usize()].next_sibling
+        return -1 if actors.count.i64() != actor_count
+
     rh_push_text(out, "{\"schema\":\"rh-identity-result/1\",\"actor_count\":")
     rh_push_decimal_i64(out, actor_count)
     rh_push_text(out, ",\"identity_revision\":")
@@ -155,5 +210,43 @@ def rh_identity_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Me
         rh_push_text(out, ",\"unresolved\":")
         rh_push_decimal_i64(out, unresolved)
         rh_push_text(out, "}")
+    if actors.count.i64() > 0:
+        rh_push_text(out, ",\"actors\":[")
+        while i < actors.count |i: usize = 0, actors, aliases, texts, out|:
+            if i > 0:
+                out.push(44)
+            actor: RhIdentityActor = actors[i]
+            rh_push_text(out, "{\"source\":")
+            out.push(34)
+            rh_json_escape(out, texts, actor.source_s.usize(), actor.source_e.usize())
+            out.push(34)
+            rh_push_text(out, ",\"source_instance\":")
+            out.push(34)
+            rh_json_escape(out, texts, actor.instance_s.usize(), actor.instance_e.usize())
+            out.push(34)
+            rh_push_text(out, ",\"native_object_id\":")
+            out.push(34)
+            rh_json_escape(out, texts, actor.native_s.usize(), actor.native_e.usize())
+            out.push(34)
+            rh_push_text(out, ",\"display_name\":")
+            out.push(34)
+            rh_json_escape(out, texts, actor.display_s.usize(), actor.display_e.usize())
+            out.push(34)
+            rh_push_text(out, ",\"aliases\":[")
+            while j < actor.alias_count |j: i64 = 0, actor, aliases, texts, out|:
+                if j > 0:
+                    out.push(44)
+                alias: RhIdentityAlias = aliases[(actor.alias_start + j).usize()]
+                rh_push_text(out, "{\"value\":")
+                out.push(34)
+                rh_json_escape(out, texts, alias.value_s.usize(), alias.value_e.usize())
+                out.push(34)
+                rh_push_text(out, ",\"observed_at\":")
+                rh_push_decimal_i64(out, alias.observed_at)
+                rh_push_text(out, "}")
+                j <- j + 1
+            rh_push_text(out, "]}")
+            i <- i + 1
+        rh_push_text(out, "]")
     rh_push_text(out, ",\"note\":\"clusters derive only from ACCEPTED links; rejected/revoked links change nothing; revoking recomputes clusters and advances the revision with no raw record rewritten; unresolved never forced human\"}")
     0
