@@ -1,9 +1,13 @@
 # Migrations and rollback
 
-The reference implementation keeps its durable state in a filesystem store
-(`src/rh_store.elisa`) rather than a database, so "migration" here means
-changing on-disk formats, schema versions, and toolchain versions without
-losing replayability or silently reinterpreting old data.
+The Elisa reference implementation keeps its active durable state in a
+filesystem store (`src/rh_store.elisa`). The planned server persistence
+contract is captured in
+[`db/migrations/001_initial.sql`](../../db/migrations/001_initial.sql): it
+defines typed PostgreSQL tables, visibility scope, source-scoped identity,
+evidence references, indexes, and fenced job/cursor methods. The migration is
+not applied by the local CLI, so the SQL file is a target contract and not
+evidence of a deployed database.
 
 ## Versioned things that can change
 
@@ -17,6 +21,7 @@ losing replayability or silently reinterpreting old data.
 | Benchmark manifest | `rh-bench/1` | `build/bench-manifest.json` |
 | Release packet | `rh-release-packet/1` | `build/release-packet.json` |
 | Source register | `rh-source-review/1` | `ops/source-review-register.json` |
+| PostgreSQL target schema | migration `001` | `db/migrations/001_initial.sql` |
 
 ## Rules
 
@@ -43,13 +48,20 @@ losing replayability or silently reinterpreting old data.
 6. **Toolchain pinning.** `TOOLCHAIN.md` pins the Elisa stage1 snapshot and
    no automation uses `latest`. A toolchain change is a migration: rebuild,
    re-run the suite, and record the compiler revision in the release packet.
+7. **PostgreSQL target validation is explicit.** `tests/test_migrations.sh`
+   checks the migration vocabulary, foreign-key targets, fencing primitives,
+   source-scoped uniqueness, and secret-locator boundary without claiming a
+   live PostgreSQL execution. A deployment must run the migration in a
+   disposable database and add an integration rehearsal before switching the
+   canonical store.
 
 ## What is not guaranteed yet
 
 - There is no automatic migration runner; migrations are operator-led using
   the runbooks.
-- There is no database transaction layer (`P11` remains a reference, not an
-  implementation). Concurrency is handled by the fencing lease in the store.
+- The active CLI has no database transaction layer. The migration contains
+  the planned PostgreSQL lease and cursor methods, while concurrency remains
+  handled by the filesystem fencing lease until a database adapter is wired.
 - No migration has been performed across a format change in this repository
   yet; the rules above are the contract, and the first real migration must
   add a rehearsal to `tests/`.
