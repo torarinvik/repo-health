@@ -53,6 +53,7 @@ include "./rh_privacy_report.elisa"
 include "./rh_roles_report.elisa"
 include "./rh_experimental_report.elisa"
 include "./rh_render.elisa"
+include "./rh_explain.elisa"
 include "./rh_lease_report.elisa"
 
 
@@ -110,6 +111,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli roles (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli experimental --input <file> --out <file>")
     rh_cli_err("       rh_cli render --report <report.json> --out <file.html>")
+    rh_cli_err("       rh_cli explain --input <report.json> --out <file.md>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
     rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
     rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
@@ -1497,6 +1499,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 rrq <- rrq + 1
         return rh_cli_usage(2) if rr_idx < 0 or ro_idx < 0
         return rh_do_render(slots[rr_idx], slots[ro_idx])
+    if rh_streq(cmd, "explain"):
+        ei_idx, eo_idx =
+            while eq < argc |ei_idx: i64 = -1, eo_idx: i64 = -1, eq: i64 = 2, slots| -> ei_idx, eo_idx:
+                a26: u8& = slots[eq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(a26, "--input"):
+                    if eq + 1 < argc:
+                        eq <- eq + 1
+                        ei_idx <- eq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a26, "--out"):
+                    if eq + 1 < argc:
+                        eq <- eq + 1
+                        eo_idx <- eq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                eq <- eq + 1
+        return rh_cli_usage(2) if ei_idx < 0 or eo_idx < 0
+        return rh_do_explain(slots[ei_idx], slots[eo_idx])
     if rh_streq(cmd, "sign") or rh_streq(cmd, "verify"):
         key_idx, sub_idx, sig_idx =
             while m < argc |key_idx: i64 = -1, sub_idx: i64 = -1, sig_idx: i64 = -1, m: i64 = 2, slots| -> key_idx, sub_idx, sig_idx:
@@ -4452,6 +4475,34 @@ def rh_do_render(report_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, 
         rh_cli_err("render: cannot write --out")
         return 4
     rh_cli_out("render: ok")
+    0
+
+# --- M06 report explanation projection. ---
+# Reads a pinned M01 report and writes deterministic Markdown containing the
+# typed metric status/reason/value/evidence and capability states. It adds no
+# verdict and fails closed for another report family.
+def rh_do_explain(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected explain argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("explain: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if Explain::rh_explain_markdown(raw, body) != 0:
+        rh_cli_err("explain: input is not a valid repo-health-m01 report (fail closed)")
+        return 4
+    if not rh_io_write(out_path, body):
+        rh_cli_err("explain: cannot write --out")
+        return 4
+    rh_cli_out("explain: ok")
     0
 
 # --- M02-03 job-lease execution path. ---
