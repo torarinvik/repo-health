@@ -56,6 +56,12 @@ if [[ "${RH_LIVE_TESTS:-0}" == "1" ]]; then
   rbody="$(curl -s http://127.0.0.1:18099/_report.html)" || true
   [[ "$rbody" == *"not maintainers"* && "$rbody" == *"history.commit_count"* ]] \
     || { kill "$SRV" 2>/dev/null; fail "server-rendered page missing content"; }
+  cat > "$W/query.json" <<'JSON'
+{"schema":"rh-query-input/1","kind":"metrics","ids":[10,20,30],"cursor":-1,"limit":2}
+JSON
+  qct="$(curl -s -X POST -H 'Content-Type: application/json' --data-binary @"$W/query.json" -o "$W/query.out" -w '%{content_type}' http://127.0.0.1:18099/api/query)" || true
+  [[ "$qct" == application/json ]] || { kill "$SRV" 2>/dev/null; fail "query ct=$qct"; }
+  grep -q 'rh-query-result/1' "$W/query.out" || { kill "$SRV" 2>/dev/null; fail "query result missing"; }
   n="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18099/nope)" || true
   [[ "$n" == "404" ]] || { kill "$SRV" 2>/dev/null; fail "live 404=$n"; }
   t="$(curl -s -o /dev/null -w '%{http_code}' --path-as-is http://127.0.0.1:18099/../etc/passwd)" || true

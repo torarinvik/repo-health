@@ -37,6 +37,8 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     hcheck(status_of("GET /bundle.manifest HTTP/1.1\r\n\r\n") == RH_HTTP_OK, "get-manifest-ok", &fails)
     hcheck(status_of("GET /health HTTP/1.1\r\n\r\n") == RH_HTTP_OK, "get-health-ok", &fails)
     hcheck(status_of("HEAD /report.json HTTP/1.1\r\n\r\n") == RH_HTTP_OK, "head-ok", &fails)
+    hcheck(status_of("POST /api/query HTTP/1.1\r\nContent-Length: 90\r\n\r\n") == RH_HTTP_OK, "post-query-ok", &fails)
+    hcheck(status_of("GET /api/query HTTP/1.1\r\n\r\n") == RH_HTTP_METHOD_NOT_ALLOWED, "get-query-405", &fails)
 
     # unknown path -> 404
     hcheck(status_of("GET /etc/passwd HTTP/1.1\r\n\r\n") == RH_HTTP_NOT_FOUND, "unknown-404", &fails)
@@ -57,6 +59,17 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     # method is 405 regardless of path; the path table is never probed for
     # a disallowed method. (This is the implemented, stricter order.)
     hcheck(status_of("POST /secret HTTP/1.1\r\n\r\n") == RH_HTTP_METHOD_NOT_ALLOWED, "method-before-path-405", &fails)
+
+    query_raw: mutable darray[u8] = req("POST /api/query HTTP/1.1\r\nHost: x\r\n\r\n{\"schema\":\"rh-query-input/1\",\"kind\":\"metrics\",\"ids\":[10,20],\"cursor\":-1,\"limit\":1}")
+    query_body: mutable darray[u8] = []
+    query_ct: mutable i64 = RH_CT_TEXT
+    query_status: i64 = rh_http_route(query_raw, "", query_body, &query_ct)
+    hcheck(query_status == RH_HTTP_OK and query_ct == RH_CT_JSON, "query-route-json", &fails)
+    hcheck(rh_contains_bytes(query_body, "rh-query-result/1"), "query-route-result", &fails)
+    bad_query: mutable darray[u8] = req("POST /api/query HTTP/1.1\r\n\r\nnot-json")
+    bad_query_body: mutable darray[u8] = []
+    bad_query_ct: mutable i64 = RH_CT_TEXT
+    hcheck(rh_http_route(bad_query, "", bad_query_body, &bad_query_ct) == RH_HTTP_BAD_REQUEST, "query-route-bad-400", &fails)
 
     # request line with NUL is rejected
     nul: mutable darray[u8] =

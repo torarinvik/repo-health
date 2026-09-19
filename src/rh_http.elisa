@@ -1,15 +1,17 @@
 # rh_http.elisa — bounded local HTTP listener (M06-01 wire protocol).
 #
-# A minimal, single-threaded, LOOPBACK-ONLY server that answers GET requests
+# A minimal, single-threaded, LOOPBACK-ONLY server that answers report GETs
+# and one bounded query POST
 # against a report directory. It is deliberately narrow:
 #   * binds 127.0.0.1 only (never 0.0.0.0), so it cannot be reached from
 #     another host (S002);
 #   * accepts one connection at a time, closes promptly, and caps the
 #     request line and header count (S012);
-#   * only GET and HEAD are allowed; anything else is 405;
+#   * only GET and HEAD are allowed for report files; POST /api/query is the
+#     bounded query exception and anything else is 405;
 #   * path traversal (..), absolute paths, and NUL are rejected with 400;
-#   * only a fixed set of report files under the root may be served; an
-#     unknown path is 404, never a directory listing;
+#   * only a fixed set of report files under the root may be served, plus the
+#     bounded query endpoint; an unknown path is 404, never a directory listing;
 #   * response bodies are produced by the renderer/report writer, not by
 #     interpolating request bytes (R022/S010).
 # It does not run collection, does not execute anything, and holds no
@@ -17,6 +19,7 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_render.elisa"
+include "./rh_query_report.elisa"
 
 @link_name("socket")
 extern rh_sys_socket(domain: i32, kind: i32, proto: i32) -> i32
@@ -59,7 +62,7 @@ def rh_http_content_type(ct: i64) -> u8&:
 
 # Allowlisted paths under the report root. Returns a NUL-free name span
 # index, or -1 when the path is unknown. No directory listing, no dynamic
-# construction: only files the report writer produces.
+# construction: only files the report writer produces plus the query endpoint.
 def rh_http_allowed_path(path: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
     return 0 if rh_streq(path, "/")
     return 0 if rh_streq(path, "/index.html")
@@ -68,6 +71,7 @@ def rh_http_allowed_path(path: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
     return 3 if rh_streq(path, "/bundle.manifest")
     return 4 if rh_streq(path, "/health")
     return 5 if rh_streq(path, "/_report.html")
+    return 6 if rh_streq(path, "/api/query")
     -1
 
 def rh_http_file_name(idx: i64) -> u8&:
@@ -86,7 +90,8 @@ struct RhHttpRequest:
 
 const RH_M_GET: u8 = 1
 const RH_M_HEAD: u8 = 2
-const RH_M_OTHER: u8 = 3
+const RH_M_POST: u8 = 3
+const RH_M_OTHER: u8 = 4
 
 # Parse "<METHOD> <PATH> HTTP/1.1" from the first line. Rejects an empty
 # line, a second space in the method, a path that is not origin-form
@@ -109,6 +114,8 @@ def rh_http_parse_request_line(buf: darray[u8]&) -> RhHttpRequest can[Memory.All
         method <- RH_M_GET
     if rh_span_eq_lit(buf, meth_s, meth_e, "HEAD"):
         method <- RH_M_HEAD
+    if rh_span_eq_lit(buf, meth_s, meth_e, "POST"):
+        method <- RH_M_POST
     # skip spaces
     path_start: i64 =
         while i < line_end and buf[i.usize()] == 32 |i: i64 = method_end| -> i:
@@ -140,8 +147,12 @@ def rh_http_has_traversal(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.
 # - "/health" -> 200 (service liveness only; carries no project verdict)
 def rh_http_status_for(req: RhHttpRequest&, raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
     return RH_HTTP_BAD_REQUEST if req.ok != 1
-    return RH_HTTP_METHOD_NOT_ALLOWED if req.method != RH_M_GET and req.method != RH_M_HEAD
     idx: i64 = rh_http_allowed_span(raw, req.path_s, req.path_e)
+    if req.method == RH_M_POST:
+        return RH_HTTP_OK if idx == 6
+        return RH_HTTP_METHOD_NOT_ALLOWED
+    return RH_HTTP_METHOD_NOT_ALLOWED if req.method != RH_M_GET and req.method != RH_M_HEAD
+    return RH_HTTP_METHOD_NOT_ALLOWED if idx == 6
     return RH_HTTP_NOT_FOUND if idx < 0
     RH_HTTP_OK
 
@@ -155,6 +166,17 @@ def rh_http_allowed_span(data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Al
     return 3 if rh_span_eq_lit(data, s, e, "/bundle.manifest")
     return 4 if rh_span_eq_lit(data, s, e, "/health")
     return 5 if rh_span_eq_lit(data, s, e, "/_report.html")
+    return 6 if rh_span_eq_lit(data, s, e, "/api/query")
+    -1
+
+# Return the first byte after the HTTP header terminator. A query body is
+# accepted only after a complete header block and remains bounded by the
+# request cap enforced by rh_http_read_request.
+def rh_http_body_start(raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    return -1 if raw.count < 4
+    while i + 3 < raw.count |i: usize = 0, raw|:
+        return (i + 4).i64() if raw[i] == 13 and raw[i + 1] == 10 and raw[i + 2] == 13 and raw[i + 3] == 10
+        i <- i + 1
     -1
 
 # (private to this file)
@@ -280,6 +302,16 @@ def rh_http_route(raw: darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype
         return RH_HTTP_NOT_FOUND if rh_io_read(rpp, rback) < 0
         return RH_HTTP_INTERNAL if rh_render_report_html(rback, body) != 0
         ctype_out[0] <- RH_CT_HTML
+        return RH_HTTP_OK
+    if idx == 6:
+        start: i64 = rh_http_body_start(raw)
+        return RH_HTTP_BAD_REQUEST if start < 0 or start >= raw.count.i64()
+        query: mutable darray[u8] = []
+        while i < raw.count.i64() |i: i64 = start, raw, query|:
+            query.push(raw[i.usize()])
+            i <- i + 1
+        return RH_HTTP_BAD_REQUEST if rh_query_report(query, body) != 0
+        ctype_out[0] <- RH_CT_JSON
         return RH_HTTP_OK
     name: u8& = rh_http_file_name(idx)
     if idx == 0:
