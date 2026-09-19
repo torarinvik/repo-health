@@ -165,6 +165,18 @@ rc_both=$?
 set -e
 [[ "$rc_both" -eq 4 ]] || fail "requirements.txt + pyproject.toml must fail closed (got $rc_both)"
 
+echo "[deps] unsupported PEP 621 dynamic arrays fail closed"
+mkdir -p "$T/pep621bad"
+printf '[project]\ndependencies = "dynamic"\n' > "$T/pep621bad/pyproject.toml"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/pep621bad" --out "$T/pep621bad-out" >/dev/null 2>&1
+rc_dynamic=$?
+printf '[project]\ndependencies = [\n  "demo==1.0.0"\n' > "$T/pep621bad/pyproject.toml"
+"$ROOT/build/rh_cli" deps --repo "$T/pep621bad" --out "$T/pep621bad-out2" >/dev/null 2>&1
+rc_unclosed=$?
+set -e
+[[ "$rc_dynamic" -eq 4 && "$rc_unclosed" -eq 4 ]] || fail "unsupported PEP 621 forms must fail closed"
+
 echo "[deps] go.mod resolves exact pins, keeps pseudo/directives unresolved (M08)"
 mkdir -p "$T/gosrc"
 cp "$ROOT/fixtures/packages/go.mod.txt" "$T/gosrc/go.mod"
