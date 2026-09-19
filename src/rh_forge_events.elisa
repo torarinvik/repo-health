@@ -1,11 +1,11 @@
 # rh_forge_events.elisa — bounded forge workflow-event import (M02-05).
 #
 # Provider payloads are accepted only through the captured
-# rh-forge-events-input/1 envelope. GitHub and GitLab native field names stay
-# at this adapter edge; the emitted event records use one small canonical
-# shape, preserve provider status, and count malformed records instead of
-# dropping them silently. Missing capability arrays are unsupported, while an
-# explicitly empty array is an observed empty result.
+# rh-forge-events-input/1 envelope. GitHub/Gitea/Forgejo and GitLab native
+# field names stay at this adapter edge; the emitted event records use one
+# small canonical shape, preserve provider status, and count malformed records
+# instead of dropping them silently. Missing capability arrays are unsupported,
+# while an explicitly empty array is an observed empty result.
 
 include "./rh_base.elisa"
 include "./rh_json.elisa"
@@ -79,8 +79,8 @@ module ForgeEvents:
             return "reviews" if kind == 2
             "releases"
 
-        def rh_fe_kind_id_key(kind: u8, github: bool) -> u8&:
-            return "number" if (kind == 0 or kind == 1) and github
+        def rh_fe_kind_id_key(kind: u8, githubish: bool) -> u8&:
+            return "number" if (kind == 0 or kind == 1) and githubish
             return "iid" if kind == 0 or kind == 1
             "id"
 
@@ -93,14 +93,14 @@ module ForgeEvents:
             return "state" if kind < 3
             "status"
 
-        def rh_fe_add_array(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, key: u8&, kind: u8, github: bool, events: mutable darray[RhForgeEvent]&, rejected_out: mutable i64&, has_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_fe_add_array(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, key: u8&, kind: u8, githubish: bool, events: mutable darray[RhForgeEvent]&, rejected_out: mutable i64&, has_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             has_out[0] <- 0
             arr: i64 = rh_json_obj_get(nodes, texts, root, key)
             return 0 if arr < 0
             return -1 if nodes[arr.usize()].kind != RH_JSON_ARR
             has_out[0] <- 1
             array: RhJsonNode = nodes[arr.usize()]
-            while child >= 0 |child: i64 = array.first_child, nodes, raw, texts, events, rejected_out, kind, github|:
+            while child >= 0 |child: i64 = array.first_child, nodes, raw, texts, events, rejected_out, kind, githubish|:
                 return -1 if events.count.i64() >= RH_FORGE_EVENTS_MAX_RECORDS
                 if nodes[child.usize()].kind != RH_JSON_OBJ:
                     rejected_out[0] <- rejected_out[0] + 1
@@ -108,11 +108,11 @@ module ForgeEvents:
                     continue
                 id_ok: mutable i64 = 0
                 native_id: mutable i64 = 0
-                id_key: u8& = ForgeEvents::rh_fe_kind_id_key(kind, github)
+                id_key: u8& = ForgeEvents::rh_fe_kind_id_key(kind, githubish)
                 if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, id_key, &native_id, &id_ok) or id_ok == 0 or native_id < 0:
                     # GitLab payloads may expose both iid and id; iid is the
                     # project-local workflow identity, with id as fallback.
-                    if not github and (kind == 0 or kind == 1):
+                    if not githubish and (kind == 0 or kind == 1):
                         if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "id", &native_id, &id_ok) or id_ok == 0 or native_id < 0:
                             rejected_out[0] <- rejected_out[0] + 1
                             child <- nodes[child.usize()].next_sibling
@@ -170,7 +170,7 @@ module ForgeEvents:
                 url_s: mutable i64 = -1
                 url_e: mutable i64 = -1
                 url_ok: mutable i64 = 0
-                url_key: u8& = "html_url" if github else "web_url"
+                url_key: u8& = "html_url" if githubish else "web_url"
                 if not ForgeEvents::rh_fe_optional_str(nodes, texts, child, url_key, &url_s, &url_e, &url_ok):
                     rejected_out[0] <- rejected_out[0] + 1
                     child <- nodes[child.usize()].next_sibling
@@ -256,8 +256,11 @@ module ForgeEvents:
             provider_e: mutable i64 = 0
             return -1 if not ForgeEvents::rh_fe_str(nodes, texts, root, "provider", &provider_s, &provider_e)
             github: bool = ForgeEvents::rh_fe_eq(texts, provider_s, provider_e, "github")
+            gitea: bool = ForgeEvents::rh_fe_eq(texts, provider_s, provider_e, "gitea")
+            forgejo: bool = ForgeEvents::rh_fe_eq(texts, provider_s, provider_e, "forgejo")
             gitlab: bool = ForgeEvents::rh_fe_eq(texts, provider_s, provider_e, "gitlab")
-            return -1 if not github and not gitlab
+            githubish: bool = github or gitea or forgejo
+            return -1 if not githubish and not gitlab
             captured_at: mutable i64 = 0
             captured_ok: mutable bool = false
             return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, root, "captured_at", &captured_at, &captured_ok) or not captured_ok or captured_at < 0
@@ -279,10 +282,10 @@ module ForgeEvents:
             has_proposals: mutable i64 = 0
             has_reviews: mutable i64 = 0
             has_releases: mutable i64 = 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "issues", 0, github, events, &rejected_issues, &has_issues) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, github, events, &rejected_proposals, &has_proposals) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, github, events, &rejected_reviews, &has_reviews) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "releases", 3, github, events, &rejected_releases, &has_releases) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "issues", 0, githubish, events, &rejected_issues, &has_issues) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, githubish, events, &rejected_proposals, &has_proposals) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, githubish, events, &rejected_reviews, &has_reviews) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "releases", 3, githubish, events, &rejected_releases, &has_releases) != 0
             rh_push_text(out, "{\"schema\":\"rh-forge-events-result/1\",\"provider\":\"")
             rh_json_escape(out, texts, provider_s.usize(), provider_e.usize())
             rh_push_text(out, "\",\"captured_at\":")

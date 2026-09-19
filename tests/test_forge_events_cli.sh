@@ -12,6 +12,8 @@ bash "$ROOT/tools/build.sh" >/dev/null
 rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/connectors/forge-events-input.json" "$T/input.json"
 cp "$ROOT/fixtures/connectors/forge-events-gitlab-input.json" "$T/gitlab.json"
+cp "$ROOT/fixtures/connectors/forge-events-forgejo-input.json" "$T/forgejo.json"
+cp "$ROOT/fixtures/connectors/forge-events-gitea-input.json" "$T/gitea.json"
 cp "$ROOT/fixtures/connectors/forge-events-result.json" "$T/expected.json"
 
 echo "[forge-events] valid capture reproduces the checked-in result"
@@ -40,6 +42,28 @@ assert [e["native_id"] for e in d["events"]] == ["gitlab:12", "gitlab:8", "gitla
 assert d["events"][-1]["created_at"] == 1699900100 and d["events"][-1]["status"] == "published", d
 assert d["events"][-1]["tag"] == "v2.0.0" and d["events"][-1]["url"].startswith("https://gitlab.com/"), d
 print("[forge-events] GitLab boundary OK")
+PY
+
+echo "[forge-events] Forgejo keeps its own provider namespace"
+"$ROOT/build/rh_cli" forge events --input "$T/forgejo.json" --out "$T/forgejo.out" >/dev/null || fail "Forgejo capture"
+python3 - "$T/forgejo.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["provider"] == "forgejo" and d["authorization"]["state"] == "unknown", d
+assert [e["native_id"] for e in d["events"]] == ["forgejo:21", "forgejo:11", "forgejo:66", "forgejo:12"], d
+assert d["events"][-1]["status"] == "published" and d["events"][-1]["tag"] == "v3.0.0", d
+print("[forge-events] Forgejo boundary OK")
+PY
+
+echo "[forge-events] Gitea keeps its own provider namespace and authorization"
+"$ROOT/build/rh_cli" forge events --input "$T/gitea.json" --out "$T/gitea.out" >/dev/null || fail "Gitea capture"
+python3 - "$T/gitea.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["provider"] == "gitea" and d["authorization"]["state"] == "unauthorized", d
+assert [e["native_id"] for e in d["events"]] == ["gitea:31", "gitea:13", "gitea:76", "gitea:14"], d
+assert d["events"][1]["status"] == "closed" and d["events"][3]["tag"] == "v4.0.0", d
+print("[forge-events] Gitea boundary OK")
 PY
 
 echo "[forge-events] rejected records are counted per capability"
