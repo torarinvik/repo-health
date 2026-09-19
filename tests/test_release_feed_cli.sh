@@ -35,6 +35,15 @@ assert "no history or author identity is derived" in d["note"], d["note"]
 print("[release-feed] fields + validity/known time OK")
 PY
 
+echo "[release-feed] bounded --url capture retains source/status/error evidence"
+source_url="file://$T/in.json"
+"$ROOT/build/rh_cli" release-feed --url "$source_url" --out "$T/url.out" >/dev/null || fail "url run"
+cmp -s "$T/in.json" "$T/url.out.source" || fail "url source evidence differs"
+[[ -f "$T/url.out.source.status" && "$(cat "$T/url.out.source.status")" == "000" ]] || fail "url status evidence"
+[[ -f "$T/url.out.source.err" && ! -s "$T/url.out.source.err" ]] || fail "url error evidence"
+cmp -s "$T/out.json" "$T/url.out" || fail "url output differs"
+echo "[release-feed] url capture OK"
+
 echo "[release-feed] a re-observation keeps its own first-seen (tag is not identity)"
 cat > "$T/reobs.json" <<'JSON'
 {"schema":"rh-release-feed-input/1","first_seen":1600000000,"releases":[{"tag":"v1.0.0","published_at":1700000000}]}
@@ -74,9 +83,13 @@ printf '{"first_seen":1,"releases":42}' > "$T/badshape.json"
 printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" release-feed --input "$T/notjson.json" --out "$T/x" >/dev/null 2>&1; rc_json=$?
 "$ROOT/build/rh_cli" release-feed --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
+"$ROOT/build/rh_cli" release-feed --out "$T/x" >/dev/null 2>&1; rc_neither=$?
+"$ROOT/build/rh_cli" release-feed --input "$T/in.json" --url "$source_url" --out "$T/x" >/dev/null 2>&1; rc_both=$?
 set -e
 for rc in "$rc_nofs" "$rc_arr" "$rc_shape" "$rc_json" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed release-feed input must exit 4 (got $rc)"
 done
+[[ "$rc_neither" -eq 2 ]] || fail "missing input/url must exit 2 (got $rc_neither)"
+[[ "$rc_both" -eq 2 ]] || fail "input and url together must exit 2 (got $rc_both)"
 
 echo "test_release_feed_cli OK"

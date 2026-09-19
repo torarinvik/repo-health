@@ -123,7 +123,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli notify --input <file> --out <file> [--state <file> | --state-store <dir>]")
     rh_cli_err("       rh_cli query --input <file> --out <file>")
     rh_cli_err("       rh_cli identity --input <file> --out <file>")
-    rh_cli_err("       rh_cli release-feed --input <file> --out <file>")
+    rh_cli_err("       rh_cli release-feed (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli registry-meta (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli pep440 --input <file> --out <file>")
     rh_cli_err("       rh_cli privacy --input <file> --out <file>")
@@ -1384,8 +1384,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if idi_idx < 0 or ido_idx < 0
         return rh_do_identity(slots[idi_idx], slots[ido_idx])
     if rh_streq(cmd, "release-feed"):
-        rfi_idx, rfo_idx =
-            while rfq < argc |rfi_idx: i64 = -1, rfo_idx: i64 = -1, rfq: i64 = 2, slots| -> rfi_idx, rfo_idx:
+        rfi_idx, rfu_idx, rfo_idx =
+            while rfq < argc |rfi_idx: i64 = -1, rfu_idx: i64 = -1, rfo_idx: i64 = -1, rfq: i64 = 2, slots| -> rfi_idx, rfu_idx, rfo_idx:
                 a19: u8& = slots[rfq].cast[u8&] can Unsafe.PointerCast
                 if rh_streq(a19, "--input"):
                     if rfq + 1 < argc:
@@ -1399,11 +1399,26 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         rfo_idx <- rfq
                     else:
                         return rh_cli_usage(2)
+                elif rh_streq(a19, "--url"):
+                    if rfq + 1 < argc:
+                        rfq <- rfq + 1
+                        rfu_idx <- rfq
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 rfq <- rfq + 1
-        return rh_cli_usage(2) if rfi_idx < 0 or rfo_idx < 0
-        return rh_do_release_feed(slots[rfi_idx], slots[rfo_idx])
+        return rh_cli_usage(2) if rfo_idx < 0
+        return rh_cli_usage(2) if rfi_idx >= 0 and rfu_idx >= 0
+        return rh_cli_usage(2) if rfi_idx < 0 and rfu_idx < 0
+        release_input: mutable cstr = slots[rfo_idx]
+        release_url: mutable cstr = slots[rfo_idx]
+        has_release_url: bool = rfu_idx >= 0
+        if rfi_idx >= 0:
+            release_input <- slots[rfi_idx]
+        if has_release_url:
+            release_url <- slots[rfu_idx]
+        return rh_do_release_feed(release_input, slots[rfo_idx], release_url, has_release_url)
     if rh_streq(cmd, "registry-meta"):
         rmi_idx, rmu_idx, rmo_idx =
             while rmq < argc |rmi_idx: i64 = -1, rmu_idx: i64 = -1, rmo_idx: i64 = -1, rmq: i64 = 2, slots| -> rmi_idx, rmu_idx, rmo_idx:
@@ -4612,21 +4627,62 @@ def rh_do_identity(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
 # --- M08 release-only source execution path. ---
 # Reads an rh-release-feed-input/1 document ({"first_seen":N,"releases":[...]})
 # and writes rh-release-feed-result/1. No history/identity is derived; valid
-# time (published) and known time (first-seen) are kept separate.
-def rh_do_release_feed(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+# time (published) and known time (first-seen) are kept separate. URL input
+# retains bounded source/status/error evidence before parsing.
+def rh_do_release_feed(input_path: cstr, out_path: cstr, source_url: cstr, has_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(out_path):
         rh_cli_err("rejected release-feed argument (allowlist)")
         return 3
-    ip: mutable darray[u8] =
-        ip: mutable darray[u8] = []
-        rh_push_cstr(ip, input_path)
-        ip.push(0)
-        ip
-    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
     raw: mutable darray[u8] = []
-    if rh_io_read(ipp, raw) < 0:
-        rh_cli_err("release-feed: cannot read --input")
-        return 4
+    if has_url:
+        return 3 if not rh_fetch_arg_safe(source_url)
+        source_path: mutable darray[u8] =
+            source_path: mutable darray[u8] = []
+            rh_push_cstr(source_path, out_path)
+            rh_push_text(source_path, ".source")
+            source_path.push(0)
+            source_path
+        status_path: mutable darray[u8] =
+            status_path: mutable darray[u8] = []
+            rh_push_cstr(status_path, out_path)
+            rh_push_text(status_path, ".source.status")
+            status_path.push(0)
+            status_path
+        error_path: mutable darray[u8] =
+            error_path: mutable darray[u8] = []
+            rh_push_cstr(error_path, out_path)
+            rh_push_text(error_path, ".source.err")
+            error_path.push(0)
+            error_path
+        source_ptr: cstr = (&source_path[0]).cast[cstr] can Unsafe.PointerCast
+        status_ptr: cstr = (&status_path[0]).cast[cstr] can Unsafe.PointerCast
+        error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_run_https_get(source_url, source_ptr, status_ptr, error_ptr) != 0:
+            rh_cli_err("release-feed: fetch failed; source and stderr evidence retained")
+            return 4
+        status_raw: mutable darray[u8] = []
+        if rh_io_read(status_ptr, status_raw) < 0 or status_raw.count == 0:
+            rh_cli_err("release-feed: fetch did not produce a status")
+            return 4
+        ok_status: bool = status_raw[0] == 50
+        file_transport: bool = status_raw.count >= 3 and status_raw[0] == 48 and status_raw[1] == 48 and status_raw[2] == 48 and rh_cstr_starts_with(source_url, "file://")
+        if not ok_status and not file_transport:
+            rh_cli_err("release-feed: fetch returned non-2xx; no result published")
+            return 4
+        if rh_io_read(source_ptr, raw) < 0:
+            rh_cli_err("release-feed: cannot read fetched source evidence")
+            return 4
+    else:
+        return 3 if not rh_arg_safe(input_path)
+        ip: mutable darray[u8] =
+            ip: mutable darray[u8] = []
+            rh_push_cstr(ip, input_path)
+            ip.push(0)
+            ip
+        ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_io_read(ipp, raw) < 0:
+            rh_cli_err("release-feed: cannot read --input")
+            return 4
     nodes: mutable darray[RhJsonNode] = []
     fs_idx: i64 = |raw, nodes|
         texts: mutable darray[u8] = []
