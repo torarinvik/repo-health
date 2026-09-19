@@ -26,6 +26,11 @@ tests, not an aspiration. Where a rule is tested, the test is named.
    metric must never be advertised as reachable; enforced by
    `tests/test_profile.sh`.
 
+6. **Performance evidence.** Scaling claims use the deterministic stage
+   profile in `tools/profile.sh`; `repo-health` records dataset digests and
+   stage names while leaving machine-specific timings as observations,
+   enforced by `tests/test_profile_bench.sh`.
+
 ## Changing a published metric
 
 - A changed denominator or definition is a **new version**, never a silent
