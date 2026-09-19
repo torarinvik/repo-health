@@ -16,6 +16,10 @@ const RH_POP_STATUS_UNKNOWN: u8 = 3
 const RH_POP_POLICY_PASS: u8 = 0
 const RH_POP_POLICY_FAIL: u8 = 1
 const RH_POP_POLICY_UNKNOWN: u8 = 2
+const RH_POP_PROVIDER_HEALTHY: u8 = 0
+const RH_POP_PROVIDER_RATE_LIMIT: u8 = 1
+const RH_POP_PROVIDER_AUTHORIZATION: u8 = 2
+const RH_POP_PROVIDER_UNAVAILABLE: u8 = 3
 
 struct RhPopulationMetric:
     key_s: mutable i64
@@ -93,6 +97,19 @@ module Population:
             return "fail" if policy == RH_POP_POLICY_FAIL
             "unknown"
 
+        def rh_population_provider_status(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_POP_PROVIDER_HEALTHY if Population::rh_population_eq(texts, s, e, "healthy")
+            return RH_POP_PROVIDER_RATE_LIMIT if Population::rh_population_eq(texts, s, e, "rate_limit")
+            return RH_POP_PROVIDER_AUTHORIZATION if Population::rh_population_eq(texts, s, e, "authorization")
+            return RH_POP_PROVIDER_UNAVAILABLE if Population::rh_population_eq(texts, s, e, "unavailable")
+            -1
+
+        def rh_population_provider_label(status: u8) -> u8&:
+            return "healthy" if status == RH_POP_PROVIDER_HEALTHY
+            return "rate_limit" if status == RH_POP_PROVIDER_RATE_LIMIT
+            return "authorization" if status == RH_POP_PROVIDER_AUTHORIZATION
+            "unavailable"
+
         def rh_population_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
             out.push(34)
             rh_json_escape(out, texts, s.usize(), e.usize())
@@ -151,6 +168,8 @@ module Population:
             mode_e: mutable i64 = 0
             unit_s: mutable i64 = 0
             unit_e: mutable i64 = 0
+            provider_s: mutable i64 = 0
+            provider_e: mutable i64 = 0
             return -1 if not Population::rh_population_str(nodes, texts, root, "focal_package", &focal_s, &focal_e) or not Population::rh_population_str(nodes, texts, root, "version_policy", &policy_s, &policy_e) or not Population::rh_population_str(nodes, texts, root, "discovery_source", &discovery_s, &discovery_e) or not Population::rh_population_str(nodes, texts, root, "discovery_mode", &mode_s, &mode_e) or not Population::rh_population_str(nodes, texts, root, "deduplication_unit", &unit_s, &unit_e)
             return -1 if focal_s == focal_e or policy_s == policy_e or discovery_s == discovery_e or mode_s == mode_e or unit_s == unit_e
             as_of_ok: mutable i64 = 0
@@ -163,6 +182,17 @@ module Population:
             truncated_code: i64 = Population::rh_population_bool(nodes, raw, texts, root, "truncated")
             return -1 if truncated_code < 0
             truncated: bool = truncated_code != 0
+            provider_status: mutable u8 = RH_POP_PROVIDER_HEALTHY
+            provider_idx: i64 = Population::rh_population_get(nodes, texts, root, "provider_status")
+            replay_attempts: mutable i64 = 1
+            if provider_idx >= 0:
+                return -1 if not Population::rh_population_str(nodes, texts, root, "provider_status", &provider_s, &provider_e)
+                provider_code: i64 = Population::rh_population_provider_status(texts, provider_s, provider_e)
+                return -1 if provider_code < 0
+                provider_status <- provider_code.u8()
+                replay_ok: mutable i64 = 0
+                replay_attempts <- Population::rh_population_int(nodes, raw, texts, root, "replay_attempts", &replay_ok)
+                return -1 if replay_ok == 0 or replay_attempts < 1
             defs_idx: i64 = Population::rh_population_get(nodes, texts, root, "metric_definitions")
             return -1 if defs_idx < 0 or nodes[defs_idx.usize()].kind != RH_JSON_ARR
             metrics: mutable darray[RhPopulationMetric] = []
@@ -323,6 +353,11 @@ module Population:
             rh_push_decimal_i64(out, page_limit)
             rh_push_text(out, ",\"truncated\":")
             rh_push_text(out, "true" if truncated else "false")
+            if provider_idx >= 0:
+                rh_push_text(out, ",\"provider_status\":\"")
+                rh_push_text(out, Population::rh_population_provider_label(provider_status))
+                rh_push_text(out, "\",\"replay_attempts\":")
+                rh_push_decimal_i64(out, replay_attempts)
             rh_push_text(out, "},\"mapping_revision\":")
             rh_push_decimal_i64(out, mapping_revision)
             rh_push_text(out, ",\"deduplication_unit\":")

@@ -12,7 +12,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-population-input/1","focal_package":"acme-core","version_policy":"latest-published","discovery_source":"local-reverse-index","discovery_mode":"historical","discovery_as_of":1700000000,"page_limit":100,"truncated":true,"mapping_revision":4,"deduplication_unit":"accepted-project-family","metric_definitions":[{"key":"history.months_active","version":"1"},{"key":"review.coverage","version":"2"}],"dependents":[{"id":"repo-a","family":"family-a","package":"acme-core","version":"1.2.0","relation":"direct","published_packages":["acme-core","acme-cli"],"path_witness":["app","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"observed","value":12,"policy":"pass"},{"key":"review.coverage","version":"2","status":"unknown","value":null,"policy":"unknown"}]},{"id":"repo-b","family":"family-a","package":"acme-core","version":"1.1.0","relation":"transitive","path_witness":["tool","dep","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"partial","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":3,"policy":"fail"}]},{"id":"repo-c","family":"family-c","package":"acme-core","version":"1.0.0","relation":"direct","path_witness":["service","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"unavailable","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":5,"policy":"pass"}]}],"unresolved":[{"package":"unknown-pkg","reason":"mapping review required"}]}
+{"schema":"rh-population-input/1","focal_package":"acme-core","version_policy":"latest-published","discovery_source":"local-reverse-index","discovery_mode":"historical","discovery_as_of":1700000000,"page_limit":100,"truncated":true,"provider_status":"rate_limit","replay_attempts":2,"mapping_revision":4,"deduplication_unit":"accepted-project-family","metric_definitions":[{"key":"history.months_active","version":"1"},{"key":"review.coverage","version":"2"}],"dependents":[{"id":"repo-a","family":"family-a","package":"acme-core","version":"1.2.0","relation":"direct","published_packages":["acme-core","acme-cli"],"path_witness":["app","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"observed","value":12,"policy":"pass"},{"key":"review.coverage","version":"2","status":"unknown","value":null,"policy":"unknown"}]},{"id":"repo-b","family":"family-a","package":"acme-core","version":"1.1.0","relation":"transitive","path_witness":["tool","dep","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"partial","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":3,"policy":"fail"}]},{"id":"repo-c","family":"family-c","package":"acme-core","version":"1.0.0","relation":"direct","path_witness":["service","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"unavailable","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":5,"policy":"pass"}]}],"unresolved":[{"package":"unknown-pkg","reason":"mapping review required"}]}
 JSON
 "$ROOT/build/rh_cli" population --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "population run"
 python3 - "$T/out.json" <<'PY'
@@ -20,6 +20,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-population-result/1", d
 assert d["discovery"]["truncated"] is True and d["discovery"]["page_limit"] == 100, d
+assert d["discovery"]["provider_status"] == "rate_limit" and d["discovery"]["replay_attempts"] == 2, d
 assert d["population"] == {"selected_dependents": 3, "distinct_families": 2, "unresolved": 1}, d
 assert d["dependents"][1]["path_witness"] == ["tool", "dep", "acme-core"], d
 assert d["dependents"][0]["published_package_count"] == 2, d
@@ -48,7 +49,9 @@ sed 's/"id":"repo-c"/"id":"repo-a"/' "$T/in.json" > "$T/bad-duplicate.json"
 "$ROOT/build/rh_cli" population --input "$T/bad-duplicate.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate=$?
 sed 's/"status":"unknown","value":null/"status":"unknown","value":1/' "$T/in.json" > "$T/bad-value.json"
 "$ROOT/build/rh_cli" population --input "$T/bad-value.json" --out "$T/x" >/dev/null 2>&1; rc_value=$?
+sed 's/"provider_status":"rate_limit"/"provider_status":"mystery"/' "$T/in.json" > "$T/bad-provider.json"
+"$ROOT/build/rh_cli" population --input "$T/bad-provider.json" --out "$T/x" >/dev/null 2>&1; rc_provider=$?
 set -e
-[[ "$rc_bool" -eq 4 && "$rc_revision" -eq 4 && "$rc_path" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_value" -eq 4 ]] || fail "invalid population must exit 4 (got $rc_bool/$rc_revision/$rc_path/$rc_duplicate/$rc_value)"
+[[ "$rc_bool" -eq 4 && "$rc_revision" -eq 4 && "$rc_path" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_value" -eq 4 && "$rc_provider" -eq 4 ]] || fail "invalid population must exit 4 (got $rc_bool/$rc_revision/$rc_path/$rc_duplicate/$rc_value/$rc_provider)"
 
 echo "test_population_cli OK"
