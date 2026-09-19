@@ -1,0 +1,345 @@
+# rh_lineage.elisa — canonical evidence lineage and transformation envelope.
+#
+# This is the shared RP-02 boundary for source adapters. It keeps source
+# object identity, collection/coverage, payload provenance, delivery identity,
+# origin-assessment identity, and field-level transformation states separate.
+# The adapter validates and canonicalizes the envelope; it never invents a
+# missing time, treats a delivery as independent evidence, or turns a loss
+# into a successful preserved field.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_LINEAGE_TRANSFORM_PRESERVED: u8 = 0
+const RH_LINEAGE_TRANSFORM_TRANSFORMED: u8 = 1
+const RH_LINEAGE_TRANSFORM_INFERRED: u8 = 2
+const RH_LINEAGE_TRANSFORM_DISCARDED: u8 = 3
+const RH_LINEAGE_TRANSFORM_UNSUPPORTED: u8 = 4
+const RH_LINEAGE_METRIC_RAW: u8 = 0
+const RH_LINEAGE_METRIC_DERIVED: u8 = 1
+const RH_LINEAGE_METRIC_MODELED: u8 = 2
+
+struct RhLineageTransformation:
+    field_s: mutable i64
+    field_e: mutable i64
+    state: mutable u8
+    reason_s: mutable i64
+    reason_e: mutable i64
+
+struct RhLineageMetric:
+    key_s: mutable i64
+    key_e: mutable i64
+    version_s: mutable i64
+    version_e: mutable i64
+    class: mutable u8
+    crosswalk_s: mutable i64
+    crosswalk_e: mutable i64
+
+module Lineage:
+    private:
+        def rh_lineage_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_lineage_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, lit)
+
+        def rh_lineage_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Lineage::rh_lineage_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            node: RhJsonNode = nodes[idx.usize()]
+            start_out[0] <- node.text_start
+            end_out[0] <- node.text_end
+            true
+
+        def rh_lineage_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Lineage::rh_lineage_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_lineage_optional_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Lineage::rh_lineage_get(nodes, texts, obj, key)
+            return false if idx < 0
+            if nodes[idx.usize()].kind == RH_JSON_NULL:
+                value_out[0] <- 0
+                present_out[0] <- 0
+                return true
+            ok: mutable i64 = 0
+            value: i64 = rh_json_int(nodes, raw, idx, &ok)
+            return false if ok == 0 or value < 0
+            value_out[0] <- value
+            present_out[0] <- 1
+            true
+
+        def rh_lineage_hex64(texts: darray[u8]&, s: i64, e: i64) -> bool:
+            return false if s < 0 or e - s != 64
+            while i < 64 |i: i64 = 0, texts, s|:
+                c: u8 = texts[(s + i).usize()]
+                return false if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102))
+                i <- i + 1
+            true
+
+        def rh_lineage_transform_state(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_LINEAGE_TRANSFORM_PRESERVED if Lineage::rh_lineage_eq(texts, s, e, "preserved")
+            return RH_LINEAGE_TRANSFORM_TRANSFORMED if Lineage::rh_lineage_eq(texts, s, e, "transformed")
+            return RH_LINEAGE_TRANSFORM_INFERRED if Lineage::rh_lineage_eq(texts, s, e, "inferred")
+            return RH_LINEAGE_TRANSFORM_DISCARDED if Lineage::rh_lineage_eq(texts, s, e, "discarded")
+            return RH_LINEAGE_TRANSFORM_UNSUPPORTED if Lineage::rh_lineage_eq(texts, s, e, "unsupported")
+            -1
+
+        def rh_lineage_transform_label(state: u8) -> u8&:
+            return "preserved" if state == RH_LINEAGE_TRANSFORM_PRESERVED
+            return "transformed" if state == RH_LINEAGE_TRANSFORM_TRANSFORMED
+            return "inferred" if state == RH_LINEAGE_TRANSFORM_INFERRED
+            return "discarded" if state == RH_LINEAGE_TRANSFORM_DISCARDED
+            "unsupported"
+
+        def rh_lineage_metric_class(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_LINEAGE_METRIC_RAW if Lineage::rh_lineage_eq(texts, s, e, "raw")
+            return RH_LINEAGE_METRIC_DERIVED if Lineage::rh_lineage_eq(texts, s, e, "derived")
+            return RH_LINEAGE_METRIC_MODELED if Lineage::rh_lineage_eq(texts, s, e, "modeled")
+            -1
+
+        def rh_lineage_metric_label(class: u8) -> u8&:
+            return "raw" if class == RH_LINEAGE_METRIC_RAW
+            return "derived" if class == RH_LINEAGE_METRIC_DERIVED
+            "modeled"
+
+        def rh_lineage_state_label(texts: darray[u8]&, s: i64, e: i64) -> bool:
+            Lineage::rh_lineage_eq(texts, s, e, "complete") or Lineage::rh_lineage_eq(texts, s, e, "partial") or Lineage::rh_lineage_eq(texts, s, e, "stale") or Lineage::rh_lineage_eq(texts, s, e, "unavailable") or Lineage::rh_lineage_eq(texts, s, e, "unauthorized") or Lineage::rh_lineage_eq(texts, s, e, "unsupported")
+
+        def rh_lineage_emit_optional_int(out: mutable darray[u8]&, value: i64, present: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_decimal_i64(out, value) if present != 0
+            rh_push_text(out, "null") if present == 0
+
+        def rh_lineage_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, s.usize(), e.usize())
+            out.push(34)
+
+        def rh_lineage_emit_refs(out: mutable darray[u8]&, refs_s: darray[i64]&, refs_e: darray[i64]&, texts: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(91)
+            while i < refs_s.count |i: usize = 0, refs_s, refs_e, texts, out|:
+                if i > 0:
+                    out.push(44)
+                out.push(34)
+                rh_json_escape(out, texts, refs_s[i].usize(), refs_e[i].usize())
+                out.push(34)
+                i <- i + 1
+            out.push(93)
+
+    public:
+        def rh_lineage_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not Lineage::rh_lineage_str(nodes, texts, root, "schema", &schema_s, &schema_e)
+            return -1 if not Lineage::rh_lineage_eq(texts, schema_s, schema_e, "rh-lineage-input/1")
+            source_s: mutable i64 = 0
+            source_e: mutable i64 = 0
+            instance_s: mutable i64 = 0
+            instance_e: mutable i64 = 0
+            native_s: mutable i64 = 0
+            native_e: mutable i64 = 0
+            locator_s: mutable i64 = 0
+            locator_e: mutable i64 = 0
+            run_s: mutable i64 = 0
+            run_e: mutable i64 = 0
+            scope_s: mutable i64 = 0
+            scope_e: mutable i64 = 0
+            coverage_s: mutable i64 = 0
+            coverage_e: mutable i64 = 0
+            payload_schema_s: mutable i64 = 0
+            payload_schema_e: mutable i64 = 0
+            payload_digest_s: mutable i64 = 0
+            payload_digest_e: mutable i64 = 0
+            collector_s: mutable i64 = 0
+            collector_e: mutable i64 = 0
+            config_s: mutable i64 = 0
+            config_e: mutable i64 = 0
+            rights_s: mutable i64 = 0
+            rights_e: mutable i64 = 0
+            retention_s: mutable i64 = 0
+            retention_e: mutable i64 = 0
+            delivery_s: mutable i64 = 0
+            delivery_e: mutable i64 = 0
+            tool_s: mutable i64 = 0
+            tool_e: mutable i64 = 0
+            tool_version_s: mutable i64 = 0
+            tool_version_e: mutable i64 = 0
+            original_run_s: mutable i64 = 0
+            original_run_e: mutable i64 = 0
+            result_digest_s: mutable i64 = 0
+            result_digest_e: mutable i64 = 0
+            return -1 if not Lineage::rh_lineage_str(nodes, texts, root, "source", &source_s, &source_e) or not Lineage::rh_lineage_str(nodes, texts, root, "source_instance", &instance_s, &instance_e) or not Lineage::rh_lineage_str(nodes, texts, root, "native_object_id", &native_s, &native_e) or not Lineage::rh_lineage_str(nodes, texts, root, "locator", &locator_s, &locator_e) or not Lineage::rh_lineage_str(nodes, texts, root, "collection_run", &run_s, &run_e) or not Lineage::rh_lineage_str(nodes, texts, root, "scope", &scope_s, &scope_e) or not Lineage::rh_lineage_str(nodes, texts, root, "coverage", &coverage_s, &coverage_e) or not Lineage::rh_lineage_str(nodes, texts, root, "payload_schema", &payload_schema_s, &payload_schema_e) or not Lineage::rh_lineage_str(nodes, texts, root, "payload_digest", &payload_digest_s, &payload_digest_e) or not Lineage::rh_lineage_str(nodes, texts, root, "collector_version", &collector_s, &collector_e) or not Lineage::rh_lineage_str(nodes, texts, root, "config_digest", &config_s, &config_e) or not Lineage::rh_lineage_str(nodes, texts, root, "rights_class", &rights_s, &rights_e) or not Lineage::rh_lineage_str(nodes, texts, root, "retention_class", &retention_s, &retention_e) or not Lineage::rh_lineage_str(nodes, texts, root, "delivery_id", &delivery_s, &delivery_e) or not Lineage::rh_lineage_str(nodes, texts, root, "assessment_tool", &tool_s, &tool_e) or not Lineage::rh_lineage_str(nodes, texts, root, "assessment_tool_version", &tool_version_s, &tool_version_e) or not Lineage::rh_lineage_str(nodes, texts, root, "assessment_original_run", &original_run_s, &original_run_e) or not Lineage::rh_lineage_str(nodes, texts, root, "assessment_result_digest", &result_digest_s, &result_digest_e)
+            return -1 if source_s == source_e or instance_s == instance_e or native_s == native_e or locator_s == locator_e or run_s == run_e or scope_s == scope_e or payload_schema_s == payload_schema_e or collector_s == collector_e or config_s == config_e or rights_s == rights_e or retention_s == retention_e or delivery_s == delivery_e or tool_s == tool_e or tool_version_s == tool_version_e or original_run_s == original_run_e or result_digest_s == result_digest_e
+            return -1 if not Lineage::rh_lineage_hex64(texts, payload_digest_s, payload_digest_e) or not Lineage::rh_lineage_hex64(texts, config_s, config_e) or not Lineage::rh_lineage_hex64(texts, result_digest_s, result_digest_e)
+            return -1 if not Lineage::rh_lineage_state_label(texts, coverage_s, coverage_e)
+            observed_ok: mutable i64 = 0
+            observed_at: i64 = Lineage::rh_lineage_int(nodes, raw, texts, root, "observed_at", &observed_ok)
+            return -1 if observed_ok == 0 or observed_at < 0
+            event_at: mutable i64 = 0
+            event_present: mutable i64 = 0
+            updated_at: mutable i64 = 0
+            updated_present: mutable i64 = 0
+            return -1 if not Lineage::rh_lineage_optional_int(nodes, raw, texts, root, "event_time", &event_at, &event_present) or not Lineage::rh_lineage_optional_int(nodes, raw, texts, root, "updated_at", &updated_at, &updated_present)
+            delivery_ok: mutable i64 = 0
+            delivery_time: i64 = Lineage::rh_lineage_int(nodes, raw, texts, root, "delivery_time", &delivery_ok)
+            return -1 if delivery_ok == 0 or delivery_time < 0
+            revision_ok: mutable i64 = 0
+            subject_revision: i64 = Lineage::rh_lineage_int(nodes, raw, texts, root, "assessment_subject_revision", &revision_ok)
+            return -1 if revision_ok == 0 or subject_revision < 0
+            original_time_ok: mutable i64 = 0
+            original_time: i64 = Lineage::rh_lineage_int(nodes, raw, texts, root, "assessment_original_time", &original_time_ok)
+            return -1 if original_time_ok == 0 or original_time < 0
+            refs_s: mutable darray[i64] = []
+            refs_e: mutable darray[i64] = []
+            refs_idx: i64 = Lineage::rh_lineage_get(nodes, texts, root, "derivation_refs")
+            return -1 if refs_idx < 0 or nodes[refs_idx.usize()].kind != RH_JSON_ARR
+            while ref >= 0 |ref: i64 = nodes[refs_idx.usize()].first_child, nodes, refs_s, refs_e|:
+                return -1 if nodes[ref.usize()].kind != RH_JSON_STR
+                refs_s.push(nodes[ref.usize()].text_start)
+                refs_e.push(nodes[ref.usize()].text_end)
+                return -1 if refs_s[refs_s.count - 1] == refs_e[refs_e.count - 1]
+                ref <- nodes[ref.usize()].next_sibling
+            transformations: mutable darray[RhLineageTransformation] = []
+            t_counts: mutable darray[i64] = [0, 0, 0, 0, 0]
+            t_idx: i64 = Lineage::rh_lineage_get(nodes, texts, root, "transformations")
+            return -1 if t_idx < 0 or nodes[t_idx.usize()].kind != RH_JSON_ARR
+            while tr >= 0 |tr: i64 = nodes[t_idx.usize()].first_child, nodes, texts, transformations, t_counts|:
+                return -1 if nodes[tr.usize()].kind != RH_JSON_OBJ
+                field_s: mutable i64 = 0
+                field_e: mutable i64 = 0
+                state_s: mutable i64 = 0
+                state_e: mutable i64 = 0
+                reason_s: mutable i64 = 0
+                reason_e: mutable i64 = 0
+                return -1 if not Lineage::rh_lineage_str(nodes, texts, tr, "field", &field_s, &field_e) or not Lineage::rh_lineage_str(nodes, texts, tr, "state", &state_s, &state_e) or not Lineage::rh_lineage_str(nodes, texts, tr, "reason", &reason_s, &reason_e)
+                state: i64 = Lineage::rh_lineage_transform_state(texts, state_s, state_e)
+                return -1 if field_s == field_e or reason_s == reason_e or state < 0
+                while ti < transformations.count |ti: usize = 0, transformations, texts, field_s, field_e|:
+                    return -1 if rh_bytes_equal_span(texts, transformations[ti].field_s, transformations[ti].field_e, texts, field_s, field_e)
+                    ti <- ti + 1
+                transformations.push(RhLineageTransformation{field_s: field_s, field_e: field_e, state: state.u8(), reason_s: reason_s, reason_e: reason_e})
+                t_counts[state.usize()] <- t_counts[state.usize()] + 1
+                tr <- nodes[tr.usize()].next_sibling
+            metrics: mutable darray[RhLineageMetric] = []
+            metric_counts: mutable darray[i64] = [0, 0, 0]
+            m_idx: i64 = Lineage::rh_lineage_get(nodes, texts, root, "metrics")
+            return -1 if m_idx < 0 or nodes[m_idx.usize()].kind != RH_JSON_ARR
+            while metric >= 0 |metric: i64 = nodes[m_idx.usize()].first_child, nodes, texts, metrics, metric_counts|:
+                return -1 if nodes[metric.usize()].kind != RH_JSON_OBJ
+                key_s: mutable i64 = 0
+                key_e: mutable i64 = 0
+                version_s: mutable i64 = 0
+                version_e: mutable i64 = 0
+                class_s: mutable i64 = 0
+                class_e: mutable i64 = 0
+                crosswalk_s: mutable i64 = 0
+                crosswalk_e: mutable i64 = 0
+                return -1 if not Lineage::rh_lineage_str(nodes, texts, metric, "key", &key_s, &key_e) or not Lineage::rh_lineage_str(nodes, texts, metric, "version", &version_s, &version_e) or not Lineage::rh_lineage_str(nodes, texts, metric, "class", &class_s, &class_e) or not Lineage::rh_lineage_str(nodes, texts, metric, "crosswalk", &crosswalk_s, &crosswalk_e)
+                class: i64 = Lineage::rh_lineage_metric_class(texts, class_s, class_e)
+                return -1 if key_s == key_e or version_s == version_e or crosswalk_s == crosswalk_e or class < 0
+                while mi < metrics.count |mi: usize = 0, metrics, texts, key_s, key_e, version_s, version_e|:
+                    return -1 if rh_bytes_equal_span(texts, metrics[mi].key_s, metrics[mi].key_e, texts, key_s, key_e) and rh_bytes_equal_span(texts, metrics[mi].version_s, metrics[mi].version_e, texts, version_s, version_e)
+                    mi <- mi + 1
+                metrics.push(RhLineageMetric{key_s: key_s, key_e: key_e, version_s: version_s, version_e: version_e, class: class.u8(), crosswalk_s: crosswalk_s, crosswalk_e: crosswalk_e})
+                metric_counts[class.usize()] <- metric_counts[class.usize()] + 1
+                metric <- nodes[metric.usize()].next_sibling
+            rh_push_text(out, "{\"schema\":\"rh-lineage-result/1\",\"lineage\":{\"source\":")
+            Lineage::rh_lineage_emit_span(out, texts, source_s, source_e)
+            rh_push_text(out, ",\"source_instance\":")
+            Lineage::rh_lineage_emit_span(out, texts, instance_s, instance_e)
+            rh_push_text(out, ",\"native_object_id\":")
+            Lineage::rh_lineage_emit_span(out, texts, native_s, native_e)
+            rh_push_text(out, ",\"locator\":")
+            Lineage::rh_lineage_emit_span(out, texts, locator_s, locator_e)
+            rh_push_text(out, "},\"times\":{\"event_time\":")
+            Lineage::rh_lineage_emit_optional_int(out, event_at, event_present)
+            rh_push_text(out, ",\"updated_at\":")
+            Lineage::rh_lineage_emit_optional_int(out, updated_at, updated_present)
+            rh_push_text(out, ",\"observed_at\":")
+            rh_push_decimal_i64(out, observed_at)
+            rh_push_text(out, "},\"collection\":{\"run\":")
+            Lineage::rh_lineage_emit_span(out, texts, run_s, run_e)
+            rh_push_text(out, ",\"scope\":")
+            Lineage::rh_lineage_emit_span(out, texts, scope_s, scope_e)
+            rh_push_text(out, ",\"coverage\":{\"state\":")
+            Lineage::rh_lineage_emit_span(out, texts, coverage_s, coverage_e)
+            rh_push_text(out, "}},\"payload\":{\"schema\":")
+            Lineage::rh_lineage_emit_span(out, texts, payload_schema_s, payload_schema_e)
+            rh_push_text(out, ",\"digest\":")
+            Lineage::rh_lineage_emit_span(out, texts, payload_digest_s, payload_digest_e)
+            rh_push_text(out, "},\"collector\":{\"version\":")
+            Lineage::rh_lineage_emit_span(out, texts, collector_s, collector_e)
+            rh_push_text(out, ",\"config_digest\":")
+            Lineage::rh_lineage_emit_span(out, texts, config_s, config_e)
+            rh_push_text(out, "},\"rights\":{\"class\":")
+            Lineage::rh_lineage_emit_span(out, texts, rights_s, rights_e)
+            rh_push_text(out, ",\"retention\":")
+            Lineage::rh_lineage_emit_span(out, texts, retention_s, retention_e)
+            rh_push_text(out, "},\"derivation_refs\":")
+            Lineage::rh_lineage_emit_refs(out, refs_s, refs_e, texts)
+            rh_push_text(out, ",\"assessment\":{\"delivery\":{\"id\":")
+            Lineage::rh_lineage_emit_span(out, texts, delivery_s, delivery_e)
+            rh_push_text(out, ",\"time\":")
+            rh_push_decimal_i64(out, delivery_time)
+            rh_push_text(out, "},\"origin\":{\"tool\":")
+            Lineage::rh_lineage_emit_span(out, texts, tool_s, tool_e)
+            rh_push_text(out, ",\"tool_version\":")
+            Lineage::rh_lineage_emit_span(out, texts, tool_version_s, tool_version_e)
+            rh_push_text(out, ",\"subject_revision\":")
+            rh_push_decimal_i64(out, subject_revision)
+            rh_push_text(out, ",\"original_run\":")
+            Lineage::rh_lineage_emit_span(out, texts, original_run_s, original_run_e)
+            rh_push_text(out, ",\"original_time\":")
+            rh_push_decimal_i64(out, original_time)
+            rh_push_text(out, ",\"result_digest\":")
+            Lineage::rh_lineage_emit_span(out, texts, result_digest_s, result_digest_e)
+            rh_push_text(out, "},\"dedup_scope\":\"origin_assessment\",\"identity_complete\":true},\"transformations\":[")
+            while i < transformations.count |i: usize = 0, transformations, texts, out|:
+                if i > 0:
+                    out.push(44)
+                t: RhLineageTransformation = transformations[i]
+                rh_push_text(out, "{\"field\":")
+                Lineage::rh_lineage_emit_span(out, texts, t.field_s, t.field_e)
+                rh_push_text(out, ",\"state\":\"")
+                rh_push_text(out, Lineage::rh_lineage_transform_label(t.state))
+                rh_push_text(out, "\",\"reason\":")
+                Lineage::rh_lineage_emit_span(out, texts, t.reason_s, t.reason_e)
+                rh_push_text(out, "}")
+                i <- i + 1
+            rh_push_text(out, "],\"transformation_counts\":{\"preserved\":")
+            rh_push_decimal_i64(out, t_counts[RH_LINEAGE_TRANSFORM_PRESERVED.usize()])
+            rh_push_text(out, ",\"transformed\":")
+            rh_push_decimal_i64(out, t_counts[RH_LINEAGE_TRANSFORM_TRANSFORMED.usize()])
+            rh_push_text(out, ",\"inferred\":")
+            rh_push_decimal_i64(out, t_counts[RH_LINEAGE_TRANSFORM_INFERRED.usize()])
+            rh_push_text(out, ",\"discarded\":")
+            rh_push_decimal_i64(out, t_counts[RH_LINEAGE_TRANSFORM_DISCARDED.usize()])
+            rh_push_text(out, ",\"unsupported\":")
+            rh_push_decimal_i64(out, t_counts[RH_LINEAGE_TRANSFORM_UNSUPPORTED.usize()])
+            rh_push_text(out, "},\"metrics\":[")
+            while i < metrics.count |i: usize = 0, metrics, texts, out|:
+                if i > 0:
+                    out.push(44)
+                m: RhLineageMetric = metrics[i]
+                rh_push_text(out, "{\"key\":")
+                Lineage::rh_lineage_emit_span(out, texts, m.key_s, m.key_e)
+                rh_push_text(out, ",\"version\":")
+                Lineage::rh_lineage_emit_span(out, texts, m.version_s, m.version_e)
+                rh_push_text(out, ",\"class\":\"")
+                rh_push_text(out, Lineage::rh_lineage_metric_label(m.class))
+                rh_push_text(out, "\",\"crosswalk\":")
+                Lineage::rh_lineage_emit_span(out, texts, m.crosswalk_s, m.crosswalk_e)
+                rh_push_text(out, "}")
+                i <- i + 1
+            rh_push_text(out, "],\"metric_class_counts\":{\"raw\":")
+            rh_push_decimal_i64(out, metric_counts[RH_LINEAGE_METRIC_RAW.usize()])
+            rh_push_text(out, ",\"derived\":")
+            rh_push_decimal_i64(out, metric_counts[RH_LINEAGE_METRIC_DERIVED.usize()])
+            rh_push_text(out, ",\"modeled\":")
+            rh_push_decimal_i64(out, metric_counts[RH_LINEAGE_METRIC_MODELED.usize()])
+            rh_push_text(out, "},\"note\":\"delivery identity is separate from origin assessment identity; field losses remain explicit; missing optional times are null and never sentinel epochs\"}")
+            0

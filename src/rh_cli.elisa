@@ -61,6 +61,7 @@ include "./rh_columnar.elisa"
 include "./rh_aggregates.elisa"
 include "./rh_index.elisa"
 include "./rh_adoption.elisa"
+include "./rh_lineage.elisa"
 include "./rh_render.elisa"
 include "./rh_explain.elisa"
 include "./rh_lease_report.elisa"
@@ -130,6 +131,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli aggregate --input <file> --out <file>")
     rh_cli_err("       rh_cli index --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli adoption --input <file> --out <file>")
+    rh_cli_err("       rh_cli lineage --input <file> --out <file>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
     rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
     rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
@@ -1738,6 +1740,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 abq <- abq + 1
         return rh_cli_usage(2) if ai2_idx < 0 or ao2_idx < 0
         return rh_do_adoption(slots[ai2_idx], slots[ao2_idx])
+    if rh_streq(cmd, "lineage"):
+        li_idx, lo_idx =
+            while llq < argc |li_idx: i64 = -1, lo_idx: i64 = -1, llq: i64 = 2, slots| -> li_idx, lo_idx:
+                a36: u8& = slots[llq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(a36, "--input"):
+                    if llq + 1 < argc:
+                        llq <- llq + 1
+                        li_idx <- llq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a36, "--out"):
+                    if llq + 1 < argc:
+                        llq <- llq + 1
+                        lo_idx <- llq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                llq <- llq + 1
+        return rh_cli_usage(2) if li_idx < 0 or lo_idx < 0
+        return rh_do_lineage(slots[li_idx], slots[lo_idx])
     if rh_streq(cmd, "sign") or rh_streq(cmd, "verify"):
         key_idx, sub_idx, sig_idx =
             while m < argc |key_idx: i64 = -1, sub_idx: i64 = -1, sig_idx: i64 = -1, m: i64 = 2, slots| -> key_idx, sub_idx, sig_idx:
@@ -4999,6 +5022,34 @@ def rh_do_adoption(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
         rh_cli_err("adoption: cannot write --out")
         return 4
     rh_cli_out("adoption: staged evidence observed")
+    0
+
+# --- M00 lineage and transformation-contract execution path. ---
+# Validates the shared source/object/assessment envelope and preserves explicit
+# field-level transformation losses for downstream evidence drill-down.
+def rh_do_lineage(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected lineage argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("lineage: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if Lineage::rh_lineage_report(raw, body) != 0:
+        rh_cli_err("lineage: unsupported or malformed lineage envelope (fail closed)")
+        return 4
+    body.push(10)
+    if not rh_io_write(out_path, body):
+        rh_cli_err("lineage: cannot write --out")
+        return 4
+    rh_cli_out("lineage: evidence contract validated")
     0
 
 # --- M02-03 job-lease execution path. ---
