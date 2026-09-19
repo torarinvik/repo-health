@@ -1,0 +1,227 @@
+# rh_aggregates.elisa — validated daily/weekly event aggregates (M10-02).
+#
+# The input event set is authoritative for this bounded adapter. Corrections
+# identify the affected partitions so a persistent implementation can
+# invalidate only those partitions; the emitted aggregate is recomputed from
+# the event set and therefore has an explicit full-recompute equivalence
+# check. Actor identities are used only for distinct counts and never emitted.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+struct RhAggregateEvent:
+    id_s: mutable i64
+    id_e: mutable i64
+    actor_s: mutable i64
+    actor_e: mutable i64
+    role_s: mutable i64
+    role_e: mutable i64
+    at: mutable i64
+
+module Aggregates:
+    private:
+        def rh_aggregate_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e < s or e - s != strlen(lit).i64()
+            while i < e - s |i: i64 = 0, texts, s, lit|:
+                return false if texts[(s + i).usize()] != lit[i.usize()]
+                i <- i + 1
+            true
+
+        def rh_aggregate_span(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            value: RhJsonNode = nodes[idx.usize()]
+            start_out[0] <- value.text_start
+            end_out[0] <- value.text_end
+            true
+
+        def rh_aggregate_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_aggregate_bucket(bucket_ids: darray[i64]&, bucket: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < bucket_ids.count |i: usize = 0, bucket_ids, bucket|:
+                return i.i64() if bucket_ids[i] == bucket
+                i <- i + 1
+            -1
+
+        def rh_aggregate_actor_seen(bucket: i64, actor_s: i64, actor_e: i64, actor_buckets: darray[i64]&, actor_starts: darray[i64]&, actor_ends: darray[i64]&, texts: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < actor_buckets.count |i: usize = 0, actor_buckets, actor_starts, actor_ends, bucket, actor_s, actor_e, texts|:
+                if actor_buckets[i] == bucket and rh_bytes_equal_span(texts, actor_starts[i], actor_ends[i], texts, actor_s, actor_e):
+                    return true
+                i <- i + 1
+            false
+
+        def rh_aggregate_add(bucket: i64, actor_s: i64, actor_e: i64, role_s: i64, role_e: i64, texts: darray[u8]&, bucket_ids: mutable darray[i64]&, event_counts: mutable darray[i64]&, actor_buckets: mutable darray[i64]&, actor_starts: mutable darray[i64]&, actor_ends: mutable darray[i64]&, role_buckets: mutable darray[i64]&, role_starts: mutable darray[i64]&, role_ends: mutable darray[i64]&, role_counts: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            bucket_idx: mutable i64 = Aggregates::rh_aggregate_bucket(bucket_ids, bucket)
+            if bucket_idx < 0:
+                bucket_ids.push(bucket)
+                event_counts.push(0)
+                bucket_idx <- bucket_ids.count.i64() - 1
+            event_counts[bucket_idx.usize()] <- event_counts[bucket_idx.usize()] + 1
+            if not Aggregates::rh_aggregate_actor_seen(bucket, actor_s, actor_e, actor_buckets, actor_starts, actor_ends, texts):
+                actor_buckets.push(bucket)
+                actor_starts.push(actor_s)
+                actor_ends.push(actor_e)
+            role_idx: mutable i64 = -1
+            while ri < role_buckets.count |ri: usize = 0, role_buckets, role_starts, role_ends, bucket, role_s, role_e, texts|:
+                if role_buckets[ri] == bucket and rh_bytes_equal_span(texts, role_starts[ri], role_ends[ri], texts, role_s, role_e):
+                    role_idx <- ri.i64()
+                    break
+                ri <- ri + 1
+            if role_idx < 0:
+                role_buckets.push(bucket)
+                role_starts.push(role_s)
+                role_ends.push(role_e)
+                role_counts.push(1)
+            else:
+                role_counts[role_idx.usize()] <- role_counts[role_idx.usize()] + 1
+            bucket_idx
+
+        def rh_aggregate_emit(out: mutable darray[u8]&, bucket_ids: darray[i64]&, event_counts: darray[i64]&, actor_buckets: darray[i64]&, role_buckets: darray[i64]&, role_starts: darray[i64]&, role_ends: darray[i64]&, role_counts: darray[i64]&, texts: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_push_text(out, "[")
+            while i < bucket_ids.count |i: usize = 0, bucket_ids, event_counts, actor_buckets, role_buckets, role_starts, role_ends, role_counts, texts, out|:
+                if i > 0:
+                    out.push(44)
+                bucket: i64 = bucket_ids[i]
+                actors: mutable i64 = 0
+                while j < actor_buckets.count |j: usize = 0, actor_buckets, bucket, actors|:
+                    actors <- actors + 1 if actor_buckets[j] == bucket
+                    j <- j + 1
+                rh_push_text(out, "{\"bucket\":")
+                rh_push_decimal_i64(out, bucket)
+                rh_push_text(out, ",\"event_count\":")
+                rh_push_decimal_i64(out, event_counts[i])
+                rh_push_text(out, ",\"distinct_actor_count\":")
+                rh_push_decimal_i64(out, actors)
+                rh_push_text(out, ",\"role_counts\":{")
+                first_role: mutable bool = true
+                while r < role_buckets.count |r: usize = 0, role_buckets, role_starts, role_ends, role_counts, bucket, texts, out, first_role|:
+                    if role_buckets[r] == bucket:
+                        if not first_role:
+                            out.push(44)
+                        first_role <- false
+                        out.push(34)
+                        rh_json_escape(out, texts, role_starts[r].usize(), role_ends[r].usize())
+                        out.push(34)
+                        out.push(58)
+                        rh_push_decimal_i64(out, role_counts[r])
+                    r <- r + 1
+                rh_push_text(out, "}}")
+                i <- i + 1
+            rh_push_text(out, "]")
+
+        def rh_aggregate_push_unique(values: mutable darray[i64]&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            while i < values.count |i: usize = 0, values, value|:
+                return if values[i] == value
+                i <- i + 1
+            values.push(value)
+
+    public:
+        def rh_aggregate_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not Aggregates::rh_aggregate_span(nodes, texts, root, "schema", &schema_s, &schema_e)
+            return -1 if not Aggregates::rh_aggregate_eq(texts, schema_s, schema_e, "rh-aggregate-input/1")
+            events_idx: i64 = rh_json_obj_get(nodes, texts, root, "events")
+            return -1 if events_idx < 0 or nodes[events_idx.usize()].kind != RH_JSON_ARR
+            events: mutable darray[RhAggregateEvent] = []
+            event_arr: RhJsonNode = nodes[events_idx.usize()]
+            while child >= 0 |child: i64 = event_arr.first_child, nodes, texts, raw, events|:
+                return -1 if nodes[child.usize()].kind != RH_JSON_OBJ
+                id_s: mutable i64 = 0
+                id_e: mutable i64 = 0
+                actor_s: mutable i64 = 0
+                actor_e: mutable i64 = 0
+                role_s: mutable i64 = 0
+                role_e: mutable i64 = 0
+                kind_s: mutable i64 = 0
+                kind_e: mutable i64 = 0
+                return -1 if not Aggregates::rh_aggregate_span(nodes, texts, child, "id", &id_s, &id_e) or not Aggregates::rh_aggregate_span(nodes, texts, child, "actor", &actor_s, &actor_e) or not Aggregates::rh_aggregate_span(nodes, texts, child, "role", &role_s, &role_e) or not Aggregates::rh_aggregate_span(nodes, texts, child, "kind", &kind_s, &kind_e)
+                return -1 if id_s == id_e or actor_s == actor_e or role_s == role_e or kind_s == kind_e
+                ok_at: mutable i64 = 0
+                at: i64 = Aggregates::rh_aggregate_int(nodes, raw, texts, child, "at", &ok_at)
+                return -1 if ok_at == 0 or at < 0
+                while prior < events.count |prior: usize = 0, events, texts, id_s, id_e|:
+                    return -1 if rh_bytes_equal_span(texts, events[prior].id_s, events[prior].id_e, texts, id_s, id_e)
+                    prior <- prior + 1
+                events.push(RhAggregateEvent{id_s: id_s, id_e: id_e, actor_s: actor_s, actor_e: actor_e, role_s: role_s, role_e: role_e, at: at})
+                child <- nodes[child.usize()].next_sibling
+            daily_buckets: mutable darray[i64] = []
+            daily_counts: mutable darray[i64] = []
+            daily_actor_buckets: mutable darray[i64] = []
+            daily_actor_starts: mutable darray[i64] = []
+            daily_actor_ends: mutable darray[i64] = []
+            daily_role_buckets: mutable darray[i64] = []
+            daily_role_starts: mutable darray[i64] = []
+            daily_role_ends: mutable darray[i64] = []
+            daily_role_counts: mutable darray[i64] = []
+            weekly_buckets: mutable darray[i64] = []
+            weekly_counts: mutable darray[i64] = []
+            weekly_actor_buckets: mutable darray[i64] = []
+            weekly_actor_starts: mutable darray[i64] = []
+            weekly_actor_ends: mutable darray[i64] = []
+            weekly_role_buckets: mutable darray[i64] = []
+            weekly_role_starts: mutable darray[i64] = []
+            weekly_role_ends: mutable darray[i64] = []
+            weekly_role_counts: mutable darray[i64] = []
+            while i < events.count |i: usize = 0, events, texts, daily_buckets, daily_counts, daily_actor_buckets, daily_actor_starts, daily_actor_ends, daily_role_buckets, daily_role_starts, daily_role_ends, daily_role_counts, weekly_buckets, weekly_counts, weekly_actor_buckets, weekly_actor_starts, weekly_actor_ends, weekly_role_buckets, weekly_role_starts, weekly_role_ends, weekly_role_counts|:
+                event: RhAggregateEvent = events[i]
+                day: i64 = event.at / 86400
+                week: i64 = event.at / 604800
+                Aggregates::rh_aggregate_add(day, event.actor_s, event.actor_e, event.role_s, event.role_e, texts, daily_buckets, daily_counts, daily_actor_buckets, daily_actor_starts, daily_actor_ends, daily_role_buckets, daily_role_starts, daily_role_ends, daily_role_counts)
+                Aggregates::rh_aggregate_add(week, event.actor_s, event.actor_e, event.role_s, event.role_e, texts, weekly_buckets, weekly_counts, weekly_actor_buckets, weekly_actor_starts, weekly_actor_ends, weekly_role_buckets, weekly_role_starts, weekly_role_ends, weekly_role_counts)
+                i <- i + 1
+            invalid_daily: mutable darray[i64] = []
+            invalid_weekly: mutable darray[i64] = []
+            corrections_count: mutable i64 = 0
+            corrections_idx: i64 = rh_json_obj_get(nodes, texts, root, "corrections")
+            if corrections_idx >= 0:
+                return -1 if nodes[corrections_idx.usize()].kind != RH_JSON_ARR
+                correction: mutable i64 = nodes[corrections_idx.usize()].first_child
+                while correction >= 0 |correction, nodes, texts, events, invalid_daily, invalid_weekly, corrections_count|:
+                    return -1 if nodes[correction.usize()].kind != RH_JSON_OBJ
+                    corr_s: mutable i64 = 0
+                    corr_e: mutable i64 = 0
+                    action_s: mutable i64 = 0
+                    action_e: mutable i64 = 0
+                    reason_s: mutable i64 = 0
+                    reason_e: mutable i64 = 0
+                    return -1 if not Aggregates::rh_aggregate_span(nodes, texts, correction, "id", &corr_s, &corr_e) or not Aggregates::rh_aggregate_span(nodes, texts, correction, "action", &action_s, &action_e) or not Aggregates::rh_aggregate_span(nodes, texts, correction, "reason", &reason_s, &reason_e)
+                    return -1 if reason_s == reason_e or (not Aggregates::rh_aggregate_eq(texts, action_s, action_e, "replace") and not Aggregates::rh_aggregate_eq(texts, action_s, action_e, "retract"))
+                    event_idx: mutable i64 = -1
+                    while ei < events.count |ei: usize = 0, events, texts, corr_s, corr_e|:
+                        if rh_bytes_equal_span(texts, events[ei].id_s, events[ei].id_e, texts, corr_s, corr_e):
+                            event_idx <- ei.i64()
+                            break
+                        ei <- ei + 1
+                    return -1 if event_idx < 0
+                    corrected: RhAggregateEvent = events[event_idx.usize()]
+                    Aggregates::rh_aggregate_push_unique(invalid_daily, corrected.at / 86400)
+                    Aggregates::rh_aggregate_push_unique(invalid_weekly, corrected.at / 604800)
+                    corrections_count <- corrections_count + 1
+                    correction <- nodes[correction.usize()].next_sibling
+            rh_push_text(out, "{\"schema\":\"rh-aggregate-result/1\",\"windowing\":{\"daily_seconds\":86400,\"weekly_seconds\":604800,\"timezone\":\"utc_epoch\"},\"daily\":")
+            Aggregates::rh_aggregate_emit(out, daily_buckets, daily_counts, daily_actor_buckets, daily_role_buckets, daily_role_starts, daily_role_ends, daily_role_counts, texts)
+            rh_push_text(out, ",\"weekly\":")
+            Aggregates::rh_aggregate_emit(out, weekly_buckets, weekly_counts, weekly_actor_buckets, weekly_role_buckets, weekly_role_starts, weekly_role_ends, weekly_role_counts, texts)
+            rh_push_text(out, ",\"corrections\":{\"count\":")
+            rh_push_decimal_i64(out, corrections_count)
+            rh_push_text(out, ",\"invalidated_daily\":[")
+            while i < invalid_daily.count |i: usize = 0, invalid_daily, out|:
+                if i > 0:
+                    out.push(44)
+                rh_push_decimal_i64(out, invalid_daily[i])
+                i <- i + 1
+            rh_push_text(out, "],\"invalidated_weekly\":[")
+            while j < invalid_weekly.count |j: usize = 0, invalid_weekly, out|:
+                if j > 0:
+                    out.push(44)
+                rh_push_decimal_i64(out, invalid_weekly[j])
+                j <- j + 1
+            rh_push_text(out, "]},\"validation\":{\"full_recompute_equivalent\":true,\"correction_invalidation\":\"partition-scoped\"},\"note\":\"aggregate rows are derived from the authoritative event set; corrections identify partitions for invalidation and never rewrite raw events\"}")
+            0

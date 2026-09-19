@@ -58,6 +58,7 @@ include "./rh_intervention.elisa"
 include "./rh_mapping.elisa"
 include "./rh_coverage.elisa"
 include "./rh_columnar.elisa"
+include "./rh_aggregates.elisa"
 include "./rh_render.elisa"
 include "./rh_explain.elisa"
 include "./rh_lease_report.elisa"
@@ -124,6 +125,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli mapping --input <file> --out <file>")
     rh_cli_err("       rh_cli coverage --input <file> --out <file>")
     rh_cli_err("       rh_cli snapshot --input <rh-dep-graph/1> --out <file>")
+    rh_cli_err("       rh_cli aggregate --input <file> --out <file>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
     rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
     rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
@@ -1669,6 +1671,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 ssq <- ssq + 1
         return rh_cli_usage(2) if si_idx < 0 or so_idx < 0
         return rh_do_snapshot(slots[si_idx], slots[so_idx])
+    if rh_streq(cmd, "aggregate"):
+        ai_idx, ao_idx =
+            while aaq < argc |ai_idx: i64 = -1, ao_idx: i64 = -1, aaq: i64 = 2, slots| -> ai_idx, ao_idx:
+                a33: u8& = slots[aaq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(a33, "--input"):
+                    if aaq + 1 < argc:
+                        aaq <- aaq + 1
+                        ai_idx <- aaq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a33, "--out"):
+                    if aaq + 1 < argc:
+                        aaq <- aaq + 1
+                        ao_idx <- aaq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                aaq <- aaq + 1
+        return rh_cli_usage(2) if ai_idx < 0 or ao_idx < 0
+        return rh_do_aggregate(slots[ai_idx], slots[ao_idx])
     if rh_streq(cmd, "sign") or rh_streq(cmd, "verify"):
         key_idx, sub_idx, sig_idx =
             while m < argc |key_idx: i64 = -1, sub_idx: i64 = -1, sig_idx: i64 = -1, m: i64 = 2, slots| -> key_idx, sub_idx, sig_idx:
@@ -4846,6 +4869,34 @@ def rh_do_snapshot(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
         rh_cli_err("snapshot: cannot write --out")
         return 4
     rh_cli_out("snapshot: columnar export written")
+    0
+
+# --- M10 validated aggregate execution path. ---
+# Computes daily/weekly event and role aggregates from the authoritative event
+# set, while corrections expose the exact partitions that require invalidation.
+def rh_do_aggregate(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected aggregate argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("aggregate: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if Aggregates::rh_aggregate_report(raw, body) != 0:
+        rh_cli_err("aggregate: unsupported or malformed aggregate envelope (fail closed)")
+        return 4
+    body.push(10)
+    if not rh_io_write(out_path, body):
+        rh_cli_err("aggregate: cannot write --out")
+        return 4
+    rh_cli_out("aggregate: validated projection written")
     0
 
 # --- M02-03 job-lease execution path. ---
