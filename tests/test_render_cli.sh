@@ -46,7 +46,7 @@ PY
 
 echo "[render] hostile source name is escaped, not injected"
 cat > "$T/evil.json" <<'JSON'
-{"report":"repo-health-m01","source":"<script>alert(1)</script>&\"","source_kind":"local","metrics":[{"key":"history.commit_count","version":"1.0.0","status":"observed","value":3,"evidence":["evidence/git-log.bin"]}],"capabilities":{"git_log":"observed"}}
+{"report":"repo-health-m01","source":"<script>alert(1)</script>&\"","source_kind":"local","metrics":[{"key":"history.commit_count","version":"1.0.0","status":"observed","value":3,"evidence":["evidence/git-log.bin"]}],"capabilities":{"git_log":"observed"},"timeline":[{"at":1700000000,"label":"release <one>","status":"observed"}],"neighborhood":[{"id":"pkg<&","kind":"project","depth":1,"scope":"public"}]}
 JSON
 "$ROOT/build/rh_cli" render --report "$T/evil.json" --out "$T/evil.html" >/dev/null || fail "evil render"
 python3 - "$T/evil.html" <<'PY'
@@ -56,6 +56,8 @@ assert "<script>alert" not in h, "raw script tag leaked"
 assert "&lt;script&gt;alert(1)&lt;/script&gt;" in h, "script not escaped"
 assert "&amp;" in h and "&quot;" in h, "amp/quote not escaped"
 assert "history.commit_count" in h, h
+assert "<h2>Timeline</h2>" in h and "release &lt;one&gt;" in h, "timeline table missing or unescaped"
+assert "<h2>Graph neighborhood</h2>" in h and "pkg&lt;&amp;" in h, "neighborhood table missing or unescaped"
 print("[render] escaping OK")
 PY
 

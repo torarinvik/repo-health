@@ -77,6 +77,29 @@ def rh_hr_value(nodes: darray[RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&
     else:
         rh_push_text(out, "&mdash;")
 
+# Emit a scalar report field as escaped accessible text. Missing fields remain
+# an explicit em dash so optional timeline/neighborhood rows never invent data.
+def rh_hr_field(nodes: darray[RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, obj: i64, key: u8&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+    if idx < 0:
+        rh_push_text(out, "&mdash;")
+        return
+    n: RhJsonNode = nodes[idx.usize()]
+    if n.kind == RH_JSON_STR:
+        rh_hr_escape(out, texts, n.text_start, n.text_end)
+    elif n.kind == RH_JSON_NUM:
+        ok: mutable i64 = 0
+        value: i64 = rh_json_int(nodes, raw, idx, &ok)
+        rh_push_decimal_i64(out, value) if ok == 1
+        rh_push_text(out, "number") if ok == 0
+    elif n.kind == RH_JSON_BOOL:
+        rh_push_text(out, "true") if rh_json_is_true(nodes, raw, idx)
+        rh_push_text(out, "false") if not rh_json_is_true(nodes, raw, idx)
+    elif n.kind == RH_JSON_NULL:
+        rh_push_text(out, "&mdash;")
+    else:
+        rh_push_text(out, "object")
+
 def rh_render_report_html(j: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
     nodes: mutable darray[RhJsonNode] = []
     texts: mutable darray[u8] = []
@@ -164,6 +187,40 @@ def rh_render_report_html(j: darray[u8]&, out: mutable darray[u8]&) -> i64 can[M
             rh_hr_escape(out, texts, vv.text_start, vv.text_end)
             rh_push_text(out, "</td></tr>\n")
             cc <- nodes[vn.usize()].next_sibling
+        rh_push_text(out, "</tbody></table>\n")
+    timeline_idx: i64 = rh_json_obj_get(nodes, texts, root, "timeline")
+    if timeline_idx >= 0:
+        return -1 if nodes[timeline_idx.usize()].kind != RH_JSON_ARR
+        rh_push_text(out, "<h2>Timeline</h2>\n<table>\n<caption>Observed timeline entries; the table is the accessible alternative to a visual timeline.</caption>\n<thead><tr><th scope=\"col\">Time</th><th scope=\"col\">Label</th><th scope=\"col\">Status</th></tr></thead>\n<tbody>\n")
+        ta: RhJsonNode = nodes[timeline_idx.usize()]
+        while tc >= 0 |tc: i64 = ta.first_child, nodes, texts, j, out|:
+            return -1 if nodes[tc.usize()].kind != RH_JSON_OBJ
+            rh_push_text(out, "<tr><th scope=\"row\">")
+            rh_hr_field(nodes, texts, j, tc, "at", out)
+            rh_push_text(out, "</th><td>")
+            rh_hr_field(nodes, texts, j, tc, "label", out)
+            rh_push_text(out, "</td><td>")
+            rh_hr_field(nodes, texts, j, tc, "status", out)
+            rh_push_text(out, "</td></tr>\n")
+            tc <- nodes[tc.usize()].next_sibling
+        rh_push_text(out, "</tbody></table>\n")
+    neighborhood_idx: i64 = rh_json_obj_get(nodes, texts, root, "neighborhood")
+    if neighborhood_idx >= 0:
+        return -1 if nodes[neighborhood_idx.usize()].kind != RH_JSON_ARR
+        rh_push_text(out, "<h2>Graph neighborhood</h2>\n<table>\n<caption>Bounded observed graph neighborhood; counts and rows use the selected projection.</caption>\n<thead><tr><th scope=\"col\">Node</th><th scope=\"col\">Kind</th><th scope=\"col\">Depth</th><th scope=\"col\">Scope</th></tr></thead>\n<tbody>\n")
+        na: RhJsonNode = nodes[neighborhood_idx.usize()]
+        while nc >= 0 |nc: i64 = na.first_child, nodes, texts, j, out|:
+            return -1 if nodes[nc.usize()].kind != RH_JSON_OBJ
+            rh_push_text(out, "<tr><th scope=\"row\">")
+            rh_hr_field(nodes, texts, j, nc, "id", out)
+            rh_push_text(out, "</th><td>")
+            rh_hr_field(nodes, texts, j, nc, "kind", out)
+            rh_push_text(out, "</td><td>")
+            rh_hr_field(nodes, texts, j, nc, "depth", out)
+            rh_push_text(out, "</td><td>")
+            rh_hr_field(nodes, texts, j, nc, "scope", out)
+            rh_push_text(out, "</td></tr>\n")
+            nc <- nodes[nc.usize()].next_sibling
         rh_push_text(out, "</tbody></table>\n")
     rh_push_text(out, "<p>Rendered from <code>report.json</code> at request time; it computes nothing and adds no verdict. Replay the retained bundle for reproducibility.</p>\n")
     rh_push_text(out, "</body></html>\n")
