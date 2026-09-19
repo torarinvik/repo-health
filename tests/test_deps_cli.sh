@@ -159,6 +159,44 @@ assert by["go"]["resolved_edges"] == 4 and by["go"]["unresolved_requirements"] =
 print("[deps] go.mod graph + unresolved reasons OK")
 PY
 
+echo "[deps] Gemfile.lock and composer.lock preserve ecosystem-native scopes"
+mkdir -p "$T/rubysrc"
+cat > "$T/rubysrc/Gemfile.lock" <<'EOF'
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rack (3.0.0)
+      json (~> 2.0)
+    json (2.6.3)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rack (~> 3.0)
+
+BUNDLED WITH
+   2.4.0
+EOF
+cat > "$T/rubysrc/composer.lock" <<'JSON'
+{"packages":[{"name":"monolog/monolog","version":"2.9.1","require":{"php":">=7.2","psr/log":"^1.0"}}],"packages-dev":[{"name":"phpunit/phpunit","version":"10.0.0","require":{"php":">=8.1","monolog/monolog":"^2.0"}}]}
+JSON
+"$ROOT/build/rh_cli" deps --repo "$T/rubysrc" --out "$T/rubyout" \
+  | grep -q "ecosystems=2 rubygems=2/2 unresolved=0 unsupported=0 composer=1/4 unresolved=3 unsupported=0" || fail "RubyGems/Composer summary"
+python3 - "$T/rubyout" <<'PY'
+import json, sys
+out = sys.argv[1]
+g = json.load(open(out + "/deps-rubygems-graph.json"))
+c = json.load(open(out + "/deps-composer-graph.json"))
+assert [n["name"] for n in g["nodes"]] == ["root", "rack", "json"], g["nodes"]
+assert len(g["edges"]) == 2 and g["unresolved"] == [], g
+assert [n["name"] for n in c["nodes"]] == ["root", "monolog/monolog", "phpunit/phpunit"], c["nodes"]
+assert len(c["edges"]) == 1 and c["edges"][0]["scope"] == "dev", c["edges"]
+assert sorted(u["reason"] for u in c["unresolved"]) == ["context", "context", "missing"], c["unresolved"]
+assert c["nodes"][2]["dev"] is True, c["nodes"][2]
+print("[deps] RubyGems/Composer scopes + unresolved context OK")
+PY
+
 echo "[deps] malformed go.sum fails closed without a partial graph"
 mkdir -p "$T/bad-go"
 cp "$ROOT/fixtures/packages/go.mod.txt" "$T/bad-go/go.mod"
