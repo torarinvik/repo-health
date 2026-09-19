@@ -26,8 +26,12 @@ def type_ok(val, t):
         return isinstance(val, list)
     if t == "dict":
         return isinstance(val, dict)
+    if t == "bool":
+        return isinstance(val, bool)
     if t == "str_or_null":
         return val is None or isinstance(val, str)
+    if t == "int_or_null":
+        return val is None or (isinstance(val, int) and not isinstance(val, bool))
     return False
 
 def check_obj(obj, spec, ctx):
