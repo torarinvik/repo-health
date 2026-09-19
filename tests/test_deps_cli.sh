@@ -78,6 +78,11 @@ assert {key: metrics[key]["value"] for key in metrics} == {
     "dependency.optional_requirements": 0,
     "dependency.peer_requirements": 1,
     "dependency.unknown_scope_requirements": 0,
+    "dependency.runtime_direct_count": 8,
+    "dependency.build_direct_count": 0,
+    "dependency.optional_direct_count": 0,
+    "dependency.unknown_scope_count": 0,
+    "dependency.unpinned_requirement_count": 13,
     "dependency.runtime_resolved_edges": 10,
     "dependency.development_resolved_edges": 0,
     "dependency.optional_resolved_edges": 0,
@@ -105,6 +110,10 @@ assert by["npm"]["resolved_transitive_versions"] == 6, by["npm"]
 assert by["cargo"]["runtime_requirements"] == 5, by["cargo"]
 assert by["npm"]["runtime_requirements"] == 9, by["npm"]
 assert by["npm"]["peer_requirements"] == 1, by["npm"]
+assert by["cargo"]["runtime_direct_count"] == 1, by["cargo"]
+assert by["npm"]["runtime_direct_count"] == 7, by["npm"]
+assert by["cargo"]["unpinned_requirement_count"] == 3, by["cargo"]
+assert by["npm"]["unpinned_requirement_count"] == 10, by["npm"]
 assert by["cargo"]["runtime_resolved_edges"] == 3, by["cargo"]
 assert by["npm"]["runtime_resolved_edges"] == 7, by["npm"]
 for eco in ("cargo", "npm"):
@@ -235,6 +244,9 @@ assert [(e["to"], e["scope"]) for e in g["edges"]] == [(1, "normal"), (2, "optio
 assert sorted(u["name"] for u in g["unresolved"]) == ["coverage", "requests"], g["unresolved"]
 assert metrics["dependency.runtime_requirements"]["value"] == 2, metrics
 assert metrics["dependency.optional_requirements"]["value"] == 2, metrics
+assert metrics["dependency.runtime_direct_count"]["value"] == 2, metrics
+assert metrics["dependency.optional_direct_count"]["value"] == 2, metrics
+assert metrics["dependency.unpinned_requirement_count"]["value"] == 2, metrics
 assert metrics["dependency.runtime_resolved_edges"]["value"] == 1, metrics
 assert metrics["dependency.optional_resolved_edges"]["value"] == 1, metrics
 print("[deps] PEP 621 graph + optional scope OK")
@@ -362,6 +374,9 @@ assert by["nuget"]["resolved_edges"] == 2, by
 assert by["nuget"]["unsupported_range_count"] == 1, by
 assert by["nuget"]["runtime_requirements"] == 2, by
 assert by["nuget"]["development_requirements"] == 1, by
+assert by["nuget"]["runtime_direct_count"] == 2, by
+assert by["nuget"]["build_direct_count"] == 1, by
+assert by["nuget"]["unpinned_requirement_count"] == 1, by
 assert by["nuget"]["runtime_resolved_edges"] == 1, by
 assert by["nuget"]["development_resolved_edges"] == 1, by
 print("[deps] NuGet graph + development scope OK")

@@ -1099,6 +1099,44 @@ module Package:
                 total <- total + 1 if reqs[i.usize()].depctx == scope
                 i <- i + 1
 
+        def rh_direct_scope_count(reqs: mutable darray[RhRequire]&, root: mutable i64, scope: mutable u8) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < reqs.count |total: i64 = 0, i: i64 = 0, reqs, root, scope| -> total:
+                total <- total + 1 if reqs[i.usize()].from == root and reqs[i.usize()].depctx == scope
+                i <- i + 1
+
+        # A requirement is pinned only when its source carries a literal exact
+        # version. Ranges, aliases, paths, URLs, and missing version text remain
+        # unpinned even when a lockfile happens to contain a candidate node.
+        def rh_requirement_is_pinned(req: RhRequire, pool: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if req.ver_s >= 0 and req.ver_e > req.ver_s
+            return false if req.req_s < 0 or req.req_e <= req.req_s
+            s: mutable usize = req.req_s.usize()
+            e: mutable usize = req.req_e.usize()
+            pool_loop: mutable darray[u8]& = pool
+            while s < e and (pool_loop[s] == 32 or pool_loop[s] == 9) |s, e, pool_loop|:
+                s <- s + 1
+            while e > s and (pool_loop[e - 1] == 32 or pool_loop[e - 1] == 9) |s, e, pool_loop|:
+                e <- e - 1
+            if e - s >= 2 and pool_loop[s] == 61 and pool_loop[s + 1] == 61:
+                s <- s + 2
+                s <- s + 1 if s < e and pool_loop[s] == 61
+            return false if s >= e
+            while i < e - s |i: usize = 0, s, e, pool_loop|:
+                b: u8 = pool_loop[s + i]
+                return false if b == 32 or b == 9 or b == 33 or b == 42 or b == 44 or b == 60 or b == 62 or b == 94 or b == 124 or b == 58 or b == 47
+                i <- i + 1
+            dots: mutable i64 = 0
+            while i < e - s |i: usize = 0, s, e, pool_loop, dots|:
+                dots <- dots + 1 if pool_loop[s + i] == 46
+                i <- i + 1
+            dots >= 2
+
+        def rh_unpinned_requirement_count(reqs: mutable darray[RhRequire]&, pool: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            pool_loop: mutable darray[u8]& = pool
+            while i < reqs.count |total: i64 = 0, i: i64 = 0, reqs, pool_loop| -> total:
+                total <- total + 1 if not rh_requirement_is_pinned(reqs[i.usize()], pool_loop)
+                i <- i + 1
+
         # Count resolved graph relations by their preserved source scope. A
         # declaration can remain unresolved, so these counts intentionally do
         # not have to sum to the requirement-scope counts.
@@ -2381,7 +2419,7 @@ module Package:
         # `dependencies.unsupported_range_count`, with per-ecosystem components so
         # the denominator-free count can be audited. It never claims a dependency
         # is safe or that the graph is complete (R009/F022/R030).
-        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, transitive_resolved: mutable darray[i64]&, runtime_requirements: mutable darray[i64]&, development_requirements: mutable darray[i64]&, optional_requirements: mutable darray[i64]&, peer_requirements: mutable darray[i64]&, unknown_scope_requirements: mutable darray[i64]&, runtime_edges: mutable darray[i64]&, development_edges: mutable darray[i64]&, optional_edges: mutable darray[i64]&, peer_edges: mutable darray[i64]&, unknown_scope_edges: mutable darray[i64]&, advisories: mutable darray[i64]&, advisory_records: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, affected_direct_nodes: mutable darray[i64]&, affected_transitive_nodes: mutable darray[i64]&, affected_unreachable_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, transitive_resolved: mutable darray[i64]&, runtime_requirements: mutable darray[i64]&, development_requirements: mutable darray[i64]&, optional_requirements: mutable darray[i64]&, peer_requirements: mutable darray[i64]&, unknown_scope_requirements: mutable darray[i64]&, runtime_direct: mutable darray[i64]&, build_direct: mutable darray[i64]&, optional_direct: mutable darray[i64]&, unknown_scope_direct: mutable darray[i64]&, unpinned: mutable darray[i64]&, runtime_edges: mutable darray[i64]&, development_edges: mutable darray[i64]&, optional_edges: mutable darray[i64]&, peer_edges: mutable darray[i64]&, unknown_scope_edges: mutable darray[i64]&, advisories: mutable darray[i64]&, advisory_records: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, affected_direct_nodes: mutable darray[i64]&, affected_transitive_nodes: mutable darray[i64]&, affected_unreachable_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
             total_declared: i64 =
                 while i < eco_codes.count.i64() |total_declared: i64 = 0, i: i64 = 0| -> total_declared:
                     total_declared <- total_declared + declared[i.usize()]
@@ -2433,6 +2471,26 @@ module Package:
             total_unknown_scope_requirements: i64 =
                 while i < eco_codes.count.i64() |total_unknown_scope_requirements: i64 = 0, i: i64 = 0, unknown_scope_requirements| -> total_unknown_scope_requirements:
                     total_unknown_scope_requirements <- total_unknown_scope_requirements + unknown_scope_requirements[i.usize()]
+                    i <- i + 1
+            total_runtime_direct: i64 =
+                while i < eco_codes.count.i64() |total_runtime_direct: i64 = 0, i: i64 = 0, runtime_direct| -> total_runtime_direct:
+                    total_runtime_direct <- total_runtime_direct + runtime_direct[i.usize()]
+                    i <- i + 1
+            total_build_direct: i64 =
+                while i < eco_codes.count.i64() |total_build_direct: i64 = 0, i: i64 = 0, build_direct| -> total_build_direct:
+                    total_build_direct <- total_build_direct + build_direct[i.usize()]
+                    i <- i + 1
+            total_optional_direct: i64 =
+                while i < eco_codes.count.i64() |total_optional_direct: i64 = 0, i: i64 = 0, optional_direct| -> total_optional_direct:
+                    total_optional_direct <- total_optional_direct + optional_direct[i.usize()]
+                    i <- i + 1
+            total_unknown_scope_direct: i64 =
+                while i < eco_codes.count.i64() |total_unknown_scope_direct: i64 = 0, i: i64 = 0, unknown_scope_direct| -> total_unknown_scope_direct:
+                    total_unknown_scope_direct <- total_unknown_scope_direct + unknown_scope_direct[i.usize()]
+                    i <- i + 1
+            total_unpinned: i64 =
+                while i < eco_codes.count.i64() |total_unpinned: i64 = 0, i: i64 = 0, unpinned| -> total_unpinned:
+                    total_unpinned <- total_unpinned + unpinned[i.usize()]
                     i <- i + 1
             total_runtime_edges: i64 =
                 while i < eco_codes.count.i64() |total_runtime_edges: i64 = 0, i: i64 = 0, runtime_edges| -> total_runtime_edges:
@@ -2534,6 +2592,21 @@ module Package:
             Base::rh_push_text(out, "{\"key\":\"dependency.unknown_scope_requirements\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, total_unknown_scope_requirements)
             Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.runtime_direct_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, total_runtime_direct)
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.build_direct_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, total_build_direct)
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.optional_direct_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, total_optional_direct)
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.unknown_scope_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, total_unknown_scope_direct)
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.unpinned_requirement_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, total_unpinned)
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"dependency.runtime_resolved_edges\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, total_runtime_edges)
             Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
@@ -2598,7 +2671,7 @@ module Package:
             else:
                 Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
             Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]}],\"by_ecosystem\":[")
-            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, transitive_resolved, runtime_requirements, development_requirements, optional_requirements, peer_requirements, unknown_scope_requirements, runtime_edges, development_edges, optional_edges, peer_edges, unknown_scope_edges, advisories, advisory_records, affected_nodes, affected_direct_nodes, affected_transitive_nodes, affected_unreachable_nodes, withdrawn, out|:
+            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, transitive_resolved, runtime_requirements, development_requirements, optional_requirements, peer_requirements, unknown_scope_requirements, runtime_direct, build_direct, optional_direct, unknown_scope_direct, unpinned, runtime_edges, development_edges, optional_edges, peer_edges, unknown_scope_edges, advisories, advisory_records, affected_nodes, affected_direct_nodes, affected_transitive_nodes, affected_unreachable_nodes, withdrawn, out|:
                 if k > 0:
                     out.push(44)
                 ec: i64 = eco_codes[k.usize()]
@@ -2632,6 +2705,16 @@ module Package:
                 Base::rh_push_decimal_i64(out, peer_requirements[k.usize()])
                 Base::rh_push_text(out, ",\"unknown_scope_requirements\":")
                 Base::rh_push_decimal_i64(out, unknown_scope_requirements[k.usize()])
+                Base::rh_push_text(out, ",\"runtime_direct_count\":")
+                Base::rh_push_decimal_i64(out, runtime_direct[k.usize()])
+                Base::rh_push_text(out, ",\"build_direct_count\":")
+                Base::rh_push_decimal_i64(out, build_direct[k.usize()])
+                Base::rh_push_text(out, ",\"optional_direct_count\":")
+                Base::rh_push_decimal_i64(out, optional_direct[k.usize()])
+                Base::rh_push_text(out, ",\"unknown_scope_count\":")
+                Base::rh_push_decimal_i64(out, unknown_scope_direct[k.usize()])
+                Base::rh_push_text(out, ",\"unpinned_requirement_count\":")
+                Base::rh_push_decimal_i64(out, unpinned[k.usize()])
                 Base::rh_push_text(out, ",\"runtime_resolved_edges\":")
                 Base::rh_push_decimal_i64(out, runtime_edges[k.usize()])
                 Base::rh_push_text(out, ",\"development_resolved_edges\":")
