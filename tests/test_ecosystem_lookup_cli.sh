@@ -41,7 +41,7 @@ echo "[ecosystem-lookup] omitted optional fields remain explicit"
 python3 - "$T/input.json" "$T/empty.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-d["results"] = [{"id": 1, "name": "minimal", "ecosystem": "pypi"}]
+d["results"] = [{"id": 1, "name": "minimal", "ecosystem": "pypi", "versions_count": None}]
 json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
 PY
 "$ROOT/build/rh_cli" ecosystem lookup --input "$T/empty.json" --out "$T/empty.out" >/dev/null || fail "minimal lookup"
@@ -49,7 +49,7 @@ python3 - "$T/empty.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 r = d["results"][0]
-assert r["version"] is None and r["manifest"] is None and r["coverage"]["fields"] == ["provider_id", "name", "ecosystem"], r
+assert r["version"] is None and r["manifest"] is None and r["versions_count"] is None and r["coverage"]["fields"] == ["provider_id", "name", "ecosystem"], r
 assert d["rejected"] == 0, d
 print("[ecosystem-lookup] explicit null coverage OK")
 PY
