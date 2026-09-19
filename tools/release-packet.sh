@@ -119,7 +119,7 @@ packet = {
         "policy decisions are four-valued and bound to subject/context/artifact/policy/time digests; unknown never becomes permission (M06)",
     ],
     "limitations": [
-        "HTTP listener serves a report directory read-only on loopback (M06-01), exposes a bounded POST /api/query path for rh-query-input/1 pagination, fixed report-backed JSON resources for project/metrics/continuity/graph/findings/evidence/scan-status, and a server-rendered accessible report page at /_report.html (M06-03); content-addressed store lookup and asynchronous graph execution remain outside this slice",
+        "HTTP listener serves a report directory read-only on loopback (M06-01), frames split requests through a bounded header and Content-Length read, exposes a bounded POST /api/query path for rh-query-input/1 pagination, fixed report-backed JSON resources for project/metrics/continuity/graph/findings/evidence/scan-status, and a server-rendered accessible report page at /_report.html (M06-03); content-addressed store lookup and asynchronous graph execution remain outside this slice",
         "release signing uses a shared HMAC key (integrity + key possession), not a public-key signature; third parties cannot verify without the key",
         "notification dedup/cooldown/ack/resolution state can be persisted to a file (--state) or the verified content-addressed store (--state-store); policy exception state and the correction revision/watermark ledger have the same file/store choices, so approvals survive restarts and correction replay is idempotent",
         "no independent threat-model review or opt-in pilot yet (M07-01, M07 beta)",

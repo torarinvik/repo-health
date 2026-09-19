@@ -201,6 +201,38 @@ def rh_http_body_start(raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic
         i <- i + 1
     -1
 
+# Return the declared request body length. -1 means no Content-Length header;
+# -2 is a malformed or conflicting header. Chunked transfer is intentionally
+# unsupported in this bounded listener and therefore has no usable length.
+# (private to this file)
+def rh_http_content_length(raw: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    header_end: i64 = rh_http_body_start(raw)
+    return -1 if header_end < 0
+    first: i64 = rh_find_byte(raw, 0, 10)
+    return -2 if first < 0
+    line: mutable i64 = first + 1
+    found: mutable i64 = -1
+    while line < header_end - 2:
+        next: i64 = rh_find_byte(raw, line.usize(), 10)
+        return -2 if next < 0 or next >= header_end
+        stop: mutable i64 = next
+        stop <- stop - 1 if stop > line and raw[(stop - 1).usize()] == 13
+        prefix: u8& = "Content-Length:"
+        if stop - line >= strlen(prefix).i64() and rh_bytes_equal_literal(raw, line, line + strlen(prefix).i64(), prefix):
+            value_start: mutable i64 = line + strlen(prefix).i64()
+            while value_start < stop and (raw[value_start.usize()] == 32 or raw[value_start.usize()] == 9):
+                value_start <- value_start + 1
+            value_end: mutable i64 = stop
+            while value_end > value_start and (raw[(value_end - 1).usize()] == 32 or raw[(value_end - 1).usize()] == 9):
+                value_end <- value_end - 1
+            ok: mutable i64 = 0
+            parsed: i64 = rh_parse_i64(raw, value_start.usize(), value_end.usize(), &ok)
+            return -2 if ok == 0 or parsed < 0 or parsed > RH_HTTP_MAX_BODY
+            return -2 if found >= 0 and found != parsed
+            found <- parsed
+        line <- next + 1
+    found
+
 # (private to this file)
 def rh_contains_bytes(hay: darray[u8]&, needle: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
     n: usize = strlen(needle)
@@ -362,21 +394,35 @@ def rh_http_route(raw: darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype
     body.extend(bytes_view(back))
     RH_HTTP_OK
 
-# Read up to cap bytes from a socket into buf. Returns bytes read or -1.
+# Read through a complete bounded header and declared body from a socket into
+# buf. Returns bytes read or -1. One connection may split headers/body across
+# arbitrary read boundaries; routing starts only after the complete request is
+# present.
 def rh_http_read_request(cfd: i32, buf: mutable darray[u8]&, cap: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-    tmp: mutable darray[u8] = []
-    while k < cap |k: i64 = 0, tmp, cap|:
-        tmp.push(0)
+    chunk: mutable darray[u8] = []
+    while k < 1024 |k: i64 = 0, chunk|:
+        chunk.push(0)
         k <- k + 1
-    n: i64 = |tmp|
-        p: void& = (&tmp[0]).cast[void&] can Unsafe.PointerCast
-        block_result: i64 = rh_sys_read(cfd, p, cap.u64().usize())
-        block_result
-    return 0 if n <= 0
-    while i < n |i: i64 = 0, n, buf, tmp|:
-        buf.push(tmp[i.usize()])
-        i <- i + 1
-    n
+    total: mutable i64 = 0
+    while total < cap |total, cap, cfd, buf, chunk|:
+        remaining: i64 = cap - total
+        want: usize = remaining.usize() if remaining < 1024 else 1024
+        p: void& = (&chunk[0]).cast[void&] can Unsafe.PointerCast
+        n: i64 = rh_sys_read(cfd, p, want)
+        return -1 if n < 0
+        break if n == 0
+        while i < n |i: i64 = 0, n, chunk, buf|:
+            buf.push(chunk[i.usize()])
+            i <- i + 1
+        total <- total + n
+        header_end: i64 = rh_http_body_start(buf)
+        continue if header_end < 0
+        content_length: i64 = rh_http_content_length(buf)
+        return -1 if content_length == -2
+        expected: i64 = header_end + content_length if content_length >= 0 else header_end
+        return -1 if expected > cap
+        break if total >= expected
+    total
 
 # Write all bytes to a socket. Returns bytes written or -1.
 def rh_http_write_all(cfd: i32, data: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
