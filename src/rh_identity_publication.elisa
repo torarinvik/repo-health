@@ -1,0 +1,231 @@
+# rh_identity_publication.elisa — project-focused identity publication (M04-09).
+#
+# This module is deliberately separate from rh_identity_report. The identity
+# report is an authorized/restricted evidence view and may contain source-native
+# actor metadata; this public projection only publishes aggregate project
+# context. It never emits actor ids, aliases, display names, source instances,
+# cluster membership, or an individual ranking. Correction requests remain
+# visible as workflow counts and retain a project-owner review channel.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_identity.elisa"
+
+struct RhPublicCorrection:
+    id_s: mutable i64
+    id_e: mutable i64
+    state: mutable u8
+
+module IdentityPublication:
+    private:
+        def rh_ip_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_ip_eq(texts: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, literal)
+
+        def rh_ip_span(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            node: RhJsonNode = nodes[idx.usize()]
+            return false if node.text_end <= node.text_start
+            s_out[0] <- node.text_start
+            e_out[0] <- node.text_end
+            true
+
+        def rh_ip_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_ip_link_state(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_LINK_PROPOSED if IdentityPublication::rh_ip_eq(texts, s, e, "proposed")
+            return RH_LINK_ACCEPTED if IdentityPublication::rh_ip_eq(texts, s, e, "accepted")
+            return RH_LINK_REJECTED if IdentityPublication::rh_ip_eq(texts, s, e, "rejected")
+            return RH_LINK_REVOKED if IdentityPublication::rh_ip_eq(texts, s, e, "revoked")
+            -1
+
+        def rh_ip_kind(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_ACTOR_HUMAN if IdentityPublication::rh_ip_eq(texts, s, e, "human")
+            return RH_ACTOR_BOT_KNOWN if IdentityPublication::rh_ip_eq(texts, s, e, "bot_known")
+            return RH_ACTOR_UNRESOLVED if IdentityPublication::rh_ip_eq(texts, s, e, "unresolved")
+            -1
+
+        def rh_ip_correction_state(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return 0 if IdentityPublication::rh_ip_eq(texts, s, e, "open")
+            return 1 if IdentityPublication::rh_ip_eq(texts, s, e, "accepted")
+            return 2 if IdentityPublication::rh_ip_eq(texts, s, e, "rejected")
+            return 3 if IdentityPublication::rh_ip_eq(texts, s, e, "withdrawn")
+            -1
+
+        def rh_ip_push_unique_correction(corrections: mutable darray[RhPublicCorrection]&, texts: darray[u8]&, value: RhPublicCorrection) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < corrections.count |i: usize = 0, corrections, texts, value|:
+                return false if rh_bytes_equal_span(texts, corrections[i].id_s, corrections[i].id_e, texts, value.id_s, value.id_e)
+                i <- i + 1
+            corrections.push(value)
+            true
+
+        def rh_ip_cluster_sizes(cluster_map: darray[i64]&, sizes: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            roots: mutable darray[i64] = []
+            while i < cluster_map.count |i: usize = 0, cluster_map, roots, sizes|:
+                root: i64 = cluster_map[i]
+                size_idx: mutable i64 = -1
+                while j < roots.count |j: usize = 0, roots, sizes, root, size_idx|:
+                    if roots[j] == root:
+                        size_idx <- j.i64()
+                        break
+                    j <- j + 1
+                if size_idx < 0:
+                    roots.push(root)
+                    sizes.push(1)
+                else:
+                    sizes[size_idx.usize()] <- sizes[size_idx.usize()] + 1
+                i <- i + 1
+            roots.count.i64()
+
+        def rh_ip_emit_histogram(out: mutable darray[u8]&, sizes: darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            emitted_sizes: mutable darray[i64] = []
+            rh_push_text(out, "[")
+            while i < sizes.count |i: usize = 0, sizes, emitted_sizes, out|:
+                size: mutable i64 = sizes[i]
+                seen: bool =
+                    while j < emitted_sizes.count |seen: bool = false, j: usize = 0, emitted_sizes, size| -> seen:
+                        seen <- true if emitted_sizes[j] == size
+                        j <- j + 1
+                if not seen:
+                    out.push(44) if emitted_sizes.count > 0
+                    rh_push_text(out, "{\"size\":")
+                    rh_push_decimal_i64(out, size)
+                    count: i64 =
+                        while k < sizes.count |count: i64 = 0, k: usize = 0, sizes, size| -> count:
+                            count <- count + 1 if sizes[k] == size
+                            k <- k + 1
+                    rh_push_text(out, ",\"clusters\":")
+                    rh_push_decimal_i64(out, count)
+                    rh_push_text(out, "}")
+                    emitted_sizes.push(size)
+                i <- i + 1
+            rh_push_text(out, "]")
+
+    public:
+        def rh_identity_publication_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not IdentityPublication::rh_ip_span(nodes, texts, root, "schema", &schema_s, &schema_e) or not IdentityPublication::rh_ip_eq(texts, schema_s, schema_e, "rh-identity-publication-input/1")
+            project_s: mutable i64 = 0
+            project_e: mutable i64 = 0
+            scope_s: mutable i64 = 0
+            scope_e: mutable i64 = 0
+            return -1 if not IdentityPublication::rh_ip_span(nodes, texts, root, "project_id", &project_s, &project_e) or not IdentityPublication::rh_ip_span(nodes, texts, root, "publication_scope", &scope_s, &scope_e)
+            return -1 if not IdentityPublication::rh_ip_eq(texts, scope_s, scope_e, "public")
+
+            actor_ok: mutable i64 = 0
+            actor_count: i64 = IdentityPublication::rh_ip_int(nodes, raw, texts, root, "actor_count", &actor_ok)
+            return -1 if actor_ok == 0 or actor_count < 0 or actor_count > 1000000
+            links_idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, root, "links")
+            return -1 if links_idx < 0 or nodes[links_idx.usize()].kind != RH_JSON_ARR
+
+            links: mutable darray[RhIdentityLink] = []
+            while link >= 0 |link: i64 = nodes[links_idx.usize()].first_child, nodes, texts, raw, links, actor_count|:
+                return -1 if nodes[link.usize()].kind != RH_JSON_OBJ
+                a_ok: mutable i64 = 0
+                b_ok: mutable i64 = 0
+                a: i64 = IdentityPublication::rh_ip_int(nodes, raw, texts, link, "a", &a_ok)
+                b: i64 = IdentityPublication::rh_ip_int(nodes, raw, texts, link, "b", &b_ok)
+                return -1 if a_ok == 0 or b_ok == 0 or a < 0 or b < 0 or a >= actor_count or b >= actor_count
+                state_s: mutable i64 = 0
+                state_e: mutable i64 = 0
+                return -1 if not IdentityPublication::rh_ip_span(nodes, texts, link, "state", &state_s, &state_e)
+                state: i64 = IdentityPublication::rh_ip_link_state(texts, state_s, state_e)
+                return -1 if state < 0
+                revision_ok: mutable i64 = 0
+                revision_added: mutable i64 = IdentityPublication::rh_ip_int(nodes, raw, texts, link, "revision_added", &revision_ok)
+                revision_added <- 0 if revision_ok == 0
+                return -1 if revision_added < 0
+                links.push(RhIdentityLink{a: a, b: b, state: state.u8(), revision_added: revision_added})
+                link <- nodes[link.usize()].next_sibling
+
+            kinds: mutable darray[u8] = []
+            kinds_idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, root, "actor_kinds")
+            if kinds_idx >= 0:
+                return -1 if nodes[kinds_idx.usize()].kind != RH_JSON_ARR
+                while kind >= 0 |kind: i64 = nodes[kinds_idx.usize()].first_child, nodes, texts, kinds|:
+                    kind_s: mutable i64 = 0
+                    kind_e: mutable i64 = 0
+                    code: mutable i64 =
+                        if IdentityPublication::rh_ip_span(nodes, texts, kind, "value", &kind_s, &kind_e):
+                            IdentityPublication::rh_ip_kind(texts, kind_s, kind_e)
+                        else:
+                            # Accept the compact string form used by identity/1.
+                            return -1 if not rh_json_str_span(nodes, kind, &kind_s, &kind_e)
+                            IdentityPublication::rh_ip_kind(texts, kind_s, kind_e)
+                    return -1 if code < 0
+                    kinds.push(code.u8())
+                    kind <- nodes[kind.usize()].next_sibling
+                return -1 if kinds.count.i64() != actor_count
+            else:
+                while i < actor_count |i: i64 = 0, kinds|:
+                    kinds.push(RH_ACTOR_UNRESOLVED)
+                    i <- i + 1
+
+            corrections: mutable darray[RhPublicCorrection] = []
+            corrections_idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, root, "correction_requests")
+            if corrections_idx >= 0:
+                return -1 if nodes[corrections_idx.usize()].kind != RH_JSON_ARR
+                while correction >= 0 |correction: i64 = nodes[corrections_idx.usize()].first_child, nodes, texts, corrections|:
+                    return -1 if corrections.count.i64() >= 100000 or nodes[correction.usize()].kind != RH_JSON_OBJ
+                    id_s: mutable i64 = 0
+                    id_e: mutable i64 = 0
+                    state_s: mutable i64 = 0
+                    state_e: mutable i64 = 0
+                    return -1 if not IdentityPublication::rh_ip_span(nodes, texts, correction, "id", &id_s, &id_e) or not IdentityPublication::rh_ip_span(nodes, texts, correction, "state", &state_s, &state_e)
+                    state: i64 = IdentityPublication::rh_ip_correction_state(texts, state_s, state_e)
+                    return -1 if state < 0
+                    return -1 if not IdentityPublication::rh_ip_push_unique_correction(corrections, texts, RhPublicCorrection{id_s: id_s, id_e: id_e, state: state.u8()})
+                    correction <- nodes[correction.usize()].next_sibling
+
+            revision: i64 = rh_identity_revision(links)
+            parent: mutable darray[i64] = []
+            cluster_map: mutable darray[i64] = []
+            cluster_count: i64 = rh_identity_clusters(links, actor_count, parent, cluster_map)
+            sizes: mutable darray[i64] = []
+            IdentityPublication::rh_ip_cluster_sizes(cluster_map, sizes)
+            humans: mutable i64 = 0
+            bots: mutable i64 = 0
+            unresolved: mutable i64 = 0
+            rh_actor_kinds(kinds, &humans, &bots, &unresolved)
+            correction_counts: mutable darray[i64] = [0, 0, 0, 0]
+            while i < corrections.count |i: usize = 0, corrections, correction_counts|:
+                correction_counts[corrections[i].state.usize()] <- correction_counts[corrections[i].state.usize()] + 1
+                i <- i + 1
+
+            rh_push_text(out, "{\"schema\":\"rh-identity-publication-result/1\",\"project_id\":\"")
+            rh_json_escape(out, texts, project_s.usize(), project_e.usize())
+            rh_push_text(out, "\",\"publication_scope\":\"project\",\"raw_identity\":\"restricted\",\"actor_count\":")
+            rh_push_decimal_i64(out, actor_count)
+            rh_push_text(out, ",\"identity_revision\":")
+            rh_push_decimal_i64(out, revision)
+            rh_push_text(out, ",\"cluster_count\":")
+            rh_push_decimal_i64(out, cluster_count)
+            rh_push_text(out, ",\"actor_kinds\":{\"human\":")
+            rh_push_decimal_i64(out, humans)
+            rh_push_text(out, ",\"bot_known\":")
+            rh_push_decimal_i64(out, bots)
+            rh_push_text(out, ",\"unresolved\":")
+            rh_push_decimal_i64(out, unresolved)
+            rh_push_text(out, "},\"cluster_size_histogram\":")
+            IdentityPublication::rh_ip_emit_histogram(out, sizes)
+            rh_push_text(out, ",\"corrections\":{\"open\":")
+            rh_push_decimal_i64(out, correction_counts[0])
+            rh_push_text(out, ",\"accepted\":")
+            rh_push_decimal_i64(out, correction_counts[1])
+            rh_push_text(out, ",\"rejected\":")
+            rh_push_decimal_i64(out, correction_counts[2])
+            rh_push_text(out, ",\"withdrawn\":")
+            rh_push_decimal_i64(out, correction_counts[3])
+            rh_push_text(out, "},\"correction_channel\":\"project-owner-review\",\"personal_leaderboard\":false,\"note\":\"project-scoped aggregates only; raw actor identities, aliases, display names, source-native ids, and cluster membership are restricted; correction requests remain reviewable\"}")
+            0
