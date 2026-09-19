@@ -69,4 +69,10 @@ assert "secret_locator" in clean
 print(f"[migrations] target contract OK: {len(tables)} tables, {len(functions)} functions")
 PY
 
+if [[ "${RH_PG_MIGRATION:-0}" == "1" ]]; then
+  "$ROOT/tests/test_migrations_live.sh"
+else
+  echo "[migrations] live PostgreSQL rehearsal skipped (RH_PG_MIGRATION!=1)"
+fi
+
 echo "test_migrations OK"
