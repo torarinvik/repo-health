@@ -1,0 +1,170 @@
+# rh_adapter_manifest.elisa — reviewed external adapter identity (M03-10).
+#
+# An adapter is enabled only when its source, rights, interface revision,
+# cache identity, and graph context are explicit. The validator records the
+# binding; it never treats a provider response as canonical by itself.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_ADAPTER_MAX_CAPABILITIES: i64 = 64
+
+module AdapterManifest:
+    private:
+        def rh_adapter_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if obj < 0 or nodes[obj.usize()].kind != RH_JSON_OBJ
+            want: usize = strlen(key)
+            while child >= 0 |child: i64 = nodes[obj.usize()].first_child, nodes, texts, key, want|:
+                name: RhJsonNode = nodes[child.usize()]
+                value: i64 = name.next_sibling
+                if name.kind == RH_JSON_STR and value >= 0 and name.text_end - name.text_start == want.i64():
+                    same: mutable bool = true
+                    while k < want |k: usize = 0, texts, name, key|:
+                        if texts[(name.text_start + k.i64()).usize()] != key[k]:
+                            same <- false
+                        k <- k + 1
+                    return value if same
+                child <- nodes[value.usize()].next_sibling if value >= 0 else -1
+            -1
+
+        def rh_adapter_span(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = AdapterManifest::rh_adapter_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            node: RhJsonNode = nodes[idx.usize()]
+            return false if node.text_end <= node.text_start
+            start_out[0] <- node.text_start
+            end_out[0] <- node.text_end
+            true
+
+        def rh_adapter_equal(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or end < start or end - start != strlen(literal).i64()
+            while i < end - start |i: i64 = 0, texts, start, literal|:
+                return false if texts[(start + i).usize()] != literal[i.usize()]
+                i <- i + 1
+            true
+
+        def rh_adapter_hex64(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != 64
+            while i < 64 |i: i64 = 0, texts, start|:
+                b: u8 = texts[(start + i).usize()]
+                return false if not ((b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102))
+                i <- i + 1
+            true
+
+        def rh_adapter_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, start.usize(), end.usize())
+            out.push(34)
+
+        def rh_adapter_array(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = AdapterManifest::rh_adapter_get(nodes, texts, obj, key)
+            return -1 if idx < 0 or nodes[idx.usize()].kind != RH_JSON_ARR
+            nodes[idx.usize()].child_count
+
+    public:
+        def rh_adapter_manifest_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+
+            schema_s: mutable i64 = -1
+            schema_e: mutable i64 = -1
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, root, "schema", &schema_s, &schema_e)
+            return -1 if not AdapterManifest::rh_adapter_equal(texts, schema_s, schema_e, "rh-adapter-manifest-input/1")
+            id_s: mutable i64 = -1
+            id_e: mutable i64 = -1
+            version_s: mutable i64 = -1
+            version_e: mutable i64 = -1
+            kind_s: mutable i64 = -1
+            kind_e: mutable i64 = -1
+            interface_s: mutable i64 = -1
+            interface_e: mutable i64 = -1
+            review_s: mutable i64 = -1
+            review_e: mutable i64 = -1
+            rights_s: mutable i64 = -1
+            rights_e: mutable i64 = -1
+            owner_s: mutable i64 = -1
+            owner_e: mutable i64 = -1
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, root, "connector_id", &id_s, &id_e)
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, root, "connector_version", &version_s, &version_e)
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, root, "adapter_kind", &kind_s, &kind_e)
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, root, "interface_revision", &interface_s, &interface_e)
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, root, "source_review_id", &review_s, &review_e)
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, root, "rights_class", &rights_s, &rights_e)
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, root, "owner", &owner_s, &owner_e)
+            return -1 if not AdapterManifest::rh_adapter_equal(texts, kind_s, kind_e, "lookup") and not AdapterManifest::rh_adapter_equal(texts, kind_s, kind_e, "parser")
+            return -1 if not AdapterManifest::rh_adapter_equal(texts, rights_s, rights_e, "metadata_only") and not AdapterManifest::rh_adapter_equal(texts, rights_s, rights_e, "source_required") and not AdapterManifest::rh_adapter_equal(texts, rights_s, rights_e, "none")
+
+            review_state_s: mutable i64 = -1
+            review_state_e: mutable i64 = -1
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, root, "review_state", &review_state_s, &review_state_e)
+            return -1 if not AdapterManifest::rh_adapter_equal(texts, review_state_s, review_state_e, "reviewed")
+            capabilities_idx: i64 = AdapterManifest::rh_adapter_get(nodes, texts, root, "capabilities")
+            capabilities_count: i64 = AdapterManifest::rh_adapter_array(nodes, texts, root, "capabilities")
+            return -1 if capabilities_idx < 0 or capabilities_count <= 0 or capabilities_count > RH_ADAPTER_MAX_CAPABILITIES
+            while child >= 0 |child: i64 = nodes[capabilities_idx.usize()].first_child, nodes, texts|:
+                return -1 if not nodes[child.usize()].kind == RH_JSON_STR or nodes[child.usize()].text_end <= nodes[child.usize()].text_start
+                child <- nodes[child.usize()].next_sibling
+
+            cache_idx: i64 = AdapterManifest::rh_adapter_get(nodes, texts, root, "cache_identity")
+            return -1 if cache_idx < 0 or nodes[cache_idx.usize()].kind != RH_JSON_OBJ
+            input_s: mutable i64 = -1
+            input_e: mutable i64 = -1
+            parser_s: mutable i64 = -1
+            parser_e: mutable i64 = -1
+            config_s: mutable i64 = -1
+            config_e: mutable i64 = -1
+            visibility_s: mutable i64 = -1
+            visibility_e: mutable i64 = -1
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, cache_idx, "input_digest", &input_s, &input_e)
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, cache_idx, "parser_version", &parser_s, &parser_e)
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, cache_idx, "configuration_digest", &config_s, &config_e)
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, cache_idx, "visibility", &visibility_s, &visibility_e)
+            return -1 if not AdapterManifest::rh_adapter_hex64(texts, input_s, input_e) or not AdapterManifest::rh_adapter_hex64(texts, config_s, config_e)
+
+            graph_idx: i64 = AdapterManifest::rh_adapter_get(nodes, texts, root, "graph_context")
+            return -1 if graph_idx < 0 or nodes[graph_idx.usize()].kind != RH_JSON_OBJ
+            ecosystem_s: mutable i64 = -1
+            ecosystem_e: mutable i64 = -1
+            graph_schema_s: mutable i64 = -1
+            graph_schema_e: mutable i64 = -1
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, graph_idx, "ecosystem", &ecosystem_s, &ecosystem_e)
+            return -1 if not AdapterManifest::rh_adapter_span(nodes, texts, graph_idx, "snapshot_schema", &graph_schema_s, &graph_schema_e)
+            return -1 if not AdapterManifest::rh_adapter_equal(texts, graph_schema_s, graph_schema_e, "rh-dep-graph/1")
+
+            rh_push_text(out, "{\"schema\":\"rh-adapter-manifest-result/1\",\"adapter\":{")
+            rh_push_text(out, "\"connector_id\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, id_s, id_e)
+            rh_push_text(out, ",\"connector_version\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, version_s, version_e)
+            rh_push_text(out, ",\"adapter_kind\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, kind_s, kind_e)
+            rh_push_text(out, ",\"interface_revision\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, interface_s, interface_e)
+            rh_push_text(out, ",\"source_review_id\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, review_s, review_e)
+            rh_push_text(out, ",\"rights_class\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, rights_s, rights_e)
+            rh_push_text(out, ",\"owner\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, owner_s, owner_e)
+            rh_push_text(out, ",\"review_state\":\"reviewed\",\"capabilities\":[")
+            while child2 >= 0 |child2: i64 = nodes[capabilities_idx.usize()].first_child, nodes, texts, out|:
+                if child2 != nodes[capabilities_idx.usize()].first_child:
+                    out.push(44)
+                AdapterManifest::rh_adapter_emit_span(out, texts, nodes[child2.usize()].text_start, nodes[child2.usize()].text_end)
+                child2 <- nodes[child2.usize()].next_sibling
+            rh_push_text(out, "]},\"cache_identity\":{\"input_digest\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, input_s, input_e)
+            rh_push_text(out, ",\"parser_version\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, parser_s, parser_e)
+            rh_push_text(out, ",\"configuration_digest\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, config_s, config_e)
+            rh_push_text(out, ",\"visibility\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, visibility_s, visibility_e)
+            rh_push_text(out, "},\"graph_context\":{\"ecosystem\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, ecosystem_s, ecosystem_e)
+            rh_push_text(out, ",\"snapshot_schema\":")
+            AdapterManifest::rh_adapter_emit_span(out, texts, graph_schema_s, graph_schema_e)
+            rh_push_text(out, "},\"note\":\"adapter binding is reviewed and pinned; provider responses remain enrichment evidence and cache reuse requires the complete identity\"}")
+            0

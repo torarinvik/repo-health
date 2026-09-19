@@ -23,6 +23,7 @@ include "./rh_continuity.elisa"
 include "./rh_continuity_scan.elisa"
 include "./rh_package.elisa"
 include "./rh_depsdev.elisa"
+include "./rh_adapter_manifest.elisa"
 include "./rh_findings.elisa"
 include "./rh_resolution.elisa"
 include "./rh_parser_diff.elisa"
@@ -95,6 +96,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
     rh_cli_err("       rh_cli depsdev (--input <file> | --url <https-or-file-url>) --out <file>")
+    rh_cli_err("       rh_cli adapter-manifest --input <file> --out <file>")
     rh_cli_err("       rh_cli findings --input <file> --out <file>")
     rh_cli_err("       rh_cli resolution --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli parser-diff --native <file> --candidate <file> --out <file> [--native-parser N] [--candidate-parser N] [--config C] [--visibility public|private]")
@@ -701,6 +703,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         if dvu_idx >= 0:
             return rh_do_depsdev("", slots[dvo_idx], slots[dvu_idx], true)
         return rh_do_depsdev(slots[dvi_idx], slots[dvo_idx], "", false)
+    if rh_streq(cmd, "adapter-manifest"):
+        ami_idx, amo_idx =
+            while amq < argc |ami_idx: i64 = -1, amo_idx: i64 = -1, amq: i64 = 2, slots| -> ami_idx, amo_idx:
+                argmanifest: u8& = slots[amq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(argmanifest, "--input"):
+                    if amq + 1 < argc:
+                        amq <- amq + 1
+                        ami_idx <- amq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(argmanifest, "--out"):
+                    if amq + 1 < argc:
+                        amq <- amq + 1
+                        amo_idx <- amq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                amq <- amq + 1
+        return rh_cli_usage(2) if ami_idx < 0 or amo_idx < 0
+        return rh_do_adapter_manifest(slots[ami_idx], slots[amo_idx])
     if rh_streq(cmd, "findings"):
         fi_idx, fo_idx =
             while ffq < argc |fi_idx: i64 = -1, fo_idx: i64 = -1, ffq: i64 = 2, slots| -> fi_idx, fo_idx:
@@ -2476,6 +2499,24 @@ def rh_do_depsdev(input_path: cstr, out_path: cstr, source_url: cstr, has_url: b
     body.push(10)
     return 4 if not rh_io_write(out_path, body)
     rh_cli_out("depsdev: enrichment observed")
+    0
+
+# --- M03-10 reviewed external adapter binding path. ---
+def rh_do_adapter_manifest(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected adapter-manifest argument (allowlist)")
+        return 3
+    raw: mutable darray[u8] = []
+    if rh_io_read(input_path, raw) < 0:
+        rh_cli_err("adapter-manifest: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if AdapterManifest::rh_adapter_manifest_report(raw, body) != 0:
+        rh_cli_err("adapter-manifest: unsupported or unreviewed binding (fail closed)")
+        return 4
+    body.push(10)
+    return 4 if not rh_io_write(out_path, body)
+    rh_cli_out("adapter-manifest: reviewed binding observed")
     0
 
 # --- M06-09 structured external findings execution path. ---
