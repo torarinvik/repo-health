@@ -22,6 +22,8 @@ struct RhReportCtx:
     months: i64
     cov_num: i64
     cov_den: i64
+    cov_v2_num: i64
+    cov_v2_den: i64
     cov_state: i64
     fresh_age: i64
     window_days: i64
@@ -30,8 +32,8 @@ struct RhReportCtx:
     cutoff: i64
     partial_clone: i64
 
-def rh_report_ctx_make(identities: i64, bots: i64, months: i64, cov_num: i64, cov_den: i64, cov_state: i64, fresh_age: i64, window_days: i64, full_history: i64, repo_kind: i64, cutoff: i64, partial_clone: i64) -> RhReportCtx:
-    RhReportCtx{identities: identities, bots: bots, months: months, cov_num: cov_num, cov_den: cov_den, cov_state: cov_state, fresh_age: fresh_age, window_days: window_days, full_history: full_history, repo_kind: repo_kind, cutoff: cutoff, partial_clone: partial_clone}
+def rh_report_ctx_make(identities: i64, bots: i64, months: i64, cov_num: i64, cov_den: i64, cov_v2_num: i64, cov_v2_den: i64, cov_state: i64, fresh_age: i64, window_days: i64, full_history: i64, repo_kind: i64, cutoff: i64, partial_clone: i64) -> RhReportCtx:
+    RhReportCtx{identities: identities, bots: bots, months: months, cov_num: cov_num, cov_den: cov_den, cov_v2_num: cov_v2_num, cov_v2_den: cov_v2_den, cov_state: cov_state, fresh_age: fresh_age, window_days: window_days, full_history: full_history, repo_kind: repo_kind, cutoff: cutoff, partial_clone: partial_clone}
 
 # {"key":..,"version":"1.0.0","status":..,"value":N,"evidence":[...]}
 # private to this file (modules retried after re-seed; see CHANGELOG).
@@ -55,12 +57,41 @@ def rh_emit_absent(buffer: mutable darray[u8]&, key: u8&, status: u8, reason: u8
     rh_push_text(buffer, reason)
     rh_push_text(buffer, "\"}")
 
+# Versioned absent value; denominator changes must remain visible even when
+# the observation has no numeric value.
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_emit_absent_version(buffer: mutable darray[u8]&, key: u8&, version: u8&, status: u8, reason: u8&) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(buffer, "{\"key\":\"")
+    rh_push_text(buffer, key)
+    rh_push_text(buffer, "\",\"version\":\"")
+    rh_push_text(buffer, version)
+    rh_push_text(buffer, "\",\"status\":\"")
+    rh_push_text(buffer, Observation::rh_status_label(status))
+    rh_push_text(buffer, "\",\"reason\":\"")
+    rh_push_text(buffer, reason)
+    rh_push_text(buffer, "\"}")
+
 # Ratio value {"num":N,"den":D}.
 # private to this file (modules retried after re-seed; see CHANGELOG).
 def rh_emit_ratio(buffer: mutable darray[u8]&, key: u8&, status: u8, num: i64, den: i64) -> void can[Memory.Allocate, Abort.Panic]:
     rh_push_text(buffer, "{\"key\":\"")
     rh_push_text(buffer, key)
     rh_push_text(buffer, "\",\"version\":\"1.0.0\",\"status\":\"")
+    rh_push_text(buffer, Observation::rh_status_label(status))
+    rh_push_text(buffer, "\",\"value\":{\"num\":")
+    rh_push_decimal_i64(buffer, num)
+    rh_push_text(buffer, ",\"den\":")
+    rh_push_decimal_i64(buffer, den)
+    rh_push_text(buffer, "},\"evidence\":[\"evidence/git-log.bin\",\"evidence/git-shallow.txt\"]}")
+
+# Explicit-version ratio emission keeps denominator changes machine-visible.
+# private to this file (modules retried after re-seed; see CHANGELOG).
+def rh_emit_ratio_version(buffer: mutable darray[u8]&, key: u8&, version: u8&, status: u8, num: i64, den: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(buffer, "{\"key\":\"")
+    rh_push_text(buffer, key)
+    rh_push_text(buffer, "\",\"version\":\"")
+    rh_push_text(buffer, version)
+    rh_push_text(buffer, "\",\"status\":\"")
     rh_push_text(buffer, Observation::rh_status_label(status))
     rh_push_text(buffer, "\",\"value\":{\"num\":")
     rh_push_decimal_i64(buffer, num)
@@ -141,6 +172,14 @@ def rh_write_report_json(path: cstr, repo: cstr, snap: RhSnapshot&, ctx: RhRepor
         else:
             rh_emit_ratio(out, "coverage.window_completeness", 4, ctx.cov_num, ctx.cov_den)
     rh_push_text(out, ",")
+    if ctx.cov_v2_den == 0:
+        rh_emit_absent_version(out, "coverage.window_completeness", "2.0.0", 6, "empty-window-no-complete-month")
+    else:
+        if ctx.cov_state == 0:
+            rh_emit_ratio_version(out, "coverage.window_completeness", "2.0.0", 0, ctx.cov_v2_num, ctx.cov_v2_den)
+        else:
+            rh_emit_ratio_version(out, "coverage.window_completeness", "2.0.0", 4, ctx.cov_v2_num, ctx.cov_v2_den)
+    rh_push_text(out, ",")
     if ctx.fresh_age < 0:
         rh_emit_absent(out, "freshness.evidence_max_age_hours", 2, "no-commit-events-in-window")
     else:
@@ -199,6 +238,18 @@ def rh_write_report_md(path: cstr, repo: cstr, snap: RhSnapshot&, ctx: RhReportC
         rh_push_decimal_i64(out, ctx.cov_num)
         rh_push_text(out, "/")
         rh_push_decimal_i64(out, ctx.cov_den)
+    rh_push_text(out, " |\n| window completeness v2 (full requested window) | ")
+    if ctx.cov_v2_den == 0:
+        rh_push_text(out, "not_applicable | no complete month in window")
+    else:
+        if ctx.cov_state != 0:
+            rh_push_text(out, "partial")
+        else:
+            rh_push_text(out, "observed")
+        rh_push_text(out, " | ")
+        rh_push_decimal_i64(out, ctx.cov_v2_num)
+        rh_push_text(out, "/")
+        rh_push_decimal_i64(out, ctx.cov_v2_den)
     rh_push_text(out, " |\n| evidence max age (hours) | ")
     if ctx.fresh_age < 0:
         rh_push_text(out, "unavailable | no commit events in window")

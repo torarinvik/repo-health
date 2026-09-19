@@ -67,7 +67,10 @@ assert m["history.commit_count"]["value"] == 3, m
 assert m["history.reachable_revisions"]["value"] == 3, m
 assert m["contributors.raw_identity_count"]["value"] == 2, m
 assert m["activity.active_complete_months"]["value"] == 3, m
-assert len(d["metrics"]) == 10, d
+assert len(d["metrics"]) == 11, d
+coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "coverage.window_completeness"}
+assert coverage[("coverage.window_completeness", "1.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "1.0.0")]["value"]["den"], coverage
+assert coverage[("coverage.window_completeness", "2.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "2.0.0")]["value"]["den"], coverage
 valid = {"observed","not_observed","unavailable","unauthorized","partial","stale","not_applicable","error","conflicted","suppressed","unsupported"}
 for x in d["metrics"]:
     assert x["status"] in valid, x
@@ -183,6 +186,11 @@ d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
 assert m["history.coverage_state"]["value"]["label"] == "shallow", m
 assert m["coverage.window_completeness"]["status"] == "partial", m
+coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "coverage.window_completeness"}
+v1 = coverage[("coverage.window_completeness", "1.0.0")]
+v2 = coverage[("coverage.window_completeness", "2.0.0")]
+assert v1["value"]["num"] == v1["value"]["den"], (v1, v2)
+assert v2["value"]["num"] == v1["value"]["num"] and v2["value"]["den"] > v1["value"]["den"], (v1, v2)
 print("[m01] shallow OK")
 EOF
 
