@@ -26,6 +26,14 @@ d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-release-feed-result/1", d
 r = d["releases"]
 assert len(r) == 2 and d["rejected"] == 0, d
+metrics = {m["key"]: m for m in d["metrics"]}
+assert {k: metrics[k]["value"] for k in metrics} == {
+    "release.release_count": 2,
+    "release.rejected_count": 0,
+    "release.asset_count": 2,
+    "release.digest_known_count": 1,
+    "release.published_time_known_count": 1,
+}, metrics
 assert r[0] == {"tag": "v1.0.0", "published_at": 1700000000, "first_seen": 1700000123,
                 "asset_count": 2, "digest_known_count": 1}, r[0]
 # missing published time stays unknown (null), never replaced by first-seen
