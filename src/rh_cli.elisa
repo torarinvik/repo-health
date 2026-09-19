@@ -96,7 +96,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli query --input <file> --out <file>")
     rh_cli_err("       rh_cli identity --input <file> --out <file>")
     rh_cli_err("       rh_cli release-feed --input <file> --out <file>")
-    rh_cli_err("       rh_cli registry-meta --input <file> --out <file>")
+    rh_cli_err("       rh_cli registry-meta (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli pep440 --input <file> --out <file>")
     rh_cli_err("       rh_cli privacy --input <file> --out <file>")
     rh_cli_err("       rh_cli roles --input <file> --out <file>")
@@ -1147,13 +1147,19 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if rfi_idx < 0 or rfo_idx < 0
         return rh_do_release_feed(slots[rfi_idx], slots[rfo_idx])
     if rh_streq(cmd, "registry-meta"):
-        rmi_idx, rmo_idx =
-            while rmq < argc |rmi_idx: i64 = -1, rmo_idx: i64 = -1, rmq: i64 = 2, slots| -> rmi_idx, rmo_idx:
+        rmi_idx, rmu_idx, rmo_idx =
+            while rmq < argc |rmi_idx: i64 = -1, rmu_idx: i64 = -1, rmo_idx: i64 = -1, rmq: i64 = 2, slots| -> rmi_idx, rmu_idx, rmo_idx:
                 a20: u8& = slots[rmq].cast[u8&] can Unsafe.PointerCast
                 if rh_streq(a20, "--input"):
                     if rmq + 1 < argc:
                         rmq <- rmq + 1
                         rmi_idx <- rmq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a20, "--url"):
+                    if rmq + 1 < argc:
+                        rmq <- rmq + 1
+                        rmu_idx <- rmq
                     else:
                         return rh_cli_usage(2)
                 elif rh_streq(a20, "--out"):
@@ -1165,8 +1171,10 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 else:
                     return rh_cli_usage(2)
                 rmq <- rmq + 1
-        return rh_cli_usage(2) if rmi_idx < 0 or rmo_idx < 0
-        return rh_do_registry_meta(slots[rmi_idx], slots[rmo_idx])
+        return rh_cli_usage(2) if rmo_idx < 0 or (rmi_idx < 0 and rmu_idx < 0) or (rmi_idx >= 0 and rmu_idx >= 0)
+        if rmu_idx >= 0:
+            return rh_do_registry_meta("", slots[rmo_idx], slots[rmu_idx], true)
+        return rh_do_registry_meta(slots[rmi_idx], slots[rmo_idx], "", false)
     if rh_streq(cmd, "pep440"):
         ppi_idx, ppo_idx =
             while ppq < argc |ppi_idx: i64 = -1, ppo_idx: i64 = -1, ppq: i64 = 2, slots| -> ppi_idx, ppo_idx:
@@ -3802,20 +3810,68 @@ def rh_do_release_feed(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloc
 # Reads an rh-registry-meta/1 document and writes rh-registry-meta-result/1.
 # Yanked versions are retained; absent yank/date fields stay null (unknown);
 # repository links are assertions, not identity; declared deps are counts.
-def rh_do_registry_meta(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+def rh_do_registry_meta(input_path: cstr, out_path: cstr, source_url: cstr, has_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(out_path):
         rh_cli_err("rejected registry-meta argument (allowlist)")
         return 3
-    ip: mutable darray[u8] =
-        ip: mutable darray[u8] = []
-        rh_push_cstr(ip, input_path)
-        ip.push(0)
-        ip
-    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
     raw: mutable darray[u8] = []
-    if rh_io_read(ipp, raw) < 0:
-        rh_cli_err("registry-meta: cannot read --input")
-        return 4
+    if has_url:
+        return 3 if not rh_fetch_arg_safe(source_url)
+        fetch_dir: mutable darray[u8] = []
+        if not rh_dirname(out_path, fetch_dir):
+            rh_push_text(fetch_dir, ".")
+        fetch_dir.push(0)
+        fetch_dir_ptr: cstr = (&fetch_dir[0]).cast[cstr] can Unsafe.PointerCast
+        body_path: mutable darray[u8] = []
+        code_path: mutable darray[u8] = []
+        err_path: mutable darray[u8] = []
+        if not rh_out_path(fetch_dir_ptr, "registry-meta-fetch-body.json", body_path) or not rh_out_path(fetch_dir_ptr, "registry-meta-fetch-status.txt", code_path) or not rh_out_path(fetch_dir_ptr, "registry-meta-fetch.err", err_path):
+            rh_cli_err("registry-meta: cannot stage fetch evidence")
+            return 4
+        body_path.push(0)
+        code_path.push(0)
+        err_path.push(0)
+        body_ptr: cstr = (&body_path[0]).cast[cstr] can Unsafe.PointerCast
+        code_ptr: cstr = (&code_path[0]).cast[cstr] can Unsafe.PointerCast
+        err_ptr: cstr = (&err_path[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_run_https_get(source_url, body_ptr, code_ptr, err_ptr) != 0:
+            rh_cli_err("registry-meta: fetch failed; no result published")
+            return 4
+        code_raw: mutable darray[u8] = []
+        if rh_io_read(code_ptr, code_raw) < 0 or code_raw.count == 0:
+            rh_cli_err("registry-meta: fetch did not produce a status")
+            return 4
+        ok_status: bool = code_raw[0] == 50
+        file_transport: bool = code_raw.count >= 3 and code_raw[0] == 48 and code_raw[1] == 48 and code_raw[2] == 48 and rh_cstr_starts_with(source_url, "file://")
+        if not ok_status and not file_transport:
+            rh_cli_err("registry-meta: fetch returned non-2xx; no result published")
+            return 4
+        url_data: mutable darray[u8] = []
+        rh_push_cstr(url_data, source_url)
+        status: mutable darray[u8] = []
+        rh_push_text(status, "{\"schema\":\"rh-registry-meta-fetch/1\",\"source_url\":\"")
+        rh_json_escape(status, url_data, 0, url_data.count)
+        rh_push_text(status, "\",\"status\":\"")
+        code_data: u8& = (&code_raw[0]).cast[u8&] can Unsafe.PointerCast
+        rh_push_raw(status, code_data, code_raw.count)
+        rh_push_text(status, "\",\"body_file\":\"registry-meta-fetch-body.json\",\"state\":\"collected\",\"note\":\"bounded transport capture retained before registry metadata parsing\"}\n")
+        if not rh_io_write(code_ptr, status):
+            rh_cli_err("registry-meta: cannot write fetch status")
+            return 4
+        if rh_io_read(body_ptr, raw) < 0:
+            rh_cli_err("registry-meta: cannot read fetched body")
+            return 4
+    else:
+        return 3 if not rh_arg_safe(input_path)
+        ip: mutable darray[u8] =
+            ip: mutable darray[u8] = []
+            rh_push_cstr(ip, input_path)
+            ip.push(0)
+            ip
+        ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_io_read(ipp, raw) < 0:
+            rh_cli_err("registry-meta: cannot read --input")
+            return 4
     body: mutable darray[u8] = []
     if rh_registry_meta_report(raw, body) != 0:
         rh_cli_err("registry-meta: not a valid rh-registry-meta/1 document (fail closed)")

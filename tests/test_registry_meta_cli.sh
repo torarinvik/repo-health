@@ -55,6 +55,25 @@ echo "[registry-meta] determinism"
 "$ROOT/build/rh_cli" registry-meta --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "registry-meta output not deterministic"
 
+echo "[registry-meta] bounded file transport capture"
+URL="file://$T/in.json"
+"$ROOT/build/rh_cli" registry-meta --url "$URL" --out "$T/fetched.json" >/dev/null || fail "file fetch"
+cmp -s "$T/out.json" "$T/fetched.json" || fail "fetched result differs"
+python3 - "$T/registry-meta-fetch-status.txt" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d == {
+    "schema": "rh-registry-meta-fetch/1",
+    "source_url": "file://" + sys.argv[1].rsplit("/registry-meta-fetch-status.txt", 1)[0] + "/in.json",
+    "status": "000",
+    "body_file": "registry-meta-fetch-body.json",
+    "state": "collected",
+    "note": "bounded transport capture retained before registry metadata parsing",
+}, d
+print("[registry-meta] fetch evidence retained")
+PY
+cmp -s "$T/in.json" "$T/registry-meta-fetch-body.json" || fail "fetched body not retained"
+
 echo "[registry-meta] malformed input fails closed"
 set +e
 printf '{"versions":42}' > "$T/shape.json"
@@ -66,8 +85,9 @@ printf '{"noversions":[]}' > "$T/novers.json"
 printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" registry-meta --input "$T/notjson.json" --out "$T/x" >/dev/null 2>&1; rc_json=$?
 "$ROOT/build/rh_cli" registry-meta --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
+"$ROOT/build/rh_cli" registry-meta --url "https://127.0.0.1/nope" --out "$T/x" >/dev/null 2>&1; rc_blocked=$?
 set -e
-for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing"; do
+for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked"; do
   [[ "$rc" -eq 4 ]] || fail "malformed registry-meta input must exit 4 (got $rc)"
 done
 
