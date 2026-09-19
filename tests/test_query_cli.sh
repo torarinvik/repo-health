@@ -63,6 +63,24 @@ PY
 "$ROOT/build/rh_cli" query --input "$T/p2.json" --out "$T/p2b.out" >/dev/null || fail "p2 replay"
 cmp -s "$T/p2.out" "$T/p2b.out" || fail "replayed cursor is not idempotent"
 
+echo "[query] bounded graph operation traverses both directions and reports truncation"
+cat > "$T/graph-down.json" <<'JSON'
+{"schema":"rh-query-input/1","kind":"downstream","ids":[1,2,3,4],"cursor":-1,"limit":10,"graph":{"direction":"downstream","subject":1,"nodes":[1,2,3,4],"edges":[{"from":2,"to":1},{"from":3,"to":2},{"from":4,"to":3}],"max_nodes":2,"max_depth":8}}
+JSON
+cat > "$T/graph-up.json" <<'JSON'
+{"schema":"rh-query-input/1","kind":"upstream","ids":[1,2,3,4],"cursor":-1,"limit":10,"graph":{"direction":"upstream","subject":4,"nodes":[1,2,3,4],"edges":[{"from":2,"to":1},{"from":3,"to":2},{"from":4,"to":3}],"max_nodes":2,"max_depth":8}}
+JSON
+"$ROOT/build/rh_cli" query --input "$T/graph-down.json" --out "$T/graph-down.out" >/dev/null || fail "graph downstream"
+"$ROOT/build/rh_cli" query --input "$T/graph-up.json" --out "$T/graph-up.out" >/dev/null || fail "graph upstream"
+python3 - "$T/graph-down.out" "$T/graph-up.out" <<'PY'
+import json, sys
+down = json.load(open(sys.argv[1]))["graph"]
+up = json.load(open(sys.argv[2]))["graph"]
+assert down == {"direction": "downstream", "nodes": [2, 3], "truncated": True, "complete": False}, down
+assert up == {"direction": "upstream", "nodes": [3, 2], "truncated": True, "complete": False}, up
+print("[query] graph direction + bounded truncation OK")
+PY
+
 echo "[query] determinism"
 "$ROOT/build/rh_cli" query --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "query output not deterministic"
@@ -79,9 +97,11 @@ printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[],"scan_states":["v
 "$ROOT/build/rh_cli" query --input "$T/badstate.json" --out "$T/x" >/dev/null 2>&1; rc_state=$?
 printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[],"job":{"ops":[{"op":"finish","token":1,"phase":"goodbye"}]}}' > "$T/badphase.json"
 "$ROOT/build/rh_cli" query --input "$T/badphase.json" --out "$T/x" >/dev/null 2>&1; rc_phase=$?
+printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[],"graph":{"subject":1,"nodes":[1],"edges":[{"from":1,"to":2}]}}' > "$T/badgraph.json"
+"$ROOT/build/rh_cli" query --input "$T/badgraph.json" --out "$T/x" >/dev/null 2>&1; rc_graph=$?
 "$ROOT/build/rh_cli" query --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_kind" "$rc_ids" "$rc_state" "$rc_phase" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_kind" "$rc_ids" "$rc_state" "$rc_phase" "$rc_graph" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed query input must exit 4 (got $rc)"
 done
 

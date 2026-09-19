@@ -2,13 +2,15 @@
 #
 # Turns an `rh-query-input/1` request into `rh-query-result/1`: cursor
 # pagination over an ascending id list, a per-capability scan-status
-# breakdown (so one failed capability cannot read as a failed project), and
-# an optional bounded-job lease sequence (claim/renew/finish/budget) with
-# fencing tokens. Malformed requests fail closed.
+# breakdown (so one failed capability cannot read as a failed project), an
+# optional bounded graph traversal, and an optional bounded-job lease sequence
+# (claim/renew/finish/budget) with fencing tokens. Malformed requests fail
+# closed.
 
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_query.elisa"
+include "./rh_graph.elisa"
 
 # private to this file (modules retried after re-seed; see CHANGELOG).
 def rh_qr_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -73,6 +75,11 @@ def rh_qr_kind_label(k: i64) -> u8&:
     return "findings" if k == 5
     return "evidence" if k == 6
     "scan_status"
+
+def rh_qr_graph_direction(texts: darray[u8]&, s: i64, e: i64) -> i64:
+    return 0 if rh_qr_eq(texts, s, e, "downstream")
+    return 1 if rh_qr_eq(texts, s, e, "upstream")
+    -1
 
 # private to this file (modules retried after re-seed; see CHANGELOG).
 def rh_qr_emit_phase(out: mutable darray[u8]&, p: u8) -> void can[Memory.Allocate, Abort.Panic]:
@@ -156,6 +163,67 @@ def rh_query_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memor
             sc <- nodes[sc.usize()].next_sibling
         rh_scan_status_tally(codes, &so, &st, &pa, &un, &au, &ot)
 
+    # Optional bounded graph operation. The caller supplies a graph snapshot
+    # and a direction; traversal remains local, iterative, and capped by the
+    # declared node/depth budgets. No range or implicit node is invented.
+    has_graph: mutable bool = false
+    graph_direction: mutable i64 = 0
+    graph_result: mutable darray[i64] = []
+    graph_truncated: mutable i64 = 0
+    graph_idx: i64 = rh_json_obj_get(nodes, texts, root, "graph")
+    if graph_idx >= 0:
+        return -1 if nodes[graph_idx.usize()].kind != RH_JSON_OBJ
+        graph_nodes_idx: i64 = rh_json_obj_get(nodes, texts, graph_idx, "nodes")
+        graph_edges_idx: i64 = rh_json_obj_get(nodes, texts, graph_idx, "edges")
+        subject_ok: mutable i64 = 0
+        subject: i64 = rh_qr_int(nodes, raw, texts, graph_idx, "subject", &subject_ok)
+        return -1 if graph_nodes_idx < 0 or graph_edges_idx < 0 or subject_ok == 0
+        return -1 if nodes[graph_nodes_idx.usize()].kind != RH_JSON_ARR or nodes[graph_edges_idx.usize()].kind != RH_JSON_ARR
+        direction_s: mutable i64 = 0
+        direction_e: mutable i64 = 0
+        if rh_qr_str(nodes, texts, graph_idx, "direction", &direction_s, &direction_e):
+            graph_direction <- rh_qr_graph_direction(texts, direction_s, direction_e)
+            return -1 if graph_direction < 0
+        graph_max_nodes_ok: mutable i64 = 0
+        graph_max_nodes: mutable i64 = rh_qr_int(nodes, raw, texts, graph_idx, "max_nodes", &graph_max_nodes_ok)
+        if graph_max_nodes_ok == 0:
+            graph_max_nodes <- 100
+        return -1 if graph_max_nodes <= 0 or graph_max_nodes > RH_QPAGE_MAX
+        graph_max_depth_ok: mutable i64 = 0
+        graph_max_depth: mutable i64 = rh_qr_int(nodes, raw, texts, graph_idx, "max_depth", &graph_max_depth_ok)
+        if graph_max_depth_ok == 0:
+            graph_max_depth <- 8
+        return -1 if graph_max_depth <= 0 or graph_max_depth > RH_QPAGE_MAX
+        graph_ids: mutable darray[i64] = []
+        graph_nodes_arr: RhJsonNode = nodes[graph_nodes_idx.usize()]
+        while gn >= 0 |gn: i64 = graph_nodes_arr.first_child, nodes, raw, graph_ids|:
+            return -1 if nodes[gn.usize()].kind != RH_JSON_NUM
+            graph_ok: mutable i64 = 0
+            graph_value: i64 = rh_json_int(nodes, raw, gn, &graph_ok)
+            return -1 if graph_ok == 0 or graph_value < 0 or rh_contains(graph_ids, graph_value)
+            graph_ids.push(graph_value)
+            gn <- nodes[gn.usize()].next_sibling
+        return -1 if not rh_contains(graph_ids, subject)
+        graph_edges: mutable darray[RhGraphEdge] = []
+        graph_edges_arr: RhJsonNode = nodes[graph_edges_idx.usize()]
+        while ge >= 0 |ge: i64 = graph_edges_arr.first_child, nodes, raw, texts, graph_ids, graph_edges|:
+            return -1 if nodes[ge.usize()].kind != RH_JSON_OBJ
+            from_ok: mutable i64 = 0
+            to_ok: mutable i64 = 0
+            from_value: i64 = rh_qr_int(nodes, raw, texts, ge, "from", &from_ok)
+            to_value: i64 = rh_qr_int(nodes, raw, texts, ge, "to", &to_ok)
+            return -1 if from_ok == 0 or to_ok == 0 or from_value < 0 or to_value < 0
+            return -1 if not rh_contains(graph_ids, from_value) or not rh_contains(graph_ids, to_value)
+            graph_edges.push(RhGraphEdge{from: from_value, dst: to_value, scope: RH_SCOPE_ALL, platform: 0, introduced: 0, removed: 0, first_seen: 0})
+            ge <- nodes[ge.usize()].next_sibling
+        projection: RhProjection = rh_projection_make(1, RH_SCOPE_ALL, 0, 0, 0, 0, 0, false, graph_max_nodes, graph_max_depth)
+        graph_vis: mutable darray[u8] = []
+        if graph_direction == 0:
+            _ = rh_transitive_dependents(graph_edges, graph_vis, subject, projection, graph_result, &graph_truncated)
+        else:
+            _ = rh_transitive_dependencies(graph_edges, graph_vis, subject, projection, graph_result, &graph_truncated)
+        has_graph <- true
+
     rh_push_text(out, "{\"schema\":\"rh-query-result/1\",\"kind\":\"")
     rh_push_text(out, rh_qr_kind_label(kind))
     rh_push_text(out, "\",\"page\":{\"ids\":[")
@@ -188,6 +256,20 @@ def rh_query_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memor
         rh_push_decimal_i64(out, au)
         rh_push_text(out, ",\"other\":")
         rh_push_decimal_i64(out, ot)
+        rh_push_text(out, "}")
+    if has_graph:
+        rh_push_text(out, ",\"graph\":{\"direction\":\"")
+        rh_push_text(out, "downstream" if graph_direction == 0 else "upstream")
+        rh_push_text(out, "\",\"nodes\":[")
+        while i < graph_result.count.i64() |i: i64 = 0, graph_result, out|:
+            if i > 0:
+                out.push(44)
+            rh_push_decimal_i64(out, graph_result[i.usize()])
+            i <- i + 1
+        rh_push_text(out, "],\"truncated\":")
+        rh_push_text(out, "true" if graph_truncated == 1 else "false")
+        rh_push_text(out, ",\"complete\":")
+        rh_push_text(out, "false" if graph_truncated == 1 else "true")
         rh_push_text(out, "}")
     # Optional job lease sequence.
     job_idx: i64 = rh_json_obj_get(nodes, texts, root, "job")
