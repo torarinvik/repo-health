@@ -1,0 +1,127 @@
+# rh_depsdev.elisa — optional deps.dev version adapter (M03-09).
+#
+# The adapter consumes one captured deps.dev version document and publishes
+# only fields present in that response. Coverage and origin stay explicit so
+# the local dependency graph remains useful when this optional source is
+# absent or unavailable.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module DepsDev:
+    private:
+        def rh_depsdev_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            if s >= 0 and e >= s and e <= texts.count.i64():
+                rh_json_escape(out, texts, s.usize(), e.usize())
+
+        def rh_depsdev_emit_cstr(out: mutable darray[u8]&, value: cstr) -> void can[Memory.Allocate, Abort.Panic]:
+            copied: mutable darray[u8] = []
+            rh_push_cstr(copied, value)
+            rh_json_escape(out, copied, 0, copied.count)
+
+        def rh_depsdev_array_count(nodes: darray[RhJsonNode]&, idx: i64) -> i64:
+            return -1 if idx < 0 or nodes[idx.usize()].kind != RH_JSON_ARR
+            nodes[idx.usize()].child_count
+
+    public:
+        # Convert one deps.dev `GetVersion` response into a stable local
+        # enrichment record. Required identity fields are strict; optional
+        # coverage fields remain null/empty when the provider omitted them.
+        def rh_depsdev_report(raw: darray[u8]&, out: mutable darray[u8]&, source_url: cstr, status: cstr, has_source: bool) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            name_idx: i64 = rh_json_obj_get(nodes, texts, root, "name")
+            version_idx: i64 = rh_json_obj_get(nodes, texts, root, "version")
+            ns: mutable i64 = -1
+            ne: mutable i64 = -1
+            vs: mutable i64 = -1
+            ve: mutable i64 = -1
+            return -1 if not rh_json_str_span(nodes, name_idx, &ns, &ne) or ne <= ns
+            return -1 if not rh_json_str_span(nodes, version_idx, &vs, &ve) or ve <= vs
+            system_idx: i64 = rh_json_obj_get(nodes, texts, root, "system")
+            ss: mutable i64 = -1
+            se: mutable i64 = -1
+            has_system: bool = rh_json_str_span(nodes, system_idx, &ss, &se) and se > ss
+            if system_idx >= 0 and not has_system:
+                return -1
+            published_idx: i64 = rh_json_obj_get(nodes, texts, root, "publishedAt")
+            ps: mutable i64 = -1
+            pe: mutable i64 = -1
+            has_published: bool = rh_json_str_span(nodes, published_idx, &ps, &pe)
+            if published_idx >= 0 and not has_published:
+                return -1
+            deps_idx: i64 = rh_json_obj_get(nodes, texts, root, "dependencyCount")
+            deps_ok: mutable i64 = 0
+            deps_count: mutable i64 = 0
+            has_deps: bool = deps_idx >= 0
+            if has_deps:
+                deps_count <- rh_json_int(nodes, raw, deps_idx, &deps_ok)
+                return -1 if deps_ok == 0 or deps_count < 0
+            advisories_idx: i64 = rh_json_obj_get(nodes, texts, root, "advisoryKeys")
+            has_advisories: bool = advisories_idx >= 0
+            advisory_count: mutable i64 = 0
+            if has_advisories:
+                advisory_count <- DepsDev::rh_depsdev_array_count(nodes, advisories_idx)
+                return -1 if advisory_count < 0
+                while child >= 0 |child: i64 = nodes[advisories_idx.usize()].first_child, nodes, texts|:
+                    ak_s: mutable i64 = -1
+                    ak_e: mutable i64 = -1
+                    return -1 if not rh_json_str_span(nodes, child, &ak_s, &ak_e)
+                    child <- nodes[child.usize()].next_sibling
+            complete: bool = has_published and has_deps and has_advisories
+            rh_push_text(out, "{\"schema\":\"rh-depsdev-enrichment/1\",\"origin\":{\"provider\":\"deps.dev\",\"transport\":\"")
+            rh_push_text(out, "online") if has_source else rh_push_text(out, "offline")
+            rh_push_text(out, "\",\"source_url\":")
+            if has_source:
+                out.push(34)
+                DepsDev::rh_depsdev_emit_cstr(out, source_url)
+                out.push(34)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"status\":")
+            if has_source:
+                out.push(34)
+                DepsDev::rh_depsdev_emit_cstr(out, status)
+                out.push(34)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, "},\"coverage\":{\"scope\":\"one-version\",\"status\":\"")
+            rh_push_text(out, "complete") if complete else rh_push_text(out, "partial")
+            rh_push_text(out, "\",\"fields\":[\"name\",\"version\"")
+            rh_push_text(out, ",\"published_at\"") if has_published
+            rh_push_text(out, ",\"dependency_count\"") if has_deps
+            rh_push_text(out, ",\"advisory_keys\"") if has_advisories
+            rh_push_text(out, "]},\"package\":{\"system\":\"")
+            if has_system:
+                DepsDev::rh_depsdev_emit_span(out, texts, ss, se)
+            else:
+                rh_push_text(out, "unknown")
+            rh_push_text(out, "\",\"name\":\"")
+            DepsDev::rh_depsdev_emit_span(out, texts, ns, ne)
+            rh_push_text(out, "\",\"version\":\"")
+            DepsDev::rh_depsdev_emit_span(out, texts, vs, ve)
+            rh_push_text(out, "\",\"published_at\":")
+            if has_published:
+                out.push(34)
+                DepsDev::rh_depsdev_emit_span(out, texts, ps, pe)
+                out.push(34)
+            else:
+                rh_push_text(out, "null")
+            rh_push_text(out, "},\"dependency_count\":")
+            rh_push_decimal_i64(out, deps_count) if has_deps else rh_push_text(out, "null")
+            rh_push_text(out, ",\"advisory_keys\":[")
+            if has_advisories:
+                while child2 >= 0 |child2: i64 = nodes[advisories_idx.usize()].first_child, nodes, texts, out|:
+                    if child2 != nodes[advisories_idx.usize()].first_child:
+                        out.push(44)
+                    out.push(34)
+                    ak2_s: mutable i64 = -1
+                    ak2_e: mutable i64 = -1
+                    rh_json_str_span(nodes, child2, &ak2_s, &ak2_e)
+                    DepsDev::rh_depsdev_emit_span(out, texts, ak2_s, ak2_e)
+                    out.push(34)
+                    child2 <- nodes[child2.usize()].next_sibling
+            rh_push_text(out, "],\"state\":\"observed\"}")
+            0

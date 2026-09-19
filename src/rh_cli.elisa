@@ -22,6 +22,7 @@ include "./rh_json.elisa"
 include "./rh_continuity.elisa"
 include "./rh_continuity_scan.elisa"
 include "./rh_package.elisa"
+include "./rh_depsdev.elisa"
 include "./rh_downstream_report.elisa"
 include "./rh_projection_store.elisa"
 include "./rh_policy.elisa"
@@ -75,6 +76,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli continuity --bundle <manifest> --out <dir>")
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
+    rh_cli_err("       rh_cli depsdev (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--snapshot-root <dir>] [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
     rh_cli_err("            [--max-nodes N] [--max-depth D] [--unavailable <id>] [--private <id>]...")
     rh_cli_err("       rh_cli policy --policy <file> --input <file> --out <dir> [--state <file> | --state-store <dir>]")
@@ -634,6 +636,35 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dov_idx], true, slots[dr_idx], false) if dov_idx >= 0
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dou_idx], true) if dou_idx >= 0
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dr_idx], false)
+    if rh_streq(cmd, "depsdev"):
+        dvi_idx, dvu_idx, dvo_idx =
+            while ddv < argc |dvi_idx: i64 = -1, dvu_idx: i64 = -1, dvo_idx: i64 = -1, ddv: i64 = 2, slots| -> dvi_idx, dvu_idx, dvo_idx:
+                argdev: u8& = slots[ddv].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(argdev, "--input"):
+                    if ddv + 1 < argc:
+                        ddv <- ddv + 1
+                        dvi_idx <- ddv
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(argdev, "--url"):
+                    if ddv + 1 < argc:
+                        ddv <- ddv + 1
+                        dvu_idx <- ddv
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(argdev, "--out"):
+                    if ddv + 1 < argc:
+                        ddv <- ddv + 1
+                        dvo_idx <- ddv
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                ddv <- ddv + 1
+        return rh_cli_usage(2) if dvo_idx < 0 or (dvi_idx < 0 and dvu_idx < 0) or (dvi_idx >= 0 and dvu_idx >= 0)
+        if dvu_idx >= 0:
+            return rh_do_depsdev("", slots[dvo_idx], slots[dvu_idx], true)
+        return rh_do_depsdev(slots[dvi_idx], slots[dvo_idx], "", false)
     if rh_streq(cmd, "downstream"):
         g_idx: mutable i64 = -1
         s_idx: mutable i64 = -1
@@ -1899,6 +1930,74 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         i <- i + 1
     done.push(10)
     rh_write_stdout(done)
+    0
+
+# --- M03-09 deps.dev enrichment adapter. ---
+# Captures one provider version response with bounded transport evidence and
+# emits a provenance/coverage record. This sidecar never changes the local
+# dependency graph and therefore remains optional when the provider is down.
+def rh_do_depsdev(input_path: cstr, out_path: cstr, source_url: cstr, has_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(out_path):
+        rh_cli_err("rejected depsdev output argument (allowlist)")
+        return 3
+    raw: mutable darray[u8] = []
+    status_value: mutable darray[u8] = []
+    status_ptr: mutable cstr = ""
+    if has_url:
+        return 3 if not rh_fetch_arg_safe(source_url)
+        fetch_dir: mutable darray[u8] = []
+        if not rh_dirname(out_path, fetch_dir):
+            rh_push_text(fetch_dir, ".")
+        fetch_dir.push(0)
+        fetch_dir_ptr: cstr = (&fetch_dir[0]).cast[cstr] can Unsafe.PointerCast
+        body_path: mutable darray[u8] = []
+        code_path: mutable darray[u8] = []
+        err_path: mutable darray[u8] = []
+        if not rh_out_path(fetch_dir_ptr, "depsdev-fetch-body.json", body_path) or not rh_out_path(fetch_dir_ptr, "depsdev-fetch-status.txt", code_path) or not rh_out_path(fetch_dir_ptr, "depsdev-fetch.err", err_path):
+            rh_cli_err("depsdev: cannot stage fetch evidence")
+            return 4
+        body_path.push(0)
+        code_path.push(0)
+        err_path.push(0)
+        body_ptr: cstr = (&body_path[0]).cast[cstr] can Unsafe.PointerCast
+        code_ptr: cstr = (&code_path[0]).cast[cstr] can Unsafe.PointerCast
+        err_ptr: cstr = (&err_path[0]).cast[cstr] can Unsafe.PointerCast
+        return 4 if rh_run_https_get(source_url, body_ptr, code_ptr, err_ptr) != 0
+        code_raw: mutable darray[u8] = []
+        if rh_io_read(code_ptr, code_raw) < 0 or code_raw.count == 0:
+            rh_cli_err("depsdev: fetch did not produce a status")
+            return 4
+        ok_status: bool = code_raw[0] == 50
+        file_transport: bool = code_raw.count >= 3 and code_raw[0] == 48 and code_raw[1] == 48 and code_raw[2] == 48 and rh_cstr_starts_with(source_url, "file://")
+        if not ok_status and not file_transport:
+            rh_cli_err("depsdev: fetch returned non-2xx; enrichment unavailable")
+            return 4
+        status_value.extend(bytes_view(code_raw))
+        status_value.push(0)
+        status_ptr <- (&status_value[0]).cast[cstr] can Unsafe.PointerCast
+        url_data: mutable darray[u8] = []
+        rh_push_cstr(url_data, source_url)
+        status_doc: mutable darray[u8] = []
+        rh_push_text(status_doc, "{\"schema\":\"rh-depsdev-fetch/1\",\"source_url\":\"")
+        rh_json_escape(status_doc, url_data, 0, url_data.count)
+        rh_push_text(status_doc, "\",\"status\":\"")
+        code_data: u8& = (&code_raw[0]).cast[u8&] can Unsafe.PointerCast
+        rh_push_raw(status_doc, code_data, code_raw.count)
+        rh_push_text(status_doc, "\",\"body_file\":\"depsdev-fetch-body.json\",\"state\":\"collected\",\"note\":\"optional provider capture retained before adapter parsing\"}\n")
+        return 4 if not rh_io_write(code_ptr, status_doc)
+        return 4 if rh_io_read(body_ptr, raw) < 0
+    else:
+        return 3 if not rh_arg_safe(input_path)
+        if rh_io_read(input_path, raw) < 0:
+            rh_cli_err("depsdev: cannot read --input")
+            return 4
+    body: mutable darray[u8] = []
+    if DepsDev::rh_depsdev_report(raw, body, source_url, status_ptr, has_url) != 0:
+        rh_cli_err("depsdev: unsupported or malformed provider response (fail closed)")
+        return 4
+    body.push(10)
+    return 4 if not rh_io_write(out_path, body)
+    rh_cli_out("depsdev: enrichment observed")
     0
 
 def rh_path_arg_ok(s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
