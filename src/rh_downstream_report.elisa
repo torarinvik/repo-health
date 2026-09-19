@@ -19,7 +19,7 @@ include "./rh_downstream.elisa"
 
 # Map the dep-graph scope label back to a caller-defined scope byte:
 # 1 runtime/normal, 2 dev, 3 optional, 4 peer. The projection here keeps
-# every scope (RH_SCOPE_ALL); the label is preserved in the report.
+# every scope (Graph::RH_SCOPE_ALL); the label is preserved in the report.
 # private to this file (modules retried after re-seed; see CHANGELOG).
 def rh_ds_scope(texts: darray[u8]&, s: i64, e: i64) -> u8:
     n: i64 = e - s
@@ -107,7 +107,7 @@ def rh_ds_emit_list(out: mutable darray[u8]&, ids: darray[i64]&, nodes: darray[R
 # Parse a dep graph and emit a downstream report. Returns:
 #   0 ok, -1 malformed/unsupported shape, -2 subject id not present,
 #   -3 malformed intrinsics document.
-def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, private_ids: darray[i64]&, asserts: darray[RhAssertion]&, mapping_revision: i64, intr_raw: darray[u8]&, has_intr: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, snapshot_id: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, private_ids: darray[i64]&, asserts: darray[Graph::RhAssertion]&, mapping_revision: i64, intr_raw: darray[u8]&, has_intr: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, snapshot_id: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
     nodes: mutable darray[RhJsonNode] = []
     texts: mutable darray[u8] = []
     root: i64 = rh_json_parse(raw, nodes, texts)
@@ -138,12 +138,12 @@ def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, pri
             while name_idx.count.i64() <= nid |nid, name_idx, ver_idx, vis|:
                 name_idx.push(-1)
                 ver_idx.push(-1)
-                vis.push(RH_VIS_PUBLIC)
+                vis.push(Graph::RH_VIS_PUBLIC)
             if nid >= 0:
                 name_idx[nid.usize()] <- nmk
                 ver_idx[nid.usize()] <- vvk
                 if rh_ds_id_in(private_ids, nid):
-                    vis[nid.usize()] <- RH_VIS_PRIVATE
+                    vis[nid.usize()] <- Graph::RH_VIS_PRIVATE
         child <- nodes[child.usize()].next_sibling
 
     node_count: i64 = name_idx.count.i64()
@@ -151,7 +151,7 @@ def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, pri
         return -2
 
     # Edges.
-    edges: mutable darray[RhGraphEdge] = []
+    edges: mutable darray[Graph::RhGraphEdge] = []
     earr: RhJsonNode = nodes[edges_idx.usize()]
     while echild >= 0 |echild: i64 = earr.first_child, nodes, edges, texts, raw|:
         ec: RhJsonNode = nodes[echild.usize()]
@@ -170,29 +170,29 @@ def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, pri
                 if rh_json_str_span(nodes, sc, &ss, &se):
                     scb <- rh_ds_scope(texts, ss, se)
             if okf == 1 and okt == 1:
-                edges.push(RhGraphEdge{from: frm, dst: dst, scope: scb, platform: 0, introduced: 0, removed: 0, first_seen: 0})
+                edges.push(Graph::RhGraphEdge{from: frm, dst: dst, scope: scb, platform: 0, introduced: 0, removed: 0, first_seen: 0})
         echild <- nodes[echild.usize()].next_sibling
 
-    p: RhProjection = rh_projection_make(1, RH_SCOPE_ALL, 0, 0, 0, 0, mapping_revision, true, max_nodes, max_depth)
+    p: Graph::RhProjection = Graph::rh_projection_make(1, Graph::RH_SCOPE_ALL, 0, 0, 0, 0, mapping_revision, true, max_nodes, max_depth)
     direct: mutable darray[i64] = []
-    dc: i64 = rh_direct_dependents(edges, vis, subject, &p, direct)
+    dc: i64 = Graph::rh_direct_dependents(edges, vis, subject, &p, direct)
     trans: mutable darray[i64] = []
     trunc: mutable i64 = 0
-    tc: i64 = rh_transitive_dependents(edges, vis, subject, &p, trans, &trunc)
-    scc: i64 = rh_scc_count(edges, vis, node_count, &p)
+    tc: i64 = Graph::rh_transitive_dependents(edges, vis, subject, &p, trans, &trunc)
+    scc: i64 = Graph::rh_scc_count(edges, vis, node_count, &p)
     scen: mutable darray[i64] = []
     strunc: mutable i64 = 0
-    scount: i64 = rh_scenario_unavailable(edges, vis, subject, unavailable, &p, scen, &strunc) if has_unavailable else 0
+    scount: i64 = Graph::rh_scenario_unavailable(edges, vis, subject, unavailable, &p, scen, &strunc) if has_unavailable else 0
 
     # Mirror/family dedup: only ACCEPTED grouping assertions collapse nodes;
     # forks stay distinct. With no assertions this is an order-preserving
     # identity, so the label below records whether grouping was applied.
     direct2: mutable darray[i64] = []
-    dc2: i64 = rh_family_dedup(direct, asserts, direct2)
+    dc2: i64 = Graph::rh_family_dedup(direct, asserts, direct2)
     trans2: mutable darray[i64] = []
-    tc2: i64 = rh_family_dedup(trans, asserts, trans2)
+    tc2: i64 = Graph::rh_family_dedup(trans, asserts, trans2)
     scen2: mutable darray[i64] = []
-    scount2: i64 = rh_family_dedup(scen, asserts, scen2)
+    scount2: i64 = Graph::rh_family_dedup(scen, asserts, scen2)
 
     # Optional per-metric intrinsic join (R011): the caller supplies
     # independently computed intrinsic measurements (a presence bitmask per
