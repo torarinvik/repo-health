@@ -86,6 +86,8 @@ assert {key: metrics[key]["value"] for key in metrics} == {
     "dependency.artifact_digest_coverage": {"num": 3, "den": 9},
     "dependency.maximum_observed_depth": 2,
     "dependency.resolution_complete": False,
+    "graph.node_count": 14,
+    "graph.edge_count": 10,
     "dependency.runtime_resolved_edges": 10,
     "dependency.development_resolved_edges": 0,
     "dependency.optional_resolved_edges": 0,
@@ -97,6 +99,8 @@ assert {key: metrics[key]["value"] for key in metrics} == {
     "security.affected_direct_nodes": 1,
     "security.affected_transitive_nodes": 0,
     "security.affected_unreachable_nodes": 1,
+    "security.advisory_match_unknown_nodes": 0,
+    "security.fixed_version_available": True,
     "security.withdrawn_advisory_count": 2,
 }, metrics
 by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
@@ -123,6 +127,14 @@ assert by["cargo"]["maximum_observed_depth"] == 0, by["cargo"]
 assert by["npm"]["maximum_observed_depth"] == 2, by["npm"]
 assert by["cargo"]["resolution_complete"] is False, by["cargo"]
 assert by["npm"]["resolution_complete"] is False, by["npm"]
+assert by["cargo"]["node_count"] == 7, by["cargo"]
+assert by["npm"]["node_count"] == 7, by["npm"]
+assert by["cargo"]["edge_count"] == 3, by["cargo"]
+assert by["npm"]["edge_count"] == 7, by["npm"]
+assert by["cargo"]["advisory_match_unknown_nodes"] == 0, by["cargo"]
+assert by["npm"]["advisory_match_unknown_nodes"] == 0, by["npm"]
+assert by["cargo"]["fixed_version_available"] is True, by["cargo"]
+assert by["npm"]["fixed_version_available"] is True, by["npm"]
 assert by["cargo"]["runtime_resolved_edges"] == 3, by["cargo"]
 assert by["npm"]["runtime_resolved_edges"] == 7, by["npm"]
 for eco in ("cargo", "npm"):
@@ -152,7 +164,7 @@ import json, sys
 cg = json.load(open(sys.argv[1] + "/deps-cargo-graph.json"))
 assert cg["advisories"] == [], cg["advisories"]
 m = json.load(open(sys.argv[1] + "/deps-metrics.json"))
-for metric in m["metrics"][-7:]:
+for metric in m["metrics"][-9:]:
     assert metric["status"] == "unavailable" and "value" not in metric, metric
 print("[deps] no --osv -> no advisories fabricated")
 PY
