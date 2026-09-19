@@ -57,6 +57,7 @@ include "./rh_ops_report.elisa"
 include "./rh_pilot_review.elisa"
 include "./rh_privacy_report.elisa"
 include "./rh_roles_report.elisa"
+include "./rh_roles_provider.elisa"
 include "./rh_role_publication.elisa"
 include "./rh_experimental_report.elisa"
 include "./rh_proof.elisa"
@@ -138,6 +139,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli pep440 --input <file> --out <file>")
     rh_cli_err("       rh_cli privacy --input <file> --out <file>")
     rh_cli_err("       rh_cli roles (--input <file> | --url <https-or-file-url>) --out <file>")
+    rh_cli_err("       rh_cli roles-import --input <provider-permissions.json> --out <file>")
     rh_cli_err("       rh_cli roles-publish --input <file> --out <file>")
     rh_cli_err("       rh_cli experimental --input <file> --out <file>")
     rh_cli_err("       rh_cli render --report <report.json> --out <file.html>")
@@ -1720,6 +1722,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         if rlu_idx >= 0:
             return rh_do_roles("", slots[rlo_idx], slots[rlu_idx], true)
         return rh_do_roles(slots[rl_idx], slots[rlo_idx], "", false)
+    if rh_streq(cmd, "roles-import"):
+        rii_idx, rio_idx =
+            while riq < argc |rii_idx: i64 = -1, rio_idx: i64 = -1, riq: i64 = 2, slots| -> rii_idx, rio_idx:
+                ari: u8& = slots[riq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(ari, "--input"):
+                    if riq + 1 < argc:
+                        riq <- riq + 1
+                        rii_idx <- riq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(ari, "--out"):
+                    if riq + 1 < argc:
+                        riq <- riq + 1
+                        rio_idx <- riq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                riq <- riq + 1
+        return rh_cli_usage(2) if rii_idx < 0 or rio_idx < 0
+        return rh_do_roles_import(slots[rii_idx], slots[rio_idx])
     if rh_streq(cmd, "roles-publish"):
         rpi_idx, rpo_idx =
             while rpq < argc |rpi_idx: i64 = -1, rpo_idx: i64 = -1, rpq: i64 = 2, slots| -> rpi_idx, rpo_idx:
@@ -5530,6 +5553,39 @@ def rh_do_roles(input_path: cstr, out_path: cstr, source_url: cstr, has_url: boo
         rh_cli_err("roles: cannot write --out")
         return 4
     rh_cli_out("roles: ok")
+    0
+
+# --- M04 provider permission import path. ---
+# Converts one captured GitHub/GitLab permission document into the generic
+# role evidence shape. Authentication state is retained and non-authorized
+# captures intentionally emit no declarations.
+def rh_do_roles_import(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected roles-import argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    return 4 if rh_io_read(ipp, raw) < 0
+    body: mutable darray[u8] = []
+    if RolesProvider::rh_roles_provider_import(raw, body) != 0:
+        rh_cli_err("roles-import: unsupported or malformed provider permission document")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] =
+        op: mutable darray[u8] = []
+        rh_push_cstr(op, out_path)
+        op.push(0)
+        op
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not rh_io_write(opp, body):
+        rh_cli_err("roles-import: cannot write --out")
+        return 4
+    rh_cli_out("roles-import: ok")
     0
 
 # --- M04 restricted role publication path. ---

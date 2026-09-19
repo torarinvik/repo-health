@@ -1,0 +1,152 @@
+# rh_roles_provider.elisa — bounded provider permission import (M04-01).
+#
+# GitHub and GitLab expose different permission vocabularies.  This module
+# keeps those payloads at the adapter boundary and emits the existing
+# `rh-roles-input/1` evidence shape.  Authorization is carried through
+# explicitly; a non-authorized capture produces no declarations, so an
+# accidentally retained payload cannot be spent as permission.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_roles.elisa"
+
+const RH_ROLES_PROVIDER_MAX_MEMBERS: i64 = 10000
+
+module RolesProvider:
+    private:
+        def rh_rp_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, lit)
+
+        def rh_rp_auth(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return 1 if RolesProvider::rh_rp_eq(texts, s, e, "authorized")
+            return 2 if RolesProvider::rh_rp_eq(texts, s, e, "unauthorized")
+            return 3 if RolesProvider::rh_rp_eq(texts, s, e, "not_requested")
+            return 4 if RolesProvider::rh_rp_eq(texts, s, e, "unknown")
+            -1
+
+        def rh_rp_auth_label(state: i64) -> u8&:
+            return "authorized" if state == 1
+            return "unauthorized" if state == 2
+            return "not_requested" if state == 3
+            "unknown"
+
+        def rh_rp_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            value: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            rh_json_str_span(nodes, value, &s_out[0], &e_out[0])
+
+        def rh_rp_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, obj, key), &ok_out[0])
+
+        def rh_rp_github_permission(texts: darray[u8]&, s: i64, e: i64) -> u8:
+            return RH_ROLE_OWNER if RolesProvider::rh_rp_eq(texts, s, e, "admin")
+            return RH_ROLE_MAINTAINER if RolesProvider::rh_rp_eq(texts, s, e, "maintain")
+            return RH_ROLE_TRIAGER if RolesProvider::rh_rp_eq(texts, s, e, "triage")
+            return RH_ROLE_MEMBER if RolesProvider::rh_rp_eq(texts, s, e, "push") or RolesProvider::rh_rp_eq(texts, s, e, "write")
+            return RH_ROLE_MEMBER if RolesProvider::rh_rp_eq(texts, s, e, "pull") or RolesProvider::rh_rp_eq(texts, s, e, "read")
+            RH_ROLE_UNKNOWN
+
+        def rh_rp_github_permissions(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, member: i64) -> u8:
+            permissions: i64 = rh_json_obj_get(nodes, texts, member, "permissions")
+            return RH_ROLE_UNKNOWN if permissions < 0 or nodes[permissions.usize()].kind != RH_JSON_OBJ
+            admin: i64 = rh_json_obj_get(nodes, texts, permissions, "admin")
+            return RH_ROLE_OWNER if rh_json_is_true(nodes, raw, admin)
+            maintain: i64 = rh_json_obj_get(nodes, texts, permissions, "maintain")
+            return RH_ROLE_MAINTAINER if rh_json_is_true(nodes, raw, maintain)
+            triage: i64 = rh_json_obj_get(nodes, texts, permissions, "triage")
+            return RH_ROLE_TRIAGER if rh_json_is_true(nodes, raw, triage)
+            push: i64 = rh_json_obj_get(nodes, texts, permissions, "push")
+            return RH_ROLE_MEMBER if rh_json_is_true(nodes, raw, push)
+            pull: i64 = rh_json_obj_get(nodes, texts, permissions, "pull")
+            return RH_ROLE_MEMBER if rh_json_is_true(nodes, raw, pull)
+            RH_ROLE_UNKNOWN
+
+        def rh_rp_github_role(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, member: i64) -> u8:
+            role_s: mutable i64 = 0
+            role_e: mutable i64 = 0
+            if RolesProvider::rh_rp_str(nodes, texts, member, "permission", &role_s, &role_e):
+                return RolesProvider::rh_rp_github_permission(texts, role_s, role_e)
+            if RolesProvider::rh_rp_str(nodes, texts, member, "role_name", &role_s, &role_e):
+                return RolesProvider::rh_rp_github_permission(texts, role_s, role_e)
+            RolesProvider::rh_rp_github_permissions(nodes, raw, texts, member)
+
+        def rh_rp_gitlab_role(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, member: i64) -> u8:
+            ok: mutable i64 = 0
+            access: i64 = RolesProvider::rh_rp_int(nodes, raw, texts, member, "access_level", &ok)
+            return RH_ROLE_OWNER if ok == 1 and access == 50
+            return RH_ROLE_MAINTAINER if ok == 1 and access == 40
+            return RH_ROLE_MEMBER if ok == 1 and access == 30
+            RH_ROLE_UNKNOWN
+
+        def rh_rp_permission(role: u8) -> u8:
+            return 1 if role == RH_ROLE_OWNER
+            return 2 if role == RH_ROLE_MAINTAINER
+            return 4 if role == RH_ROLE_TRIAGER
+            return 8 if role == RH_ROLE_MEMBER
+            0
+
+    public:
+        # Provider input shape:
+        # {schema, provider: github|gitlab, authorization:{state},
+        #  captured_at: unix-seconds, members:[provider records]}
+        # Output is an `rh-roles-input/1` document for the normal role
+        # engine.  The provider's native actor IDs remain internal evidence.
+        def rh_roles_provider_import(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count > 4194304
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not RolesProvider::rh_rp_str(nodes, texts, root, "schema", &schema_s, &schema_e)
+            return -1 if not RolesProvider::rh_rp_eq(texts, schema_s, schema_e, "rh-provider-roles-input/1")
+            provider_s: mutable i64 = 0
+            provider_e: mutable i64 = 0
+            return -1 if not RolesProvider::rh_rp_str(nodes, texts, root, "provider", &provider_s, &provider_e)
+            github: bool = RolesProvider::rh_rp_eq(texts, provider_s, provider_e, "github")
+            gitlab: bool = RolesProvider::rh_rp_eq(texts, provider_s, provider_e, "gitlab")
+            return -1 if not github and not gitlab
+            captured_ok: mutable i64 = 0
+            captured_at: i64 = RolesProvider::rh_rp_int(nodes, raw, texts, root, "captured_at", &captured_ok)
+            return -1 if captured_ok == 0 or captured_at < 0
+            auth_state: mutable i64 = 4
+            auth: i64 = rh_json_obj_get(nodes, texts, root, "authorization")
+            if auth >= 0:
+                return -1 if nodes[auth.usize()].kind != RH_JSON_OBJ
+                auth_s: mutable i64 = 0
+                auth_e: mutable i64 = 0
+                return -1 if not RolesProvider::rh_rp_str(nodes, texts, auth, "state", &auth_s, &auth_e)
+                auth_state <- RolesProvider::rh_rp_auth(texts, auth_s, auth_e)
+                return -1 if auth_state < 0
+            members: i64 = rh_json_obj_get(nodes, texts, root, "members")
+            return -1 if members < 0 or nodes[members.usize()].kind != RH_JSON_ARR
+            rh_push_text(out, "{\"schema\":\"rh-roles-input/1\",\"authorization\":{\"state\":\"")
+            rh_push_text(out, RolesProvider::rh_rp_auth_label(auth_state))
+            rh_push_text(out, "\"},\"declarations\":[")
+            emitted: mutable i64 = 0
+            arr: RhJsonNode = nodes[members.usize()]
+            while member >= 0 |member: i64 = arr.first_child, nodes, raw, texts, out, emitted, github, gitlab, captured_at, auth_state|:
+                return -1 if emitted >= RH_ROLES_PROVIDER_MAX_MEMBERS or nodes[member.usize()].kind != RH_JSON_OBJ
+                actor_ok: mutable i64 = 0
+                actor: i64 = RolesProvider::rh_rp_int(nodes, raw, texts, member, "id", &actor_ok)
+                return -1 if actor_ok == 0 or actor < 0
+                role: mutable u8 = RH_ROLE_UNKNOWN
+                if auth_state == 1:
+                    role <- RolesProvider::rh_rp_github_role(nodes, raw, texts, member) if github
+                    role <- RolesProvider::rh_rp_gitlab_role(nodes, raw, texts, member) if gitlab
+                if auth_state == 1:
+                    if emitted > 0:
+                        out.push(44)
+                    rh_push_text(out, "{\"actor_id\":")
+                    rh_push_decimal_i64(out, actor)
+                    rh_push_text(out, ",\"role\":\"")
+                    rh_push_text(out, rh_role_label(role))
+                    rh_push_text(out, "\",\"permission\":")
+                    rh_push_decimal_i64(out, RolesProvider::rh_rp_permission(role).i64())
+                    rh_push_text(out, ",\"source\":\"provider\",\"declared_at\":")
+                    rh_push_decimal_i64(out, captured_at)
+                    rh_push_text(out, "}")
+                    emitted <- emitted + 1
+                member <- nodes[member.usize()].next_sibling
+            rh_push_text(out, "]}")
+            0
