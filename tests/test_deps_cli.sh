@@ -115,6 +115,8 @@ PY
 echo "[deps] go.mod resolves exact pins, keeps pseudo/directives unresolved (M08)"
 mkdir -p "$T/gosrc"
 cp "$ROOT/fixtures/packages/go.mod.txt" "$T/gosrc/go.mod"
+printf 'github.com/pkg/errors v0.9.1 h1:%s=\ngithub.com/pkg/errors v0.9.1/go.mod h1:%s=\ngithub.com/unknown/module v1.0.0 h1:%s=\n' \
+  "$(printf 'A%.0s' {1..43})" "$(printf 'B%.0s' {1..43})" "$(printf 'C%.0s' {1..43})" > "$T/gosrc/go.sum"
 "$ROOT/build/rh_cli" deps --repo "$T/gosrc" --out "$T/goout" --osv "$T/src/osv-response.json" \
   | grep -q "ecosystems=1 go=4/6 unresolved=4 unsupported=0" || fail "go deps summary"
 [[ -f "$T/goout/deps-go-graph.json" ]] || fail "missing go graph"
@@ -133,10 +135,24 @@ assert reasons["github.com/old/module"] == "missing", reasons
 assert reasons["github.com/inc/module"] == "missing", reasons
 assert reasons["github.com/pkg/errors"] == "context", reasons
 assert reasons["github.com/bad/module"] == "context", reasons
+digests = {n["name"]: n["digest"] for n in g["nodes"]}
+assert digests["github.com/pkg/errors"] is True, digests
+assert digests["github.com/google/uuid"] is False, digests
 by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
 assert by["go"]["resolved_edges"] == 4 and by["go"]["unresolved_requirements"] == 4, by["go"]
 print("[deps] go.mod graph + unresolved reasons OK")
 PY
+
+echo "[deps] malformed go.sum fails closed without a partial graph"
+mkdir -p "$T/bad-go"
+cp "$ROOT/fixtures/packages/go.mod.txt" "$T/bad-go/go.mod"
+printf 'not a checksum record\n' > "$T/bad-go/go.sum"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/bad-go" --out "$T/bad-go-out" >/dev/null 2>&1
+rc_bad_sum=$?
+set -e
+[[ "$rc_bad_sum" -eq 4 ]] || fail "malformed go.sum must exit 4 (got $rc_bad_sum)"
+[[ ! -f "$T/bad-go-out/deps-go-graph.json" ]] || fail "partial graph written on malformed go.sum"
 
 echo "[deps] negative: no manifests fails closed"
 mkdir -p "$T/empty"

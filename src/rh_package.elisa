@@ -2023,6 +2023,80 @@ def rh_go_context_entry(mod: darray[u8]&, s: i64, e: i64, pool: mutable darray[u
     unresolved.push(RhUnresolved{from: 0, name_s: name_s, name_e: name_s + (ne - ns), req_s: full_s, req_e: full_s + (e - s), reason: 2})
     return
 
+# --- Go module checksums (go.sum; M03-02) -------------------------------
+# A go.sum module line is evidence for the exact module/version selected by
+# go.mod. The separate `<version>/go.mod` checksum is metadata for the module
+# file, not the package artifact, so it is deliberately ignored here. Unknown
+# module lines are retained by Go's normal sum database but do not become
+# graph nodes when the local go.mod did not declare them.
+def rh_go_sum_digest_valid(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if e - s != 47
+    return false if not rh_go_tok(data, s, s + 3, "h1:")
+    while i < e |i: i64 = s + 3, data|:
+        b: u8 = data[i.usize()]
+        valid: bool = (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 43 or b == 47 or b == 61
+        return false if not valid
+        i <- i + 1
+    data[(e - 1).usize()] == 61
+
+def rh_go_sum_line(sum: darray[u8]&, s: i64, e: i64, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    ts: mutable i64 = 0
+    te: mutable i64 = 0
+    rh_go_trim(sum, s, e, &ts, &te)
+    return 0 if ts == te
+    ms: i64 = ts
+    me: i64 =
+        while i < te and sum[i.usize()] != 32 and sum[i.usize()] != 9 |i: i64 = ts| -> i:
+            i <- i + 1
+    return -1 if me <= ms
+    vs: i64 =
+        while i < te and (sum[i.usize()] == 32 or sum[i.usize()] == 9) |i: i64 = me| -> i:
+            i <- i + 1
+    ve: i64 =
+        while i < te and sum[i.usize()] != 32 and sum[i.usize()] != 9 |i: i64 = vs| -> i:
+            i <- i + 1
+    return -1 if ve <= vs
+    ds: i64 =
+        while i < te and (sum[i.usize()] == 32 or sum[i.usize()] == 9) |i: i64 = ve| -> i:
+            i <- i + 1
+    de: i64 = te
+    return -1 if ds >= de or not rh_go_sum_digest_valid(sum, ds, de)
+    # A fourth token is never part of go.sum's line grammar.
+    extra: i64 =
+        while extra < te and (sum[extra.usize()] == 32 or sum[extra.usize()] == 9) |extra: i64 = de| -> extra:
+            extra <- extra + 1
+    return -1 if extra < te
+    # Ignore the module-file checksum while retaining package checksums.
+    is_modfile: bool = ve - vs >= 7 and sum[(ve - 7).usize()] == 47 and rh_go_tok(sum, ve - 6, ve, "go.mod")
+    return 0 if is_modfile
+    version_end: i64 =
+        while version_end < ve and sum[version_end.usize()] != 47 |version_end: i64 = vs| -> version_end:
+            version_end <- version_end + 1
+    while i < pkgs.count |i: usize = 0, pkgs, pool, sum, ms, me, vs, version_end, ds, de|:
+        n: RhPkgNode = pkgs[i]
+        if n.eco == RH_ECO_GO and n.name_s >= 0 and n.ver_s >= 0:
+            if rh_go_span_eq2(pool, n.name_s.usize(), n.name_e.usize(), sum, ms.usize(), me.usize()) and rh_go_span_eq2(pool, n.ver_s.usize(), n.ver_e.usize(), sum, vs.usize(), version_end.usize()):
+                if n.has_digest == 1:
+                    return 0 if rh_go_span_eq2(pool, n.dig_s.usize(), n.dig_e.usize(), sum, ds.usize(), de.usize())
+                    return -1
+                digest_start: i64 = rh_pool_copy(pool, sum, ds.usize(), de.usize())
+                n.has_digest <- 1
+                n.dig_s <- digest_start
+                n.dig_e <- digest_start + (de - ds)
+                pkgs[i] <- n
+                return 0
+        i <- i + 1
+    0
+
+def rh_go_sum_parse(sum: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    while pos < sum.count.i64() |pos: i64 = 0, sum, pkgs, pool|:
+        line_end: i64 =
+            while line_end < sum.count.i64() and sum[line_end.usize()] != 10 |line_end: i64 = pos, sum| -> line_end:
+                line_end <- line_end + 1
+        return -1 if rh_go_sum_line(sum, pos, line_end, pkgs, pool) != 0
+        pos <- line_end + 1
+    0
+
 # --- M03 unsupported range expressions (F022, R009) -------------------
 # The supported subset is DECLARED, not implied: a requirement string is
 # classified as evaluable only when it is a plain semver range over digits,
