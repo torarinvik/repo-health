@@ -200,6 +200,22 @@ assert v[1]["version"] == "1.1.0" and v[1]["yanked"] is True, v[1]
 print("[registry-meta] NuGet registration normalization OK")
 PY
 
+echo "[registry-meta] NuGet nested pages preserve unknown listed state"
+cat > "$T/nuget-nested.json" <<'JSON'
+{"items":[{"items":[{"catalogEntry":{"version":"2.0.0","published":null,"listed":null,"dependencyGroups":[]}}]}]}
+JSON
+"$ROOT/build/rh_cli" registry-meta --input "$T/nuget-nested.json" --out "$T/nuget-nested.out" >/dev/null || fail "NuGet nested page adapter"
+python3 - "$T/nuget-nested.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["counts"] == {"versions": 1, "yanked": 0, "unknown_yank": 1, "with_repo": 0,
+                       "declared_deps": 0, "optional_deps": 0, "dev_deps": 0}, d["counts"]
+assert d["versions"] == [{"version": "2.0.0", "yanked": None, "published_at": None,
+                          "repository": None, "dep_count": 0, "optional_dep_count": 0,
+                          "dev_dep_count": 0}], d["versions"]
+print("[registry-meta] NuGet nested page + unknown listed state OK")
+PY
+
 echo "[registry-meta] bounded file transport capture"
 URL="file://$T/in.json"
 "$ROOT/build/rh_cli" registry-meta --url "$URL" --out "$T/fetched.json" >/dev/null || fail "file fetch"
