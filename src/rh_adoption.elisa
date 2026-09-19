@@ -1,0 +1,97 @@
+# rh_adoption.elisa — staged dependency adoption evidence (M05-07).
+#
+# Exposes first-seen, confirmed introduction/removal, and censored duration
+# semantics already owned by rh_downstream. Missing or null times stay
+# unknown; an observed newer version never becomes a migration claim.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_downstream.elisa"
+
+module Adoption:
+    private:
+        def rh_adoption_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_adoption_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, lit)
+
+        def rh_adoption_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Adoption::rh_adoption_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_adoption_optional(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Adoption::rh_adoption_get(nodes, texts, obj, key)
+            return false if idx < 0
+            if nodes[idx.usize()].kind == RH_JSON_NULL:
+                value_out[0] <- 0
+                present_out[0] <- 0
+                return true
+            ok: mutable i64 = 0
+            value: i64 = rh_json_int(nodes, raw, idx, &ok)
+            return false if ok == 0 or value < 0
+            value_out[0] <- value
+            present_out[0] <- 1
+            true
+
+    public:
+        def rh_adoption_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema_idx: i64 = Adoption::rh_adoption_get(nodes, texts, root, "schema")
+            return -1 if schema_idx < 0 or nodes[schema_idx.usize()].kind != RH_JSON_STR
+            schema: RhJsonNode = nodes[schema_idx.usize()]
+            return -1 if not Adoption::rh_adoption_eq(texts, schema.text_start, schema.text_end, "rh-adoption-input/1")
+            cutoff_ok: mutable i64 = 0
+            cutoff: i64 = Adoption::rh_adoption_int(nodes, raw, texts, root, "cutoff", &cutoff_ok)
+            return -1 if cutoff_ok == 0 or cutoff < 0
+            arr_idx: i64 = Adoption::rh_adoption_get(nodes, texts, root, "adoptions")
+            return -1 if arr_idx < 0 or nodes[arr_idx.usize()].kind != RH_JSON_ARR
+            unknown: mutable i64 = 0
+            first_seen_only: mutable i64 = 0
+            confirmed_intro: mutable i64 = 0
+            confirmed_removal: mutable i64 = 0
+            body: mutable darray[u8] = []
+            rh_push_text(body, "[")
+            while child >= 0 |child: i64 = nodes[arr_idx.usize()].first_child, nodes, raw, texts, body, cutoff, unknown, first_seen_only, confirmed_intro, confirmed_removal|:
+                return -1 if nodes[child.usize()].kind != RH_JSON_OBJ
+                first: mutable i64 = 0
+                intro: mutable i64 = 0
+                removal: mutable i64 = 0
+                has_first: mutable i64 = 0
+                has_intro: mutable i64 = 0
+                has_removal: mutable i64 = 0
+                return -1 if not Adoption::rh_adoption_optional(nodes, raw, texts, child, "first_seen", &first, &has_first) or not Adoption::rh_adoption_optional(nodes, raw, texts, child, "confirmed_introduction", &intro, &has_intro) or not Adoption::rh_adoption_optional(nodes, raw, texts, child, "confirmed_removal", &removal, &has_removal)
+                return -1 if has_first != 0 and first > cutoff or has_intro != 0 and intro > cutoff or has_removal != 0 and removal > cutoff
+                return -1 if has_intro != 0 and has_removal != 0 and removal < intro
+                adoption: RhAdoption = RhAdoption{first_seen: first, confirmed_intro: intro, last_seen: 0, confirmed_removal: removal}
+                if child != nodes[arr_idx.usize()].first_child:
+                    body.push(44)
+                rh_adoption_write(body, adoption, cutoff)
+                state: u8 = rh_adoption_status(adoption)
+                if state == RH_ADOPT_UNKNOWN:
+                    unknown <- unknown + 1
+                elif state == RH_ADOPT_FIRST_SEEN_ONLY:
+                    first_seen_only <- first_seen_only + 1
+                elif state == RH_ADOPT_CONFIRMED_INTRO:
+                    confirmed_intro <- confirmed_intro + 1
+                else:
+                    confirmed_removal <- confirmed_removal + 1
+                child <- nodes[child.usize()].next_sibling
+            rh_push_text(body, "]")
+            rh_push_text(out, "{\"schema\":\"rh-adoption-result/1\",\"cutoff\":")
+            rh_push_decimal_i64(out, cutoff)
+            rh_push_text(out, ",\"adoptions\":")
+            out.extend(bytes_view(body))
+            rh_push_text(out, ",\"status_counts\":{\"unknown\":")
+            rh_push_decimal_i64(out, unknown)
+            rh_push_text(out, ",\"first_seen_only\":")
+            rh_push_decimal_i64(out, first_seen_only)
+            rh_push_text(out, ",\"confirmed_introduced\":")
+            rh_push_decimal_i64(out, confirmed_intro)
+            rh_push_text(out, ",\"confirmed_removal\":")
+            rh_push_decimal_i64(out, confirmed_removal)
+            rh_push_text(out, "},\"note\":\"first_seen is a collector observation; confirmed introduction/removal remain separate assertions; missing follow-up is right-censored and an observed upgrade is not proof of migration\"}")
+            0
