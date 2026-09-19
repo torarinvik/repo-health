@@ -28,6 +28,15 @@ assert d["format"] == "cyclonedx" and d["spec_version"] == "1.5", d
 assert d["status"] == "observed", d
 c = d["counts"]
 assert c == {"components": 2, "invalid": 1, "with_purl": 2, "with_hash": 2, "digest_known": 1, "unknown_top_keys": 0}, c
+metrics = {m["key"]: m for m in d["metrics"]}
+assert {k: metrics[k]["value"] for k in metrics} == {
+    "inventory.component_count": 2,
+    "inventory.invalid_component_count": 1,
+    "inventory.components_with_purl_count": 2,
+    "inventory.components_with_hash_count": 2,
+    "inventory.known_digest_count": 1,
+    "inventory.unknown_field_count": 0,
+}, metrics
 by = {x["name"]: x for x in d["components"]}
 assert by["serde"]["digest_known"] is True, by
 assert by["left-pad"]["digest_known"] is False, by  # only valid SHA-256 counts
@@ -55,6 +64,11 @@ assert d["status"] == "observed", d
 c = d["counts"]
 assert c["packages"] == 2 and c["invalid"] == 1, c
 assert c["unknown_top_keys"] == 1, c
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["inventory.component_count"]["value"] == 2, metrics
+assert metrics["inventory.invalid_component_count"]["value"] == 1, metrics
+assert metrics["inventory.known_digest_count"]["value"] == 1, metrics
+assert metrics["inventory.unknown_field_count"]["value"] == 1, metrics
 print("[inventory] spdx OK")
 PY
 
