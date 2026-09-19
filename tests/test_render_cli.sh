@@ -69,19 +69,23 @@ cat > "$T/rep/continuity-metrics.json" <<'JSON'
 {"schema":"rh-continuity-metrics/1","metrics":[{"key":"persistence.retained_90d","version":"1.0.0","status":"observed","value":{"num":1,"den":3}},{"key":"concentration.change_hhi","version":"1.0.0","status":"unknown","reason":"windowed"}]}
 JSON
 "$ROOT/tools/render-project.sh" "$T/rep" "$T/rep/project.html" >/dev/null || fail "continuity render"
-python3 - "$T/rep/project.html" <<'PY'
+"$ROOT/build/rh_cli" render --report "$T/rep/report.json" --out "$T/rep/page-cont.html" >/dev/null || fail "server continuity render"
+python3 - "$T/rep/project.html" "$T/rep/page-cont.html" <<'PY'
 import sys
 h = open(sys.argv[1], encoding="utf-8").read()
 assert "<h2>Continuity</h2>" in h and "coverage basis" in h, h
 assert "first-ever" in h and "651" in h and "4" in h, h
 assert "<h3>Continuity metrics</h3>" in h and "persistence.retained_90d" in h and "1/3" in h, h
 assert "unknown" in h and 'scope="row"' in h, h
+server = open(sys.argv[2], encoding="utf-8").read()
+assert "<h2>Continuity</h2>" in server and "<h2>Continuity metrics</h2>" in server, server
+assert "persistence.retained_90d" in server and "1 / 3" in server, server
 print("[render] continuity tables OK")
 PY
 
 echo "[render] determinism + fail-closed negatives"
-"$ROOT/build/rh_cli" render --report "$T/rep/report.json" --out "$T/rep/page2.html" >/dev/null || fail "rerun"
-cmp -s "$T/rep/page.html" "$T/rep/page2.html" || fail "render not deterministic"
+"$ROOT/build/rh_cli" render --report "$T/rep/report.json" --out "$T/rep/page-cont2.html" >/dev/null || fail "rerun"
+cmp -s "$T/rep/page-cont.html" "$T/rep/page-cont2.html" || fail "render not deterministic"
 set +e
 printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" render --report "$T/notjson.json" --out "$T/x" >/dev/null 2>&1; rc_json=$?

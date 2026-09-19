@@ -23,6 +23,15 @@ include "./rh_render.elisa"
 include "./rh_query_report.elisa"
 include "./rh_store.elisa"
 
+# Join an allowlisted report-root name without constructing arbitrary paths.
+def rh_http_root_path(root: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if rh_cstr_len_c(root) == 0
+    rh_push_cstr(out, root)
+    out.push(47)
+    rh_push_text(out, name)
+    out.push(0)
+    true
+
 @link_name("socket")
 extern rh_sys_socket(domain: i32, kind: i32, proto: i32) -> i32
 @link_name("setsockopt")
@@ -381,7 +390,17 @@ def rh_http_route(raw: darray[u8]&, root: cstr, body: mutable darray[u8]&, ctype
         rback: mutable darray[u8] = []
         rpp: cstr = (&rpath[0]).cast[cstr] can Unsafe.PointerCast
         return RH_HTTP_NOT_FOUND if rh_io_read(rpp, rback) < 0
-        return RH_HTTP_INTERNAL if rh_render_report_html(rback, body) != 0
+        cpath: mutable darray[u8] = []
+        mpath: mutable darray[u8] = []
+        cback: mutable darray[u8] = []
+        mback: mutable darray[u8] = []
+        rendered_with_continuity: mutable bool = false
+        if rh_http_root_path(root, "continuity.json", cpath) and rh_http_root_path(root, "continuity-metrics.json", mpath):
+            cpp: cstr = (&cpath[0]).cast[cstr] can Unsafe.PointerCast
+            mpp: cstr = (&mpath[0]).cast[cstr] can Unsafe.PointerCast
+            if rh_io_read(cpp, cback) >= 0 and rh_io_read(mpp, mback) >= 0:
+                rendered_with_continuity <- rh_render_report_html_with_continuity(rback, cback, mback, body) == 0
+        return RH_HTTP_INTERNAL if not rendered_with_continuity and rh_render_report_html(rback, body) != 0
         ctype_out[0] <- RH_CT_HTML
         return RH_HTTP_OK
     if idx == 6:

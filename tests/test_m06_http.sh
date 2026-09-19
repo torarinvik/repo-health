@@ -44,6 +44,12 @@ if [[ "${RH_LIVE_TESTS:-0}" == "1" ]]; then
   ( cd "$W/src" && git config user.name D && git config user.email d@e.test && echo x > f && git add f \
       && GIT_AUTHOR_DATE="2024-03-01T00:00:00Z" GIT_COMMITTER_DATE="2024-03-01T00:00:00Z" git commit -qm one )
   "$ROOT/build/rh_cli" scan --repo "$W/src" --out "$W/report" --window-days 36500 >/dev/null
+  cat > "$W/report/continuity.json" <<'JSON'
+{"schema":"rh-continuity/1","coverage":{"basis":"full","activity_change_claims_supported":true},"first_observation_basis":"first-ever","actors_total":1,"persistent":1,"event_totals":{"commits":1}}
+JSON
+  cat > "$W/report/continuity-metrics.json" <<'JSON'
+{"schema":"rh-continuity-metrics/1","metrics":[{"key":"persistence.retained_90d","version":"1.0.0","status":"observed","value":{"num":1,"den":1}}]}
+JSON
   "$ROOT/build/rh_cli" serve --root "$W/report" --port 18611 --max 20 > "$W/log" 2>&1 &
   SRV=$!
   sleep 2
@@ -56,6 +62,8 @@ if [[ "${RH_LIVE_TESTS:-0}" == "1" ]]; then
   rbody="$(curl -s http://127.0.0.1:18611/_report.html)" || true
   [[ "$rbody" == *"not maintainers"* && "$rbody" == *"history.commit_count"* ]] \
     || { kill "$SRV" 2>/dev/null; fail "server-rendered page missing content"; }
+  [[ "$rbody" == *"<h2>Continuity</h2>"* && "$rbody" == *"persistence.retained_90d"* ]] \
+    || { kill "$SRV" 2>/dev/null; fail "server-rendered continuity missing"; }
   cat > "$W/query.json" <<'JSON'
 {"schema":"rh-query-input/1","kind":"metrics","ids":[10,20,30],"cursor":-1,"limit":2}
 JSON

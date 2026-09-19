@@ -56,17 +56,16 @@ def rh_hr_value(nodes: darray[RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&
         if rh_json_str_span(nodes, v, &vs, &ve):
             rh_hr_escape(out, texts, vs, ve)
     elif kind == RH_JSON_OBJ:
-        ns: mutable i64 = 0
-        ne: mutable i64 = 0
-        if rh_hr_str(nodes, texts, v, "num", &ns, &ne):
-            okn: mutable i64 = 0
-            num: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, v, "num"), &okn)
-            okd: mutable i64 = 0
-            den: i64 = rh_json_int(nodes, raw, rh_json_obj_get(nodes, texts, v, "den"), &okd)
-            if okn == 1 and okd == 1:
-                rh_push_decimal_i64(out, num)
-                rh_push_text(out, " / ")
-                rh_push_decimal_i64(out, den)
+        num_idx: i64 = rh_json_obj_get(nodes, texts, v, "num")
+        den_idx: i64 = rh_json_obj_get(nodes, texts, v, "den")
+        okn: mutable i64 = 0
+        okd: mutable i64 = 0
+        num: i64 = rh_json_int(nodes, raw, num_idx, &okn)
+        den: i64 = rh_json_int(nodes, raw, den_idx, &okd)
+        if okn == 1 and okd == 1:
+            rh_push_decimal_i64(out, num)
+            rh_push_text(out, " / ")
+            rh_push_decimal_i64(out, den)
         else:
             ls: mutable i64 = 0
             le: mutable i64 = 0
@@ -223,5 +222,111 @@ def rh_render_report_html(j: darray[u8]&, out: mutable darray[u8]&) -> i64 can[M
             nc <- nodes[nc.usize()].next_sibling
         rh_push_text(out, "</tbody></table>\n")
     rh_push_text(out, "<p>Rendered from <code>report.json</code> at request time; it computes nothing and adds no verdict. Replay the retained bundle for reproducibility.</p>\n")
+    rh_push_text(out, "</body></html>\n")
+    0
+
+# Emit one continuity row whose value is a scalar field on obj. Missing
+# optional fields stay an explicit em dash, matching the report renderer.
+def rh_hr_cont_scalar(nodes: darray[RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, obj: i64, key: u8&, label: u8&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+    rh_push_text(out, "<tr><th scope=\"row\">")
+    rh_push_text(out, label)
+    rh_push_text(out, "</th><td>")
+    rh_hr_field(nodes, texts, raw, obj, key, out)
+    rh_push_text(out, "</td></tr>\n")
+
+# Render the two retained continuity artifacts as accessible tables. This
+# consumes only already-written JSON and never computes a new metric.
+def rh_hr_continuity(continuity: darray[u8]&, metric_bytes: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = rh_json_parse(continuity, nodes, texts)
+    return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+    schema_s: mutable i64 = 0
+    schema_e: mutable i64 = 0
+    return -1 if not rh_hr_str(nodes, texts, root, "schema", &schema_s, &schema_e)
+    return -1 if not rh_bytes_equal_literal(texts, schema_s, schema_e, "rh-continuity/1")
+
+    rh_push_text(out, "<h2>Continuity</h2>\n<table>\n<caption>Observed continuity context; unknown and unsupported states remain explicit.</caption>\n")
+    rh_push_text(out, "<thead><tr><th scope=\"col\">Field</th><th scope=\"col\">Value</th></tr></thead>\n<tbody>\n")
+    coverage: i64 = rh_json_obj_get(nodes, texts, root, "coverage")
+    if coverage >= 0 and nodes[coverage.usize()].kind == RH_JSON_OBJ:
+        rh_hr_cont_scalar(nodes, texts, continuity, coverage, "basis", "coverage basis", out)
+        rh_hr_cont_scalar(nodes, texts, continuity, coverage, "activity_change_claims_supported", "activity-change claims supported", out)
+    rh_hr_cont_scalar(nodes, texts, continuity, root, "first_observation_basis", "first-observation basis", out)
+    rh_hr_cont_scalar(nodes, texts, continuity, root, "actors_total", "actors total", out)
+    rh_hr_cont_scalar(nodes, texts, continuity, root, "persistent", "persistent actors", out)
+    events: i64 = rh_json_obj_get(nodes, texts, root, "event_totals")
+    if events >= 0 and nodes[events.usize()].kind == RH_JSON_OBJ:
+        event_obj: RhJsonNode = nodes[events.usize()]
+        while event_key >= 0 |event_key: i64 = event_obj.first_child, nodes, texts, continuity, out|:
+            event_value: i64 = nodes[event_key.usize()].next_sibling
+            return -1 if event_value < 0
+            rh_push_text(out, "<tr><th scope=\"row\">event total: ")
+            rh_hr_escape(out, texts, nodes[event_key.usize()].text_start, nodes[event_key.usize()].text_end)
+            rh_push_text(out, "</th><td>")
+            event_ok: mutable i64 = 0
+            event_total: i64 = rh_json_int(nodes, continuity, event_value, &event_ok)
+            if event_ok == 1:
+                rh_push_decimal_i64(out, event_total)
+            else:
+                rh_push_text(out, "&mdash;")
+            rh_push_text(out, "</td></tr>\n")
+            event_key <- nodes[event_value.usize()].next_sibling
+    rh_push_text(out, "</tbody></table>\n")
+
+    metric_nodes: mutable darray[RhJsonNode] = []
+    metric_texts: mutable darray[u8] = []
+    metric_root: i64 = rh_json_parse(metric_bytes, metric_nodes, metric_texts)
+    return -1 if metric_root < 0 or metric_nodes[metric_root.usize()].kind != RH_JSON_OBJ
+    metric_schema_s: mutable i64 = 0
+    metric_schema_e: mutable i64 = 0
+    return -1 if not rh_hr_str(metric_nodes, metric_texts, metric_root, "schema", &metric_schema_s, &metric_schema_e)
+    return -1 if not rh_bytes_equal_literal(metric_texts, metric_schema_s, metric_schema_e, "rh-continuity-metrics/1")
+    metrics: i64 = rh_json_obj_get(metric_nodes, metric_texts, metric_root, "metrics")
+    if metrics >= 0 and metric_nodes[metrics.usize()].kind == RH_JSON_ARR:
+        rh_push_text(out, "<h2>Continuity metrics</h2>\n<table>\n<caption>Typed continuity observations and their coverage state.</caption>\n<thead><tr><th scope=\"col\">Metric</th><th scope=\"col\">Version</th><th scope=\"col\">Status</th><th scope=\"col\">Value</th></tr></thead>\n<tbody>\n")
+        metric_arr: RhJsonNode = metric_nodes[metrics.usize()]
+        while metric >= 0 |metric: i64 = metric_arr.first_child, metric_nodes, metric_texts, metric_bytes, out|:
+            return -1 if metric_nodes[metric.usize()].kind != RH_JSON_OBJ
+            rh_push_text(out, "<tr><th scope=\"row\">")
+            ks: mutable i64 = 0
+            ke: mutable i64 = 0
+            if rh_hr_str(metric_nodes, metric_texts, metric, "key", &ks, &ke):
+                rh_hr_escape(out, metric_texts, ks, ke)
+            rh_push_text(out, "</th><td>")
+            vs: mutable i64 = 0
+            ve: mutable i64 = 0
+            if rh_hr_str(metric_nodes, metric_texts, metric, "version", &vs, &ve):
+                rh_hr_escape(out, metric_texts, vs, ve)
+            rh_push_text(out, "</td><td>")
+            sts: mutable i64 = 0
+            ste: mutable i64 = 0
+            if rh_hr_str(metric_nodes, metric_texts, metric, "status", &sts, &ste):
+                rh_hr_escape(out, metric_texts, sts, ste)
+            reason_s: mutable i64 = 0
+            reason_e: mutable i64 = 0
+            if rh_hr_str(metric_nodes, metric_texts, metric, "reason", &reason_s, &reason_e):
+                rh_push_text(out, " (")
+                rh_hr_escape(out, metric_texts, reason_s, reason_e)
+                rh_push_text(out, ")")
+            rh_push_text(out, "</td><td>")
+            rh_hr_value(metric_nodes, metric_texts, metric_bytes, metric, out)
+            rh_push_text(out, "</td></tr>\n")
+            metric <- metric_nodes[metric.usize()].next_sibling
+        rh_push_text(out, "</tbody></table>\n")
+    0
+
+# Add optional sibling continuity artifacts while preserving the exact base
+# report document when either artifact is absent.
+def rh_render_report_html_with_continuity(j: darray[u8]&, continuity: darray[u8]&, metric_bytes: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    base: mutable darray[u8] = []
+    return -1 if rh_render_report_html(j, base) != 0
+    close: darray[u8] = "</body></html>\n"
+    return -1 if base.count < close.count
+    prefix_end: i64 = base.count.i64() - close.count.i64()
+    while i < prefix_end |i: i64 = 0, base, out|:
+        out.push(base[i.usize()])
+        i <- i + 1
+    return -1 if rh_hr_continuity(continuity, metric_bytes, out) != 0
     rh_push_text(out, "</body></html>\n")
     0
