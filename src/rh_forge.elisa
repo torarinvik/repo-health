@@ -1,358 +1,364 @@
-# rh_forge.elisa — forge capability manifests, fetch policy, normalizers
-# (M02-04/05/07).
-#
-# Connector IDs are stable and distinct: Forgejo and Gitea share API
-# ancestry but are DIFFERENT connectors with separate manifests and
-# fixtures (plan §7.2). Capability bits: HISTORY comes from generic Git
-# for every connector; forge APIs add workflow capabilities. Traffic and
-# permission inventory need owner authorization the M02 slice never
-# carries, so they report unauthorized/unavailable honestly (never scraped
-# or guessed). Coverage mapping (M02-07): fetch outcome -> per-capability
-# measurement status, so a failed review fetch marks review metrics
-# partial/stale without tainting the whole project.
-
-
 include "./rh_base.elisa"
 include "./rh_temporal.elisa"
 include "./rh_json.elisa"
 
-const RH_CONN_GIT: u8 = 0
-const RH_CONN_GITHUB: u8 = 1
-const RH_CONN_GITLAB: u8 = 2
-const RH_CONN_FORGEJO: u8 = 3
-const RH_CONN_GITEA: u8 = 4
+module Forge:
+    public:
+        # rh_forge.elisa — forge capability manifests, fetch policy, normalizers
+        # (M02-04/05/07).
+        #
+        # Connector IDs are stable and distinct: Forgejo and Gitea share API
+        # ancestry but are DIFFERENT connectors with separate manifests and
+        # fixtures (plan §7.2). Capability bits: HISTORY comes from generic Git
+        # for every connector; forge APIs add workflow capabilities. Traffic and
+        # permission inventory need owner authorization the M02 slice never
+        # carries, so they report unauthorized/unavailable honestly (never scraped
+        # or guessed). Coverage mapping (M02-07): fetch outcome -> per-capability
+        # measurement status, so a failed review fetch marks review metrics
+        # partial/stale without tainting the whole project.
 
-const RH_CAP_HISTORY: u64 = 1
-const RH_CAP_ISSUES: u64 = 2
-const RH_CAP_REVIEWS: u64 = 4
-const RH_CAP_RELEASES: u64 = 8
-const RH_CAP_TRAFFIC: u64 = 16
-const RH_CAP_PERMS: u64 = 32
 
-def rh_conn_name(conn: u8) -> u8&:
-    return "github" if conn == RH_CONN_GITHUB
-    return "gitlab" if conn == RH_CONN_GITLAB
-    return "forgejo" if conn == RH_CONN_FORGEJO
-    return "gitea" if conn == RH_CONN_GITEA
-    "generic-git"
 
-def rh_conn_capabilities(conn: u8) -> u64:
-    return 63 if conn == RH_CONN_GITHUB
-    return 63 if conn == RH_CONN_GITLAB
-    return 15 if conn == RH_CONN_FORGEJO
-    return 15 if conn == RH_CONN_GITEA
-    1
 
-def rh_conn_has(conn: u8, cap: u64) -> bool:
-    (rh_conn_capabilities(conn) & cap) != 0
 
-# M02-07: fetch outcome -> measurement status for one capability.
-# needs_auth: capability requires authorization; authed: caller holds it;
-# rc: 0 fetched ok, else transport failure; had_data: prior observation.
-def rh_capability_status(fetch_rc: i64, had_data: bool, authed: bool, needs_auth: bool) -> u8 can[Memory.Allocate, Abort.Panic]:
-    return 3 if needs_auth and not authed
-    return 0 if fetch_rc == 0
-    return 5 if had_data
-    2
 
-# --- ISO8601 UTC-ish timestamps ("2024-03-10T12:00:00Z", "+02:00",
-# "-0500" suffixes). Fractional seconds rejected as malformed (GitHub
-# never emits them; guessing is not parsing). ok_out 1/0; value is Unix
-# seconds. Range-checked: month/day/hour/min/sec validated, leap aware.
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_days_in_month(y: i64, m: i64) -> i64:
-    if m == 2:
-        leap: bool = y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
-        return 29 if leap
-        return 28
-    return 30 if m == 4 or m == 6 or m == 9 or m == 11
-    31
+        const RH_CONN_GIT: u8 = 0
+        const RH_CONN_GITHUB: u8 = 1
+        const RH_CONN_GITLAB: u8 = 2
+        const RH_CONN_FORGEJO: u8 = 3
+        const RH_CONN_GITEA: u8 = 4
 
-def rh_parse_iso8601(data: darray[u8]&, start: usize, end: usize, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    ok_out[0] <- 0
-    span: i64 = end.i64() - start.i64()
-    return 0 if span != 20 and span != 24 and span != 25
-    return 0 if data[start] != 45 and (data[start] < 48 or data[start] > 57)
-    sep_ok: bool = data[start + 4] == 45 and data[start + 7] == 45 and data[start + 10] == 84 and data[start + 13] == 58 and data[start + 16] == 58
-    return 0 if not sep_ok
-    y_ok: mutable i64 = 0
-    y: i64 = rh_parse_i64(data, start, start + 4, &y_ok)
-    mo_ok: mutable i64 = 0
-    mo: i64 = rh_parse_i64(data, start + 5, start + 7, &mo_ok)
-    d_ok: mutable i64 = 0
-    d: i64 = rh_parse_i64(data, start + 8, start + 10, &d_ok)
-    h_ok: mutable i64 = 0
-    h: i64 = rh_parse_i64(data, start + 11, start + 13, &h_ok)
-    mi_ok: mutable i64 = 0
-    mi: i64 = rh_parse_i64(data, start + 14, start + 16, &mi_ok)
-    s_ok: mutable i64 = 0
-    s: i64 = rh_parse_i64(data, start + 17, start + 19, &s_ok)
-    return 0 if y_ok == 0 or mo_ok == 0 or d_ok == 0 or h_ok == 0 or mi_ok == 0 or s_ok == 0
-    return 0 if y < 1970 or mo < 1 or mo > 12 or h > 23 or mi > 59 or s > 60
-    return 0 if d < 1 or d > rh_days_in_month(y, mo)
-    tzoff: mutable i64 = 0
-    tmark: u8 = data[start + 19]
-    return 0 if tmark != 90 and tmark != 43 and tmark != 45
-    if tmark == 90:
-        return 0 if span != 20
-    if tmark == 43 or tmark == 45:
-        oh_ok: mutable i64 = 0
-        om_ok: mutable i64 = 0
-        oh: mutable i64 = 0
-        om: mutable i64 = 0
-        if span == 25:
-            return 0 if data[start + 22] != 58
-            oh <- rh_parse_i64(data, start + 20, start + 22, &oh_ok)
-            om <- rh_parse_i64(data, start + 23, start + 25, &om_ok)
-        if span != 25:
-            oh <- rh_parse_i64(data, start + 20, start + 22, &oh_ok)
-            om <- rh_parse_i64(data, start + 22, start + 24, &om_ok)
-        return 0 if oh_ok == 0 or om_ok == 0 or oh > 23 or om > 59
-        tzoff <- oh * 3600 + om * 60
-        if tmark == 45:
-            tzoff <- 0 - tzoff
-    ok_out[0] <- 1
-    Temporal::rh_days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s - tzoff
+        const RH_CAP_HISTORY: u64 = 1
+        const RH_CAP_ISSUES: u64 = 2
+        const RH_CAP_REVIEWS: u64 = 4
+        const RH_CAP_RELEASES: u64 = 8
+        const RH_CAP_TRAFFIC: u64 = 16
+        const RH_CAP_PERMS: u64 = 32
 
-# --- Canonical observations (rh-canonical-repo/1). Both forges map into
-# one shape so the same domain report works; the mapping table per forge
-# is explicit below and anything unmapped is null (unavailable), never
-# invented. Timestamps that fail ISO parsing fail the record (fail
-# closed); the caller counts a parser rejection.
-#
-# GitHub repo: id, name, full_name, html_url, created_at, updated_at,
-#   pushed_at.
-# GitLab project: id, name, path_with_namespace -> full_name, web_url,
-#   created_at, last_activity_at -> updated_at, pushed_at null (the
-#   project payload carries no push time; null, not zero).
+        def rh_conn_name(conn: u8) -> u8&:
+            return "github" if conn == RH_CONN_GITHUB
+            return "gitlab" if conn == RH_CONN_GITLAB
+            return "forgejo" if conn == RH_CONN_FORGEJO
+            return "gitea" if conn == RH_CONN_GITEA
+            "generic-git"
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_emit_time(buffer: mutable darray[u8]&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
-    if value < 0:
-        rh_push_text(buffer, "null")
-    else:
-        rh_push_decimal_i64(buffer, value)
+        def rh_conn_capabilities(conn: u8) -> u64:
+            return 63 if conn == RH_CONN_GITHUB
+            return 63 if conn == RH_CONN_GITLAB
+            return 15 if conn == RH_CONN_FORGEJO
+            return 15 if conn == RH_CONN_GITEA
+            1
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_get_str_span(nodes: darray[RhJsonNode]&, texts: darray[u8]&, root: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-    idx: i64 = rh_json_obj_get(nodes, texts, root, key)
-    return false if idx < 0
-    rh_json_str_span(nodes, idx, start_out, end_out)
+        def rh_conn_has(conn: u8, cap: u64) -> bool:
+            (rh_conn_capabilities(conn) & cap) != 0
 
-# private to this file (modules retried after re-seed; see CHANGELOG).
-def rh_get_iso_time(nodes: darray[RhJsonNode]&, texts: darray[u8]&, input: darray[u8]&, root: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    ok_out[0] <- 0
-    idx: i64 = rh_json_obj_get(nodes, texts, root, key)
-    return -1 if idx < 0
-    n: RhJsonNode = nodes[idx.usize()]
-    return -1 if n.kind != RH_JSON_STR
-    rh_parse_iso8601(texts, n.text_start.usize(), n.text_end.usize(), ok_out)
+        # M02-07: fetch outcome -> measurement status for one capability.
+        # needs_auth: capability requires authorization; authed: caller holds it;
+        # rc: 0 fetched ok, else transport failure; had_data: prior observation.
+        def rh_capability_status(fetch_rc: i64, had_data: bool, authed: bool, needs_auth: bool) -> u8 can[Memory.Allocate, Abort.Panic]:
+            return 3 if needs_auth and not authed
+            return 0 if fetch_rc == 0
+            return 5 if had_data
+            2
 
-def rh_github_repo_canonical(nodes: darray[RhJsonNode]&, texts: darray[u8]&, input: darray[u8]&, root: i64, fetched_at: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
-    id_idx: i64 = rh_json_obj_get(nodes, texts, root, "id")
-    id_ok: mutable i64 = 0
-    id_num: i64 = rh_json_int(nodes, input, id_idx, &id_ok)
-    return false if id_ok == 0
-    ns: mutable i64 = 0
-    ne: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "name", &ns, &ne)
-    fs: mutable i64 = 0
-    fe: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "full_name", &fs, &fe)
-    us: mutable i64 = 0
-    ue: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "html_url", &us, &ue)
-    c_ok: mutable i64 = 0
-    created: i64 = rh_get_iso_time(nodes, texts, input, root, "created_at", &c_ok)
-    return false if c_ok == 0
-    u_ok: mutable i64 = 0
-    updated: i64 = rh_get_iso_time(nodes, texts, input, root, "updated_at", &u_ok)
-    return false if u_ok == 0
-    p_ok: mutable i64 = 0
-    pushed: i64 = rh_get_iso_time(nodes, texts, input, root, "pushed_at", &p_ok)
-    return false if p_ok == 0
-    rh_push_text(out, "{\"schema\":\"rh-canonical-repo/1\",\"source\":\"github\",\"native_id\":\"github:")
-    rh_push_decimal_i64(out, id_num)
-    rh_push_text(out, "\",\"name\":\"")
-    rh_json_escape(out, texts, ns.usize(), ne.usize())
-    rh_push_text(out, "\",\"full_name\":\"")
-    rh_json_escape(out, texts, fs.usize(), fe.usize())
-    rh_push_text(out, "\",\"url\":\"")
-    rh_json_escape(out, texts, us.usize(), ue.usize())
-    rh_push_text(out, "\",\"created_at\":")
-    rh_emit_time(out, created)
-    rh_push_text(out, ",\"updated_at\":")
-    rh_emit_time(out, updated)
-    rh_push_text(out, ",\"pushed_at\":")
-    rh_emit_time(out, pushed)
-    rh_push_text(out, ",\"fetched_at\":")
-    rh_push_decimal_i64(out, fetched_at)
-    rh_push_text(out, "}")
-    true
+        # --- ISO8601 UTC-ish timestamps ("2024-03-10T12:00:00Z", "+02:00",
+        # "-0500" suffixes). Fractional seconds rejected as malformed (GitHub
+        # never emits them; guessing is not parsing). ok_out 1/0; value is Unix
+        # seconds. Range-checked: month/day/hour/min/sec validated, leap aware.
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_days_in_month(y: i64, m: i64) -> i64:
+            if m == 2:
+                leap: bool = y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
+                return 29 if leap
+                return 28
+            return 30 if m == 4 or m == 6 or m == 9 or m == 11
+            31
 
-def rh_gitlab_project_canonical(nodes: darray[RhJsonNode]&, texts: darray[u8]&, input: darray[u8]&, root: i64, fetched_at: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
-    id_idx: i64 = rh_json_obj_get(nodes, texts, root, "id")
-    id_ok: mutable i64 = 0
-    id_num: i64 = rh_json_int(nodes, input, id_idx, &id_ok)
-    return false if id_ok == 0
-    ns: mutable i64 = 0
-    ne: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "name", &ns, &ne)
-    fs: mutable i64 = 0
-    fe: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "path_with_namespace", &fs, &fe)
-    us: mutable i64 = 0
-    ue: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "web_url", &us, &ue)
-    c_ok: mutable i64 = 0
-    created: i64 = rh_get_iso_time(nodes, texts, input, root, "created_at", &c_ok)
-    return false if c_ok == 0
-    u_ok: mutable i64 = 0
-    updated: i64 = rh_get_iso_time(nodes, texts, input, root, "last_activity_at", &u_ok)
-    return false if u_ok == 0
-    rh_push_text(out, "{\"schema\":\"rh-canonical-repo/1\",\"source\":\"gitlab\",\"native_id\":\"gitlab:")
-    rh_push_decimal_i64(out, id_num)
-    rh_push_text(out, "\",\"name\":\"")
-    rh_json_escape(out, texts, ns.usize(), ne.usize())
-    rh_push_text(out, "\",\"full_name\":\"")
-    rh_json_escape(out, texts, fs.usize(), fe.usize())
-    rh_push_text(out, "\",\"url\":\"")
-    rh_json_escape(out, texts, us.usize(), ue.usize())
-    rh_push_text(out, "\",\"created_at\":")
-    rh_emit_time(out, created)
-    rh_push_text(out, ",\"updated_at\":")
-    rh_emit_time(out, updated)
-    rh_push_text(out, ",\"pushed_at\":null,\"fetched_at\":")
-    rh_push_decimal_i64(out, fetched_at)
-    rh_push_text(out, "}")
-    true
+        def rh_parse_iso8601(data: darray[u8]&, start: usize, end: usize, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            ok_out[0] <- 0
+            span: i64 = end.i64() - start.i64()
+            return 0 if span != 20 and span != 24 and span != 25
+            return 0 if data[start] != 45 and (data[start] < 48 or data[start] > 57)
+            sep_ok: bool = data[start + 4] == 45 and data[start + 7] == 45 and data[start + 10] == 84 and data[start + 13] == 58 and data[start + 16] == 58
+            return 0 if not sep_ok
+            y_ok: mutable i64 = 0
+            y: i64 = rh_parse_i64(data, start, start + 4, &y_ok)
+            mo_ok: mutable i64 = 0
+            mo: i64 = rh_parse_i64(data, start + 5, start + 7, &mo_ok)
+            d_ok: mutable i64 = 0
+            d: i64 = rh_parse_i64(data, start + 8, start + 10, &d_ok)
+            h_ok: mutable i64 = 0
+            h: i64 = rh_parse_i64(data, start + 11, start + 13, &h_ok)
+            mi_ok: mutable i64 = 0
+            mi: i64 = rh_parse_i64(data, start + 14, start + 16, &mi_ok)
+            s_ok: mutable i64 = 0
+            s: i64 = rh_parse_i64(data, start + 17, start + 19, &s_ok)
+            return 0 if y_ok == 0 or mo_ok == 0 or d_ok == 0 or h_ok == 0 or mi_ok == 0 or s_ok == 0
+            return 0 if y < 1970 or mo < 1 or mo > 12 or h > 23 or mi > 59 or s > 60
+            return 0 if d < 1 or d > rh_days_in_month(y, mo)
+            tzoff: mutable i64 = 0
+            tmark: u8 = data[start + 19]
+            return 0 if tmark != 90 and tmark != 43 and tmark != 45
+            if tmark == 90:
+                return 0 if span != 20
+            if tmark == 43 or tmark == 45:
+                oh_ok: mutable i64 = 0
+                om_ok: mutable i64 = 0
+                oh: mutable i64 = 0
+                om: mutable i64 = 0
+                if span == 25:
+                    return 0 if data[start + 22] != 58
+                    oh <- rh_parse_i64(data, start + 20, start + 22, &oh_ok)
+                    om <- rh_parse_i64(data, start + 23, start + 25, &om_ok)
+                if span != 25:
+                    oh <- rh_parse_i64(data, start + 20, start + 22, &oh_ok)
+                    om <- rh_parse_i64(data, start + 22, start + 24, &om_ok)
+                return 0 if oh_ok == 0 or om_ok == 0 or oh > 23 or om > 59
+                tzoff <- oh * 3600 + om * 60
+                if tmark == 45:
+                    tzoff <- 0 - tzoff
+            ok_out[0] <- 1
+            Temporal::rh_days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s - tzoff
 
-# Gitea and Forgejo share the same repo object shape (Forgejo is a Gitea
-# fork); the connector label is passed in so the native id prefix and the
-# canonical `source` stay connector-specific. Gitea exposes `updated_at`
-# but no `pushed_at`, which is emitted as null (unknown), never guessed.
-def rh_gitea_repo_canonical(nodes: darray[RhJsonNode]&, texts: darray[u8]&, input: darray[u8]&, root: i64, fetched_at: i64, source: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
-    id_idx: i64 = rh_json_obj_get(nodes, texts, root, "id")
-    id_ok: mutable i64 = 0
-    id_num: i64 = rh_json_int(nodes, input, id_idx, &id_ok)
-    return false if id_ok == 0
-    ns: mutable i64 = 0
-    ne: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "name", &ns, &ne)
-    fs: mutable i64 = 0
-    fe: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "full_name", &fs, &fe)
-    us: mutable i64 = 0
-    ue: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "html_url", &us, &ue)
-    c_ok: mutable i64 = 0
-    created: i64 = rh_get_iso_time(nodes, texts, input, root, "created_at", &c_ok)
-    return false if c_ok == 0
-    u_ok: mutable i64 = 0
-    updated: i64 = rh_get_iso_time(nodes, texts, input, root, "updated_at", &u_ok)
-    return false if u_ok == 0
-    rh_push_text(out, "{\"schema\":\"rh-canonical-repo/1\",\"source\":\"")
-    rh_push_text(out, source)
-    rh_push_text(out, "\",\"native_id\":\"")
-    rh_push_text(out, source)
-    rh_push_text(out, ":")
-    rh_push_decimal_i64(out, id_num)
-    rh_push_text(out, "\",\"name\":\"")
-    rh_json_escape(out, texts, ns.usize(), ne.usize())
-    rh_push_text(out, "\",\"full_name\":\"")
-    rh_json_escape(out, texts, fs.usize(), fe.usize())
-    rh_push_text(out, "\",\"url\":\"")
-    rh_json_escape(out, texts, us.usize(), ue.usize())
-    rh_push_text(out, "\",\"created_at\":")
-    rh_emit_time(out, created)
-    rh_push_text(out, ",\"updated_at\":")
-    rh_emit_time(out, updated)
-    rh_push_text(out, ",\"pushed_at\":null,\"fetched_at\":")
-    rh_push_decimal_i64(out, fetched_at)
-    rh_push_text(out, "}")
-    true
+        # --- Canonical observations (rh-canonical-repo/1). Both forges map into
+        # one shape so the same domain report works; the mapping table per forge
+        # is explicit below and anything unmapped is null (unavailable), never
+        # invented. Timestamps that fail ISO parsing fail the record (fail
+        # closed); the caller counts a parser rejection.
+        #
+        # GitHub repo: id, name, full_name, html_url, created_at, updated_at,
+        #   pushed_at.
+        # GitLab project: id, name, path_with_namespace -> full_name, web_url,
+        #   created_at, last_activity_at -> updated_at, pushed_at null (the
+        #   project payload carries no push time; null, not zero).
 
-# --- Bitbucket Cloud connector (M08 forge lane). ---
-# Bitbucket Cloud's repo object differs materially from GitHub/GitLab/Gitea:
-# identity is `uuid` (a `{...}` string) plus `full_name` (workspace/repo),
-# the URL lives at `links.html.href`, and timestamps are `created_on`/
-# `updated_on` with fractional seconds and a `+00:00` offset. This normalizer
-# maps only those fields; anything absent is null (unavailable), never
-# invented. A timestamp that cannot be parsed after dropping its fractional
-# seconds fails the record (fail closed) so the caller counts a rejection.
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_emit_time(buffer: mutable darray[u8]&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            if value < 0:
+                rh_push_text(buffer, "null")
+            else:
+                rh_push_decimal_i64(buffer, value)
 
-# Convert a `created_on`/`updated_on` value at text span [s,e) into epoch
-# seconds, dropping a fractional-seconds suffix (`YYYY-...:SS.ffffff+00:00`
-# -> `YYYY-...:SS+00:00`) before the strict ISO parser sees it. Returns the
-# epoch (>=0) and sets ok_out, or 0 with ok_out=0 when absent/unparseable.
-def rh_bb_time(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    ok_out[0] <- 0
-    idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
-    return 0 if idx < 0
-    nn: RhJsonNode = nodes[idx.usize()]
-    return 0 if nn.kind != RH_JSON_STR
-    s: i64 = nn.text_start
-    e: i64 = nn.text_end
-    # locate the fractional dot between seconds and the timezone marker
-    buf: mutable darray[u8] = []
-    while k < e |k: i64 = s, e, texts, buf|:
-        b: u8 = texts[k.usize()]
-        if b == 46:
-            # drop bytes until the next '+'/'-' timezone marker (or end)
-            j: i64 =
-                while j < e |j: i64 = k, buf| -> j:
-                    tb: u8 = texts[j.usize()]
-                    break if tb == 43 or tb == 45
-                    j <- j + 1
-            k <- j
-            continue
-        buf.push(b)
-        k <- k + 1
-    rh_parse_iso8601(buf, 0, buf.count, ok_out)
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_get_str_span(nodes: darray[RhJsonNode]&, texts: darray[u8]&, root: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_json_obj_get(nodes, texts, root, key)
+            return false if idx < 0
+            rh_json_str_span(nodes, idx, start_out, end_out)
 
-# Bitbucket Cloud repo (workspace/repo) -> canonical-repo/1.
-def rh_bitbucket_repo_canonical(nodes: darray[RhJsonNode]&, texts: darray[u8]&, input: darray[u8]&, root: i64, fetched_at: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
-    us: mutable i64 = 0
-    ue: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "uuid", &us, &ue)
-    return false if ue <= us
-    ns: mutable i64 = 0
-    ne: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, root, "name", &ns, &ne)
-    fs: mutable i64 = 0
-    fe: mutable i64 = 0
-    if not rh_get_str_span(nodes, texts, root, "full_name", &fs, &fe):
-        return false
-    # html url is nested: links.html.href
-    html: i64 =
-        links: i64 = rh_json_obj_get(nodes, texts, root, "links")
-        return false if links < 0
-        value: i64 = rh_json_obj_get(nodes, texts, links, "html")
-        value
-    return false if html < 0
-    hs: mutable i64 = 0
-    he: mutable i64 = 0
-    return false if not rh_get_str_span(nodes, texts, html, "href", &hs, &he)
-    c_ok: mutable i64 = 0
-    created: i64 = rh_bb_time(nodes, texts, root, "created_on", &c_ok)
-    return false if c_ok == 0
-    u_ok: mutable i64 = 0
-    updated: i64 = rh_bb_time(nodes, texts, root, "updated_on", &u_ok)
-    return false if u_ok == 0
-    rh_push_text(out, "{\"schema\":\"rh-canonical-repo/1\",\"source\":\"bitbucket\",\"native_id\":\"bitbucket:")
-    rh_json_escape(out, texts, us.usize(), ue.usize())
-    rh_push_text(out, "\",\"name\":\"")
-    rh_json_escape(out, texts, ns.usize(), ne.usize())
-    rh_push_text(out, "\",\"full_name\":\"")
-    rh_json_escape(out, texts, fs.usize(), fe.usize())
-    rh_push_text(out, "\",\"url\":\"")
-    rh_json_escape(out, texts, hs.usize(), he.usize())
-    rh_push_text(out, "\",\"created_at\":")
-    rh_emit_time(out, created)
-    rh_push_text(out, ",\"updated_at\":")
-    rh_emit_time(out, updated)
-    rh_push_text(out, ",\"pushed_at\":null,\"fetched_at\":")
-    rh_push_decimal_i64(out, fetched_at)
-    rh_push_text(out, "}")
-    true
+        # private to this file (modules retried after re-seed; see CHANGELOG).
+        def rh_get_iso_time(nodes: darray[RhJsonNode]&, texts: darray[u8]&, input: darray[u8]&, root: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            ok_out[0] <- 0
+            idx: i64 = rh_json_obj_get(nodes, texts, root, key)
+            return -1 if idx < 0
+            n: RhJsonNode = nodes[idx.usize()]
+            return -1 if n.kind != RH_JSON_STR
+            rh_parse_iso8601(texts, n.text_start.usize(), n.text_end.usize(), ok_out)
+
+        def rh_github_repo_canonical(nodes: darray[RhJsonNode]&, texts: darray[u8]&, input: darray[u8]&, root: i64, fetched_at: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            id_idx: i64 = rh_json_obj_get(nodes, texts, root, "id")
+            id_ok: mutable i64 = 0
+            id_num: i64 = rh_json_int(nodes, input, id_idx, &id_ok)
+            return false if id_ok == 0
+            ns: mutable i64 = 0
+            ne: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "name", &ns, &ne)
+            fs: mutable i64 = 0
+            fe: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "full_name", &fs, &fe)
+            us: mutable i64 = 0
+            ue: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "html_url", &us, &ue)
+            c_ok: mutable i64 = 0
+            created: i64 = rh_get_iso_time(nodes, texts, input, root, "created_at", &c_ok)
+            return false if c_ok == 0
+            u_ok: mutable i64 = 0
+            updated: i64 = rh_get_iso_time(nodes, texts, input, root, "updated_at", &u_ok)
+            return false if u_ok == 0
+            p_ok: mutable i64 = 0
+            pushed: i64 = rh_get_iso_time(nodes, texts, input, root, "pushed_at", &p_ok)
+            return false if p_ok == 0
+            rh_push_text(out, "{\"schema\":\"rh-canonical-repo/1\",\"source\":\"github\",\"native_id\":\"github:")
+            rh_push_decimal_i64(out, id_num)
+            rh_push_text(out, "\",\"name\":\"")
+            rh_json_escape(out, texts, ns.usize(), ne.usize())
+            rh_push_text(out, "\",\"full_name\":\"")
+            rh_json_escape(out, texts, fs.usize(), fe.usize())
+            rh_push_text(out, "\",\"url\":\"")
+            rh_json_escape(out, texts, us.usize(), ue.usize())
+            rh_push_text(out, "\",\"created_at\":")
+            rh_emit_time(out, created)
+            rh_push_text(out, ",\"updated_at\":")
+            rh_emit_time(out, updated)
+            rh_push_text(out, ",\"pushed_at\":")
+            rh_emit_time(out, pushed)
+            rh_push_text(out, ",\"fetched_at\":")
+            rh_push_decimal_i64(out, fetched_at)
+            rh_push_text(out, "}")
+            true
+
+        def rh_gitlab_project_canonical(nodes: darray[RhJsonNode]&, texts: darray[u8]&, input: darray[u8]&, root: i64, fetched_at: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            id_idx: i64 = rh_json_obj_get(nodes, texts, root, "id")
+            id_ok: mutable i64 = 0
+            id_num: i64 = rh_json_int(nodes, input, id_idx, &id_ok)
+            return false if id_ok == 0
+            ns: mutable i64 = 0
+            ne: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "name", &ns, &ne)
+            fs: mutable i64 = 0
+            fe: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "path_with_namespace", &fs, &fe)
+            us: mutable i64 = 0
+            ue: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "web_url", &us, &ue)
+            c_ok: mutable i64 = 0
+            created: i64 = rh_get_iso_time(nodes, texts, input, root, "created_at", &c_ok)
+            return false if c_ok == 0
+            u_ok: mutable i64 = 0
+            updated: i64 = rh_get_iso_time(nodes, texts, input, root, "last_activity_at", &u_ok)
+            return false if u_ok == 0
+            rh_push_text(out, "{\"schema\":\"rh-canonical-repo/1\",\"source\":\"gitlab\",\"native_id\":\"gitlab:")
+            rh_push_decimal_i64(out, id_num)
+            rh_push_text(out, "\",\"name\":\"")
+            rh_json_escape(out, texts, ns.usize(), ne.usize())
+            rh_push_text(out, "\",\"full_name\":\"")
+            rh_json_escape(out, texts, fs.usize(), fe.usize())
+            rh_push_text(out, "\",\"url\":\"")
+            rh_json_escape(out, texts, us.usize(), ue.usize())
+            rh_push_text(out, "\",\"created_at\":")
+            rh_emit_time(out, created)
+            rh_push_text(out, ",\"updated_at\":")
+            rh_emit_time(out, updated)
+            rh_push_text(out, ",\"pushed_at\":null,\"fetched_at\":")
+            rh_push_decimal_i64(out, fetched_at)
+            rh_push_text(out, "}")
+            true
+
+        # Gitea and Forgejo share the same repo object shape (Forgejo is a Gitea
+        # fork); the connector label is passed in so the native id prefix and the
+        # canonical `source` stay connector-specific. Gitea exposes `updated_at`
+        # but no `pushed_at`, which is emitted as null (unknown), never guessed.
+        def rh_gitea_repo_canonical(nodes: darray[RhJsonNode]&, texts: darray[u8]&, input: darray[u8]&, root: i64, fetched_at: i64, source: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            id_idx: i64 = rh_json_obj_get(nodes, texts, root, "id")
+            id_ok: mutable i64 = 0
+            id_num: i64 = rh_json_int(nodes, input, id_idx, &id_ok)
+            return false if id_ok == 0
+            ns: mutable i64 = 0
+            ne: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "name", &ns, &ne)
+            fs: mutable i64 = 0
+            fe: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "full_name", &fs, &fe)
+            us: mutable i64 = 0
+            ue: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "html_url", &us, &ue)
+            c_ok: mutable i64 = 0
+            created: i64 = rh_get_iso_time(nodes, texts, input, root, "created_at", &c_ok)
+            return false if c_ok == 0
+            u_ok: mutable i64 = 0
+            updated: i64 = rh_get_iso_time(nodes, texts, input, root, "updated_at", &u_ok)
+            return false if u_ok == 0
+            rh_push_text(out, "{\"schema\":\"rh-canonical-repo/1\",\"source\":\"")
+            rh_push_text(out, source)
+            rh_push_text(out, "\",\"native_id\":\"")
+            rh_push_text(out, source)
+            rh_push_text(out, ":")
+            rh_push_decimal_i64(out, id_num)
+            rh_push_text(out, "\",\"name\":\"")
+            rh_json_escape(out, texts, ns.usize(), ne.usize())
+            rh_push_text(out, "\",\"full_name\":\"")
+            rh_json_escape(out, texts, fs.usize(), fe.usize())
+            rh_push_text(out, "\",\"url\":\"")
+            rh_json_escape(out, texts, us.usize(), ue.usize())
+            rh_push_text(out, "\",\"created_at\":")
+            rh_emit_time(out, created)
+            rh_push_text(out, ",\"updated_at\":")
+            rh_emit_time(out, updated)
+            rh_push_text(out, ",\"pushed_at\":null,\"fetched_at\":")
+            rh_push_decimal_i64(out, fetched_at)
+            rh_push_text(out, "}")
+            true
+
+        # --- Bitbucket Cloud connector (M08 forge lane). ---
+        # Bitbucket Cloud's repo object differs materially from GitHub/GitLab/Gitea:
+        # identity is `uuid` (a `{...}` string) plus `full_name` (workspace/repo),
+        # the URL lives at `links.html.href`, and timestamps are `created_on`/
+        # `updated_on` with fractional seconds and a `+00:00` offset. This normalizer
+        # maps only those fields; anything absent is null (unavailable), never
+        # invented. A timestamp that cannot be parsed after dropping its fractional
+        # seconds fails the record (fail closed) so the caller counts a rejection.
+
+        # Convert a `created_on`/`updated_on` value at text span [s,e) into epoch
+        # seconds, dropping a fractional-seconds suffix (`YYYY-...:SS.ffffff+00:00`
+        # -> `YYYY-...:SS+00:00`) before the strict ISO parser sees it. Returns the
+        # epoch (>=0) and sets ok_out, or 0 with ok_out=0 when absent/unparseable.
+        def rh_bb_time(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            ok_out[0] <- 0
+            idx: i64 = rh_json_obj_get(nodes, texts, obj, key)
+            return 0 if idx < 0
+            nn: RhJsonNode = nodes[idx.usize()]
+            return 0 if nn.kind != RH_JSON_STR
+            s: i64 = nn.text_start
+            e: i64 = nn.text_end
+            # locate the fractional dot between seconds and the timezone marker
+            buf: mutable darray[u8] = []
+            while k < e |k: i64 = s, e, texts, buf|:
+                b: u8 = texts[k.usize()]
+                if b == 46:
+                    # drop bytes until the next '+'/'-' timezone marker (or end)
+                    j: i64 =
+                        while j < e |j: i64 = k, buf| -> j:
+                            tb: u8 = texts[j.usize()]
+                            break if tb == 43 or tb == 45
+                            j <- j + 1
+                    k <- j
+                    continue
+                buf.push(b)
+                k <- k + 1
+            rh_parse_iso8601(buf, 0, buf.count, ok_out)
+
+        # Bitbucket Cloud repo (workspace/repo) -> canonical-repo/1.
+        def rh_bitbucket_repo_canonical(nodes: darray[RhJsonNode]&, texts: darray[u8]&, input: darray[u8]&, root: i64, fetched_at: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            us: mutable i64 = 0
+            ue: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "uuid", &us, &ue)
+            return false if ue <= us
+            ns: mutable i64 = 0
+            ne: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, root, "name", &ns, &ne)
+            fs: mutable i64 = 0
+            fe: mutable i64 = 0
+            if not rh_get_str_span(nodes, texts, root, "full_name", &fs, &fe):
+                return false
+            # html url is nested: links.html.href
+            html: i64 =
+                links: i64 = rh_json_obj_get(nodes, texts, root, "links")
+                return false if links < 0
+                value: i64 = rh_json_obj_get(nodes, texts, links, "html")
+                value
+            return false if html < 0
+            hs: mutable i64 = 0
+            he: mutable i64 = 0
+            return false if not rh_get_str_span(nodes, texts, html, "href", &hs, &he)
+            c_ok: mutable i64 = 0
+            created: i64 = rh_bb_time(nodes, texts, root, "created_on", &c_ok)
+            return false if c_ok == 0
+            u_ok: mutable i64 = 0
+            updated: i64 = rh_bb_time(nodes, texts, root, "updated_on", &u_ok)
+            return false if u_ok == 0
+            rh_push_text(out, "{\"schema\":\"rh-canonical-repo/1\",\"source\":\"bitbucket\",\"native_id\":\"bitbucket:")
+            rh_json_escape(out, texts, us.usize(), ue.usize())
+            rh_push_text(out, "\",\"name\":\"")
+            rh_json_escape(out, texts, ns.usize(), ne.usize())
+            rh_push_text(out, "\",\"full_name\":\"")
+            rh_json_escape(out, texts, fs.usize(), fe.usize())
+            rh_push_text(out, "\",\"url\":\"")
+            rh_json_escape(out, texts, hs.usize(), he.usize())
+            rh_push_text(out, "\",\"created_at\":")
+            rh_emit_time(out, created)
+            rh_push_text(out, ",\"updated_at\":")
+            rh_emit_time(out, updated)
+            rh_push_text(out, ",\"pushed_at\":null,\"fetched_at\":")
+            rh_push_decimal_i64(out, fetched_at)
+            rh_push_text(out, "}")
+            true
