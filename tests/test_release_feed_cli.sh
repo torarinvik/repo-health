@@ -17,7 +17,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-release-feed-input/1","first_seen":1700000123,"releases":[{"tag":"v1.0.0","published_at":1700000000,"assets":[{"name":"a.tgz","digest":"sha256:abc"},{"name":"b.tgz"}]},{"tag":"v1.1.0"}]}
+{"schema":"rh-release-feed-input/1","first_seen":1700000123,"releases":[{"tag":"v1.0.0","published_at":1700000000,"prerelease":false,"assets":[{"name":"a.tgz","digest":"sha256:abc"},{"name":"b.tgz"}]},{"tag":"v1.1.0","prerelease":true}]}
 JSON
 "$ROOT/build/rh_cli" release-feed --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
 python3 - "$T/out.json" <<'PY'
@@ -33,11 +33,13 @@ assert {k: metrics[k]["value"] for k in metrics} == {
     "release.asset_count": 2,
     "release.digest_known_count": 1,
     "release.published_time_known_count": 1,
+    "release.stable_count": 1,
+    "release.prerelease_count": 1,
 }, metrics
 assert r[0] == {"tag": "v1.0.0", "published_at": 1700000000, "first_seen": 1700000123,
-                "asset_count": 2, "digest_known_count": 1}, r[0]
+                "prerelease": False, "asset_count": 2, "digest_known_count": 1}, r[0]
 # missing published time stays unknown (null), never replaced by first-seen
-assert r[1]["published_at"] is None and r[1]["first_seen"] == 1700000123, r[1]
+assert r[1]["published_at"] is None and r[1]["prerelease"] is True and r[1]["first_seen"] == 1700000123, r[1]
 assert d["source"] == {"history_supported": False, "identity_supported": False}, d["source"]
 assert "no history or author identity is derived" in d["note"], d["note"]
 print("[release-feed] fields + validity/known time OK")
@@ -54,7 +56,7 @@ echo "[release-feed] url capture OK"
 
 echo "[release-feed] a re-observation keeps its own first-seen (tag is not identity)"
 cat > "$T/reobs.json" <<'JSON'
-{"schema":"rh-release-feed-input/1","first_seen":1600000000,"releases":[{"tag":"v1.0.0","published_at":1700000000}]}
+{"schema":"rh-release-feed-input/1","first_seen":1600000000,"releases":[{"tag":"v1.0.0","published_at":1700000000,"prerelease":false}]}
 JSON
 "$ROOT/build/rh_cli" release-feed --input "$T/reobs.json" --out "$T/reobs.out" >/dev/null || fail "reobs"
 python3 - "$T/reobs.out" <<'PY'
