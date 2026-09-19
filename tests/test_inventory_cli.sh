@@ -62,6 +62,15 @@ echo "[inventory] determinism"
 "$ROOT/build/rh_cli" inventory --format cyclonedx --input "$T/cyclonedx-1.5.json" --out "$T/cdx2.json" >/dev/null || fail "rerun"
 cmp -s "$T/cdx.json" "$T/cdx2.json" || fail "inventory output is not deterministic"
 
+echo "[inventory] bounded --url capture retains source/status/error evidence"
+source_url="file://$T/cyclonedx-1.5.json"
+"$ROOT/build/rh_cli" inventory --format cyclonedx --url "$source_url" --out "$T/cdx-url.json" >/dev/null || fail "url parse"
+cmp -s "$T/cyclonedx-1.5.json" "$T/cdx-url.json.source" || fail "url source evidence differs"
+[[ -f "$T/cdx-url.json.source.status" && "$(cat "$T/cdx-url.json.source.status")" == "000" ]] || fail "url status evidence"
+[[ -f "$T/cdx-url.json.source.err" && ! -s "$T/cdx-url.json.source.err" ]] || fail "url error evidence"
+cmp -s "$T/cdx.json" "$T/cdx-url.json" || fail "url inventory differs"
+echo "[inventory] url capture OK"
+
 echo "[inventory] unsupported spec version is reported, not interpreted"
 printf '{"bomFormat":"CycloneDX","specVersion":"9.9","components":[{"type":"library","name":"x","version":"1"}]}' > "$T/badver.json"
 set +e
@@ -87,11 +96,15 @@ printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" inventory --format cyclonedx --input "$T/notjson.json" --out "$T/bad.out" >/dev/null 2>&1; rc_json=$?
 "$ROOT/build/rh_cli" inventory --format sarif --input "$T/cyclonedx-1.5.json" --out "$T/bad.out" >/dev/null 2>&1; rc_fmt=$?
 "$ROOT/build/rh_cli" inventory --format cyclonedx --input "$T/nope.json" --out "$T/bad.out" >/dev/null 2>&1; rc_missing=$?
+"$ROOT/build/rh_cli" inventory --format cyclonedx --out "$T/bad.out" >/dev/null 2>&1; rc_neither=$?
+"$ROOT/build/rh_cli" inventory --format cyclonedx --input "$T/cyclonedx-1.5.json" --url "$source_url" --out "$T/bad.out" >/dev/null 2>&1; rc_both=$?
 set -e
 [[ "$rc_wrong" -eq 4 ]] || fail "spdx reading cyclonedx must exit 4 (got $rc_wrong)"
 [[ "$rc_wrong2" -eq 4 ]] || fail "cyclonedx reading spdx must exit 4 (got $rc_wrong2)"
 [[ "$rc_json" -eq 4 ]] || fail "invalid JSON must exit 4 (got $rc_json)"
 [[ "$rc_fmt" -eq 3 ]] || fail "unknown format must exit 3 (got $rc_fmt)"
 [[ "$rc_missing" -eq 4 ]] || fail "missing input must exit 4 (got $rc_missing)"
+[[ "$rc_neither" -eq 2 ]] || fail "missing input/url must exit 2 (got $rc_neither)"
+[[ "$rc_both" -eq 2 ]] || fail "input and url together must exit 2 (got $rc_both)"
 
 echo "test_inventory_cli OK"

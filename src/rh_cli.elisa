@@ -117,7 +117,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli job classify --input <file> --out <file> | job run --input <file> --out <file>")
     rh_cli_err("       rh_cli reconcile --input <file> --out <file>")
     rh_cli_err("       rh_cli worker tick --input <file> --out <file>")
-    rh_cli_err("       rh_cli inventory --format cyclonedx|spdx --input <file> --out <file>")
+    rh_cli_err("       rh_cli inventory --format cyclonedx|spdx (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli vcs --format hg|svn|fossil|patch --input <file> --out <file>")
     rh_cli_err("       rh_cli vcs --format hg|svn|fossil --repo <path> --out <file>")
     rh_cli_err("       rh_cli notify --input <file> --out <file> [--state <file> | --state-store <dir>]")
@@ -1238,8 +1238,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if cnin_idx < 0 or cnout_idx < 0
         return rh_do_connector_check(slots[cnin_idx], slots[cnout_idx])
     if rh_streq(cmd, "inventory"):
-        iv_idx, ii_idx, io_idx =
-            while iv < argc |iv_idx: i64 = -1, ii_idx: i64 = -1, io_idx: i64 = -1, iv: i64 = 2, slots| -> iv_idx, ii_idx, io_idx:
+        iv_idx, ii_idx, iu_idx, io_idx =
+            while iv < argc |iv_idx: i64 = -1, ii_idx: i64 = -1, iu_idx: i64 = -1, io_idx: i64 = -1, iv: i64 = 2, slots| -> iv_idx, ii_idx, iu_idx, io_idx:
                 a14: u8& = slots[iv].cast[u8&] can Unsafe.PointerCast
                 if rh_streq(a14, "--format"):
                     if iv + 1 < argc:
@@ -1253,6 +1253,12 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         ii_idx <- iv
                     else:
                         return rh_cli_usage(2)
+                elif rh_streq(a14, "--url"):
+                    if iv + 1 < argc:
+                        iv <- iv + 1
+                        iu_idx <- iv
+                    else:
+                        return rh_cli_usage(2)
                 elif rh_streq(a14, "--out"):
                     if iv + 1 < argc:
                         iv <- iv + 1
@@ -1262,8 +1268,17 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 else:
                     return rh_cli_usage(2)
                 iv <- iv + 1
-        return rh_cli_usage(2) if iv_idx < 0 or ii_idx < 0 or io_idx < 0
-        return rh_do_inventory(slots[iv_idx], slots[ii_idx], slots[io_idx])
+        return rh_cli_usage(2) if iv_idx < 0 or io_idx < 0
+        return rh_cli_usage(2) if ii_idx >= 0 and iu_idx >= 0
+        return rh_cli_usage(2) if ii_idx < 0 and iu_idx < 0
+        inventory_input: mutable cstr = slots[io_idx]
+        inventory_url: mutable cstr = slots[io_idx]
+        has_inventory_url: bool = iu_idx >= 0
+        if ii_idx >= 0:
+            inventory_input <- slots[ii_idx]
+        if has_inventory_url:
+            inventory_url <- slots[iu_idx]
+        return rh_do_inventory(slots[iv_idx], inventory_input, slots[io_idx], inventory_url, has_inventory_url)
     if rh_streq(cmd, "vcs"):
         vc_idx, vi_idx, vo_idx, vr_idx =
             while vv < argc |vc_idx: i64 = -1, vi_idx: i64 = -1, vo_idx: i64 = -1, vr_idx: i64 = -1, vv: i64 = 2, slots| -> vc_idx, vi_idx, vo_idx, vr_idx:
@@ -4329,9 +4344,10 @@ def rh_do_worker_tick(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloca
 # Parses a CycloneDX or SPDX-2.3 document and writes rh-inventory/1. An
 # unsupported declared spec version is reported (exit 3), never interpreted;
 # a document of the wrong format fails closed (exit 4). The notice states
-# that validity does not imply completeness.
-def rh_do_inventory(format: cstr, input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not rh_arg_safe(format) or not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+# that validity does not imply completeness. URL input retains bounded
+# source/status/error evidence before parsing.
+def rh_do_inventory(format: cstr, input_path: cstr, out_path: cstr, source_url: cstr, has_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(format) or not rh_arg_safe(out_path):
         rh_cli_err("rejected inventory argument (allowlist)")
         return 3
     fmt: mutable u8 = 0
@@ -4342,16 +4358,56 @@ def rh_do_inventory(format: cstr, input_path: cstr, out_path: cstr) -> i32 can[M
     else:
         rh_cli_err("inventory: unsupported --format (cyclonedx|spdx)")
         return 3
-    ip: mutable darray[u8] =
-        ip: mutable darray[u8] = []
-        rh_push_cstr(ip, input_path)
-        ip.push(0)
-        ip
-    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
     raw: mutable darray[u8] = []
-    if rh_io_read(ipp, raw) < 0:
-        rh_cli_err("inventory: cannot read --input")
-        return 4
+    if has_url:
+        return 3 if not rh_fetch_arg_safe(source_url)
+        source_path: mutable darray[u8] =
+            source_path: mutable darray[u8] = []
+            rh_push_cstr(source_path, out_path)
+            rh_push_text(source_path, ".source")
+            source_path.push(0)
+            source_path
+        status_path: mutable darray[u8] =
+            status_path: mutable darray[u8] = []
+            rh_push_cstr(status_path, out_path)
+            rh_push_text(status_path, ".source.status")
+            status_path.push(0)
+            status_path
+        error_path: mutable darray[u8] =
+            error_path: mutable darray[u8] = []
+            rh_push_cstr(error_path, out_path)
+            rh_push_text(error_path, ".source.err")
+            error_path.push(0)
+            error_path
+        source_ptr: cstr = (&source_path[0]).cast[cstr] can Unsafe.PointerCast
+        status_ptr: cstr = (&status_path[0]).cast[cstr] can Unsafe.PointerCast
+        error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_run_https_get(source_url, source_ptr, status_ptr, error_ptr) != 0:
+            rh_cli_err("inventory: fetch failed; source and stderr evidence retained")
+            return 4
+        status_raw: mutable darray[u8] = []
+        if rh_io_read(status_ptr, status_raw) < 0 or status_raw.count == 0:
+            rh_cli_err("inventory: fetch did not produce a status")
+            return 4
+        ok_status: bool = status_raw[0] == 50
+        file_transport: bool = status_raw.count >= 3 and status_raw[0] == 48 and status_raw[1] == 48 and status_raw[2] == 48 and rh_cstr_starts_with(source_url, "file://")
+        if not ok_status and not file_transport:
+            rh_cli_err("inventory: fetch returned non-2xx; no result published")
+            return 4
+        if rh_io_read(source_ptr, raw) < 0:
+            rh_cli_err("inventory: cannot read fetched source evidence")
+            return 4
+    else:
+        return 3 if not rh_arg_safe(input_path)
+        ip: mutable darray[u8] =
+            ip: mutable darray[u8] = []
+            rh_push_cstr(ip, input_path)
+            ip.push(0)
+            ip
+        ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+        if rh_io_read(ipp, raw) < 0:
+            rh_cli_err("inventory: cannot read --input")
+            return 4
     body: mutable darray[u8] = []
     rc: i64 = rh_inventory_report(raw, fmt, body)
     if rc == -1:
