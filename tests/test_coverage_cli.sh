@@ -31,6 +31,9 @@ assert metrics["coverage.unavailable_capability_count"]["value"] == 0, metrics
 assert metrics["coverage.unauthorized_capability_count"]["value"] == 1, metrics
 assert metrics["coverage.not_applicable_capability_count"]["value"] == 0, metrics
 assert metrics["coverage.unsupported_capability_count"]["value"] == 0, metrics
+assert metrics["coverage.requested_capabilities"]["value"] == 3, metrics
+assert metrics["coverage.available_capability_share"]["value"] == {"num": 2, "den": 3}, metrics
+assert metrics["coverage.unauthorized_capabilities"]["value"] == 1, metrics
 assert d["capabilities"][0]["valid_start"] is None, d
 assert d["capabilities"][1]["valid_end"] is None, d
 assert "source-specific" in d["note"], d
