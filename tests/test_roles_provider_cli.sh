@@ -43,6 +43,18 @@ assert all(x["source"] == "provider" for x in d["declarations"]), d
 print("[roles-provider] GitLab access levels OK")
 PY
 
+echo "[roles-provider] restricted publication consumes normalized evidence"
+"$ROOT/build/rh_cli" roles-publish --input "$T/github.json" --out "$T/public.json" >/dev/null || fail "restricted publication"
+python3 - "$T/public.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+raw = open(sys.argv[1], encoding="utf-8").read()
+assert d["schema"] == "rh-role-publication-result/1", d
+assert d["authorization_state"] == "authorized", d
+assert "7001" not in raw and "permission documents" in d["note"], d
+print("[roles-provider] restricted publication boundary OK")
+PY
+
 echo "[roles-provider] unauthorized capture withholds declarations"
 cat > "$T/unauthorized.json" <<'JSON'
 {"schema":"rh-provider-roles-input/1","provider":"github","authorization":{"state":"unauthorized"},"captured_at":1700000000,"members":[{"id":9001,"permission":"admin"}]}
