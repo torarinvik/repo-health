@@ -1,0 +1,174 @@
+# rh_intervention.elisa — intervention evaluation evidence adapter (M11-06).
+#
+# This records an evaluation design and observed outcomes. It does not claim
+# causality, estimate prevented incidents, or convert before/after counts into
+# a maintenance recommendation.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module Intervention:
+    private:
+        def rh_intervention_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if obj < 0 or nodes[obj.usize()].kind != RH_JSON_OBJ
+            want: usize = strlen(key)
+            while child >= 0 |child: i64 = nodes[obj.usize()].first_child, nodes, texts, key, want|:
+                kn: RhJsonNode = nodes[child.usize()]
+                value: i64 = kn.next_sibling
+                if kn.kind == RH_JSON_STR and value >= 0 and kn.text_end - kn.text_start == want.i64():
+                    same: mutable bool = true
+                    while k < want |k: usize = 0, texts, kn, key|:
+                        if texts[(kn.text_start + k.i64()).usize()] != key[k]:
+                            same <- false
+                        k <- k + 1
+                    return value if same
+                child <- nodes[value.usize()].next_sibling if value >= 0 else -1
+            -1
+
+        def rh_intervention_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Intervention::rh_intervention_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            n: RhJsonNode = nodes[idx.usize()]
+            s_out[0] <- n.text_start
+            e_out[0] <- n.text_end
+            true
+
+        def rh_intervention_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Intervention::rh_intervention_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_intervention_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool:
+            return false if s < 0 or e < s or e - s != strlen(lit).i64()
+            while i < e - s |i: i64 = 0, texts, s, lit|:
+                return false if texts[(s + i).usize()] != lit[i.usize()]
+                i <- i + 1
+            true
+
+        def rh_intervention_emit_str(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, s.usize(), e.usize())
+            out.push(34)
+
+        def rh_intervention_ratio(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            ratio: i64 = Intervention::rh_intervention_get(nodes, texts, obj, key)
+            return false if ratio < 0 or nodes[ratio.usize()].kind != RH_JSON_OBJ
+            nok: mutable i64 = 0
+            dok: mutable i64 = 0
+            num: i64 = Intervention::rh_intervention_int(nodes, raw, texts, ratio, "num", &nok)
+            den: i64 = Intervention::rh_intervention_int(nodes, raw, texts, ratio, "den", &dok)
+            return false if nok == 0 or dok == 0 or den <= 0 or num < 0
+            rh_push_text(out, "{\"num\":")
+            rh_push_decimal_i64(out, num)
+            rh_push_text(out, ",\"den\":")
+            rh_push_decimal_i64(out, den)
+            rh_push_text(out, "}")
+            true
+
+        def rh_intervention_strings(nodes: darray[RhJsonNode]&, texts: darray[u8]&, arr: i64, out: mutable darray[u8]&, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if arr < 0 or nodes[arr.usize()].kind != RH_JSON_ARR
+            count_out[0] <- 0
+            rh_push_text(out, "[")
+            while child >= 0 |child: i64 = nodes[arr.usize()].first_child, nodes, texts, out, count_out|:
+                return false if nodes[child.usize()].kind != RH_JSON_STR
+                out.push(44) if count_out[0] > 0
+                n: RhJsonNode = nodes[child.usize()]
+                Intervention::rh_intervention_emit_str(out, texts, n.text_start, n.text_end)
+                count_out[0] <- count_out[0] + 1
+                child <- nodes[child.usize()].next_sibling
+            rh_push_text(out, "]")
+            true
+
+        def rh_intervention_outcomes(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, arr: i64, out: mutable darray[u8]&, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if arr < 0 or nodes[arr.usize()].kind != RH_JSON_ARR
+            count_out[0] <- 0
+            rh_push_text(out, "[")
+            while child >= 0 |child: i64 = nodes[arr.usize()].first_child, nodes, raw, texts, out, count_out|:
+                return false if nodes[child.usize()].kind != RH_JSON_OBJ
+                ms: mutable i64 = 0
+                me: mutable i64 = 0
+                return false if not Intervention::rh_intervention_str(nodes, texts, child, "metric", &ms, &me)
+                out.push(44) if count_out[0] > 0
+                rh_push_text(out, "{\"metric\":")
+                Intervention::rh_intervention_emit_str(out, texts, ms, me)
+                rh_push_text(out, ",\"before\":")
+                return false if not Intervention::rh_intervention_ratio(nodes, raw, texts, child, "before", out)
+                rh_push_text(out, ",\"after\":")
+                return false if not Intervention::rh_intervention_ratio(nodes, raw, texts, child, "after", out)
+                rh_push_text(out, "}")
+                count_out[0] <- count_out[0] + 1
+                child <- nodes[child.usize()].next_sibling
+            rh_push_text(out, "]")
+            true
+
+    public:
+        def rh_intervention_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema: i64 = Intervention::rh_intervention_get(nodes, texts, root, "schema")
+            return -1 if schema < 0 or nodes[schema.usize()].kind != RH_JSON_STR
+            sn: RhJsonNode = nodes[schema.usize()]
+            return -1 if not Intervention::rh_intervention_eq(texts, sn.text_start, sn.text_end, "rh-intervention-input/1")
+            ids: mutable i64 = 0
+            ide: mutable i64 = 0
+            scope_s: mutable i64 = 0
+            scope_e: mutable i64 = 0
+            rationale_s: mutable i64 = 0
+            rationale_e: mutable i64 = 0
+            return -1 if not Intervention::rh_intervention_str(nodes, texts, root, "intervention_id", &ids, &ide)
+            return -1 if not Intervention::rh_intervention_str(nodes, texts, root, "scope", &scope_s, &scope_e)
+            return -1 if not Intervention::rh_intervention_str(nodes, texts, root, "selection_rationale", &rationale_s, &rationale_e)
+            baseline: i64 = Intervention::rh_intervention_get(nodes, texts, root, "baseline")
+            comparison: i64 = Intervention::rh_intervention_get(nodes, texts, root, "comparison")
+            return -1 if baseline < 0 or comparison < 0 or nodes[baseline.usize()].kind != RH_JSON_OBJ or nodes[comparison.usize()].kind != RH_JSON_OBJ
+            start_ok: mutable i64 = 0
+            end_ok: mutable i64 = 0
+            events_ok: mutable i64 = 0
+            start: i64 = Intervention::rh_intervention_int(nodes, raw, texts, baseline, "window_start", &start_ok)
+            finish: i64 = Intervention::rh_intervention_int(nodes, raw, texts, baseline, "window_end", &end_ok)
+            events: i64 = Intervention::rh_intervention_int(nodes, raw, texts, baseline, "event_count", &events_ok)
+            return -1 if start_ok == 0 or end_ok == 0 or events_ok == 0 or start < 0 or finish < start or events < 0
+            design_s: mutable i64 = 0
+            design_e: mutable i64 = 0
+            control_s: mutable i64 = 0
+            control_e: mutable i64 = 0
+            return -1 if not Intervention::rh_intervention_str(nodes, texts, comparison, "design", &design_s, &design_e)
+            return -1 if not Intervention::rh_intervention_str(nodes, texts, comparison, "control_group", &control_s, &control_e)
+            window_ok: mutable i64 = 0
+            window_days: i64 = Intervention::rh_intervention_int(nodes, raw, texts, comparison, "window_days", &window_ok)
+            return -1 if window_ok == 0 or window_days <= 0
+            outcomes: mutable darray[u8] = []
+            outcome_count: mutable i64 = 0
+            return -1 if not Intervention::rh_intervention_outcomes(nodes, raw, texts, Intervention::rh_intervention_get(nodes, texts, root, "outcomes"), outcomes, &outcome_count)
+            limits: mutable darray[u8] = []
+            limit_count: mutable i64 = 0
+            return -1 if not Intervention::rh_intervention_strings(nodes, texts, Intervention::rh_intervention_get(nodes, texts, root, "limitations"), limits, &limit_count)
+            return -1 if limit_count == 0
+            rh_push_text(out, "{\"schema\":\"rh-intervention-result/1\",\"intervention_id\":")
+            Intervention::rh_intervention_emit_str(out, texts, ids, ide)
+            rh_push_text(out, ",\"scope\":")
+            Intervention::rh_intervention_emit_str(out, texts, scope_s, scope_e)
+            rh_push_text(out, ",\"selection_rationale\":")
+            Intervention::rh_intervention_emit_str(out, texts, rationale_s, rationale_e)
+            rh_push_text(out, ",\"baseline\":{\"window_start\":")
+            rh_push_decimal_i64(out, start)
+            rh_push_text(out, ",\"window_end\":")
+            rh_push_decimal_i64(out, finish)
+            rh_push_text(out, ",\"event_count\":")
+            rh_push_decimal_i64(out, events)
+            rh_push_text(out, "}")
+            rh_push_text(out, ",\"comparison\":{\"design\":")
+            Intervention::rh_intervention_emit_str(out, texts, design_s, design_e)
+            rh_push_text(out, ",\"control_group\":")
+            Intervention::rh_intervention_emit_str(out, texts, control_s, control_e)
+            rh_push_text(out, ",\"window_days\":")
+            rh_push_decimal_i64(out, window_days)
+            rh_push_text(out, "},\"outcomes\":")
+            out.extend(bytes_view(outcomes))
+            rh_push_text(out, ",\"outcome_count\":")
+            rh_push_decimal_i64(out, outcome_count)
+            rh_push_text(out, ",\"limitations\":")
+            out.extend(bytes_view(limits))
+            rh_push_text(out, ",\"status\":\"observational\",\"note\":\"before/after outcomes do not establish causal benefit or prevented incidents; selection, baseline, comparison, and limitations remain explicit\"}")
+            0
