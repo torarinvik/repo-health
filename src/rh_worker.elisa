@@ -22,7 +22,6 @@ struct RhSourceJob:
     source_id: mutable i64
     interval_secs: mutable i64
     last_full: mutable i64
-    has_cursor: mutable bool
     cursor_time: mutable i64
     overlap_secs: mutable i64
 
@@ -38,8 +37,8 @@ struct RhWorkerDecision:
     overlap_start: mutable i64
     debt: mutable i64
 
-def rh_worker_source(source_id: i64, interval: i64, last_full: i64, has_cursor: bool, cursor_time: i64, overlap: i64) -> RhSourceJob:
-    RhSourceJob{source_id: source_id, interval_secs: interval, last_full: last_full, has_cursor: has_cursor, cursor_time: cursor_time, overlap_secs: overlap}
+def rh_worker_source(source_id: i64, interval: i64, last_full: i64, cursor_time: i64, overlap: i64) -> RhSourceJob:
+    RhSourceJob{source_id: source_id, interval_secs: interval, last_full: last_full, cursor_time: cursor_time, overlap_secs: overlap}
 
 # Run one scheduling pass. `sources` is scanned in the given order; a source
 # whose reconcile is due takes priority over an incremental one, and within a
@@ -48,13 +47,12 @@ def rh_worker_source(source_id: i64, interval: i64, last_full: i64, has_cursor: 
 # refuses, remaining sources are recorded as skipped (never silently lost —
 # their reconcile debt is still reported, so the next tick retries).
 #
-# `quota_owner` is the synthetic owner id used for the quota gate; this pass
-# only decides *what to enqueue*, it does not claim/lease the jobs.
-def rh_worker_pass(sources: darray[RhSourceJob]&, h: mutable RhHost&, slots: mutable darray[RhSlot]&, now: i64, quota_owner: i64, decisions: mutable darray[RhWorkerDecision]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+# This pass only decides *what to enqueue*; it does not claim/lease jobs.
+def rh_worker_pass(sources: darray[RhSourceJob]&, h: mutable RhHost&, slots: mutable darray[RhSlot]&, now: i64, decisions: mutable darray[RhWorkerDecision]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     while i < sources.count |enqueued: i64 = 0, i: usize = 0, h, slots, decisions| -> enqueued:
         s: RhSourceJob = sources[i]
         due: bool = rh_reconcile_due(s.last_full, s.interval_secs, now)
-        mode: u8 = rh_reconcile_mode(s.last_full, s.interval_secs, s.has_cursor, now)
+        mode: u8 = rh_reconcile_mode(s.last_full, s.interval_secs, now)
         horizon: i64 = rh_reconcile_horizon(s.last_full, now)
         debt: i64 = rh_reconcile_debt(s.last_full, s.interval_secs, now)
         ovl: i64 = rh_cursor_overlap_start(s.cursor_time, s.overlap_secs)
