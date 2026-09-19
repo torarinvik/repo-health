@@ -52,7 +52,7 @@ grep -q "M04 continuity/identity.*in_progress" "$ROOT/STATUS.md" || { echo "[m00
 grep -q "M05 temporal/downstream.*in_progress" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md misstates M05"; exit 1; }
 grep -q "M06 API/policy/corrections.*in_progress" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md misstates M06"; exit 1; }
 grep -q "M07 beta gate.*in_progress" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md misstates M07"; exit 1; }
-grep -q "341 of the 360" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md must scope the 360-metric catalog"; exit 1; }
+grep -q "340 of the 360" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md must scope the 360-metric catalog"; exit 1; }
 # STATUS metric table and JSON definitions must agree on the implemented set.
 python3 - "$ROOT/STATUS.md" "$ROOT/metrics/definitions" <<'EOF'
 import json, glob, re, sys

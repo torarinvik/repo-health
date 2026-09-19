@@ -88,4 +88,14 @@ PY
 echo "[m08] honesty: STATUS.md marks M08 in progress"
 grep -q "M08 expanded coverage.*in_progress" "$ROOT/STATUS.md" || fail "STATUS.md misstates M08"
 
+echo "[m08] Arch PKGBUILD declarations are bounded and shell-free"
+"$ROOT/tests/test_arch_pkgbuild_cli.sh" >/dev/null || fail "arch-pkgbuild CLI"
+python3 - "$ROOT/fixtures/distribution/arch-pkgbuild-result.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-arch-pkgbuild-result/1", d
+assert d["format"] == "arch-pkgbuild" and d["licenses"] == ["MIT"], d
+print("[m08] arch-pkgbuild fixture OK")
+PY
+
 echo "test_m08 OK"

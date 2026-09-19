@@ -1,0 +1,301 @@
+# rh_arch.elisa — bounded Arch Linux PKGBUILD metadata (M08).
+#
+# PKGBUILD is shell syntax, so this adapter deliberately consumes only simple
+# top-level assignments before the first function declaration. It never
+# sources, expands, or executes the file. Array values are retained as
+# declarations; package relations are not resolved and shell substitutions
+# remain visibly unresolved.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_ARCH_MAX_BYTES: usize = 4194304
+const RH_ARCH_MAX_FIELDS: i64 = 512
+const RH_ARCH_MAX_ITEMS: i64 = 200000
+
+struct RhArchField:
+    key_s: mutable i64
+    key_e: mutable i64
+    value_s: mutable i64
+    value_e: mutable i64
+    array: mutable bool
+
+struct RhArchItem:
+    field: mutable i64
+    value_s: mutable i64
+    value_e: mutable i64
+
+module Arch:
+    private:
+        def rh_arch_eq(data: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(data, s, e, literal)
+
+        def rh_arch_trim(data: darray[u8]&, s: i64, e: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e < s or e > data.count.i64()
+            start_out[0] <- s
+            end_out[0] <- e
+            while start_out[0] < end_out[0] and (data[start_out[0].usize()] == 32 or data[start_out[0].usize()] == 9 or data[start_out[0].usize()] == 13):
+                start_out[0] <- start_out[0] + 1
+            while end_out[0] > start_out[0] and (data[(end_out[0] - 1).usize()] == 32 or data[(end_out[0] - 1).usize()] == 9 or data[(end_out[0] - 1).usize()] == 13):
+                end_out[0] <- end_out[0] - 1
+            true
+
+        def rh_arch_key_char(value: u8) -> bool:
+            (value >= 65 and value <= 90) or (value >= 97 and value <= 122) or (value >= 48 and value <= 57) or value == 95
+
+        def rh_arch_known_key(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if Arch::rh_arch_eq(data, s, e, "pkgname") or Arch::rh_arch_eq(data, s, e, "pkgver") or Arch::rh_arch_eq(data, s, e, "pkgrel")
+            return true if Arch::rh_arch_eq(data, s, e, "epoch") or Arch::rh_arch_eq(data, s, e, "pkgdesc") or Arch::rh_arch_eq(data, s, e, "url")
+            return true if Arch::rh_arch_eq(data, s, e, "license") or Arch::rh_arch_eq(data, s, e, "arch") or Arch::rh_arch_eq(data, s, e, "source")
+            return true if Arch::rh_arch_eq(data, s, e, "sha256sums") or Arch::rh_arch_eq(data, s, e, "depends") or Arch::rh_arch_eq(data, s, e, "makedepends")
+            return true if Arch::rh_arch_eq(data, s, e, "checkdepends") or Arch::rh_arch_eq(data, s, e, "optdepends") or Arch::rh_arch_eq(data, s, e, "provides")
+            return true if Arch::rh_arch_eq(data, s, e, "conflicts") or Arch::rh_arch_eq(data, s, e, "replaces") or Arch::rh_arch_eq(data, s, e, "backup")
+            Arch::rh_arch_eq(data, s, e, "options")
+
+        def rh_arch_function_line(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s >= e
+            open: mutable i64 = s
+            while open < e and (data[open.usize()] == 32 or data[open.usize()] == 9):
+                open <- open + 1
+            return false if open >= e
+            close: mutable i64 = open
+            while close < e and ((data[close.usize()] >= 65 and data[close.usize()] <= 90) or (data[close.usize()] >= 97 and data[close.usize()] <= 122) or data[close.usize()] == 95):
+                close <- close + 1
+            close < e and data[close.usize()] == 40
+
+        # Parse simple assignment lines. A multiline array is accepted only
+        # when its closing ')' is visible before the next assignment/function.
+        def rh_arch_parse(data: darray[u8]&, fields: mutable darray[RhArchField]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if data.count > RH_ARCH_MAX_BYTES
+            unknown_out[0] <- 0
+            line_start: mutable i64 = 0
+            while line_start <= data.count.i64():
+                line_end: i64 =
+                    while j < data.count.i64() and data[j.usize()] != 10 |j: i64 = line_start| -> j:
+                        j <- j + 1
+                s: mutable i64 = line_start
+                e: mutable i64 = line_end
+                while e > s and (data[(e - 1).usize()] == 13 or data[(e - 1).usize()] == 32 or data[(e - 1).usize()] == 9):
+                    e <- e - 1
+                while s < e and (data[s.usize()] == 32 or data[s.usize()] == 9):
+                    s <- s + 1
+                if s < e and data[s.usize()] != 35:
+                    break if Arch::rh_arch_function_line(data, s, e)
+                    # Strip a trailing comment only when it is separated by
+                    # whitespace; quoted values remain untouched.
+                    eq: mutable i64 = -1
+                    while k < e |k: i64 = s, e, data, eq|:
+                        if data[k.usize()] == 61:
+                            eq <- k
+                            break
+                        k <- k + 1
+                    if eq > s:
+                        while k < eq |k: i64 = s, eq, data|:
+                            return -1 if not Arch::rh_arch_key_char(data[k.usize()])
+                            k <- k + 1
+                        return -1 if fields.count.i64() >= RH_ARCH_MAX_FIELDS
+                        value_s: mutable i64 = eq + 1
+                        value_e: mutable i64 = e
+                        Arch::rh_arch_trim(data, value_s, value_e, &value_s, &value_e)
+                        is_array: bool = value_s < value_e and data[value_s.usize()] == 40
+                        if is_array:
+                            return -1 if data[(value_e - 1).usize()] != 41
+                            value_s <- value_s + 1
+                            value_e <- value_e - 1
+                        fields.push(RhArchField{key_s: s, key_e: eq, value_s: value_s, value_e: value_e, array: is_array})
+                        unknown_out[0] <- unknown_out[0] + 1 if not Arch::rh_arch_known_key(data, s, eq)
+                line_start <- line_end + 1
+            fields.count.i64()
+
+        def rh_arch_field(data: darray[u8]&, fields: darray[RhArchField]&, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < fields.count.i64() |i: i64 = 0, fields, data, key|:
+                field: RhArchField = fields[i.usize()]
+                if Arch::rh_arch_eq(data, field.key_s, field.key_e, key):
+                    return i
+                i <- i + 1
+            -1
+
+        def rh_arch_singleton(data: darray[u8]&, fields: darray[RhArchField]&, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            seen: mutable i64 = 0
+            while i < fields.count.i64() |i: i64 = 0, fields, data, key, seen|:
+                field: RhArchField = fields[i.usize()]
+                seen <- seen + 1 if Arch::rh_arch_eq(data, field.key_s, field.key_e, key)
+                i <- i + 1
+            seen <= 1
+
+        def rh_arch_unquote(data: darray[u8]&, s: i64, e: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Arch::rh_arch_trim(data, s, e, &start_out[0], &end_out[0])
+            return false if start_out[0] >= end_out[0]
+            first: u8 = data[start_out[0].usize()]
+            last: u8 = data[(end_out[0] - 1).usize()]
+            if (first == 34 and last == 34) or (first == 39 and last == 39):
+                start_out[0] <- start_out[0] + 1
+                end_out[0] <- end_out[0] - 1
+            start_out[0] < end_out[0]
+
+        def rh_arch_item_unresolved(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < e |i: i64 = s, e, data|:
+                return true if data[i.usize()] == 36 or data[i.usize()] == 37 or data[i.usize()] == 64
+                i <- i + 1
+            false
+
+        def rh_arch_items(data: darray[u8]&, field: RhArchField, field_id: i64, items: mutable darray[RhArchItem]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            s: mutable i64 = field.value_s
+            e: mutable i64 = field.value_e
+            return -1 if not field.array
+            i: mutable i64 = s
+            while i <= e |i, data, e, items, field_id|:
+                while i < e and (data[i.usize()] == 32 or data[i.usize()] == 9 or data[i.usize()] == 10 or data[i.usize()] == 13):
+                    i <- i + 1
+                break if i >= e
+                start: mutable i64 = i
+                quote: mutable u8 = 0
+                if data[i.usize()] == 34 or data[i.usize()] == 39:
+                    quote <- data[i.usize()]
+                    i <- i + 1
+                    start <- i
+                    while i < e and data[i.usize()] != quote:
+                        i <- i + 1
+                    return -1 if i >= e
+                else:
+                    while i < e and data[i.usize()] != 32 and data[i.usize()] != 9 and data[i.usize()] != 10 and data[i.usize()] != 13:
+                        i <- i + 1
+                return -1 if items.count.i64() >= RH_ARCH_MAX_ITEMS
+                items.push(RhArchItem{field: field_id, value_s: start, value_e: i})
+                i <- i + 1 if quote != 0
+            items.count.i64()
+
+        def rh_arch_emit_scalar(out: mutable darray[u8]&, data: darray[u8]&, fields: darray[RhArchField]&, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            field_index: i64 = Arch::rh_arch_field(data, fields, key)
+            return false if field_index < 0 or fields[field_index.usize()].array
+            field: RhArchField = fields[field_index.usize()]
+            s: i64 = field.value_s
+            e: i64 = field.value_e
+            us: mutable i64 = 0
+            ue: mutable i64 = 0
+            return false if not Arch::rh_arch_unquote(data, s, e, &us, &ue)
+            out.push(34)
+            rh_json_escape(out, data, us.usize(), ue.usize())
+            out.push(34)
+            true
+
+        def rh_arch_emit_array(out: mutable darray[u8]&, data: darray[u8]&, items: darray[RhArchItem]&, field_id: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            emitted: mutable i64 = 0
+            while i < items.count.i64() |i: i64 = 0, items, data, out, field_id, emitted|:
+                item: RhArchItem = items[i.usize()]
+                if item.field == field_id:
+                    out.push(44) if emitted > 0
+                    out.push(34)
+                    rh_json_escape(out, data, item.value_s.usize(), item.value_e.usize())
+                    out.push(34)
+                    emitted <- emitted + 1
+                i <- i + 1
+            emitted
+
+        def rh_arch_relation_scope(data: darray[u8]&, s: i64, e: i64) -> u8&:
+            return "runtime" if Arch::rh_arch_eq(data, s, e, "depends")
+            return "build" if Arch::rh_arch_eq(data, s, e, "makedepends")
+            return "check" if Arch::rh_arch_eq(data, s, e, "checkdepends")
+            return "optional" if Arch::rh_arch_eq(data, s, e, "optdepends")
+            return "provide" if Arch::rh_arch_eq(data, s, e, "provides")
+            return "conflict" if Arch::rh_arch_eq(data, s, e, "conflicts")
+            "replace"
+
+        def rh_arch_relation_field(data: darray[u8]&, field: RhArchField) -> bool can[Memory.Allocate, Abort.Panic]:
+            Arch::rh_arch_eq(data, field.key_s, field.key_e, "depends") or Arch::rh_arch_eq(data, field.key_s, field.key_e, "makedepends") or Arch::rh_arch_eq(data, field.key_s, field.key_e, "checkdepends") or Arch::rh_arch_eq(data, field.key_s, field.key_e, "optdepends") or Arch::rh_arch_eq(data, field.key_s, field.key_e, "provides") or Arch::rh_arch_eq(data, field.key_s, field.key_e, "conflicts") or Arch::rh_arch_eq(data, field.key_s, field.key_e, "replaces")
+
+    public:
+        def rh_arch_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            fields: mutable darray[RhArchField] = []
+            unknown: mutable i64 = 0
+            return -1 if Arch::rh_arch_parse(raw, fields, &unknown) <= 0
+            return -1 if not Arch::rh_arch_singleton(raw, fields, "pkgname") or not Arch::rh_arch_singleton(raw, fields, "pkgver") or not Arch::rh_arch_singleton(raw, fields, "pkgrel")
+            name_field: i64 = Arch::rh_arch_field(raw, fields, "pkgname")
+            version_field: i64 = Arch::rh_arch_field(raw, fields, "pkgver")
+            rel_field: i64 = Arch::rh_arch_field(raw, fields, "pkgrel")
+            return -1 if name_field < 0 or version_field < 0 or rel_field < 0 or fields[name_field.usize()].array or fields[version_field.usize()].array or fields[rel_field.usize()].array
+            name_s: mutable i64 = fields[name_field.usize()].value_s
+            name_e: mutable i64 = fields[name_field.usize()].value_e
+            version_s: mutable i64 = fields[version_field.usize()].value_s
+            version_e: mutable i64 = fields[version_field.usize()].value_e
+            rel_s: mutable i64 = fields[rel_field.usize()].value_s
+            rel_e: mutable i64 = fields[rel_field.usize()].value_e
+            return -1 if not Arch::rh_arch_unquote(raw, name_s, name_e, &name_s, &name_e) or not Arch::rh_arch_unquote(raw, version_s, version_e, &version_s, &version_e) or not Arch::rh_arch_unquote(raw, rel_s, rel_e, &rel_s, &rel_e)
+            items: mutable darray[RhArchItem] = []
+            while i < fields.count.i64() |i: i64 = 0, fields, raw, items|:
+                field: RhArchField = fields[i.usize()]
+                if Arch::rh_arch_relation_field(raw, field):
+                    return -1 if Arch::rh_arch_items(raw, field, i, items) < 0
+                i <- i + 1
+            rh_push_text(out, "{\"schema\":\"rh-arch-pkgbuild-result/1\",\"format\":\"arch-pkgbuild\",\"name\":\"")
+            rh_json_escape(out, raw, name_s.usize(), name_e.usize())
+            rh_push_text(out, "\",\"pkgver\":\"")
+            rh_json_escape(out, raw, version_s.usize(), version_e.usize())
+            rh_push_text(out, "\",\"pkgrel\":\"")
+            rh_json_escape(out, raw, rel_s.usize(), rel_e.usize())
+            rh_push_text(out, "\",\"epoch\":")
+            if not Arch::rh_arch_emit_scalar(out, raw, fields, "epoch"):
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"url\":")
+            if not Arch::rh_arch_emit_scalar(out, raw, fields, "url"):
+                rh_push_text(out, "null")
+            rh_push_text(out, ",\"licenses\":[")
+            license_items: mutable darray[RhArchItem] = []
+            license_field: i64 = Arch::rh_arch_field(raw, fields, "license")
+            if license_field >= 0:
+                return -1 if Arch::rh_arch_items(raw, fields[license_field.usize()], license_field, license_items) < 0
+            Arch::rh_arch_emit_array(out, raw, license_items, license_field)
+            rh_push_text(out, "],\"architectures\":[")
+            arch_items: mutable darray[RhArchItem] = []
+            arch_field: mutable i64 = -1
+            while ai < fields.count.i64() |ai: i64 = 0, fields, raw, arch_field|:
+                arch_field <- ai if Arch::rh_arch_eq(raw, fields[ai.usize()].key_s, fields[ai.usize()].key_e, "arch")
+                ai <- ai + 1
+            if arch_field >= 0:
+                return -1 if Arch::rh_arch_items(raw, fields[arch_field.usize()], arch_field, arch_items) < 0
+            Arch::rh_arch_emit_array(out, raw, arch_items, arch_field)
+            rh_push_text(out, "],\"sources\":[")
+            source_items: mutable darray[RhArchItem] = []
+            source_field: mutable i64 = -1
+            while si < fields.count.i64() |si: i64 = 0, fields, raw, source_field|:
+                source_field <- si if Arch::rh_arch_eq(raw, fields[si.usize()].key_s, fields[si.usize()].key_e, "source")
+                si <- si + 1
+            if source_field >= 0:
+                return -1 if Arch::rh_arch_items(raw, fields[source_field.usize()], source_field, source_items) < 0
+            Arch::rh_arch_emit_array(out, raw, source_items, source_field)
+            rh_push_text(out, "],\"checksums\":[")
+            checksum_items: mutable darray[RhArchItem] = []
+            checksum_field: mutable i64 = -1
+            while ci < fields.count.i64() |ci: i64 = 0, fields, raw, checksum_field|:
+                checksum_field <- ci if Arch::rh_arch_eq(raw, fields[ci.usize()].key_s, fields[ci.usize()].key_e, "sha256sums")
+                ci <- ci + 1
+            if checksum_field >= 0:
+                return -1 if Arch::rh_arch_items(raw, fields[checksum_field.usize()], checksum_field, checksum_items) < 0
+            Arch::rh_arch_emit_array(out, raw, checksum_items, checksum_field)
+            rh_push_text(out, "],\"relations\":[")
+            emitted: mutable i64 = 0
+            unresolved: mutable i64 = 0
+            while i < items.count.i64() |i: i64 = 0, items, raw, fields, out, emitted, unresolved|:
+                item: RhArchItem = items[i.usize()]
+                field: RhArchField = fields[item.field.usize()]
+                out.push(44) if emitted > 0
+                out.push(123)
+                rh_push_text(out, "\"name\":\"")
+                rh_json_escape(out, raw, item.value_s.usize(), item.value_e.usize())
+                rh_push_text(out, "\",\"scope\":\"")
+                rh_push_text(out, Arch::rh_arch_relation_scope(raw, field.key_s, field.key_e))
+                rh_push_text(out, "\",\"state\":\"")
+                if Arch::rh_arch_item_unresolved(raw, item.value_s, item.value_e):
+                    rh_push_text(out, "unresolved")
+                    unresolved <- unresolved + 1
+                else:
+                    rh_push_text(out, "declared")
+                rh_push_text(out, "\"}")
+                emitted <- emitted + 1
+                i <- i + 1
+            rh_push_text(out, "],\"unknown_fields\":")
+            rh_push_decimal_i64(out, unknown)
+            rh_push_text(out, ",\"unresolved_relations\":")
+            rh_push_decimal_i64(out, unresolved)
+            rh_push_text(out, ",\"note\":\"PKGBUILD assignments only; shell functions are not executed or expanded; source, checksum, architecture, and dependency values are declarations; relations are not resolved\"}")
+            0
