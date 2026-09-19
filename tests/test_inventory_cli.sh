@@ -35,6 +35,7 @@ assert {k: metrics[k]["value"] for k in metrics} == {
     "inventory.components_with_purl_count": 2,
     "inventory.components_with_hash_count": 2,
     "inventory.known_digest_count": 1,
+    "provenance.artifact_digest_present_share": {"num": 2, "den": 2},
     "inventory.unknown_field_count": 0,
 }, metrics
 by = {x["name"]: x for x in d["components"]}
@@ -68,6 +69,7 @@ metrics = {m["key"]: m for m in d["metrics"]}
 assert metrics["inventory.component_count"]["value"] == 2, metrics
 assert metrics["inventory.invalid_component_count"]["value"] == 1, metrics
 assert metrics["inventory.known_digest_count"]["value"] == 1, metrics
+assert metrics["provenance.artifact_digest_present_share"]["value"] == {"num": 2, "den": 2}, metrics
 assert metrics["inventory.unknown_field_count"]["value"] == 1, metrics
 print("[inventory] spdx OK")
 PY
