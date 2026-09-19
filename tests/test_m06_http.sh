@@ -66,6 +66,14 @@ JSON
   mct="$(curl -s -o "$W/metrics.out" -w '%{http_code} %{content_type}' http://127.0.0.1:18611/api/metrics)" || true
   [[ "$mct" == "200 application/json" ]] || { kill "$SRV" 2>/dev/null; fail "resource route=$mct"; }
   grep -q '"resource":"metrics"' "$W/metrics.out" || { kill "$SRV" 2>/dev/null; fail "resource body missing"; }
+  mkdir -p "$W/report/evidence"
+  printf 'stored evidence\n' > "$W/blob.txt"
+  put_out="$("$ROOT/build/rh_cli" store put --root "$W/report/evidence" --file "$W/blob.txt")" || { kill "$SRV" 2>/dev/null; fail "store put"; }
+  digest="${put_out#store: put }"
+  digest="${digest%% *}"
+  sct="$(curl -s -o "$W/store.out" -w '%{http_code} %{content_type}' "http://127.0.0.1:18611/api/store/$digest")" || true
+  [[ "$sct" == "200 application/octet-stream" ]] || { kill "$SRV" 2>/dev/null; fail "store route=$sct"; }
+  cmp -s "$W/blob.txt" "$W/store.out" || { kill "$SRV" 2>/dev/null; fail "store body differs"; }
   absent="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18611/api/findings)" || true
   [[ "$absent" == "404" ]] || { kill "$SRV" 2>/dev/null; fail "absent resource=$absent"; }
   n="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18611/nope)" || true
