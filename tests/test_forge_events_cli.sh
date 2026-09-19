@@ -59,6 +59,20 @@ assert len(d["events"]) == 4, d
 print("[forge-events] per-capability rejection count OK")
 PY
 
+python3 - "$T/input.json" "$T/negative-time.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["issues"][0]["updated_at"] = -1
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" forge events --input "$T/negative-time.json" --out "$T/negative-time.out" >/dev/null || fail "negative timestamp capture"
+python3 - "$T/negative-time.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["issues"] == {"status": "observed", "count": 0, "rejected": 1}, d
+print("[forge-events] negative timestamp rejection OK")
+PY
+
 echo "[forge-events] missing capabilities remain explicit unsupported"
 python3 - "$T/input.json" "$T/partial.json" <<'PY'
 import json, sys
