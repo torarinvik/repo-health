@@ -16,138 +16,142 @@ include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_registry_pypi.elisa"
 
-const RH_REGMETA_MAX_VERSIONS: i64 = 10000
+module RegistryMeta:
+    private:
+        const RH_REGMETA_MAX_VERSIONS: i64 = 10000
 
-struct RhRegVersion:
-    ver_s: i64
-    ver_e: i64
-    yanked: i64
-    has_published: i64
-    published_epoch: i64
-    published_s: i64
-    published_e: i64
-    has_repo: i64
-    repo_s: i64
-    repo_e: i64
-    dep_count: i64
-    optional_dep_count: i64
-    dev_dep_count: i64
+        # (private to this file)
+        def rh_regmeta_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if s < 0 or e < s
+            start: i64 = pool.count.i64()
+            while k < e |k: i64 = s, texts, pool, e|:
+                pool.push(texts[k.usize()])
+                k <- k + 1
+            start
 
-struct RhRegMeta:
-    ok: mutable i64
-    versions: mutable i64
-    yanked_count: mutable i64
-    unknown_yank_count: mutable i64
-    with_repo: mutable i64
-    declared_deps: mutable i64
-    optional_deps: mutable i64
-    dev_deps: mutable i64
+        # Deps array: count all, optional (optional==true), dev (kind=="dev").
+        # (private to this file)
+        def rh_regmeta_deps(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, arr: i64, total_out: mutable i64&, opt_out: mutable i64&, dev_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
+            total_out[0] <- 0
+            opt_out[0] <- 0
+            dev_out[0] <- 0
+            return if arr < 0
+            o: Json::RhJsonNode = nodes[arr.usize()]
+            return if o.kind != Json::RH_JSON_ARR
+            while child >= 0 |child: i64 = o.first_child, nodes, texts, total_out, opt_out, dev_out|:
+                nxt: i64 = nodes[child.usize()].next_sibling
+                total_out[0] <- total_out[0] + 1
+                if Json::rh_json_is_true(nodes, raw, Json::rh_json_obj_get(nodes, texts, child, "optional")):
+                    opt_out[0] <- opt_out[0] + 1
+                ks: mutable i64 = -1
+                ke: mutable i64 = -1
+                if Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "kind"), &ks, &ke):
+                    if ke - ks == 3 and texts[ks.usize()] == 100 and texts[(ks + 1).usize()] == 101 and texts[(ks + 2).usize()] == 118:
+                        dev_out[0] <- dev_out[0] + 1
+                child <- nxt
 
-# (private to this file)
-def rh_regmeta_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return -1 if s < 0 or e < s
-    start: i64 = pool.count.i64()
-    while k < e |k: i64 = s, texts, pool, e|:
-        pool.push(texts[k.usize()])
-        k <- k + 1
-    start
+        # (private to this module)
+        def rh_regmeta_end(start: i64, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if start < 0 or s < 0 or e < s
+            start + (e - s)
 
-# Deps array: count all, optional (optional==true), dev (kind=="dev").
-# (private to this file)
-def rh_regmeta_deps(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, arr: i64, total_out: mutable i64&, opt_out: mutable i64&, dev_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-    total_out[0] <- 0
-    opt_out[0] <- 0
-    dev_out[0] <- 0
-    return if arr < 0
-    o: Json::RhJsonNode = nodes[arr.usize()]
-    return if o.kind != Json::RH_JSON_ARR
-    while child >= 0 |child: i64 = o.first_child, nodes, texts, total_out, opt_out, dev_out|:
-        nxt: i64 = nodes[child.usize()].next_sibling
-        total_out[0] <- total_out[0] + 1
-        if Json::rh_json_is_true(nodes, raw, Json::rh_json_obj_get(nodes, texts, child, "optional")):
-            opt_out[0] <- opt_out[0] + 1
-        ks: mutable i64 = -1
-        ke: mutable i64 = -1
-        if Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "kind"), &ks, &ke):
-            if ke - ks == 3 and texts[ks.usize()] == 100 and texts[(ks + 1).usize()] == 101 and texts[(ks + 2).usize()] == 118:
-                dev_out[0] <- dev_out[0] + 1
-        child <- nxt
+    public:
+        struct RhRegVersion:
+            ver_s: i64
+            ver_e: i64
+            yanked: i64
+            has_published: i64
+            published_epoch: i64
+            published_s: i64
+            published_e: i64
+            has_repo: i64
+            repo_s: i64
+            repo_e: i64
+            dep_count: i64
+            optional_dep_count: i64
+            dev_dep_count: i64
 
-# Parse `{"versions":[...]}`. Returns 0 on success, -1 when the document is
-# not parseable or lacks a versions array. Versions missing a non-empty
-# label are skipped and counted in `versions` only when retained.
-def rh_regmeta_parse(raw: darray[u8]&, pool: mutable darray[u8]&, out: mutable darray[RhRegVersion]&, meta_out: mutable RhRegMeta&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    meta_out[0] <- RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
-    nodes: mutable darray[Json::RhJsonNode] = []
-    texts: mutable darray[u8] = []
-    arr: i64 = |nodes, texts|
-        root: i64 = Json::rh_json_parse(raw, nodes, texts)
-        return -1 if root < 0
-        rn: Json::RhJsonNode = nodes[root.usize()]
-        return -1 if rn.kind != Json::RH_JSON_OBJ
-        block_result: i64 = Json::rh_json_obj_get(nodes, texts, root, "versions")
-        block_result
-    return -1 if arr < 0
-    an: Json::RhJsonNode = nodes[arr.usize()]
-    return -1 if an.kind != Json::RH_JSON_ARR
-    m: RhRegMeta = RhRegMeta{ok: 1, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
-    while child >= 0 |child: i64 = an.first_child, nodes, texts, pool, out, m|:
-        nxt: i64 = nodes[child.usize()].next_sibling
-        return -1 if out.count.i64() >= RH_REGMETA_MAX_VERSIONS
-        vs: mutable i64 = -1
-        ve: mutable i64 = -1
-        if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "num"), &vs, &ve) or ve <= vs:
-            m.versions <- m.versions + 1
-        else:
-            m.versions <- m.versions + 1
-            yank: mutable i64 = -1
-            ynode: i64 = Json::rh_json_obj_get(nodes, texts, child, "yanked")
-            if ynode >= 0:
-                if nodes[ynode.usize()].kind == Json::RH_JSON_BOOL:
-                    yank <- 0
-                    if Json::rh_json_is_true(nodes, raw, ynode):
-                        yank <- 1
-            if yank == 1:
-                m.yanked_count <- m.yanked_count + 1
-            if yank == -1:
-                m.unknown_yank_count <- m.unknown_yank_count + 1
-            has_pub: mutable i64 = 0
-            pub: mutable i64 = -1
-            ps: mutable i64 = -1
-            pe: mutable i64 = -1
-            pnode: i64 = Json::rh_json_obj_get(nodes, texts, child, "published_at")
-            if pnode >= 0:
-                if nodes[pnode.usize()].kind == Json::RH_JSON_NUM:
-                    pok: mutable i64 = 0
-                    pub <- Json::rh_json_int(nodes, raw, pnode, &pok)
-                    if pok == 1:
-                        has_pub <- 1
-                if nodes[pnode.usize()].kind == Json::RH_JSON_STR:
-                    if Json::rh_json_str_span(nodes, pnode, &ps, &pe):
-                        has_pub <- 1
-            rs: mutable i64 = -1
-            re: i64 = -1
-            has_repo: mutable i64 = 0
-            if Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "repository"), &rs, &re):
-                if re > rs:
-                    has_repo <- 1
-                    m.with_repo <- m.with_repo + 1
-            dt: mutable i64 = 0
-            do_: mutable i64 = 0
-            dd: mutable i64 = 0
-            rh_regmeta_deps(nodes, raw, texts, Json::rh_json_obj_get(nodes, texts, child, "deps"), &dt, &do_, &dd)
-            m.declared_deps <- m.declared_deps + dt
-            m.optional_deps <- m.optional_deps + do_
-            m.dev_deps <- m.dev_deps + dd
-            v2: i64 = rh_regmeta_copy(pool, texts, vs, ve)
-            r2: i64 = rh_regmeta_copy(pool, texts, rs, re)
-            p2: i64 = rh_regmeta_copy(pool, texts, ps, pe)
-            out.push(RhRegVersion{ver_s: v2, ver_e: rh_regmeta_end(v2, vs, ve), yanked: yank, has_published: has_pub, published_epoch: pub, published_s: p2, published_e: rh_regmeta_end(p2, ps, pe), has_repo: has_repo, repo_s: r2, repo_e: rh_regmeta_end(r2, rs, re), dep_count: dt, optional_dep_count: do_, dev_dep_count: dd})
-        child <- nxt
-    meta_out[0] <- m
-    0
+        struct RhRegMeta:
+            ok: mutable i64
+            versions: mutable i64
+            yanked_count: mutable i64
+            unknown_yank_count: mutable i64
+            with_repo: mutable i64
+            declared_deps: mutable i64
+            optional_deps: mutable i64
+            dev_deps: mutable i64
 
-# (private to this file)
-def rh_regmeta_end(start: i64, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-    return -1 if start < 0 or s < 0 or e < s
-    start + (e - s)
+        # Parse `{"versions":[...]}`. Returns 0 on success, -1 when the document is
+        # not parseable or lacks a versions array. Versions missing a non-empty
+        # label are skipped and counted in `versions` only when retained.
+        def rh_regmeta_parse(raw: darray[u8]&, pool: mutable darray[u8]&, out: mutable darray[RhRegVersion]&, meta_out: mutable RhRegMeta&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            meta_out[0] <- RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            arr: i64 = |nodes, texts|
+                root: i64 = Json::rh_json_parse(raw, nodes, texts)
+                return -1 if root < 0
+                rn: Json::RhJsonNode = nodes[root.usize()]
+                return -1 if rn.kind != Json::RH_JSON_OBJ
+                block_result: i64 = Json::rh_json_obj_get(nodes, texts, root, "versions")
+                block_result
+            return -1 if arr < 0
+            an: Json::RhJsonNode = nodes[arr.usize()]
+            return -1 if an.kind != Json::RH_JSON_ARR
+            m: RhRegMeta = RhRegMeta{ok: 1, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+            while child >= 0 |child: i64 = an.first_child, nodes, texts, pool, out, m|:
+                nxt: i64 = nodes[child.usize()].next_sibling
+                return -1 if out.count.i64() >= RH_REGMETA_MAX_VERSIONS
+                vs: mutable i64 = -1
+                ve: mutable i64 = -1
+                if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "num"), &vs, &ve) or ve <= vs:
+                    m.versions <- m.versions + 1
+                else:
+                    m.versions <- m.versions + 1
+                    yank: mutable i64 = -1
+                    ynode: i64 = Json::rh_json_obj_get(nodes, texts, child, "yanked")
+                    if ynode >= 0:
+                        if nodes[ynode.usize()].kind == Json::RH_JSON_BOOL:
+                            yank <- 0
+                            if Json::rh_json_is_true(nodes, raw, ynode):
+                                yank <- 1
+                    if yank == 1:
+                        m.yanked_count <- m.yanked_count + 1
+                    if yank == -1:
+                        m.unknown_yank_count <- m.unknown_yank_count + 1
+                    has_pub: mutable i64 = 0
+                    pub: mutable i64 = -1
+                    ps: mutable i64 = -1
+                    pe: mutable i64 = -1
+                    pnode: i64 = Json::rh_json_obj_get(nodes, texts, child, "published_at")
+                    if pnode >= 0:
+                        if nodes[pnode.usize()].kind == Json::RH_JSON_NUM:
+                            pok: mutable i64 = 0
+                            pub <- Json::rh_json_int(nodes, raw, pnode, &pok)
+                            if pok == 1:
+                                has_pub <- 1
+                        if nodes[pnode.usize()].kind == Json::RH_JSON_STR:
+                            if Json::rh_json_str_span(nodes, pnode, &ps, &pe):
+                                has_pub <- 1
+                    rs: mutable i64 = -1
+                    re: i64 = -1
+                    has_repo: mutable i64 = 0
+                    if Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "repository"), &rs, &re):
+                        if re > rs:
+                            has_repo <- 1
+                            m.with_repo <- m.with_repo + 1
+                    dt: mutable i64 = 0
+                    do_: mutable i64 = 0
+                    dd: mutable i64 = 0
+                    rh_regmeta_deps(nodes, raw, texts, Json::rh_json_obj_get(nodes, texts, child, "deps"), &dt, &do_, &dd)
+                    m.declared_deps <- m.declared_deps + dt
+                    m.optional_deps <- m.optional_deps + do_
+                    m.dev_deps <- m.dev_deps + dd
+                    v2: i64 = rh_regmeta_copy(pool, texts, vs, ve)
+                    r2: i64 = rh_regmeta_copy(pool, texts, rs, re)
+                    p2: i64 = rh_regmeta_copy(pool, texts, ps, pe)
+                    out.push(RhRegVersion{ver_s: v2, ver_e: rh_regmeta_end(v2, vs, ve), yanked: yank, has_published: has_pub, published_epoch: pub, published_s: p2, published_e: rh_regmeta_end(p2, ps, pe), has_repo: has_repo, repo_s: r2, repo_e: rh_regmeta_end(r2, rs, re), dep_count: dt, optional_dep_count: do_, dev_dep_count: dd})
+                child <- nxt
+            meta_out[0] <- m
+            0
+
