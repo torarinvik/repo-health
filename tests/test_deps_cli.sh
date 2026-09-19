@@ -73,6 +73,11 @@ assert {key: metrics[key]["value"] for key in metrics} == {
     "dependency.resolved_direct_versions": 5,
     "dependency.unresolved_requirements": 1,
     "dependency.resolved_transitive_versions": 6,
+    "dependency.runtime_requirements": 14,
+    "dependency.development_requirements": 0,
+    "dependency.optional_requirements": 0,
+    "dependency.peer_requirements": 1,
+    "dependency.unknown_scope_requirements": 0,
     "security.known_advisory_records": 3,
     "security.known_unique_advisories": 2,
     "security.affected_resolved_nodes": 2,
@@ -89,6 +94,14 @@ assert by["cargo"]["resolved_direct_versions"] == 0, by["cargo"]
 assert by["npm"]["resolved_direct_versions"] == 5, by["npm"]
 assert by["cargo"]["resolved_transitive_versions"] == 0, by["cargo"]
 assert by["npm"]["resolved_transitive_versions"] == 6, by["npm"]
+assert by["cargo"]["runtime_requirements"] == 5, by["cargo"]
+assert by["npm"]["runtime_requirements"] == 9, by["npm"]
+assert by["npm"]["peer_requirements"] == 1, by["npm"]
+for eco in ("cargo", "npm"):
+    assert by[eco]["development_requirements"] == 0, by[eco]
+    assert by[eco]["optional_requirements"] == 0, by[eco]
+    assert by[eco]["unknown_scope_requirements"] == 0, by[eco]
+assert by["cargo"]["peer_requirements"] == 0, by["cargo"]
 assert by["cargo"]["known_advisory_records"] == 2, by["cargo"]
 assert by["npm"]["known_advisory_records"] == 1, by["npm"]
 assert by["cargo"]["known_unique_advisories"] == 1, by["cargo"]
@@ -105,7 +118,7 @@ import json, sys
 cg = json.load(open(sys.argv[1] + "/deps-cargo-graph.json"))
 assert cg["advisories"] == [], cg["advisories"]
 m = json.load(open(sys.argv[1] + "/deps-metrics.json"))
-for metric in m["metrics"][-3:]:
+for metric in m["metrics"][-4:]:
     assert metric["status"] == "unavailable" and "value" not in metric, metric
 print("[deps] no --osv -> no advisories fabricated")
 PY
@@ -163,6 +176,11 @@ assert by["pypi"]["requirements_direct"] == 7, by["pypi"]
 assert by["pypi"]["resolved_direct_versions"] == 3, by["pypi"]
 assert by["pypi"]["unresolved_direct_requirements"] == 5, by["pypi"]
 assert by["pypi"]["resolved_transitive_versions"] == 3, by["pypi"]
+assert by["pypi"]["runtime_requirements"] == 7, by["pypi"]
+assert by["pypi"]["development_requirements"] == 0, by["pypi"]
+assert by["pypi"]["optional_requirements"] == 0, by["pypi"]
+assert by["pypi"]["peer_requirements"] == 0, by["pypi"]
+assert by["pypi"]["unknown_scope_requirements"] == 0, by["pypi"]
 assert by["pypi"]["unsupported_range_count"] == 1, by["pypi"]
 assert m["metrics"][0]["value"] == 1, m["metrics"][0]
 metrics = {item["key"]: item for item in m["metrics"]}
@@ -191,13 +209,16 @@ test = [
 EOF
 "$ROOT/build/rh_cli" deps --repo "$T/pep621src" --out "$T/pep621out" \
   | grep -q "ecosystems=1 pypi=2/4 unresolved=2 unsupported=0" || fail "pep621 deps summary"
-python3 - "$T/pep621out/deps-pypi-graph.json" <<'PY'
+python3 - "$T/pep621out/deps-pypi-graph.json" "$T/pep621out/deps-metrics.json" <<'PY'
 import json, sys
 g = json.load(open(sys.argv[1]))
+metrics = {item["key"]: item for item in json.load(open(sys.argv[2]))["metrics"]}
 assert g["ecosystem"] == "pypi", g
 assert [n["name"] for n in g["nodes"]] == ["root", "Django", "pytest"], g["nodes"]
 assert [(e["to"], e["scope"]) for e in g["edges"]] == [(1, "normal"), (2, "optional")], g["edges"]
 assert sorted(u["name"] for u in g["unresolved"]) == ["coverage", "requests"], g["unresolved"]
+assert metrics["dependency.runtime_requirements"]["value"] == 2, metrics
+assert metrics["dependency.optional_requirements"]["value"] == 2, metrics
 print("[deps] PEP 621 graph + optional scope OK")
 PY
 
@@ -287,6 +308,10 @@ assert [n["name"] for n in c["nodes"]] == ["root", "monolog/monolog", "phpunit/p
 assert len(c["edges"]) == 1 and c["edges"][0]["scope"] == "dev", c["edges"]
 assert sorted(u["reason"] for u in c["unresolved"]) == ["context", "context", "missing"], c["unresolved"]
 assert c["nodes"][2]["dev"] is True, c["nodes"][2]
+rm = json.load(open(out + "/deps-metrics.json"))
+by = {b["ecosystem"]: b for b in rm["by_ecosystem"]}
+assert by["rubygems"]["unknown_scope_requirements"] == 1, by
+assert by["composer"]["development_requirements"] == 2, by
 print("[deps] RubyGems/Composer scopes + unresolved context OK")
 PY
 
@@ -316,6 +341,8 @@ by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
 assert by["nuget"]["declared_requirements"] == 3, by
 assert by["nuget"]["resolved_edges"] == 2, by
 assert by["nuget"]["unsupported_range_count"] == 1, by
+assert by["nuget"]["runtime_requirements"] == 2, by
+assert by["nuget"]["development_requirements"] == 1, by
 print("[deps] NuGet graph + development scope OK")
 PY
 
@@ -372,6 +399,8 @@ by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
 assert by["maven"]["declared_requirements"] == 3, by
 assert by["maven"]["resolved_edges"] == 2, by
 assert by["maven"]["unsupported_range_count"] == 1, by
+assert by["maven"]["runtime_requirements"] == 2, by
+assert by["maven"]["development_requirements"] == 1, by
 print("[deps] Maven graph + dependency-management exclusion OK")
 PY
 
