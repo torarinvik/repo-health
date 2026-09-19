@@ -65,6 +65,7 @@ include "./rh_lineage.elisa"
 include "./rh_population.elisa"
 include "./rh_ingest_conformance.elisa"
 include "./rh_drilldown.elisa"
+include "./rh_role_grain.elisa"
 include "./rh_render.elisa"
 include "./rh_explain.elisa"
 include "./rh_lease_report.elisa"
@@ -138,6 +139,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli population --input <file> --out <file>")
     rh_cli_err("       rh_cli ingest --root <dir> --input <file> --out <file>")
     rh_cli_err("       rh_cli drilldown --input <file> --out <file>")
+    rh_cli_err("       rh_cli role-grain --input <file> --out <file>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
     rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
     rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
@@ -1836,6 +1838,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 ddq <- ddq + 1
         return rh_cli_usage(2) if di_idx < 0 or do_idx < 0
         return rh_do_drilldown(slots[di_idx], slots[do_idx])
+    if rh_streq(cmd, "role-grain"):
+        rgi_idx, rgo_idx =
+            while rgq < argc |rgi_idx: i64 = -1, rgo_idx: i64 = -1, rgq: i64 = 2, slots| -> rgi_idx, rgo_idx:
+                a40: u8& = slots[rgq].cast[u8&] can Unsafe.PointerCast
+                if rh_streq(a40, "--input"):
+                    if rgq + 1 < argc:
+                        rgq <- rgq + 1
+                        rgi_idx <- rgq
+                    else:
+                        return rh_cli_usage(2)
+                elif rh_streq(a40, "--out"):
+                    if rgq + 1 < argc:
+                        rgq <- rgq + 1
+                        rgo_idx <- rgq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                rgq <- rgq + 1
+        return rh_cli_usage(2) if rgi_idx < 0 or rgo_idx < 0
+        return rh_do_role_grain(slots[rgi_idx], slots[rgo_idx])
     if rh_streq(cmd, "sign") or rh_streq(cmd, "verify"):
         key_idx, sub_idx, sig_idx =
             while m < argc |key_idx: i64 = -1, sub_idx: i64 = -1, sig_idx: i64 = -1, m: i64 = 2, slots| -> key_idx, sub_idx, sig_idx:
@@ -5207,6 +5230,32 @@ def rh_do_drilldown(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate
         rh_cli_err("drilldown: cannot write --out")
         return 4
     rh_cli_out("drilldown: evidence links preserved")
+    0
+
+# --- M04 role/event grain execution path. ---
+def rh_do_role_grain(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not rh_arg_safe(input_path) or not rh_arg_safe(out_path):
+        rh_cli_err("rejected role-grain argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if rh_io_read(ipp, raw) < 0:
+        rh_cli_err("role-grain: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if RoleGrain::rh_role_grain_report(raw, body) != 0:
+        rh_cli_err("role-grain: unsupported or malformed role/event input (fail closed)")
+        return 4
+    body.push(10)
+    if not rh_io_write(out_path, body):
+        rh_cli_err("role-grain: cannot write --out")
+        return 4
+    rh_cli_out("role-grain: cardinality and correction projection emitted")
     0
 
 # --- M02-03 job-lease execution path. ---

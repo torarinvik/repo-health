@@ -1,0 +1,231 @@
+# rh_role_grain.elisa — role/event grain and correction fan-out (RP-05).
+#
+# Each source event contributes once to one declared role. Corrections create a
+# new current projection while the as-known projection remains reproducible;
+# raw event identity and correction revision are never silently overwritten.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+const RH_ROLE_AUTHOR: u8 = 0
+const RH_ROLE_COMMITTER: u8 = 1
+const RH_ROLE_REVIEWER: u8 = 2
+const RH_ROLE_RELEASER: u8 = 3
+
+struct RhRoleEvent:
+    id_s: mutable i64
+    id_e: mutable i64
+    actor_s: mutable i64
+    actor_e: mutable i64
+    role: mutable u8
+    at: mutable i64
+
+struct RhRoleCorrection:
+    event_s: mutable i64
+    event_e: mutable i64
+    action: mutable u8
+    actor_s: mutable i64
+    actor_e: mutable i64
+    revision: mutable i64
+
+module RoleGrain:
+    private:
+        def rh_rg_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_rg_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, lit)
+
+        def rh_rg_str(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = RoleGrain::rh_rg_get(nodes, texts, obj, key)
+            return false if idx < 0
+            rh_json_str_span(nodes, idx, start_out, end_out)
+
+        def rh_rg_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = RoleGrain::rh_rg_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_rg_role(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return RH_ROLE_AUTHOR if RoleGrain::rh_rg_eq(texts, s, e, "author")
+            return RH_ROLE_COMMITTER if RoleGrain::rh_rg_eq(texts, s, e, "committer")
+            return RH_ROLE_REVIEWER if RoleGrain::rh_rg_eq(texts, s, e, "reviewer")
+            return RH_ROLE_RELEASER if RoleGrain::rh_rg_eq(texts, s, e, "releaser")
+            -1
+
+        def rh_rg_role_label(role: u8) -> u8&:
+            return "author" if role == RH_ROLE_AUTHOR
+            return "committer" if role == RH_ROLE_COMMITTER
+            return "reviewer" if role == RH_ROLE_REVIEWER
+            "releaser"
+
+        def rh_rg_action(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return 0 if RoleGrain::rh_rg_eq(texts, s, e, "replace")
+            return 1 if RoleGrain::rh_rg_eq(texts, s, e, "retract")
+            -1
+
+        def rh_rg_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, s.usize(), e.usize())
+            out.push(34)
+
+        def rh_rg_correction(corrections: darray[RhRoleCorrection]&, texts: darray[u8]&, event: RhRoleEvent&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < corrections.count |i: usize = 0, corrections, texts, event|:
+                c: RhRoleCorrection = corrections[i]
+                return i.i64() if rh_bytes_equal_span(texts, c.event_s, c.event_e, texts, event.id_s, event.id_e)
+                i <- i + 1
+            -1
+
+        def rh_rg_add_role(events: darray[RhRoleEvent]&, corrections: darray[RhRoleCorrection]&, texts: darray[u8]&, current: bool, counts: mutable darray[i64]&, distinct: mutable darray[i64]&, actor_roles: mutable darray[u8]&, actor_s: mutable darray[i64]&, actor_e: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < events.count |i: usize = 0, events, corrections, texts, current, counts, distinct, actor_roles, actor_s, actor_e|:
+                event: RhRoleEvent = events[i]
+                actor_start: mutable i64 = event.actor_s
+                actor_end: mutable i64 = event.actor_e
+                active: mutable bool = true
+                if current:
+                    ci: i64 = RoleGrain::rh_rg_correction(corrections, texts, event)
+                    if ci >= 0:
+                        c: RhRoleCorrection = corrections[ci.usize()]
+                        if c.action == 1:
+                            active <- false
+                        else:
+                            actor_start <- c.actor_s
+                            actor_end <- c.actor_e
+                if active:
+                    counts[event.role.usize()] <- counts[event.role.usize()] + 1
+                    found: mutable bool = false
+                    while j < actor_roles.count |j: usize = 0, actor_roles, actor_s, actor_e, texts, event, actor_start, actor_end, found|:
+                        if actor_roles[j] == event.role and rh_bytes_equal_span(texts, actor_s[j], actor_e[j], texts, actor_start, actor_end):
+                            found <- true
+                        j <- j + 1
+                    if not found:
+                        actor_roles.push(event.role)
+                        actor_s.push(actor_start)
+                        actor_e.push(actor_end)
+                        distinct[event.role.usize()] <- distinct[event.role.usize()] + 1
+                i <- i + 1
+            events.count.i64()
+
+    public:
+        def rh_role_grain_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            ss: mutable i64 = 0
+            se: mutable i64 = 0
+            return -1 if not RoleGrain::rh_rg_str(nodes, texts, root, "schema", &ss, &se) or not RoleGrain::rh_rg_eq(texts, ss, se, "rh-role-grain-input/1")
+            rev_ok: mutable i64 = 0
+            identity_revision: i64 = RoleGrain::rh_rg_int(nodes, raw, texts, root, "identity_revision", &rev_ok)
+            known_ok: mutable i64 = 0
+            as_known_revision: i64 = RoleGrain::rh_rg_int(nodes, raw, texts, root, "as_known_revision", &known_ok)
+            return -1 if rev_ok == 0 or known_ok == 0 or identity_revision < 0 or as_known_revision < 0
+            events_idx: i64 = RoleGrain::rh_rg_get(nodes, texts, root, "events")
+            corrections_idx: i64 = RoleGrain::rh_rg_get(nodes, texts, root, "corrections")
+            return -1 if events_idx < 0 or corrections_idx < 0 or nodes[events_idx.usize()].kind != RH_JSON_ARR or nodes[corrections_idx.usize()].kind != RH_JSON_ARR
+            events: mutable darray[RhRoleEvent] = []
+            while event >= 0 |event: i64 = nodes[events_idx.usize()].first_child, nodes, texts, raw, events|:
+                return -1 if nodes[event.usize()].kind != RH_JSON_OBJ
+                ids: mutable i64 = 0
+                ide: mutable i64 = 0
+                actors: mutable i64 = 0
+                actore: mutable i64 = 0
+                roles: mutable i64 = 0
+                rolee: mutable i64 = 0
+                return -1 if not RoleGrain::rh_rg_str(nodes, texts, event, "id", &ids, &ide) or not RoleGrain::rh_rg_str(nodes, texts, event, "actor", &actors, &actore) or not RoleGrain::rh_rg_str(nodes, texts, event, "role", &roles, &rolee)
+                role: i64 = RoleGrain::rh_rg_role(texts, roles, rolee)
+                at_ok: mutable i64 = 0
+                at: i64 = RoleGrain::rh_rg_int(nodes, raw, texts, event, "at", &at_ok)
+                return -1 if ids == ide or actors == actore or role < 0 or at_ok == 0 or at < 0
+                while i < events.count |i: usize = 0, events, texts, ids, ide|:
+                    return -1 if rh_bytes_equal_span(texts, events[i].id_s, events[i].id_e, texts, ids, ide)
+                    i <- i + 1
+                events.push(RhRoleEvent{id_s: ids, id_e: ide, actor_s: actors, actor_e: actore, role: role.u8(), at: at})
+                event <- nodes[event.usize()].next_sibling
+            corrections: mutable darray[RhRoleCorrection] = []
+            while corr >= 0 |corr: i64 = nodes[corrections_idx.usize()].first_child, nodes, texts, raw, events, corrections|:
+                return -1 if nodes[corr.usize()].kind != RH_JSON_OBJ
+                es: mutable i64 = 0
+                ee: mutable i64 = 0
+                as_: mutable i64 = 0
+                ae: mutable i64 = 0
+                action_s: mutable i64 = 0
+                action_e: mutable i64 = 0
+                return -1 if not RoleGrain::rh_rg_str(nodes, texts, corr, "event_id", &es, &ee) or not RoleGrain::rh_rg_str(nodes, texts, corr, "action", &action_s, &action_e)
+                action: i64 = RoleGrain::rh_rg_action(texts, action_s, action_e)
+                return -1 if action < 0
+                event_found: mutable bool = false
+                while i < events.count |i: usize = 0, events, texts, es, ee, event_found|:
+                    event_found <- true if rh_bytes_equal_span(texts, events[i].id_s, events[i].id_e, texts, es, ee)
+                    i <- i + 1
+                return -1 if not event_found
+                if action == 0:
+                    return -1 if not RoleGrain::rh_rg_str(nodes, texts, corr, "actor", &as_, &ae) or as_ == ae
+                revision_ok: mutable i64 = 0
+                revision: i64 = RoleGrain::rh_rg_int(nodes, raw, texts, corr, "revision", &revision_ok)
+                return -1 if revision_ok == 0 or revision < 0
+                return -1 if RoleGrain::rh_rg_correction(corrections, texts, RhRoleEvent{id_s: es, id_e: ee, actor_s: 0, actor_e: 0, role: 0, at: 0}) >= 0
+                corrections.push(RhRoleCorrection{event_s: es, event_e: ee, action: action.u8(), actor_s: as_, actor_e: ae, revision: revision})
+                corr <- nodes[corr.usize()].next_sibling
+            known_counts: mutable darray[i64] = [0, 0, 0, 0]
+            known_distinct: mutable darray[i64] = [0, 0, 0, 0]
+            current_counts: mutable darray[i64] = [0, 0, 0, 0]
+            current_distinct: mutable darray[i64] = [0, 0, 0, 0]
+            known_roles: mutable darray[u8] = []
+            known_actor_s: mutable darray[i64] = []
+            known_actor_e: mutable darray[i64] = []
+            current_roles: mutable darray[u8] = []
+            current_actor_s: mutable darray[i64] = []
+            current_actor_e: mutable darray[i64] = []
+            _ = RoleGrain::rh_rg_add_role(events, corrections, texts, false, known_counts, known_distinct, known_roles, known_actor_s, known_actor_e)
+            _ = RoleGrain::rh_rg_add_role(events, corrections, texts, true, current_counts, current_distinct, current_roles, current_actor_s, current_actor_e)
+            rh_push_text(out, "{\"schema\":\"rh-role-grain-result/1\",\"identity_revision\":")
+            rh_push_decimal_i64(out, identity_revision)
+            rh_push_text(out, ",\"as_known_revision\":")
+            rh_push_decimal_i64(out, as_known_revision)
+            rh_push_text(out, ",\"event_grain\":\"one_event_one_role\",\"as_known\":{\"event_count\":")
+            rh_push_decimal_i64(out, events.count.i64())
+            rh_push_text(out, ",\"roles\":[")
+            while role < 4 |role: i64 = 0, known_counts, known_distinct, out|:
+                if role > 0:
+                    out.push(44)
+                rh_push_text(out, "{\"role\":\"")
+                rh_push_text(out, RoleGrain::rh_rg_role_label(role.u8()))
+                rh_push_text(out, "\",\"events\":")
+                rh_push_decimal_i64(out, known_counts[role.usize()])
+                rh_push_text(out, ",\"distinct_actors\":")
+                rh_push_decimal_i64(out, known_distinct[role.usize()])
+                rh_push_text(out, "}")
+                role <- role + 1
+            rh_push_text(out, "]},\"current_corrected\":{\"event_count\":")
+            current_total: i64 = current_counts[0] + current_counts[1] + current_counts[2] + current_counts[3]
+            rh_push_decimal_i64(out, current_total)
+            rh_push_text(out, ",\"roles\":[")
+            while role < 4 |role: i64 = 0, current_counts, current_distinct, out|:
+                if role > 0:
+                    out.push(44)
+                rh_push_text(out, "{\"role\":\"")
+                rh_push_text(out, RoleGrain::rh_rg_role_label(role.u8()))
+                rh_push_text(out, "\",\"events\":")
+                rh_push_decimal_i64(out, current_counts[role.usize()])
+                rh_push_text(out, ",\"distinct_actors\":")
+                rh_push_decimal_i64(out, current_distinct[role.usize()])
+                rh_push_text(out, "}")
+                role <- role + 1
+            rh_push_text(out, "]},\"corrections\":{\"applied\":")
+            applied: mutable i64 = 0
+            retracted: mutable i64 = 0
+            while i < corrections.count |i: usize = 0, corrections, applied, retracted|:
+                applied <- applied + 1 if corrections[i].action == 0
+                retracted <- retracted + 1 if corrections[i].action == 1
+                i <- i + 1
+            rh_push_decimal_i64(out, applied)
+            rh_push_text(out, ",\"retracted\":")
+            rh_push_decimal_i64(out, retracted)
+            rh_push_text(out, ",\"invalidated_event_ids\":[")
+            while i < corrections.count |i: usize = 0, corrections, texts, out|:
+                if i > 0:
+                    out.push(44)
+                RoleGrain::rh_rg_emit_span(out, texts, corrections[i].event_s, corrections[i].event_e)
+                i <- i + 1
+            rh_push_text(out, "]},\"note\":\"each event contributes once to its declared role; corrections create a current projection and invalidate affected role aggregates while raw events and the as-known replay remain available\"}")
+            0
