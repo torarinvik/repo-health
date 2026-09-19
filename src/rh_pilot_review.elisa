@@ -1,0 +1,157 @@
+# rh_pilot_review.elisa — bounded pilot and operations review record (RP-08).
+#
+# This records observed review inputs and outage/cost evidence. It does not
+# manufacture an independent audit, release approval, or user-research result.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module PilotReview:
+    private:
+        def rh_pilot_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_pilot_eq(texts: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_bytes_equal_literal(texts, s, e, literal)
+
+        def rh_pilot_span(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_STR
+            node: RhJsonNode = nodes[idx.usize()]
+            return false if node.text_end <= node.text_start
+            s_out[0] <- node.text_start
+            e_out[0] <- node.text_end
+            true
+
+        def rh_pilot_int(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, out_ok: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
+            rh_json_int(nodes, raw, idx, out_ok)
+
+        def rh_pilot_bool(nodes: darray[RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, out_ok: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
+            out_ok[0] <- 0
+            return false if idx < 0 or nodes[idx.usize()].kind != RH_JSON_BOOL
+            out_ok[0] <- 1
+            rh_json_is_true(nodes, raw, idx)
+
+        def rh_pilot_obj(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
+            return -1 if idx < 0 or nodes[idx.usize()].kind != RH_JSON_OBJ
+            idx
+
+        def rh_pilot_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            rh_json_escape(out, texts, s.usize(), e.usize())
+            out.push(34)
+
+        def rh_pilot_nonnegative(value: i64, ok: i64) -> bool:
+            ok != 0 and value >= 0
+
+    public:
+        def rh_pilot_review_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != RH_JSON_OBJ
+            schema_s: mutable i64 = -1
+            schema_e: mutable i64 = -1
+            return -1 if not PilotReview::rh_pilot_span(nodes, texts, root, "schema", &schema_s, &schema_e) or not PilotReview::rh_pilot_eq(texts, schema_s, schema_e, "rh-pilot-review-input/1")
+            review_s: mutable i64 = -1
+            review_e: mutable i64 = -1
+            reviewer_s: mutable i64 = -1
+            reviewer_e: mutable i64 = -1
+            scope_s: mutable i64 = -1
+            scope_e: mutable i64 = -1
+            return -1 if not PilotReview::rh_pilot_span(nodes, texts, root, "review_id", &review_s, &review_e) or not PilotReview::rh_pilot_span(nodes, texts, root, "reviewer", &reviewer_s, &reviewer_e) or not PilotReview::rh_pilot_span(nodes, texts, root, "scope", &scope_s, &scope_e)
+            reviewed_ok: mutable i64 = 0
+            reviewed_at: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, root, "reviewed_at", &reviewed_ok)
+            return -1 if not PilotReview::rh_pilot_nonnegative(reviewed_at, reviewed_ok)
+
+            mapping: i64 = PilotReview::rh_pilot_obj(nodes, texts, root, "mapping_review")
+            corrections: i64 = PilotReview::rh_pilot_obj(nodes, texts, root, "corrections")
+            usefulness: i64 = PilotReview::rh_pilot_obj(nodes, texts, root, "decision_usefulness")
+            outage: i64 = PilotReview::rh_pilot_obj(nodes, texts, root, "provider_outage")
+            costs: i64 = PilotReview::rh_pilot_obj(nodes, texts, root, "costs")
+            return -1 if mapping < 0 or corrections < 0 or usefulness < 0 or outage < 0 or costs < 0
+
+            mapping_ok: mutable i64 = 0
+            mapping_accepted_ok: mutable i64 = 0
+            mapping_open_ok: mutable i64 = 0
+            mapping_sampled: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, mapping, "sampled", &mapping_ok)
+            mapping_accepted: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, mapping, "accepted", &mapping_accepted_ok)
+            mapping_open: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, mapping, "needs_review", &mapping_open_ok)
+            return -1 if not PilotReview::rh_pilot_nonnegative(mapping_sampled, mapping_ok) or not PilotReview::rh_pilot_nonnegative(mapping_accepted, mapping_accepted_ok) or not PilotReview::rh_pilot_nonnegative(mapping_open, mapping_open_ok) or mapping_accepted + mapping_open > mapping_sampled
+
+            requested_ok: mutable i64 = 0
+            resolved_ok: mutable i64 = 0
+            turnaround_ok: mutable i64 = 0
+            corrections_requested: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, corrections, "requested", &requested_ok)
+            corrections_resolved: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, corrections, "resolved", &resolved_ok)
+            median_turnaround: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, corrections, "median_turnaround_seconds", &turnaround_ok)
+            return -1 if not PilotReview::rh_pilot_nonnegative(corrections_requested, requested_ok) or not PilotReview::rh_pilot_nonnegative(corrections_resolved, resolved_ok) or not PilotReview::rh_pilot_nonnegative(median_turnaround, turnaround_ok) or corrections_resolved > corrections_requested
+
+            understood_ok: mutable i64 = 0
+            false_positive_ok: mutable i64 = 0
+            false_negative_ok: mutable i64 = 0
+            understood: bool = PilotReview::rh_pilot_bool(nodes, raw, texts, usefulness, "understood", &understood_ok)
+            false_positive: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, usefulness, "false_positive_count", &false_positive_ok)
+            false_negative: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, usefulness, "false_negative_count", &false_negative_ok)
+            return -1 if understood_ok == 0 or not PilotReview::rh_pilot_nonnegative(false_positive, false_positive_ok) or not PilotReview::rh_pilot_nonnegative(false_negative, false_negative_ok)
+
+            outage_cap_s: mutable i64 = -1
+            outage_cap_e: mutable i64 = -1
+            outage_status_s: mutable i64 = -1
+            outage_status_e: mutable i64 = -1
+            outage_usable_ok: mutable i64 = 0
+            return -1 if not PilotReview::rh_pilot_span(nodes, texts, outage, "capability", &outage_cap_s, &outage_cap_e) or not PilotReview::rh_pilot_span(nodes, texts, outage, "status", &outage_status_s, &outage_status_e)
+            other_capabilities_usable: bool = PilotReview::rh_pilot_bool(nodes, raw, texts, outage, "other_capabilities_usable", &outage_usable_ok)
+            return -1 if outage_usable_ok == 0 or not PilotReview::rh_pilot_eq(texts, outage_status_s, outage_status_e, "stale_unknown") and not PilotReview::rh_pilot_eq(texts, outage_status_s, outage_status_e, "recovered") and not PilotReview::rh_pilot_eq(texts, outage_status_s, outage_status_e, "unsupported")
+
+            events_ok: mutable i64 = 0
+            bytes_ok: mutable i64 = 0
+            elapsed_ok: mutable i64 = 0
+            cost_events: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, costs, "events", &events_ok)
+            cost_bytes: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, costs, "bytes", &bytes_ok)
+            elapsed_ms: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, costs, "elapsed_ms", &elapsed_ok)
+            return -1 if not PilotReview::rh_pilot_nonnegative(cost_events, events_ok) or not PilotReview::rh_pilot_nonnegative(cost_bytes, bytes_ok) or not PilotReview::rh_pilot_nonnegative(elapsed_ms, elapsed_ok)
+
+            rh_push_text(out, "{\"schema\":\"rh-pilot-review-result/1\",\"review\":{\"id\":")
+            PilotReview::rh_pilot_emit_span(out, texts, review_s, review_e)
+            rh_push_text(out, ",\"reviewer\":")
+            PilotReview::rh_pilot_emit_span(out, texts, reviewer_s, reviewer_e)
+            rh_push_text(out, ",\"reviewed_at\":")
+            rh_push_decimal_i64(out, reviewed_at)
+            rh_push_text(out, ",\"scope\":")
+            PilotReview::rh_pilot_emit_span(out, texts, scope_s, scope_e)
+            rh_push_text(out, "},\"mapping_review\":{\"sampled\":")
+            rh_push_decimal_i64(out, mapping_sampled)
+            rh_push_text(out, ",\"accepted\":")
+            rh_push_decimal_i64(out, mapping_accepted)
+            rh_push_text(out, ",\"needs_review\":")
+            rh_push_decimal_i64(out, mapping_open)
+            rh_push_text(out, "},\"corrections\":{\"requested\":")
+            rh_push_decimal_i64(out, corrections_requested)
+            rh_push_text(out, ",\"resolved\":")
+            rh_push_decimal_i64(out, corrections_resolved)
+            rh_push_text(out, ",\"median_turnaround_seconds\":")
+            rh_push_decimal_i64(out, median_turnaround)
+            rh_push_text(out, "},\"decision_usefulness\":{\"understood\":")
+            rh_push_text(out, "true" if understood else "false")
+            rh_push_text(out, ",\"false_positive_count\":")
+            rh_push_decimal_i64(out, false_positive)
+            rh_push_text(out, ",\"false_negative_count\":")
+            rh_push_decimal_i64(out, false_negative)
+            rh_push_text(out, "},\"provider_outage\":{\"capability\":")
+            PilotReview::rh_pilot_emit_span(out, texts, outage_cap_s, outage_cap_e)
+            rh_push_text(out, ",\"status\":")
+            PilotReview::rh_pilot_emit_span(out, texts, outage_status_s, outage_status_e)
+            rh_push_text(out, ",\"other_capabilities_usable\":")
+            rh_push_text(out, "true" if other_capabilities_usable else "false")
+            rh_push_text(out, "},\"costs\":{\"events\":")
+            rh_push_decimal_i64(out, cost_events)
+            rh_push_text(out, ",\"bytes\":")
+            rh_push_decimal_i64(out, cost_bytes)
+            rh_push_text(out, ",\"elapsed_ms\":")
+            rh_push_decimal_i64(out, elapsed_ms)
+            rh_push_text(out, "},\"state\":\"recorded\",\"note\":\"pilot observations are recorded for review; this contract is not an independent audit, release approval, or claim of decision usefulness beyond the supplied counts\"}")
+            0

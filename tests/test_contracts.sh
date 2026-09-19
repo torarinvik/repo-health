@@ -48,7 +48,7 @@ for want in ("dep-graph", "canonical-repo", "bundle-manifest", "report",
              "corrections-state", "connector-instance", "job-next",
              "job-schedule-result",
              "reconcile-result", "job-schedule-result",
-             "worker-plan", "succession-metric", "adapter-manifest-result", "research-conformance"):
+             "worker-plan", "succession-metric", "adapter-manifest-result", "research-conformance", "pilot-review-result"):
     assert want in ids, ("missing contract", want)
 assert d["rules"], "contract rules must be stated"
 print("[contracts] OK:", len(ids), "contracts")
