@@ -1077,6 +1077,32 @@ module Package:
                     total <- total + 1
                 i <- i + 1
 
+        # Direct dependency projections use the selected graph root. Requirements
+        # and unresolved records remain distinct from exact edges; resolved
+        # versions are counted as unique destination nodes even when scopes
+        # produce duplicate edge records.
+        def rh_direct_requirement_count(reqs: mutable darray[RhRequire]&, root: mutable i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < reqs.count |total: i64 = 0, i: i64 = 0, reqs, root| -> total:
+                total <- total + 1 if reqs[i.usize()].from == root
+                i <- i + 1
+
+        def rh_direct_unresolved_count(unresolved: mutable darray[RhUnresolved]&, root: mutable i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < unresolved.count |total: i64 = 0, i: i64 = 0, unresolved, root| -> total:
+                total <- total + 1 if unresolved[i.usize()].from == root
+                i <- i + 1
+
+        def rh_direct_resolved_count(edges: mutable darray[RhDepEdge]&, root: mutable i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            seen: mutable darray[i64] = []
+            while i < edges.count |i: i64 = 0, edges, root, seen| -> seen.count.i64():
+                e: mutable RhDepEdge = edges[i.usize()]
+                if e.from == root:
+                    already: bool =
+                        while j < seen.count |already: bool = false, j: i64 = 0, seen, e| -> already:
+                            already <- true if seen[j.usize()] == e.dst
+                            j <- j + 1
+                    seen.push(e.dst) if not already
+                i <- i + 1
+
         def rh_visited_has(visited: darray[i64]&, node: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             while i < visited.count |i: usize = 0, visited, node|:
                 return true if visited[i] == node
@@ -2276,7 +2302,7 @@ module Package:
         # `dependencies.unsupported_range_count`, with per-ecosystem components so
         # the denominator-free count can be audited. It never claims a dependency
         # is safe or that the graph is complete (R009/F022/R030).
-        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, advisories: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, advisories: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
             total_declared: i64 =
                 while i < eco_codes.count.i64() |total_declared: i64 = 0, i: i64 = 0| -> total_declared:
                     total_declared <- total_declared + declared[i.usize()]
@@ -2292,6 +2318,18 @@ module Package:
             total_unsupported: i64 =
                 while i < eco_codes.count.i64() |total_unsupported: i64 = 0, i: i64 = 0| -> total_unsupported:
                     total_unsupported <- total_unsupported + unsupported[i.usize()]
+                    i <- i + 1
+            total_direct_declared: i64 =
+                while i < eco_codes.count.i64() |total_direct_declared: i64 = 0, i: i64 = 0, direct_declared| -> total_direct_declared:
+                    total_direct_declared <- total_direct_declared + direct_declared[i.usize()]
+                    i <- i + 1
+            total_direct_resolved: i64 =
+                while i < eco_codes.count.i64() |total_direct_resolved: i64 = 0, i: i64 = 0, direct_resolved| -> total_direct_resolved:
+                    total_direct_resolved <- total_direct_resolved + direct_resolved[i.usize()]
+                    i <- i + 1
+            total_direct_unresolved: i64 =
+                while i < eco_codes.count.i64() |total_direct_unresolved: i64 = 0, i: i64 = 0, direct_unresolved| -> total_direct_unresolved:
+                    total_direct_unresolved <- total_direct_unresolved + direct_unresolved[i.usize()]
                     i <- i + 1
             security_observed: bool = advisories.count == eco_codes.count and eco_codes.count > 0 and advisories[0] >= 0
             total_advisories: mutable i64 = 0
@@ -2330,6 +2368,15 @@ module Package:
             Base::rh_push_text(out, "{\"key\":\"dependencies.unresolved_requirement_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, total_unresolved)
             Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.requirements_direct\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, total_direct_declared)
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.resolved_direct_versions\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, total_direct_resolved)
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"dependency.unresolved_requirements\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, total_direct_unresolved)
+            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"security.known_unique_advisories\",\"version\":\"1.0.0\",\"status\":\"")
             if security_observed:
                 Base::rh_push_text(out, "observed\",\"value\":")
@@ -2351,7 +2398,7 @@ module Package:
             else:
                 Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
             Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]}],\"by_ecosystem\":[")
-            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, advisories, affected_nodes, withdrawn, out|:
+            while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, advisories, affected_nodes, withdrawn, out|:
                 if k > 0:
                     out.push(44)
                 ec: i64 = eco_codes[k.usize()]
@@ -2367,6 +2414,12 @@ module Package:
                 Base::rh_push_decimal_i64(out, unresolved[k.usize()])
                 Base::rh_push_text(out, ",\"unsupported_range_count\":")
                 Base::rh_push_decimal_i64(out, unsupported[k.usize()])
+                Base::rh_push_text(out, ",\"requirements_direct\":")
+                Base::rh_push_decimal_i64(out, direct_declared[k.usize()])
+                Base::rh_push_text(out, ",\"resolved_direct_versions\":")
+                Base::rh_push_decimal_i64(out, direct_resolved[k.usize()])
+                Base::rh_push_text(out, ",\"unresolved_direct_requirements\":")
+                Base::rh_push_decimal_i64(out, direct_unresolved[k.usize()])
                 Base::rh_push_text(out, ",\"known_unique_advisories\":")
                 if security_observed:
                     Base::rh_push_decimal_i64(out, advisories[k.usize()])
