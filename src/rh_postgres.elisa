@@ -88,18 +88,13 @@ module Postgres:
             bytes.push(0)
             bytes
 
-    public:
-        # Commit one complete collection page through the migration's fenced,
-        # idempotent transaction. Parameters use libpq's extended query protocol;
-        # none are interpolated into SQL or passed through a shell. Empty optional
-        # JSON/evidence strings map to SQL NULL. Returns 1 when committed, 0 when
-        # this page was already committed, or -1 on connection/query failure.
-        def rh_pg_commit_collection_page(conninfo: cstr, run_id: cstr, page_number: i64, scope_hash: cstr, cursor_before: cstr, cursor_after: cstr, completeness: cstr, record_count: i64, evidence_id: cstr, now: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            return -1 if page_number < 0 or record_count < 0
-            return -1 if not Base::rh_streq(completeness, "complete") and not Base::rh_streq(completeness, "empty")
+        # Every public repository operation is one parameterized PostgreSQL
+        # function call, so the database owns the short transaction boundary.
+        def rh_pg_boolean_query(conninfo: cstr, statement: cstr, params: darray[cstr]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if params.count == 0 or params.count > 64
             api: RhPgApi = Postgres::rh_pg_load_api()
             return -1 if api.library == null
-            handle: void& = api.library
+            library: void& = api.library
             connectdb_params: fn(void&, void&, i32) -> void&? = api.connectdb_params.cast[fn(void&, void&, i32) -> void&?] can Unsafe.PointerCast
             status: fn(void&) -> i32 = api.status.cast[fn(void&) -> i32] can Unsafe.PointerCast
             exec_params: fn(void&, cstr, i32, void&?, void&, void&?, void&?, i32) -> void&? = api.exec_params.cast[fn(void&, cstr, i32, void&?, void&, void&?, void&?, i32) -> void&?] can Unsafe.PointerCast
@@ -122,29 +117,15 @@ module Postgres:
             value_ptr: void& = (&values[0]).cast[void&] can Unsafe.PointerCast
             connection: void&? = connectdb_params(keyword_ptr, value_ptr, 1)
             if connection == null:
-                _ = rh_pg_dlclose(handle)
+                _ = rh_pg_dlclose(library)
                 return -1
             conn: void& = connection
             outcome: i64 =
                 if status(conn) != 0:
                     -1
                 else:
-                    page_text: mutable darray[u8] = Postgres::rh_pg_decimal(page_number)
-                    count_text: mutable darray[u8] = Postgres::rh_pg_decimal(record_count)
-                    page_ptr: cstr = (&page_text[0]).cast[cstr] can Unsafe.PointerCast
-                    count_ptr: cstr = (&count_text[0]).cast[cstr] can Unsafe.PointerCast
-                    params: mutable darray[cstr] = []
-                    params.push(run_id)
-                    params.push(page_ptr)
-                    params.push(scope_hash)
-                    params.push(cursor_before)
-                    params.push(cursor_after)
-                    params.push(completeness)
-                    params.push(count_ptr)
-                    params.push(evidence_id)
-                    params.push(now)
                     param_values: void& = (&params[0]).cast[void&] can Unsafe.PointerCast
-                    query_result: void&? = exec_params(conn, "SELECT public.rh_commit_collection_page($1::uuid, $2::integer, $3::text, NULLIF($4, '')::jsonb, $5::jsonb, $6::text, $7::integer, NULLIF($8, '')::uuid, $9::timestamptz)", 9, null, param_values, null, null, 0)
+                    query_result: void&? = exec_params(conn, statement, params.count.i32(), null, param_values, null, null, 0)
                     if query_result == null:
                         -1
                     else:
@@ -158,5 +139,61 @@ module Postgres:
                         clear(result)
                         parsed
             finish(conn)
-            _ = rh_pg_dlclose(handle)
+            _ = rh_pg_dlclose(library)
             outcome
+
+    public:
+        # Commit one complete collection page through the migration's fenced,
+        # idempotent transaction. Parameters use libpq's extended query protocol;
+        # none are interpolated into SQL or passed through a shell. Empty optional
+        # JSON/evidence strings map to SQL NULL. Returns 1 when committed, 0 when
+        # this page was already committed, or -1 on connection/query failure.
+        def rh_pg_commit_collection_page(conninfo: cstr, run_id: cstr, page_number: i64, scope_hash: cstr, cursor_before: cstr, cursor_after: cstr, completeness: cstr, record_count: i64, evidence_id: cstr, now: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if page_number < 0 or record_count < 0
+            return -1 if not Base::rh_streq(completeness, "complete") and not Base::rh_streq(completeness, "empty")
+            page_text: mutable darray[u8] = Postgres::rh_pg_decimal(page_number)
+            count_text: mutable darray[u8] = Postgres::rh_pg_decimal(record_count)
+            page_ptr: cstr = (&page_text[0]).cast[cstr] can Unsafe.PointerCast
+            count_ptr: cstr = (&count_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(run_id)
+            params.push(page_ptr)
+            params.push(scope_hash)
+            params.push(cursor_before)
+            params.push(cursor_after)
+            params.push(completeness)
+            params.push(count_ptr)
+            params.push(evidence_id)
+            params.push(now)
+            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_commit_collection_page($1::uuid, $2::integer, $3::text, NULLIF($4, '')::jsonb, $5::jsonb, $6::text, $7::integer, NULLIF($8, '')::uuid, $9::timestamptz)", params)
+
+        # A stale worker token receives a normal false result from PostgreSQL;
+        # transport or query failures remain distinguishable as -1.
+        def rh_pg_heartbeat_job(conninfo: cstr, job_id: cstr, fencing_token: i64, now: cstr, lease_seconds: i64) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if fencing_token <= 0 or lease_seconds <= 0 or lease_seconds > 86400
+            token_text: mutable darray[u8] = Postgres::rh_pg_decimal(fencing_token)
+            lease_text: mutable darray[u8] = Postgres::rh_pg_decimal(lease_seconds)
+            token_ptr: cstr = (&token_text[0]).cast[cstr] can Unsafe.PointerCast
+            lease_ptr: cstr = (&lease_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(job_id)
+            params.push(token_ptr)
+            params.push(now)
+            params.push(lease_ptr)
+            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_heartbeat_job($1::uuid, $2::bigint, $3::timestamptz, $4::integer)", params)
+
+        # Finish only a recognized terminal state; the migration function
+        # performs the fencing check and closes the matching attempt atomically.
+        def rh_pg_finish_job(conninfo: cstr, job_id: cstr, fencing_token: i64, state: cstr, now: cstr, outcome: cstr, error_kind: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if fencing_token <= 0
+            return -1 if not Base::rh_streq(state, "succeeded") and not Base::rh_streq(state, "failed") and not Base::rh_streq(state, "dead_letter") and not Base::rh_streq(state, "canceled")
+            token_text: mutable darray[u8] = Postgres::rh_pg_decimal(fencing_token)
+            token_ptr: cstr = (&token_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(job_id)
+            params.push(token_ptr)
+            params.push(state)
+            params.push(now)
+            params.push(outcome)
+            params.push(error_kind)
+            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_finish_job($1::uuid, $2::bigint, $3::text, $4::timestamptz, NULLIF($5, '')::text, NULLIF($6, '')::text)", params)

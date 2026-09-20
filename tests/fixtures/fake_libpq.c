@@ -24,13 +24,33 @@ int PQstatus(void *handle) {
 void *PQexecParams(void *handle, const char *query, int count, const unsigned int *types,
                    const char *const *values, const int *lengths, const int *formats,
                    int result_format) {
-    static const char *expected[9] = {
+    static const char *page_values[9] = {
         "00000000-0000-0000-0000-000000000001", "7",
         "scope ' ; SELECT pg_sleep(60); --", "", "{\"page\":8}", "complete",
         "2", "", "2026-01-01T00:01:00Z"
     };
-    if (handle != &connection || query == NULL || strncmp(query, "SELECT public.rh_commit_collection_page(", 40) != 0 ||
-        count != 9 || types != NULL || values == NULL || lengths != NULL || formats != NULL || result_format != 0)
+    static const char *heartbeat_values[4] = {
+        "00000000-0000-0000-0000-000000000002", "4", "2026-01-01T00:01:00Z", "60"
+    };
+    static const char *finish_values[6] = {
+        "00000000-0000-0000-0000-000000000002", "4", "dead_letter",
+        "2026-01-01T00:02:00Z", "retry-exhausted", "malformed"
+    };
+    const char *operation = getenv("RH_FAKE_PG_OPERATION");
+    const char **expected = page_values;
+    const char *prefix = "SELECT public.rh_commit_collection_page(";
+    int expected_count = 9;
+    if (operation != NULL && strcmp(operation, "heartbeat") == 0) {
+        expected = heartbeat_values;
+        expected_count = 4;
+        prefix = "SELECT public.rh_heartbeat_job(";
+    } else if (operation != NULL && strcmp(operation, "finish") == 0) {
+        expected = finish_values;
+        expected_count = 6;
+        prefix = "SELECT public.rh_finish_job(";
+    }
+    if (handle != &connection || query == NULL || strncmp(query, prefix, strlen(prefix)) != 0 ||
+        count != expected_count || types != NULL || values == NULL || lengths != NULL || formats != NULL || result_format != 0)
         return NULL;
     for (int i = 0; i < count; ++i)
         if (values[i] == NULL || strcmp(values[i], expected[i]) != 0)

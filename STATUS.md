@@ -31,12 +31,12 @@ evidence and graph indexes, fenced lease/cursor SQL methods) with the static
 `RH_PG_MIGRATION=1 tests/test_migrations_live.sh` rehearsal applies
 the migration to PostgreSQL 16 and exercises stale fencing, terminal finish,
 complete-only cursor advancement, and duplicate-page idempotence. The first
-dynamically loaded `libpq` application
-method commits a collection page through `rh_commit_collection_page`, with
-bound parameters and `connect_timeout=5`, verified by the ABI fixture in
+dynamically loaded `libpq` application methods commit a collection page and
+heartbeat/finish fenced jobs through the migration functions, with bound
+parameters and `connect_timeout=5`, verified by the ABI fixture in
 `tests/test_pg_adapter.sh` and the opt-in real-database path in
-`tests/test_pg_adapter_live.sh` (`RH_PG_ADAPTER=1`); event/evidence/job
-persistence and wiring into `rh_cli ingest` remain open. Capability manifests
+`tests/test_pg_adapter_live.sh` (`RH_PG_ADAPTER=1`); event/evidence persistence,
+job claiming, and wiring into `rh_cli ingest` remain open. Capability manifests
 (5 connectors), bounded JSON parser, ISO8601, fetch guard + curl transport, GitHub/GitLab/Gitea/Forgejo
 normalizers with goldens, per-capability status mapping, durable
 filesystem store (content-addressed blobs with tamper-blocked publication,
