@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Optional adapter-to-PostgreSQL test. It needs Docker and a local libpq dylib.
+# Optional adapter-to-PostgreSQL test. It needs Docker and a local libpq library.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${RH_PG_IMAGE:-postgres:16-alpine}"
 CONTAINER="rh-pg-adapter-${$}"
+TMP_DIR="/tmp/rh-pg-adapter-live-${$}"
 
 if [[ "${RH_PG_ADAPTER:-0}" != "1" ]]; then
   echo "[pg-adapter-live] skipped (RH_PG_ADAPTER!=1)"
@@ -14,7 +15,7 @@ fail() { echo "[pg-adapter-live] FAIL: $1" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 docker info >/dev/null 2>&1 || fail "docker daemon is unavailable"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "image is unavailable: $IMAGE"
-cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 
 bash "$ROOT/tools/build.sh" >/dev/null
@@ -31,6 +32,8 @@ INSERT INTO source_instance (id, kind, base_url, visibility_scope, configuration
 VALUES ('00000000-0000-0000-0000-000000000001', 'github', 'https://api.github.com', 'public', 1, '2026-01-01T00:00:00Z');
 INSERT INTO collection_run (id, source_instance_id, capability, connector_name, connector_version, started_at, status, completeness)
 VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-01T00:00:00Z', 'running', 'unknown');
+INSERT INTO entity (id, entity_kind, visibility_scope, created_at)
+VALUES ('00000000-0000-0000-0000-000000000005', 'issue', 'public', '2026-01-01T00:00:00Z');
 INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, attempt_count, fencing_token, worker_id, lease_expires_at, created_at)
 VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'running', 1, '2026-01-01T00:00:00Z', 1, 4, 'worker-a', '2026-09-22T00:00:00Z', '2026-01-01T00:00:00Z');
 INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, created_at)
@@ -43,4 +46,39 @@ if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
 else
   env -u RH_LIBPQ_PATH RH_TEST_PG_CONNINFO="host=127.0.0.1 port=$PORT dbname=repo_health user=postgres password=repo-health-test sslmode=disable" "$ROOT/build/test_postgres_live" || fail "libpq unavailable; set RH_LIBPQ_PATH to its library"
 fi
-echo "[pg-adapter-live] page replay, fenced job lifecycle, and empty-queue claim OK"
+
+mkdir -p "$TMP_DIR/evidence"
+printf 'hello evidence\n' > "$TMP_DIR/evidence-source.txt"
+stored_name="$("$ROOT/build/rh_cli" store put --root "$TMP_DIR/evidence" --file "$TMP_DIR/evidence-source.txt" | awk '{print $3}')"
+[[ "$stored_name" == "f5e19178d3ff184e" ]] || fail "content-addressed evidence fixture changed"
+CONNINFO="host=127.0.0.1 port=$PORT dbname=repo_health user=postgres password=repo-health-test sslmode=disable"
+
+run_cli() {
+  local input="$1" output="$2"
+  if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
+    RH_DATABASE_URL="$CONNINFO" RH_EVIDENCE_ROOT="$TMP_DIR/evidence" RH_LIBPQ_PATH="$RH_LIBPQ_PATH" \
+      "$ROOT/build/rh_cli" postgres --input "$input" --out "$output" >/dev/null
+  else
+    env -u RH_LIBPQ_PATH RH_DATABASE_URL="$CONNINFO" RH_EVIDENCE_ROOT="$TMP_DIR/evidence" \
+      "$ROOT/build/rh_cli" postgres --input "$input" --out "$output" >/dev/null
+  fi
+}
+
+run_cli "$ROOT/fixtures/postgres/register-evidence-command.json" "$TMP_DIR/evidence-registered.json" || fail "CLI evidence registration"
+run_cli "$ROOT/fixtures/postgres/register-evidence-command.json" "$TMP_DIR/evidence-duplicate.json" || fail "CLI evidence replay"
+run_cli "$ROOT/fixtures/postgres/page-events-evidence-command.json" "$TMP_DIR/events-committed.json" || fail "CLI event page with registered evidence"
+run_cli "$ROOT/fixtures/postgres/page-events-evidence-command.json" "$TMP_DIR/events-duplicate.json" || fail "CLI event page replay"
+python3 - "$TMP_DIR" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+def read(name):
+    with open(os.path.join(root, name)) as stream:
+        return json.load(stream)
+assert read("evidence-registered.json")["status"] == "registered"
+assert read("evidence-duplicate.json")["status"] == "duplicate"
+assert read("events-committed.json")["status"] == "committed"
+assert read("events-duplicate.json")["status"] == "duplicate"
+PY
+event_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM canonical_event WHERE source_object_id = 'issue:live' AND evidence_id = '00000000-0000-0000-0000-000000000006'::uuid")"
+[[ "$event_count" == "1" ]] || fail "registered evidence event did not commit exactly once"
+echo "[pg-adapter-live] page replay, evidence registration, event linkage, fenced job lifecycle, and empty-queue claim OK"

@@ -31,7 +31,9 @@ connection string as an environment setting, never as a command argument.
 Remote connection strings should use `sslmode=verify-full` and a
 trusted root certificate. The mock ABI gate is `tests/test_pg_adapter.sh`; set
 `RH_PG_ADAPTER=1` and optionally `RH_LIBPQ_PATH` to run these operations
-against an ephemeral PostgreSQL instance with `tests/test_pg_adapter_live.sh`.
+against an ephemeral PostgreSQL instance with `tests/test_pg_adapter_live.sh`;
+that rehearsal drives the CLI from local blob verification through evidence
+registration to an event-page commit that references the registered evidence.
 The CLI command contract and failure gates are covered by
 `tests/test_postgres_cli.sh`.
 
