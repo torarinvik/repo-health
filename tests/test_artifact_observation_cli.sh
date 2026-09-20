@@ -213,6 +213,29 @@ with tempfile.TemporaryDirectory(prefix="rh-artifact-npm-e2e-") as temporary:
     assert result["verification_basis"] == "raw_npm_tarball_bytes", result
 PY
 
+echo "[artifact-observe] Go h1 go.mod verification emits rh-go-mod-observation-result/1"
+"$ROOT/build/rh_cli" artifact-observe \
+  --graph "$ROOT/fixtures/packages/go-mod-observation-graph.json" \
+  --artifact 0 \
+  --file "$ROOT/fixtures/packages/go-mod-artifact.mod" \
+  --out "$T/go-mod-observation.json" >/dev/null
+cmp "$T/go-mod-observation.json" "$ROOT/fixtures/packages/go-mod-observation-result.json"
+cp "$ROOT/fixtures/packages/go-mod-artifact.mod" "$T/changed-go.mod"
+printf '\n// changed' >> "$T/changed-go.mod"
+"$ROOT/build/rh_cli" artifact-observe \
+  --graph "$ROOT/fixtures/packages/go-mod-observation-graph.json" \
+  --artifact 0 \
+  --file "$T/changed-go.mod" \
+  --out "$T/go-mod-changed-observation.json" >/dev/null
+python3 - "$T/go-mod-changed-observation.json" <<'PY'
+import json, sys
+result=json.load(open(sys.argv[1]))
+assert result["schema"] == "rh-go-mod-observation-result/1", result
+assert result["verification_basis"] == "go_h1_mod_file", result
+assert result["identity_state"] == "changed", result
+assert result["observed_digest"] != result["expected_digest"], result
+PY
+
 echo "[artifact-observe] unsupported and out-of-range evidence fails closed"
 python3 - "$T/oversized-graph.json" <<'PY'
 import pathlib, sys

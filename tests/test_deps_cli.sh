@@ -339,6 +339,10 @@ m = json.load(open(out + "/deps-metrics.json"))
 assert g["ecosystem"] == "go", g["ecosystem"]
 assert g["nodes"][0]["name"] == "example.com/app", g["nodes"][0]
 assert len(g["nodes"]) == 5 and len(g["edges"]) == 4, (g["nodes"], g["edges"])
+go_mod_artifacts = [a for a in g["artifacts"] if a["kind"] == "go_mod"]
+module_artifacts = [a for a in g["artifacts"] if a["kind"] == "module"]
+assert len(go_mod_artifacts) == 1 and go_mod_artifacts[0]["expected_digest"] == "h1:" + "B" * 42 + "A=", go_mod_artifacts
+assert len(module_artifacts) == 1 and module_artifacts[0]["expected_digest"] == "h1:" + "A" * 43 + "=", module_artifacts
 names = sorted(n["name"] for n in g["nodes"][1:])
 assert names == ["github.com/google/uuid", "github.com/pkg/errors", "github.com/stretchr/testify", "golang.org/x/text"], names
 reasons = {u["name"]: u["reason"] for u in g["unresolved"]}

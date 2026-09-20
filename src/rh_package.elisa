@@ -48,6 +48,7 @@ module Package:
         const RH_ART_CHANGED: i64 = 2
         const RH_ART_KIND_ARCHIVE: u8 = 0
         const RH_ART_KIND_MODULE: u8 = 1
+        const RH_ART_KIND_GO_MOD: u8 = 2
 
         # Compare an expected digest against an observed digest for one version
         # label. Either side missing => UNKNOWN (never a match). known flags are
@@ -779,6 +780,7 @@ module Package:
     private:
         def rh_artifact_kind_label(kind: u8) -> u8&:
             return "module" if kind == RH_ART_KIND_MODULE
+            return "go_mod" if kind == RH_ART_KIND_GO_MOD
             "archive"
 
         def rh_artifact_state_label(state: i64) -> u8&:
@@ -2497,16 +2499,15 @@ module Package:
 
         # --- Go module checksums (go.sum; M03-02) -------------------------------
         # A go.sum module line is evidence for the exact module/version selected by
-        # go.mod. The separate `<version>/go.mod` checksum is metadata for the module
-        # file, not the package artifact, so it is deliberately ignored here. Unknown
-        # module lines are retained by Go's normal sum database but do not become
+        # go.mod. Zip checksums attach to the module artifact; `/go.mod` checksums
+        # attach to a distinct `go_mod` artifact. Unknown module lines do not create
         # graph nodes when the local go.mod did not declare them.
         def rh_go_sum_digest_valid(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if e - s != 47
             return false if not rh_go_tok(data, s, s + 3, "h1:")
             Base64::rh_base64_sha256_valid(data, s + 3, e)
 
-        def rh_go_sum_line(sum: darray[u8]&, s: i64, e: i64, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_go_sum_line(sum: darray[u8]&, s: i64, e: i64, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, artifacts: mutable darray[RhArtifact]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             ts: mutable i64 = 0
             te: mutable i64 = 0
             rh_go_trim(sum, s, e, &ts, &te)
@@ -2533,16 +2534,24 @@ module Package:
                 while extra < te and (sum[extra.usize()] == 32 or sum[extra.usize()] == 9) |extra: i64 = de| -> extra:
                     extra <- extra + 1
             return -1 if extra < te
-            # Ignore the module-file checksum while retaining package checksums.
             is_modfile: bool = ve - vs >= 7 and sum[(ve - 7).usize()] == 47 and rh_go_tok(sum, ve - 6, ve, "go.mod")
-            return 0 if is_modfile
             version_end: i64 =
                 while version_end < ve and sum[version_end.usize()] != 47 |version_end: i64 = vs| -> version_end:
                     version_end <- version_end + 1
-            while i < pkgs.count |i: usize = 0, pkgs, pool, sum, ms, me, vs, version_end, ds, de|:
+            while i < pkgs.count |i: usize = 0, pkgs, pool, sum, artifacts, ms, me, vs, version_end, ds, de, is_modfile|:
                 n: RhPkgNode = pkgs[i]
                 if n.eco == RH_ECO_GO and n.name_s >= 0 and n.ver_s >= 0:
                     if rh_go_span_eq2(pool, n.name_s.usize(), n.name_e.usize(), sum, ms.usize(), me.usize()) and rh_go_span_eq2(pool, n.ver_s.usize(), n.ver_e.usize(), sum, vs.usize(), version_end.usize()):
+                        if is_modfile:
+                            while a < artifacts.count |a: usize = 0, artifacts, pool, i, sum, ds, de|:
+                                prior: RhArtifact = artifacts[a]
+                                if prior.kind == RH_ART_KIND_GO_MOD and prior.package_node == i.i64():
+                                    return 0 if rh_go_span_eq2(pool, prior.expected_s.usize(), prior.expected_e.usize(), sum, ds.usize(), de.usize())
+                                    return -1
+                                a <- a + 1
+                            digest_start: i64 = rh_pool_copy(pool, sum, ds.usize(), de.usize())
+                            return -1 if rh_artifact_add_expected(artifacts, i.i64(), RH_ART_KIND_GO_MOD, digest_start, digest_start + (de - ds)) < 0
+                            return 0
                         if n.has_digest == 1:
                             return 0 if rh_go_span_eq2(pool, n.dig_s.usize(), n.dig_e.usize(), sum, ds.usize(), de.usize())
                             return -1
@@ -2555,12 +2564,12 @@ module Package:
                 i <- i + 1
             0
 
-        def rh_go_sum_parse(sum: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while pos < sum.count.i64() |pos: i64 = 0, sum, pkgs, pool|:
+        def rh_go_sum_parse(sum: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, artifacts: mutable darray[RhArtifact]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while pos < sum.count.i64() |pos: i64 = 0, sum, pkgs, pool, artifacts|:
                 line_end: i64 =
                     while line_end < sum.count.i64() and sum[line_end.usize()] != 10 |line_end: i64 = pos, sum| -> line_end:
                         line_end <- line_end + 1
-                return -1 if rh_go_sum_line(sum, pos, line_end, pkgs, pool) != 0
+                return -1 if rh_go_sum_line(sum, pos, line_end, pkgs, pool, artifacts) != 0
                 pos <- line_end + 1
             0
 

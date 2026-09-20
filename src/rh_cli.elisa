@@ -108,7 +108,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli continuity --bundle <manifest> --out <dir>")
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
-    rh_cli_err("       rh_cli artifact-observe --graph <cargo-or-npm-graph> --artifact <id> --file <local-archive> --out <file>")
+    rh_cli_err("       rh_cli artifact-observe --graph <package-graph> --artifact <id> --file <local-artifact> --out <file>")
     rh_cli_err("       rh_cli osv-query --input <rh-osv-query-input/1|2> --out <dir> [--continue-pagination]")
     rh_cli_err("       rh_cli osv-query --graph <rh-dep-graph/1> --out <dir> [--continue-pagination] [--hydrate-advisories]")
     rh_cli_err("       rh_cli depsdev (--input <file> | --url <https-or-file-url>) --out <file>")
@@ -3015,7 +3015,9 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
             return 4
         # go.sum is optional for a module-only capture, but when present every
         # non-empty line must be a valid checksum record. Matching h1: module
-        # checksums become node evidence; /go.mod records stay metadata.
+        # checksums become module artifacts; /go.mod records become go_mod
+        # artifacts for independent file verification.
+        gartifacts: mutable darray[Package::RhArtifact] = []
         gs: mutable darray[u8] = []
         if not rh_out_path(repo, "go.sum", gs):
             rh_cli_err("deps: bad repo path")
@@ -3026,7 +3028,7 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
             if Base::rh_io_read(gsp, gsb) < 0:
                 rh_cli_err("deps: cannot read go.sum")
                 return 4
-            if Package::rh_go_sum_parse(gsb, gpkgs, gpool) != 0:
+            if Package::rh_go_sum_parse(gsb, gpkgs, gpool, gartifacts) != 0:
                 rh_cli_err("deps: malformed go.sum (structured failure, no partial graph)")
                 return 4
         gunsup: i64 = Package::rh_unsupported_range_count(greqs, gpool)
@@ -3035,7 +3037,6 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         gsk: mutable i64 = 0
         if resolved_has_osv:
             _ = Package::rh_osv_match(gpkgs, gpool, osv_nodes, osv_texts, osv_root, gfind, &gwd, &gsk)
-        gartifacts: mutable darray[Package::RhArtifact] = []
         _ = Package::rh_artifacts_from_packages(gpkgs, gartifacts)
         gg: mutable darray[u8] = []
         Package::rh_graph_write_json(gg, 3, gpkgs, gpool, gartifacts, gedges, gunres, gfind, osv_texts, groot)
@@ -4415,7 +4416,7 @@ def rh_do_resolution(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
     0
 
 # --- M03-02 local package-archive byte observation. ---
-def rh_do_artifact_observation(graph_path: cstr, artifact_id: i64, archive_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_artifact_observation(graph_path: cstr, artifact_id: i64, artifact_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     graph_size: i64 = Base::rh_file_size(graph_path)
     if graph_size <= 0 or graph_size > ArtifactObservation::RH_ARTIFACT_OBSERVATION_MAX_GRAPH_BYTES:
         rh_cli_err("artifact-observe: graph size is empty, unavailable, or over the 8 MiB bound")
@@ -4424,23 +4425,23 @@ def rh_do_artifact_observation(graph_path: cstr, artifact_id: i64, archive_path:
     if Base::rh_io_read(graph_path, graph) != graph_size:
         rh_cli_err("artifact-observe: cannot read --graph")
         return 4
-    archive_size: i64 = Base::rh_file_size(archive_path)
-    if archive_size <= 0 or archive_size > ArtifactObservation::RH_ARTIFACT_OBSERVATION_MAX_BYTES:
-        rh_cli_err("artifact-observe: archive size is empty, unavailable, or over the 64 MiB bound")
+    artifact_size: i64 = Base::rh_file_size(artifact_path)
+    if artifact_size <= 0 or artifact_size > ArtifactObservation::RH_ARTIFACT_OBSERVATION_MAX_BYTES:
+        rh_cli_err("artifact-observe: file size is empty, unavailable, or over the 64 MiB bound")
         return 4
-    archive: mutable darray[u8] = []
-    if Base::rh_io_read(archive_path, archive) != archive_size:
-        rh_cli_err("artifact-observe: cannot read complete local archive bytes")
+    artifact_bytes: mutable darray[u8] = []
+    if Base::rh_io_read(artifact_path, artifact_bytes) != artifact_size:
+        rh_cli_err("artifact-observe: cannot read complete local artifact bytes")
         return 4
     body: mutable darray[u8] = []
-    if ArtifactObservation::rh_artifact_observation(graph, archive, artifact_id, body) != 0:
-        rh_cli_err("artifact-observe: graph record is malformed or outside the supported Cargo SHA-256 / npm SHA-256/SHA-384/SHA-512 SRI contract")
+    if ArtifactObservation::rh_artifact_observation(graph, artifact_bytes, artifact_id, body) != 0:
+        rh_cli_err("artifact-observe: graph record is malformed or outside the supported Cargo, npm, or Go go.mod digest contract")
         return 3
     body.push(10)
     if not Base::rh_io_write(out_path, body):
         rh_cli_err("artifact-observe: cannot write --out")
         return 4
-    rh_cli_out("artifact-observe: local archive digest recorded against graph and artifact identity")
+    rh_cli_out("artifact-observe: local artifact digest recorded against graph and artifact identity")
     0
 
 # --- M03-10 parser-adoption differential path. ---
