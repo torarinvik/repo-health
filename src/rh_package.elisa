@@ -644,6 +644,9 @@ module Package:
                 pos <- lend + 1
 
             return -1 if parsed_count < 0 or not rh_cargo_nodes_valid(pkgs)
+            metadata_unknown: i64 = rh_cargo_metadata_checksums(lock, pkgs, pool)
+            return -1 if metadata_unknown < 0
+            unknown_out[0] <- unknown_out[0] + metadata_unknown
             parsed_count
 
         def rh_cargo_nodes_valid(pkgs: darray[RhPkgNode]&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -809,6 +812,128 @@ module Package:
         # verbatim in req_s/req_e and never treated as resolved versions (R009).
 
     private:
+        # Cargo's older lockfiles keep package checksums in a generic metadata
+        # table. Index only when such an entry exists; ordinary and newer locks
+        # do not pay for the lookup table.
+        def rh_cargo_identity_hash(pool: darray[u8]&, name_s: usize, name_e: usize, ver_s: usize, ver_e: usize, source_s: usize, source_e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            name_hash: i64 =
+                while i < name_e - name_s |hash: i64 = 7, i: usize = 0| -> hash:
+                    hash <- (hash * 131 + pool[name_s + i].i64()) % 2147483629
+                    i <- i + 1
+            version_hash: i64 =
+                while i < ver_e - ver_s |hash: i64 = (name_hash * 131) % 2147483629, i: usize = 0| -> hash:
+                    hash <- (hash * 131 + pool[ver_s + i].i64()) % 2147483629
+                    i <- i + 1
+            while i < source_e - source_s |hash: i64 = (version_hash * 131) % 2147483629, i: usize = 0| -> hash:
+                hash <- (hash * 131 + pool[source_s + i].i64()) % 2147483629
+                i <- i + 1
+
+        def rh_cargo_identity_matches(node: RhPkgNode, pool: darray[u8]&, name_s: usize, name_e: usize, ver_s: usize, ver_e: usize, source_s: usize, source_e: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            node.src_kind == RH_PSRC_REGISTRY and node.origin_s >= 0 and rh_span_eq2(pool, node.name_s.usize(), node.name_e.usize(), pool, name_s, name_e) and rh_span_eq2(pool, node.ver_s.usize(), node.ver_e.usize(), pool, ver_s, ver_e) and rh_span_eq2(pool, node.origin_s.usize(), node.origin_e.usize(), pool, source_s, source_e)
+
+        def rh_cargo_checksum_index(pkgs: darray[RhPkgNode]&, pool: darray[u8]&, table: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            capacity: i64 = pkgs.count.i64() * 2 + 1
+            while table.count.i64() < capacity |table|:
+                table.push(-1)
+            while i < pkgs.count.i64() |i: i64 = 0, pkgs, table|:
+                node: RhPkgNode = pkgs[i.usize()]
+                if node.src_kind == RH_PSRC_REGISTRY and node.origin_s >= 0:
+                    hash: i64 = rh_cargo_identity_hash(pool, node.name_s.usize(), node.name_e.usize(), node.ver_s.usize(), node.ver_e.usize(), node.origin_s.usize(), node.origin_e.usize())
+                    start_slot: usize = (hash % table.count.i64()).usize()
+                    inserted: bool =
+                        while probe < table.count.i64() |found: bool = false, probe: i64 = 0, slot: usize = start_slot, i, table, pkgs| -> found:
+                            previous: i64 = table[slot]
+                            if previous < 0:
+                                table[slot] <- i
+                                break true
+                            prior: RhPkgNode = pkgs[previous.usize()]
+                            return false if rh_cargo_identity_matches(prior, pool, node.name_s.usize(), node.name_e.usize(), node.ver_s.usize(), node.ver_e.usize(), node.origin_s.usize(), node.origin_e.usize())
+                            slot <- (slot + 1) % table.count
+                            probe <- probe + 1
+                    return false if not inserted
+                i <- i + 1
+            true
+
+        def rh_cargo_metadata_apply(pkgs: mutable darray[RhPkgNode]&, pool: darray[u8]&, table: darray[i64]&, name_s: usize, name_e: usize, ver_s: usize, ver_e: usize, source_s: usize, source_e: usize, digest_s: i64, digest_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if table.count.i64() == 0
+            hash: i64 = rh_cargo_identity_hash(pool, name_s, name_e, ver_s, ver_e, source_s, source_e)
+            slot: mutable usize = (hash % table.count.i64()).usize()
+            while probe < table.count.i64() |probe: i64 = 0, slot, table, pkgs|:
+                package: i64 = table[slot]
+                return false if package < 0
+                node: mutable RhPkgNode = pkgs[package.usize()]
+                if rh_cargo_identity_matches(node, pool, name_s, name_e, ver_s, ver_e, source_s, source_e):
+                    return false if node.has_digest != 0
+                    node.has_digest <- 1
+                    node.dig_s <- digest_s
+                    node.dig_e <- digest_e
+                    pkgs[package.usize()] <- node
+                    return true
+                slot <- (slot + 1) % table.count
+                probe <- probe + 1
+            false
+
+        def rh_cargo_metadata_checksums(lock: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            table: mutable darray[i64] = []
+            while pos < lock.count |unknown: i64 = 0, in_metadata: bool = false, metadata_seen: bool = false, table_ready: bool = false, pos: usize = 0, pkgs, table| -> unknown:
+                line_end: usize =
+                    nl: i64 = Base::rh_find_byte(lock, pos, 10)
+                    nl.usize() if nl >= 0 else lock.count
+                ts: mutable i64 = 0
+                te: mutable i64 = 0
+                rh_trim_span(lock, pos, line_end, &ts, &te)
+                if te > ts:
+                    if lock[ts.usize()] == 35:
+                        pos <- line_end + 1
+                        continue
+                    if lock[ts.usize()] == 91:
+                        is_metadata: bool = rh_span_lit(lock, ts.usize(), te.usize(), "[metadata]")
+                        return -1 if is_metadata and metadata_seen
+                        metadata_seen <- true if is_metadata
+                        in_metadata <- is_metadata
+                    elif in_metadata and lock[ts.usize()] == 34:
+                        key_s: mutable i64 = 0
+                        key_e: mutable i64 = 0
+                        after_key: i64 = rh_quoted_span(lock, ts.usize(), te.usize(), pool, &key_s, &key_e)
+                        return -1 if after_key < 0
+                        if rh_span_prefix(pool, key_s.usize(), key_e.usize(), "checksum "):
+                            package_name_s: usize = key_s.usize() + 9
+                            package_name_e: usize =
+                                while name_end < key_e.usize() |name_end: usize = package_name_s, pool| -> name_end:
+                                    break if pool[name_end] == 32
+                                    name_end <- name_end + 1
+                            return -1 if package_name_e == package_name_s or package_name_e + 1 >= key_e.usize()
+                            return -1 if pool[package_name_e] != 32 or pool[key_e.usize() - 1] != 41
+                            package_version_s: usize = package_name_e + 1
+                            package_version_e: usize =
+                                while version_end < key_e.usize() |version_end: usize = package_version_s, pool| -> version_end:
+                                    break if pool[version_end] == 32
+                                    version_end <- version_end + 1
+                            return -1 if package_version_e == package_version_s or package_version_e + 2 >= key_e.usize()
+                            return -1 if pool[package_version_e] != 32 or pool[package_version_e + 1] != 40
+                            source_s: usize = package_version_e + 2
+                            source_e: usize = key_e.usize() - 1
+                            return -1 if source_e <= source_s
+                            digest_s: mutable i64 = 0
+                            digest_e: mutable i64 = 0
+                            after_digest: i64 = rh_toml_qstring(lock, after_key.usize(), te.usize(), pool, &digest_s, &digest_e)
+                            return -1 if after_digest < 0 or not rh_cargo_checksum_valid(pool, digest_s, digest_e)
+                            trailing: usize =
+                                while trailing < te.usize() |trailing: usize = after_digest.usize()| -> trailing:
+                                    break if lock[trailing] == 35
+                                    break if lock[trailing] != 32 and lock[trailing] != 9
+                                    trailing <- trailing + 1
+                            return -1 if trailing < te.usize() and lock[trailing] != 35
+                            if not table_ready:
+                                return -1 if not rh_cargo_checksum_index(pkgs, pool, table)
+                                table_ready <- true
+                            return -1 if not rh_cargo_metadata_apply(pkgs, pool, table, package_name_s, package_name_e, package_version_s, package_version_e, source_s, source_e, digest_s, digest_e)
+                        else:
+                            unknown <- unknown + 1
+                    elif in_metadata:
+                        unknown <- unknown + 1
+                pos <- line_end + 1
+
         def rh_artifact_kind_label(kind: u8) -> u8&:
             return "module" if kind == RH_ART_KIND_MODULE
             return "go_mod" if kind == RH_ART_KIND_GO_MOD

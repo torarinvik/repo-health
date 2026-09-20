@@ -698,6 +698,36 @@ set -e
 [[ "$rc_bad_cargo_checksum" -eq 4 ]] || fail "malformed Cargo checksum must fail closed (got $rc_bad_cargo_checksum)"
 [[ ! -f "$T/cargo-bad-checksum-out/deps-cargo-graph.json" ]] || fail "malformed Cargo checksum wrote a partial graph"
 
+echo "[deps] legacy Cargo metadata checksums map by exact name, version, and source"
+mkdir -p "$T/cargo-legacy-metadata"
+cp "$ROOT/fixtures/packages/cargo-legacy-metadata.lock" "$T/cargo-legacy-metadata/Cargo.lock"
+"$ROOT/build/rh_cli" deps --repo "$T/cargo-legacy-metadata" --out "$T/cargo-legacy-metadata-out" \
+  | grep -q "ecosystems=1 cargo=2/2 unresolved=0 unsupported=0" || fail "legacy Cargo metadata summary"
+python3 - "$T/cargo-legacy-metadata-out/deps-cargo-graph.json" <<'PY'
+import hashlib, json, sys
+g = json.load(open(sys.argv[1]))
+assert [(e["from"], e["to"]) for e in g["edges"]] == [(0, 1), (0, 2)], g["edges"]
+nodes = {n["id"]: n for n in g["nodes"]}
+artifacts = {a["package_node"]: a["expected_digest"] for a in g["artifacts"]}
+source_a = hashlib.sha256(b"registry+https://registry-a.example/index").hexdigest()
+source_b = hashlib.sha256(b"registry+https://registry-b.example/index").hexdigest()
+assert nodes[1]["source_identity_sha256"] == source_a and artifacts[1] == "a" * 64, (nodes, artifacts)
+assert nodes[2]["source_identity_sha256"] == source_b and artifacts[2] == "b" * 64, (nodes, artifacts)
+assert len(g["artifacts"]) == 2, g["artifacts"]
+print("[deps] historical Cargo checksum metadata retains exact source identity")
+PY
+
+echo "[deps] malformed legacy Cargo metadata checksum fails closed"
+mkdir -p "$T/cargo-legacy-bad-checksum"
+sed 's/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/not-a-checksum/' \
+  "$ROOT/fixtures/packages/cargo-legacy-metadata.lock" > "$T/cargo-legacy-bad-checksum/Cargo.lock"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/cargo-legacy-bad-checksum" --out "$T/cargo-legacy-bad-checksum-out" >/dev/null 2>&1
+rc_bad_cargo_metadata_checksum=$?
+set -e
+[[ "$rc_bad_cargo_metadata_checksum" -eq 4 ]] || fail "malformed legacy Cargo checksum must fail closed (got $rc_bad_cargo_metadata_checksum)"
+[[ ! -f "$T/cargo-legacy-bad-checksum-out/deps-cargo-graph.json" ]] || fail "bad Cargo metadata checksum wrote a partial graph"
+
 echo "[deps] npm lockfile v2 package map is supported"
 mkdir -p "$T/npm-v2"
 cp "$ROOT/fixtures/packages/npm-v2-lock.json" "$T/npm-v2/package-lock.json"

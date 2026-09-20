@@ -126,8 +126,8 @@ crosswalk.
 (strict, prerelease precedence, build ignored), Cargo name normalization
 (case/dash-insensitive), lockfile-only resolution for Cargo (`[[package]]`
 tables, unversioned legacy `[root]` plus versions 3/4, source kind/source
-fingerprint and validated inline checksums, unknown keys counted; unsupported
-versions rejected; legacy `[metadata]` checksums still lack package mapping) and
+fingerprint and validated inline or legacy `[metadata]` checksums mapped by
+exact name/version/source; unknown keys counted; unsupported versions rejected) and
 npm (`lockfileVersion` 2/3 `packages` with Node walk-up nested-version
 preference, version-1 legacy `dependencies` trees, both `package-lock.json`
 and `npm-shrinkwrap.json` with npm-defined shrinkwrap precedence,
