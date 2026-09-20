@@ -839,10 +839,11 @@ exercises package-version identities, accepted mirror grouping, independent
 partial history/review coverage, temporal and runtime/Linux graph projections,
 and the real correction invalidation/replay path. It still does not model real
 project histories, arbitrary historical correction replay, or worker-scheduler
-load shedding. Concurrency results now include a per-batch sum of each child's
-peak RSS as a conservative memory upper bound; they do not sample simultaneous
-aggregate memory. Request-budget variation, remote object storage, and deployed
-database load also remain unmeasured. Downstream shared-cache snapshots now use
+load shedding. Concurrency results now include a 1 ms target-poll series summing live-child RSS reads per driver pass, explicit
+missed samples, and a conservative upper bound from summed child high-water
+marks; short peaks can fall between polls.
+Request-budget variation, remote object storage, and deployed database load also
+remain unmeasured. Downstream shared-cache snapshots now use
 `rh-projection-snapshot/2`: they store only the public downstream graph, remap
 visible node IDs, drop private nodes and incident edges, and omit unknown fields,
 unresolved rows, and advisory witnesses. A regression checks two visibility

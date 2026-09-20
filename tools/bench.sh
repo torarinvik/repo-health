@@ -52,6 +52,7 @@ for nodes, seed, stage, distribution in workloads:
         "latency": sample["latency"],
         "peak_rss": sample["peak_rss"],
         "concurrent_peak_rss_upper_bound": sample["concurrent_peak_rss_upper_bound"],
+        "sampled_concurrent_peak_rss": sample["sampled_concurrent_peak_rss"],
         **throughput_and_outcomes(sample, fields),
         "digest": digest,
         "output": out1,
@@ -122,7 +123,7 @@ disk_workload = storage_disk_profile()
 manifest = {
     **metadata,
     "bench_version": "rh-bench/3",
-    "note": "timings, peak RSS, and concurrent RSS upper bounds are machine-specific; graph distributions, store corpus, stage output, dataset digests, and counts are deterministic",
+    "note": "timings, peak RSS, sampled concurrent RSS, and concurrent RSS upper bounds are machine-specific; graph distributions, store corpus, stage output, dataset digests, and counts are deterministic",
     "reps": reps,
     "disk_workload": disk_workload,
     "runs": runs,

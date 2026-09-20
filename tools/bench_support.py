@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+import ctypes
 import math
 import os
 import platform
@@ -11,13 +12,51 @@ import shutil
 import statistics
 import subprocess
 import sys
+import threading
 import time
-from typing import Sequence
+from typing import Callable, Sequence
 
 
-def run_process(command: Sequence[str]) -> tuple[str, float, int]:
+class _ProcTaskInfo(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint64) for name in (
+        "virtual_size", "resident_size", "total_user", "total_system",
+        "threads_user", "threads_system",
+    )] + [(name, ctypes.c_int32) for name in (
+        "policy", "faults", "pageins", "cow_faults", "messages_sent",
+        "messages_received", "syscalls_mach", "syscalls_unix", "context_switches",
+        "thread_count", "running_threads", "priority",
+    )]
+
+
+_proc_pidinfo = None
+if sys.platform == "darwin":
+    _proc_pidinfo = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True).proc_pidinfo
+    _proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    _proc_pidinfo.restype = ctypes.c_int
+
+
+def process_rss_bytes(pid: int) -> int | None:
+    """Read one live child RSS without spawning a system monitor process."""
+    if sys.platform == "darwin":
+        info = _ProcTaskInfo()
+        size = ctypes.sizeof(info)
+        read = _proc_pidinfo(pid, 4, 0, ctypes.byref(info), size)
+        return int(info.resident_size) if read == size else None
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/%d/statm" % pid, encoding="ascii") as stream:
+                resident_pages = int(stream.read().split()[1])
+            return resident_pages * os.sysconf("SC_PAGE_SIZE")
+        except (FileNotFoundError, IndexError, OSError, ValueError):
+            return None
+    return None
+
+
+def run_process(command: Sequence[str], on_start: Callable[[int], None] | None = None) -> tuple[str, float, int]:
     """Run one small-output workload and return output, wall ms, peak RSS bytes."""
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if on_start is not None:
+        on_start(process.pid)
     started = time.perf_counter()
     while True:
         try:
@@ -68,30 +107,51 @@ def measure(command: Sequence[str], reps: int, concurrent_jobs: int = 1) -> dict
     if not 1 <= concurrent_jobs <= 32:
         raise ValueError("concurrent_jobs must be from 1 to 32")
 
-    def run_batch(executor: ThreadPoolExecutor | None) -> tuple[str, float, list[int]]:
-        if executor is None:
-            output, elapsed_ms, rss_bytes = run_process(command)
-            return output, elapsed_ms, [rss_bytes]
+    def run_batch(executor: ThreadPoolExecutor) -> tuple[str, float, list[int], int | None, int]:
+        child_pids = []
+        child_pids_lock = threading.Lock()
+
+        def register_child(pid: int) -> None:
+            with child_pids_lock:
+                child_pids.append(pid)
+
         started = time.perf_counter()
-        results = list(executor.map(run_process, [command] * concurrent_jobs))
+        futures = [executor.submit(run_process, command, register_child) for _ in range(concurrent_jobs)]
+        sampled_peak = 0
+        sample_count = 0
+        while any(not future.done() for future in futures):
+            with child_pids_lock:
+                pids = list(child_pids)
+            if len(pids) == concurrent_jobs:
+                resident = [process_rss_bytes(pid) for pid in pids]
+                total = sum(value for value in resident if value is not None)
+                if total > 0:
+                    sampled_peak = max(sampled_peak, total)
+                    sample_count += 1
+            time.sleep(0.001)
+        results = [future.result() for future in futures]
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         outputs = {result[0] for result in results}
         if len(outputs) != 1:
             raise RuntimeError("concurrent workload output changed within a batch")
-        return outputs.pop(), elapsed_ms, [result[2] for result in results]
+        return outputs.pop(), elapsed_ms, [result[2] for result in results], sampled_peak if sample_count > 0 else None, sample_count
 
     elapsed_samples = []
     rss_samples = []
     rss_sum_bounds = []
-    with ThreadPoolExecutor(max_workers=concurrent_jobs) if concurrent_jobs > 1 else _NullExecutor() as executor:
-        expected, _, _ = run_batch(executor)
+    sampled_concurrent_peaks = []
+    concurrent_sample_counts = []
+    with ThreadPoolExecutor(max_workers=concurrent_jobs) as executor:
+        expected, _, _, _, _ = run_batch(executor)
         for _ in range(reps):
-            output, elapsed_ms, process_rss = run_batch(executor)
+            output, elapsed_ms, process_rss, sampled_peak, sample_count = run_batch(executor)
             if output != expected:
                 raise RuntimeError("workload output changed between repetitions")
             elapsed_samples.append(round(elapsed_ms, 3))
             rss_samples.append(max(process_rss))
             rss_sum_bounds.append(sum(process_rss))
+            sampled_concurrent_peaks.append(sampled_peak)
+            concurrent_sample_counts.append(sample_count)
     latency = {
         "min_ms": min(elapsed_samples),
         "median_ms": round(statistics.median(elapsed_samples), 3),
@@ -114,11 +174,23 @@ def measure(command: Sequence[str], reps: int, concurrent_jobs: int = 1) -> dict
         "samples_bytes": rss_sum_bounds,
         "basis": "sum of each child peak RSS within a concurrent batch; conservative upper bound, not simultaneous aggregate memory",
     }
+    observed_samples = [sample for sample in sampled_concurrent_peaks if sample is not None]
+    sampled_memory = {
+        "median_bytes": int(statistics.median(observed_samples)) if observed_samples else None,
+        "p95_bytes": int(percentile(observed_samples, 0.95)) if observed_samples else None,
+        "max_bytes": max(observed_samples) if observed_samples else None,
+        "samples_bytes": sampled_concurrent_peaks,
+        "sample_counts_per_batch": concurrent_sample_counts,
+        "sampled_batches": len(observed_samples),
+        "sampling_interval_target_ms": 1,
+        "basis": "maximum sum of child RSS reads collected in one driver poll pass; 1 ms target between polls, brief peaks may be missed; excludes driver and unrelated processes",
+    }
     return {
         "output": expected,
         "latency": latency,
         "peak_rss": memory,
         "concurrent_peak_rss_upper_bound": concurrent_memory_bound,
+        "sampled_concurrent_peak_rss": sampled_memory,
         "successful_repetitions": reps,
         "failed_repetitions": 0,
         "concurrent_processes_per_repetition": concurrent_jobs,
@@ -152,16 +224,6 @@ def throughput_and_outcomes(sample: dict[str, object], fields: dict[str, str]) -
             "concurrent_processes_per_repetition": concurrent_jobs,
         },
     }
-
-
-class _NullExecutor:
-    """Context manager sentinel that preserves the single-process timing path."""
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        return None
 
 
 def environment_metadata(root: str, binary_path: str, compiler: str, concurrent_jobs: int) -> dict[str, object]:

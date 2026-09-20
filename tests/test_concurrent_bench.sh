@@ -25,10 +25,19 @@ for run in manifest["runs"]:
     assert all(total >= individual for total, individual in zip(upper["samples_bytes"], run["peak_rss"]["samples_bytes"])), run
     assert "sum of each child peak RSS" in upper["basis"], upper
     assert "not simultaneous aggregate memory" in upper["basis"], upper
+    sampled = run["sampled_concurrent_peak_rss"]
+    assert len(sampled["samples_bytes"]) == len(sampled["sample_counts_per_batch"]) == 2, sampled
+    assert sampled["sampled_batches"] == sum(value is not None for value in sampled["samples_bytes"]), sampled
+    assert all((value is None) == (count == 0) for value, count in zip(sampled["samples_bytes"], sampled["sample_counts_per_batch"])), sampled
+    assert all(value is None or (0 < value <= bound) for value, bound in zip(sampled["samples_bytes"], upper["samples_bytes"])), sampled
+    assert sampled["sampling_interval_target_ms"] == 1, sampled
+    assert "sum of child RSS reads collected in one driver poll pass" in sampled["basis"], sampled
+    assert "brief peaks may be missed" in sampled["basis"], sampled
     assert run["outcomes"]["concurrent_processes_per_repetition"] == 2, run
     assert "per concurrent batch" in run["throughput"]["basis"], run
     assert "not aggregate batch memory" in run["peak_rss"]["basis"], run
-print("[concurrent-bench] two-process batches + concurrent RSS upper bounds OK")
+assert any(run["sampled_concurrent_peak_rss"]["sampled_batches"] > 0 for run in manifest["runs"]), manifest
+print("[concurrent-bench] sampled concurrent RSS + conservative upper bounds OK")
 PY
 
 echo "[concurrent-bench] concurrency bound fails closed"

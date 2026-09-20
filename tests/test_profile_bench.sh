@@ -46,6 +46,15 @@ assert all(len(r["latency"]["samples_ms"]) == 10 for r in a["runs"]), a
 assert all(0 <= r["latency"]["median_ms"] <= r["latency"]["p95_ms"] <= r["latency"]["max_ms"] for r in a["runs"]), a
 assert all(len(r["peak_rss"]["samples_bytes"]) == 10 and r["peak_rss"]["max_bytes"] > 0 for r in a["runs"]), a
 assert all(r["concurrent_peak_rss_upper_bound"]["samples_bytes"] == r["peak_rss"]["samples_bytes"] for r in a["runs"]), a
+for run in a["runs"]:
+    sampled = run["sampled_concurrent_peak_rss"]
+    bounds = run["concurrent_peak_rss_upper_bound"]["samples_bytes"]
+    assert len(sampled["samples_bytes"]) == len(sampled["sample_counts_per_batch"]) == 10, sampled
+    assert sampled["sampled_batches"] == sum(value is not None for value in sampled["samples_bytes"]), sampled
+    assert all((value is None) == (count == 0) for value, count in zip(sampled["samples_bytes"], sampled["sample_counts_per_batch"])), sampled
+    assert all(value is None or (0 < value <= bound) for value, bound in zip(sampled["samples_bytes"], bounds)), sampled
+    assert sampled["sampling_interval_target_ms"] == 1, sampled
+assert any(run["sampled_concurrent_peak_rss"]["sampled_batches"] > 0 for run in a["runs"]), a
 assert all(r["throughput"]["nodes_per_second"] > 0 for r in a["runs"]), a
 assert all(r["outcomes"]["successful_repetitions"] == 10 and r["outcomes"]["failed_repetitions"] == 0 for r in a["runs"]), a
 assert all(r["outcomes"]["error_rate"] == 0 for r in a["runs"]), a
