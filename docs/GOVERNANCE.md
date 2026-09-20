@@ -7,9 +7,13 @@ tests, not an aspiration. Where a rule is tested, the test is named.
 
 1. **Definition first.** Author `metrics/definitions/<key>.json` with the
    full contract. A `ratio` must name its numerator and denominator. A
-   metric that is not yet `implemented` must also carry the admission
-   template (`inputs`, `params`, `missing_behavior`, `confounders`).
-   Enforced by `tools/metric-lint.sh`.
+   metric must declare its `raw`, `derived`, or `modeled` class; experimental
+   metrics are modeled. A standards relationship belongs in
+   `standards_crosswalks` with its source pinning, local population, boundary,
+   differences, and interpretation limit. A metric that is not yet
+   `implemented` must also carry the admission template (`inputs`, `params`,
+   `missing_behavior`, `confounders`). Enforced by `tools/metric-lint.sh` and
+   `tests/test_metric_admission.sh`.
 2. **Oracle before implementation.** Add a test asserting exact expected
    values (or an invariant) that fails before the implementation exists.
    Oracle/unit values live in the `test_*` binaries; invariants live in

@@ -340,6 +340,8 @@ Create the smallest foundation that prevents later modules from inventing incomp
 
 **M00-10: Transformation and measurement contracts.** Record parser/normalizer version, configuration digest, input digest and output schema. Emit field-level `preserved`, `transformed`, `inferred`, `discarded`, or `unsupported` states for analysis-relevant fields; missing optionality is unknown, not false. Add the CHAOSS crosswalk and explicit raw/derived/modeled classification to metric admission. Schema changes require compatibility and migration fixtures, not silent reinterpretation. (Paper §§13.9, 17.)
 
+**Current repository checkpoint:** all 211 metric definitions now declare `measurement_class`; the admission linter requires `raw`, `derived`, or `modeled` and confines modeled definitions to the experimental group. The canonical commit Contributor Absence Factor definition and its compatibility alias carry a CHAOSS crosswalk with the reviewed source file-object ID, its default-branch/unpinned status, the exact local Git-event population, the inclusive 50-percent boundary, empty-population behavior, deliberate scope differences, and interpretation limit. `tests/test_metric_admission.sh` checks the class set and rejects a missing class or changed threshold boundary. This closes the admission classification and initial CHAOSS crosswalk slice; field-level transformation coverage remains a separate requirement.
+
 ### 5.3 Essential invariants
 
 ```text
