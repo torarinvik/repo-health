@@ -142,7 +142,8 @@ canonical `rh-dep-graph/1` JSON with byte-checked goldens.
 `rh_cli artifact-observe --graph <cargo-or-npm-graph> --artifact <id> --file
 <local-archive> --out <file>` verifies raw Cargo archive bytes with SHA-256 or
 npm tarball bytes with SHA-256/SHA-384/SHA-512 SRI Base64, then emits a sidecar
-bound to the exact graph digest and artifact ID; changed bytes under the same
+bound to the exact graph digest and artifact ID after an 8 MiB graph-file
+check before read and a 64 MiB archive cap; changed bytes under the same
 package/version are reported as `changed`. SRI option expressions are retained
 verbatim and ignored during digest comparison after printable-ASCII syntax
 validation, following the [SRI grammar](https://www.w3.org/TR/sri-2/). This

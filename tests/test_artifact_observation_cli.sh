@@ -214,6 +214,15 @@ with tempfile.TemporaryDirectory(prefix="rh-artifact-npm-e2e-") as temporary:
 PY
 
 echo "[artifact-observe] unsupported and out-of-range evidence fails closed"
+python3 - "$T/oversized-graph.json" <<'PY'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).write_bytes(b" " * (8 * 1024 * 1024 + 1))
+PY
+if "$ROOT/build/rh_cli" artifact-observe --graph "$T/oversized-graph.json" --artifact 0 --file "$ROOT/fixtures/packages/artifact-observation.archive" --out "$T/oversized-out.json" >/dev/null 2>&1; then
+  echo "oversized graph unexpectedly accepted" >&2
+  exit 1
+fi
+test ! -e "$T/oversized-out.json"
 python3 - "$T" "$ROOT/fixtures/packages/artifact-observation-graph.json" <<'PY'
 import base64, json, pathlib, sys
 t = pathlib.Path(sys.argv[1])
