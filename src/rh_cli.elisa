@@ -23,6 +23,7 @@ include "./rh_json.elisa"
 include "./rh_continuity.elisa"
 include "./rh_continuity_scan.elisa"
 include "./rh_package.elisa"
+include "./rh_artifact_observation.elisa"
 include "./rh_osv_query.elisa"
 include "./rh_depsdev.elisa"
 include "./rh_ecosystem_lookup.elisa"
@@ -107,6 +108,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli continuity --bundle <manifest> --out <dir>")
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
+    rh_cli_err("       rh_cli artifact-observe --graph <cargo-graph> --artifact <id> --file <local-archive> --out <file>")
     rh_cli_err("       rh_cli osv-query --input <rh-osv-query-input/1|2> --out <dir> [--continue-pagination]")
     rh_cli_err("       rh_cli osv-query --graph <rh-dep-graph/1> --out <dir> [--continue-pagination] [--hydrate-advisories]")
     rh_cli_err("       rh_cli depsdev (--input <file> | --url <https-or-file-url>) --out <file>")
@@ -950,6 +952,42 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 rsq <- rsq + 1
         return rh_cli_usage(2) if rsi_idx < 0 or rso_idx < 0
         return rh_do_resolution(slots[rsi_idx], slots[rso_idx])
+    if Base::rh_streq(cmd, "artifact-observe"):
+        graph_idx, artifact_idx, file_idx, out_idx, artifact_id =
+            while aoq < argc |graph_idx: i64 = -1, artifact_idx: i64 = -1, file_idx: i64 = -1, out_idx: i64 = -1, artifact_id: i64 = -1, aoq: i64 = 2, slots| -> graph_idx, artifact_idx, file_idx, out_idx, artifact_id:
+                arg_observe: u8& = slots[aoq].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(arg_observe, "--graph"):
+                    if aoq + 1 < argc:
+                        aoq <- aoq + 1
+                        graph_idx <- aoq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(arg_observe, "--artifact"):
+                    if aoq + 1 < argc:
+                        aoq <- aoq + 1
+                        artifact_idx <- aoq
+                        artifact_ok: mutable i64 = 0
+                        artifact_id <- rh_parse_cstr_int(slots[aoq], &artifact_ok)
+                        return rh_cli_usage(2) if artifact_ok != 1 or artifact_id < 0
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(arg_observe, "--file"):
+                    if aoq + 1 < argc:
+                        aoq <- aoq + 1
+                        file_idx <- aoq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(arg_observe, "--out"):
+                    if aoq + 1 < argc:
+                        aoq <- aoq + 1
+                        out_idx <- aoq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                aoq <- aoq + 1
+        return rh_cli_usage(2) if graph_idx < 0 or artifact_idx < 0 or file_idx < 0 or out_idx < 0
+        return rh_do_artifact_observation(slots[graph_idx], artifact_id, slots[file_idx], slots[out_idx])
     if Base::rh_streq(cmd, "parser-diff"):
         pdn_idx, pdc_idx, pdo_idx, pdnp_idx, pdcp_idx, pdcfg_idx, pdv_idx =
             while pdq < argc |pdn_idx: i64 = -1, pdc_idx: i64 = -1, pdo_idx: i64 = -1, pdnp_idx: i64 = -1, pdcp_idx: i64 = -1, pdcfg_idx: i64 = -1, pdv_idx: i64 = -1, pdq: i64 = 2, slots| -> pdn_idx, pdc_idx, pdo_idx, pdnp_idx, pdcp_idx, pdcfg_idx, pdv_idx:
@@ -4374,6 +4412,31 @@ def rh_do_resolution(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
     body.push(10)
     return 4 if not Base::rh_io_write(out_path, body)
     rh_cli_out("resolution: instances observed")
+    0
+
+# --- M03-02 local package-archive byte observation. ---
+def rh_do_artifact_observation(graph_path: cstr, artifact_id: i64, archive_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    graph: mutable darray[u8] = []
+    if Base::rh_io_read(graph_path, graph) < 0:
+        rh_cli_err("artifact-observe: cannot read --graph")
+        return 4
+    archive_size: i64 = Base::rh_file_size(archive_path)
+    if archive_size <= 0 or archive_size > ArtifactObservation::RH_ARTIFACT_OBSERVATION_MAX_BYTES:
+        rh_cli_err("artifact-observe: archive size is empty, unavailable, or over the 64 MiB bound")
+        return 4
+    archive: mutable darray[u8] = []
+    if Base::rh_io_read(archive_path, archive) != archive_size:
+        rh_cli_err("artifact-observe: cannot read complete local archive bytes")
+        return 4
+    body: mutable darray[u8] = []
+    if ArtifactObservation::rh_artifact_observation(graph, archive, artifact_id, body) != 0:
+        rh_cli_err("artifact-observe: graph record is malformed or outside the supported Cargo SHA-256 archive contract")
+        return 3
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("artifact-observe: cannot write --out")
+        return 4
+    rh_cli_out("artifact-observe: local archive digest recorded against graph and artifact identity")
     0
 
 # --- M03-10 parser-adoption differential path. ---
