@@ -648,6 +648,22 @@ assert not g["unresolved"], g["unresolved"]
 print("[deps] npm v2 layout + exact graph OK")
 PY
 
+echo "[deps] npm-shrinkwrap uses package-lock format and npm precedence"
+mkdir -p "$T/npm-shrinkwrap"
+cp "$ROOT/fixtures/packages/npm-v2-lock.json" "$T/npm-shrinkwrap/npm-shrinkwrap.json"
+"$ROOT/build/rh_cli" deps --repo "$T/npm-shrinkwrap" --out "$T/npm-shrinkwrap-out" \
+  | grep -q "ecosystems=1 npm=1/1 unresolved=0 unsupported=0" || fail "npm-shrinkwrap summary"
+cp "$ROOT/fixtures/packages/npm-diamond.lock.json" "$T/npm-shrinkwrap/package-lock.json"
+"$ROOT/build/rh_cli" deps --repo "$T/npm-shrinkwrap" --out "$T/npm-shrinkwrap-precedence-out" \
+  | grep -q "ecosystems=1 npm=1/1 unresolved=0 unsupported=0" || fail "npm-shrinkwrap precedence summary"
+python3 - "$T/npm-shrinkwrap-precedence-out/deps-npm-graph.json" <<'PY'
+import json, sys
+g = json.load(open(sys.argv[1]))
+assert [n["name"] for n in g["nodes"]] == ["v2-app", "left"], g["nodes"]
+assert [(e["from"], e["to"]) for e in g["edges"]] == [(0, 1)], g["edges"]
+print("[deps] npm-shrinkwrap-only and precedence semantics OK")
+PY
+
 echo "[deps] npm resolved locators distinguish nested same-version packages"
 mkdir -p "$T/npm-source-locators"
 cp "$ROOT/fixtures/packages/npm-source-locators.lock.json" "$T/npm-source-locators/package-lock.json"

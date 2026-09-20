@@ -128,8 +128,10 @@ crosswalk.
 tables, unversioned legacy plus versions 3/4, source kind/source fingerprint
 and expected checksums, unknown keys counted; unsupported versions rejected) and
 npm (`lockfileVersion` 2/3 `packages` with Node walk-up nested-version
-preference, version-1 legacy `dependencies` trees, dev/optional/peer scopes,
-integrity values retained as graph-level artifact records (observed bytes remain null),
+preference, version-1 legacy `dependencies` trees, both `package-lock.json`
+and `npm-shrinkwrap.json` with npm-defined shrinkwrap precedence,
+dev/optional/peer scopes, integrity values retained as graph-level artifact
+records (observed bytes remain null),
 and `peerDependenciesMeta` optional-peer conditions on both
 resolved and unresolved graph entries; unsupported or mismatched revisions rejected), explicit
 unresolved reasons (`missing` / `ambiguous` /
@@ -185,7 +187,8 @@ identity is the `module` path; names are byte-exact.
 `rh_cli deps
 --repo <dir> --out <dir> [--osv <file>]` is now the real execution path:
 it reads a local project's `Cargo.lock`, `package.json` +
-`package-lock.json`, `requirements.txt`, bounded PEP 621 `pyproject.toml`,
+`package-lock.json` or `npm-shrinkwrap.json` (npm precedence),
+`requirements.txt`, bounded PEP 621 `pyproject.toml`,
 `go.mod`, `Gemfile.lock`, `composer.lock`, `packages.config`, and/or bounded
 `packages.lock.json`, and/or bounded `pom.xml`, writes one
 `rh-dep-graph/1` report per ecosystem, and

@@ -2512,7 +2512,8 @@ def rh_do_serve(root: cstr, port: i64, maxc: i64) -> i32 can[Memory.Allocate, Ab
 # it is NOT a claim that the subject is correct, safe, or trustworthy (S011).
 
 # --- M03 dependency graph execution path. ---
-# Reads a local project's Cargo.lock, package.json + package-lock.json,
+# Reads a local project's Cargo.lock and npm package.json plus a
+# package-lock.json or npm-shrinkwrap.json,
 # requirements.txt, bounded PEP 621 pyproject.toml, go.mod, Gemfile.lock,
 # composer.lock, packages.config, or the bounded pom.xml subset,
 # resolves the version-aware graph, and writes one rh-dep-graph/1 report per
@@ -2730,16 +2731,24 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         withdrawn_n.push(cwd if resolved_has_osv else -1)
         found <- found + 1
 
-    # --- package.json + package-lock.json ---
+    # --- npm package lock (npm-shrinkwrap.json takes precedence) ---
     pl: mutable darray[u8] = []
     if not rh_out_path(repo, "package-lock.json", pl):
         rh_cli_err("deps: bad repo path")
         return 3
     plp: cstr = (&pl[0]).cast[cstr] can Unsafe.PointerCast
-    if file_exists(plp):
+    sw: mutable darray[u8] = []
+    if not rh_out_path(repo, "npm-shrinkwrap.json", sw):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    swp: cstr = (&sw[0]).cast[cstr] can Unsafe.PointerCast
+    use_shrinkwrap: bool = file_exists(swp)
+    use_package_lock: bool = file_exists(plp)
+    npm_lock_path: cstr = swp if use_shrinkwrap else plp
+    if use_shrinkwrap or use_package_lock:
         nlock: mutable darray[u8] = []
-        if Base::rh_io_read(plp, nlock) < 0:
-            rh_cli_err("deps: cannot read package-lock.json")
+        if Base::rh_io_read(npm_lock_path, nlock) < 0:
+            rh_cli_err("deps: cannot read npm lockfile")
             return 4
         pj: mutable darray[u8] = []
         if not rh_out_path(repo, "package.json", pj):
@@ -2757,7 +2766,7 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         nreqs: mutable darray[Package::RhRequire] = []
         nroot: i64 = Package::rh_npm_lock_parse(nlock, npkg, npkgs, npool, npaths, nreqs)
         if nroot < 0:
-            rh_cli_err("deps: malformed package-lock.json (structured failure, no partial graph)")
+            rh_cli_err("deps: malformed npm lockfile (structured failure, no partial graph)")
             return 4
         nedges: mutable darray[Package::RhDepEdge] = []
         nunres: mutable darray[Package::RhUnresolved] = []
