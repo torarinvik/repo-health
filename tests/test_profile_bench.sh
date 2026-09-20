@@ -18,19 +18,30 @@ python3 - "$T/a/profile-manifest.json" "$T/b/profile-manifest.json" <<'PY'
 import json, sys
 a = json.load(open(sys.argv[1]))
 b = json.load(open(sys.argv[2]))
-assert a["profile"] == b["profile"] == "rh-profile/1", a
+assert a["profile"] == b["profile"] == "rh-profile/2", a
 assert a["stages"] == ["graph", "query", "metrics"], a
 assert a["note"] and "machine-specific" in a["note"], a
 assert a["cache_state"] == "process-started", a
 def shape(d):
-    return [(r["nodes"], r["seed"], r["stage"], r["dataset_digest"], r["output"]) for r in d["runs"]]
+    return [(r["nodes"], r["seed"], r["distribution"], r["stage"], r["dataset_digest"], r["output"]) for r in d["runs"]]
 assert shape(a) == shape(b), (shape(a), shape(b))
-assert len(a["runs"]) == 9, a
+expected_workloads = [
+    {"nodes": 100, "seed": 42, "distribution": "uniform", "stages": ["graph", "query", "metrics"]},
+    {"nodes": 1000, "seed": 42, "distribution": "uniform", "stages": ["graph", "query", "metrics"]},
+    {"nodes": 10000, "seed": 7, "distribution": "uniform", "stages": ["graph", "metrics"]},
+    {"nodes": 1000, "seed": 17, "distribution": "long_tail", "stages": ["graph", "metrics"]},
+    {"nodes": 1000, "seed": 23, "distribution": "central_hubs", "stages": ["graph", "query"]},
+    {"nodes": 1000, "seed": 29, "distribution": "cycle", "stages": ["graph", "query"]},
+]
+assert a["workloads"] == expected_workloads, a
+assert len(a["runs"]) == sum(len(w["stages"]) for w in expected_workloads), a
 assert all(r["elapsed_ms"] >= 0 for r in a["runs"]), a
-for nodes, seed in ((200, 42), (1000, 42), (5000, 7)):
-    ds = {r["dataset_digest"] for r in a["runs"] if r["nodes"] == nodes and r["seed"] == seed}
+for workload in expected_workloads:
+    nodes, seed, distribution = workload["nodes"], workload["seed"], workload["distribution"]
+    ds = {r["dataset_digest"] for r in a["runs"] if r["nodes"] == nodes and r["seed"] == seed and r["distribution"] == distribution}
     assert len(ds) == 1, (nodes, seed, ds)
-    assert all("process wall clock" in r["scope"] for r in a["runs"] if r["nodes"] == nodes and r["seed"] == seed)
+    assert all("process wall clock" in r["scope"] for r in a["runs"] if r["nodes"] == nodes and r["seed"] == seed and r["distribution"] == distribution)
+assert any(r["nodes"] == 10000 and r["stage"] == "metrics" for r in a["runs"]), a
 print("[profile-bench] stage manifest + deterministic digests OK")
 PY
 

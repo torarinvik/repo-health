@@ -21,15 +21,26 @@ python3 - "$A/bench-manifest.json" "$B/bench-manifest.json" <<'PY'
 import json, sys
 a = json.load(open(sys.argv[1]))
 b = json.load(open(sys.argv[2]))
-assert a["bench_version"] == "rh-bench/1", a
+assert a["bench_version"] == "rh-bench/2", a
 assert a["runs"], a
 assert "machine-specific" in a["note"], a
 def digests(m):
-    return [(r["nodes"], r["seed"], r["digest"]) for r in m["runs"]]
+    return [(r["nodes"], r["seed"], r["stage"], r["distribution"], r["digest"]) for r in m["runs"]]
 assert digests(a) == digests(b), ("datasets not deterministic", digests(a), digests(b))
+expected = {
+    (100, 42, "all", "uniform"),
+    (1000, 42, "all", "uniform"),
+    (10000, 7, "metrics", "uniform"),
+    (1000, 17, "graph", "long_tail"),
+    (1000, 23, "graph", "central_hubs"),
+    (1000, 29, "graph", "cycle"),
+}
+assert {(r["nodes"], r["seed"], r["stage"], r["distribution"]) for r in a["runs"]} == expected, a
+assert len({r["digest"] for r in a["runs"] if r["nodes"] == 1000}) == 4, a
 for r in a["runs"]:
     assert len(r["digest"]) == 16, r
     assert "nodes=" in r["output"] and "digest=" in r["output"], r
+    assert "distribution=" + r["distribution"] in r["output"], r
     assert r["elapsed_ms"] >= 0, r
 print("[bench] manifest OK:", len(a["runs"]), "runs")
 PY

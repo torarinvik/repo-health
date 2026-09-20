@@ -18,7 +18,8 @@ evidence of a deployed database.
 | Canonical repo | `rh-canonical-repo/1` | `fixtures/connectors/*.canonical.json` |
 | Evidence bundle | manifest schema versions | `bundle.manifest` |
 | Metric definitions | `key` + `version` | `metrics/definitions/*.json` |
-| Benchmark manifest | `rh-bench/1` | `build/bench-manifest.json` |
+| Benchmark manifest | `rh-bench/2` | `build/bench-manifest.json` |
+| Profile manifest | `rh-profile/2` | `build/profile-manifest.json` |
 | Release packet | `rh-release-packet/1` | `build/release-packet.json` |
 | Source register | `rh-source-review/1` | `ops/source-review-register.json` |
 | PostgreSQL target schema | migration `001` | `db/migrations/001_initial.sql` |

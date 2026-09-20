@@ -1,163 +1,224 @@
-# bench_runner.elisa — deterministic benchmark dataset generator (M10).
+# bench_runner.elisa — deterministic benchmark workload generator (M10).
 #
-# Generates a graph from a seed with a fixed LCG, so the DATASET is
-# reproducible and its structure digest is stable across runs and machines.
-# It prints the digest and exact counts only; it does NOT print timing,
-# because wall-clock depends on the machine and must be recorded by the
-# harness around this process. Usage: bench_runner <nodes> <seed> [stage]
-# Stages are graph, query, metrics, and all (the default). Each stage still
-# constructs the same bounded deterministic dataset; the profile harness
-# records that process scope explicitly instead of pretending to isolate
-# allocator or compiler costs.
+# Workload structure is reproducible; timing is measured by the shell harness.
+# Stages are graph, query, metrics, and all (the default). Distributions are
+# uniform, long_tail, central_hubs, and cycle. Usage:
+#   bench_runner <nodes> <seed> [stage] [distribution]
 include "./rh_base.elisa"
 include "./rh_graph.elisa"
 include "./rh_metrics.elisa"
 include "./rh_continuity.elisa"
 
-struct BenchLcg:
-    state: mutable u64
+module Bench:
+    private:
+        struct BenchLcg:
+            state: mutable u64
 
-def rh_bench_next(s: mutable BenchLcg&) -> u64:
-    n: u64 = s.state * 6364136223846793005 + 1442695040888963407
-    s.state <- n
-    n
+        const RH_BENCH_UNIFORM: i64 = 0
+        const RH_BENCH_LONG_TAIL: i64 = 1
+        const RH_BENCH_CENTRAL_HUBS: i64 = 2
+        const RH_BENCH_CYCLE: i64 = 3
 
-# FNV-1a over each edge (from, dst) as low/high 32-bit halves.
-def rh_bench_digest(edges: darray[Graph::RhGraphEdge]&) -> u64 can[Memory.Allocate, Abort.Panic]:
-    while i < edges.count |h: u64 = 14695981039346656037, i: usize = 0| -> h:
-        v: u64 =
-            e: Graph::RhGraphEdge = edges[i]
-            e.from.u64() ^ (e.dst.u64() << 32)
-        while k < 8 |k: i64 = 0, h, v|:
-            b: u64 = (v >> (k * 8).u64()) & 255
-            h <- (h ^ b) * 1099511628211
-            k <- k + 1
-        i <- i + 1
+        def rh_bench_next(s: mutable BenchLcg&) -> u64:
+            n: u64 = s.state * 6364136223846793005 + 1442695040888963407
+            s.state <- n
+            n
 
-# Integer argv parse (argv is cstr). Returns fallback when absent/invalid.
-def rh_bench_arg(argc: i64, argv: mutable cstr&&, idx: i64, fallback: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-    return fallback if idx >= argc
-    s: cstr = argv[idx]
-    scratch: mutable darray[u8] = []
-    Base::rh_push_cstr(scratch, s)
-    ok: mutable i64 = 0
-    v: i64 = Base::rh_parse_i64(scratch, 0, scratch.count, &ok)
-    return fallback if ok == 0 or v <= 0
-    v
+        # FNV-1a over each edge (from, dst) as low/high 32-bit halves.
+        def rh_bench_digest(edges: darray[Graph::RhGraphEdge]&) -> u64 can[Memory.Allocate, Abort.Panic]:
+            while i < edges.count |h: u64 = 14695981039346656037, i: usize = 0| -> h:
+                v: u64 =
+                    e: Graph::RhGraphEdge = edges[i]
+                    e.from.u64() ^ (e.dst.u64() << 32)
+                while k < 8 |k: i64 = 0, h, v|:
+                    b: u64 = (v >> (k * 8).u64()) & 255
+                    h <- (h ^ b) * 1099511628211
+                    k <- k + 1
+                i <- i + 1
 
-def rh_bench_stage(argc: i64, argv: mutable cstr&&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-    return 0 if argc <= 3
-    stage: u8& = argv[3].cast[u8&] can Unsafe.PointerCast
-    return 1 if Base::rh_streq(stage, "graph")
-    return 2 if Base::rh_streq(stage, "query")
-    return 3 if Base::rh_streq(stage, "metrics")
-    return 0 if Base::rh_streq(stage, "all")
-    -1
+        # Integer argv parse (argv is cstr). Returns fallback when absent/invalid.
+        def rh_bench_arg(argc: i64, argv: mutable cstr&&, idx: i64, fallback: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return fallback if idx >= argc
+            s: cstr = argv[idx]
+            scratch: mutable darray[u8] = []
+            Base::rh_push_cstr(scratch, s)
+            ok: mutable i64 = 0
+            v: i64 = Base::rh_parse_i64(scratch, 0, scratch.count, &ok)
+            return fallback if ok == 0 or v <= 0
+            v
+
+        def rh_bench_stage(argc: i64, argv: mutable cstr&&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return 0 if argc <= 3
+            stage: u8& = argv[3].cast[u8&] can Unsafe.PointerCast
+            return 1 if Base::rh_streq(stage, "graph")
+            return 2 if Base::rh_streq(stage, "query")
+            return 3 if Base::rh_streq(stage, "metrics")
+            return 0 if Base::rh_streq(stage, "all")
+            -1
+
+        def rh_bench_distribution(argc: i64, argv: mutable cstr&&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return RH_BENCH_UNIFORM if argc <= 4
+            distribution: u8& = argv[4].cast[u8&] can Unsafe.PointerCast
+            return RH_BENCH_UNIFORM if Base::rh_streq(distribution, "uniform")
+            return RH_BENCH_LONG_TAIL if Base::rh_streq(distribution, "long_tail")
+            return RH_BENCH_CENTRAL_HUBS if Base::rh_streq(distribution, "central_hubs")
+            return RH_BENCH_CYCLE if Base::rh_streq(distribution, "cycle")
+            -1
+
+        def rh_bench_push_distribution(out: mutable darray[u8]&, distribution: i64) can[Memory.Allocate, Abort.Panic]:
+            if distribution == RH_BENCH_UNIFORM:
+                Base::rh_push_text(out, "uniform")
+            elif distribution == RH_BENCH_LONG_TAIL:
+                Base::rh_push_text(out, "long_tail")
+            elif distribution == RH_BENCH_CENTRAL_HUBS:
+                Base::rh_push_text(out, "central_hubs")
+            else:
+                Base::rh_push_text(out, "cycle")
+
+        def rh_bench_push_edge(edges: mutable darray[Graph::RhGraphEdge]&, source: u64, destination: u64) can[Memory.Allocate, Abort.Panic]:
+            if source != destination:
+                edges.push(Graph::RhGraphEdge{from: source.i64(), dst: destination.i64(), scope: 0, platform: 0, introduced: 0, removed: 0, first_seen: 1})
+
+    public:
+        def rh_run(argc: i64, argv: mutable cstr&&) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            n: mutable i64 = rh_bench_arg(argc, argv, 1, 200)
+            stage: i64 = rh_bench_stage(argc, argv)
+            return 2 if stage < 0
+            distribution: mutable i64 = rh_bench_distribution(argc, argv)
+            return 2 if distribution < 0
+            lcg: mutable BenchLcg =
+                seed: i64 = rh_bench_arg(argc, argv, 2, 42)
+                BenchLcg{state: seed.u64() ^ 88172645463325252}
+            edges: mutable darray[Graph::RhGraphEdge] = []
+            attempted_edges: i64 = n * 2
+            while edge_i < attempted_edges |edge_i: i64 = 0, edges, lcg, n, distribution|:
+                if distribution == RH_BENCH_UNIFORM:
+                    source: u64 = rh_bench_next(lcg) % n.u64()
+                    destination: u64 = rh_bench_next(lcg) % n.u64()
+                    rh_bench_push_edge(edges, source, destination)
+                elif distribution == RH_BENCH_LONG_TAIL:
+                    source: u64 = rh_bench_next(lcg) % n.u64()
+                    rank: u64 = rh_bench_next(lcg) % n.u64()
+                    destination: u64 = rh_bench_next(lcg) % (rank + 1)
+                    rh_bench_push_edge(edges, source, destination)
+                elif distribution == RH_BENCH_CENTRAL_HUBS:
+                    source: u64 = rh_bench_next(lcg) % n.u64()
+                    hub_count: mutable u64 = 4
+                    if n < 4:
+                        hub_count <- n.u64()
+                    destination: u64 = rh_bench_next(lcg) % hub_count
+                    rh_bench_push_edge(edges, source, destination)
+                else:
+                    destination: u64 = edge_i.u64() % n.u64()
+                    source: u64 = (destination + 1 + (edge_i.u64() / n.u64())) % n.u64()
+                    rh_bench_push_edge(edges, source, destination)
+                edge_i <- edge_i + 1
+            dig: mutable u64 = rh_bench_digest(edges)
+            if stage == 1:
+                return |edges, n, dig, distribution|
+                    out: mutable darray[u8] = []
+                    Base::rh_push_text(out, "stage=graph nodes=")
+                    Base::rh_push_decimal_i64(out, n)
+                    Base::rh_push_text(out, " edges=")
+                    Base::rh_push_decimal_i64(out, edges.count.i64())
+                    Base::rh_push_text(out, " distribution=")
+                    rh_bench_push_distribution(out, distribution)
+                    Base::rh_push_text(out, " digest=")
+                    Base::rh_push_hex_u64(out, dig)
+                    out.push(10)
+                    Base::rh_write_stdout(out)
+                    0
+            vis: mutable darray[u8] = []
+            p: Graph::RhProjection = Graph::rh_projection_make(1, Graph::RH_SCOPE_ALL, 0, 0, 0, 0, 0, false, 1000000, 32)
+            nd: mutable i64 = 0
+            nt: mutable i64 = 0
+            trans_truncated: mutable i64 = 0
+            if stage == 0 or stage == 2:
+                nd <- |edges, vis|
+                    direct: mutable darray[i64] = []
+                    block_result: i64 = Graph::rh_direct_dependents(edges, vis, 0, &p, direct)
+                    block_result
+                nt <- |edges, vis, trans_truncated|
+                    trans: mutable darray[i64] = []
+                    block_result: i64 = Graph::rh_transitive_dependents(edges, vis, 0, &p, trans, &trans_truncated)
+                    block_result
+            if stage == 2:
+                return |edges, n, dig, nd, nt, trans_truncated, distribution|
+                    out: mutable darray[u8] = []
+                    Base::rh_push_text(out, "stage=query nodes=")
+                    Base::rh_push_decimal_i64(out, n)
+                    Base::rh_push_text(out, " edges=")
+                    Base::rh_push_decimal_i64(out, edges.count.i64())
+                    Base::rh_push_text(out, " distribution=")
+                    rh_bench_push_distribution(out, distribution)
+                    Base::rh_push_text(out, " digest=")
+                    Base::rh_push_hex_u64(out, dig)
+                    Base::rh_push_text(out, " direct=")
+                    Base::rh_push_decimal_i64(out, nd)
+                    Base::rh_push_text(out, " trans=")
+                    Base::rh_push_decimal_i64(out, nt)
+                    Base::rh_push_text(out, " trans_truncated=")
+                    Base::rh_push_decimal_i64(out, trans_truncated)
+                    out.push(10)
+                    Base::rh_write_stdout(out)
+                    0
+            counts: mutable darray[u64] = []
+            while j < n |j: i64 = 0, counts|:
+                counts.push(0)
+                j <- j + 1
+            while e < edges.count |e: usize = 0, edges, counts|:
+                ed: Graph::RhGraphEdge = edges[e]
+                if ed.dst >= 0 and ed.dst < counts.count.i64():
+                    counts[ed.dst.usize()] <- counts[ed.dst.usize()] + 1
+                e <- e + 1
+            k50: mutable i64 = Continuity::rh_absence_factor_50(counts)
+            csum: mutable u64 =
+                while ci < counts.count |csum: u64 = 0, ci: usize = 0, counts| -> csum:
+                    csum <- csum + counts[ci]
+                    ci <- ci + 1
+            if stage == 3:
+                return |edges, n, dig, k50, csum, distribution|
+                    out: mutable darray[u8] = []
+                    Base::rh_push_text(out, "stage=metrics nodes=")
+                    Base::rh_push_decimal_i64(out, n)
+                    Base::rh_push_text(out, " edges=")
+                    Base::rh_push_decimal_i64(out, edges.count.i64())
+                    Base::rh_push_text(out, " distribution=")
+                    rh_bench_push_distribution(out, distribution)
+                    Base::rh_push_text(out, " digest=")
+                    Base::rh_push_hex_u64(out, dig)
+                    Base::rh_push_text(out, " k50=")
+                    Base::rh_push_decimal_i64(out, k50)
+                    Base::rh_push_text(out, " indegree_sum=")
+                    Base::rh_push_decimal_i64(out, csum.i64())
+                    out.push(10)
+                    Base::rh_write_stdout(out)
+                    0
+            out: mutable darray[u8] =
+                out: mutable darray[u8] = []
+                Base::rh_push_text(out, "nodes=")
+                Base::rh_push_decimal_i64(out, n)
+                Base::rh_push_text(out, " edges=")
+                Base::rh_push_decimal_i64(out, edges.count.i64())
+                Base::rh_push_text(out, " distribution=")
+                rh_bench_push_distribution(out, distribution)
+                Base::rh_push_text(out, " digest=")
+                Base::rh_push_hex_u64(out, dig)
+                Base::rh_push_text(out, " direct=")
+                Base::rh_push_decimal_i64(out, nd)
+                Base::rh_push_text(out, " trans=")
+                Base::rh_push_decimal_i64(out, nt)
+                Base::rh_push_text(out, " trans_truncated=")
+                Base::rh_push_decimal_i64(out, trans_truncated)
+                Base::rh_push_text(out, " k50=")
+                Base::rh_push_decimal_i64(out, k50)
+                Base::rh_push_text(out, " indegree_sum=")
+                Base::rh_push_decimal_i64(out, csum.i64())
+                out.push(10)
+                out
+            Base::rh_write_stdout(out)
+            0
 
 def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     slots: mutable cstr&& = argv.cast[mutable cstr&&] can Unsafe.PointerCast
-    n: mutable i64 = rh_bench_arg(argc, slots, 1, 200)
-    stage: i64 = rh_bench_stage(argc, slots)
-    return 2 if stage < 0
-    lcg: mutable BenchLcg =
-        seed: i64 = rh_bench_arg(argc, slots, 2, 42)
-        BenchLcg{state: seed.u64() ^ 88172645463325252}
-    edges: mutable darray[Graph::RhGraphEdge] = []
-    m: i64 = n * 2
-    while i < m |i: i64 = 0, edges, lcg, n|:
-        a: u64 = rh_bench_next(lcg) % n.u64()
-        b: u64 = rh_bench_next(lcg) % n.u64()
-        if a != b:
-            edges.push(Graph::RhGraphEdge{from: a.i64(), dst: b.i64(), scope: 0, platform: 0, introduced: 0, removed: 0, first_seen: 1})
-        i <- i + 1
-    dig: mutable u64 = rh_bench_digest(edges)
-    if stage == 1:
-        return |edges, n, dig|
-            out: mutable darray[u8] = []
-            Base::rh_push_text(out, "stage=graph nodes=")
-            Base::rh_push_decimal_i64(out, n)
-            Base::rh_push_text(out, " edges=")
-            Base::rh_push_decimal_i64(out, edges.count.i64())
-            Base::rh_push_text(out, " digest=")
-            Base::rh_push_hex_u64(out, dig)
-            out.push(10)
-            Base::rh_write_stdout(out)
-            0
-    vis: mutable darray[u8] = []
-    p: Graph::RhProjection = Graph::rh_projection_make(1, Graph::RH_SCOPE_ALL, 0, 0, 0, 0, 0, false, 1000000, 32)
-    nd: mutable i64 = |edges, vis|
-        direct: mutable darray[i64] = []
-        block_result: i64 = Graph::rh_direct_dependents(edges, vis, 0, &p, direct)
-        block_result
-    nt: mutable i64 = |edges, vis|
-        trans: mutable darray[i64] = []
-        tr: mutable i64 = 0
-        block_result: i64 = Graph::rh_transitive_dependents(edges, vis, 0, &p, trans, &tr)
-        block_result
-    if stage == 2:
-        return |edges, n, dig, nd, nt|
-            out: mutable darray[u8] = []
-            Base::rh_push_text(out, "stage=query nodes=")
-            Base::rh_push_decimal_i64(out, n)
-            Base::rh_push_text(out, " edges=")
-            Base::rh_push_decimal_i64(out, edges.count.i64())
-            Base::rh_push_text(out, " digest=")
-            Base::rh_push_hex_u64(out, dig)
-            Base::rh_push_text(out, " direct=")
-            Base::rh_push_decimal_i64(out, nd)
-            Base::rh_push_text(out, " trans=")
-            Base::rh_push_decimal_i64(out, nt)
-            out.push(10)
-            Base::rh_write_stdout(out)
-            0
-    # indegree distribution for concentration (deterministic counts)
-    counts: mutable darray[u64] = []
-    while j < n |j: i64 = 0, counts|:
-        counts.push(0)
-        j <- j + 1
-    while e < edges.count |e: usize = 0, edges, counts|:
-        ed: Graph::RhGraphEdge = edges[e]
-        if ed.dst >= 0 and ed.dst < counts.count.i64():
-            counts[ed.dst.usize()] <- counts[ed.dst.usize()] + 1
-        e <- e + 1
-    k50: mutable i64 = Continuity::rh_absence_factor_50(counts)
-    csum: mutable u64 =
-        while ci < counts.count |csum: u64 = 0, ci: usize = 0, counts| -> csum:
-            csum <- csum + counts[ci]
-            ci <- ci + 1
-    if stage == 3:
-        return |edges, n, dig, k50, csum|
-            out: mutable darray[u8] = []
-            Base::rh_push_text(out, "stage=metrics nodes=")
-            Base::rh_push_decimal_i64(out, n)
-            Base::rh_push_text(out, " edges=")
-            Base::rh_push_decimal_i64(out, edges.count.i64())
-            Base::rh_push_text(out, " digest=")
-            Base::rh_push_hex_u64(out, dig)
-            Base::rh_push_text(out, " k50=")
-            Base::rh_push_decimal_i64(out, k50)
-            Base::rh_push_text(out, " indegree_sum=")
-            Base::rh_push_decimal_i64(out, csum.i64())
-            out.push(10)
-            Base::rh_write_stdout(out)
-            0
-    out: mutable darray[u8] =
-        out: mutable darray[u8] = []
-        Base::rh_push_text(out, "nodes=")
-        Base::rh_push_decimal_i64(out, n)
-        Base::rh_push_text(out, " edges=")
-        Base::rh_push_decimal_i64(out, edges.count.i64())
-        Base::rh_push_text(out, " digest=")
-        Base::rh_push_hex_u64(out, dig)
-        Base::rh_push_text(out, " direct=")
-        Base::rh_push_decimal_i64(out, nd)
-        Base::rh_push_text(out, " trans=")
-        Base::rh_push_decimal_i64(out, nt)
-        Base::rh_push_text(out, " k50=")
-        Base::rh_push_decimal_i64(out, k50)
-        Base::rh_push_text(out, " indegree_sum=")
-        Base::rh_push_decimal_i64(out, csum.i64())
-        out.push(10)
-        out
-    Base::rh_write_stdout(out)
-    0
+    Bench::rh_run(argc, slots)

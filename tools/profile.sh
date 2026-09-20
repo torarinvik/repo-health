@@ -14,18 +14,24 @@ python3 - "$ROOT" "$OUT_DIR" <<'PY'
 import json, os, platform, subprocess, sys, time
 root, out_dir = sys.argv[1], sys.argv[2]
 binp = os.path.join(root, "build", "bench_runner")
-configs = [(200, 42), (1000, 42), (5000, 7)]
-stages = ("graph", "query", "metrics")
+workloads = [
+    (100, 42, "uniform", ("graph", "query", "metrics")),
+    (1000, 42, "uniform", ("graph", "query", "metrics")),
+    (10000, 7, "uniform", ("graph", "metrics")),
+    (1000, 17, "long_tail", ("graph", "metrics")),
+    (1000, 23, "central_hubs", ("graph", "query")),
+    (1000, 29, "cycle", ("graph", "query")),
+]
 runs = []
-for nodes, seed in configs:
+for nodes, seed, distribution, stages in workloads:
     structural = {}
     for stage in stages:
         t0 = time.perf_counter()
-        out1 = subprocess.check_output([binp, str(nodes), str(seed), stage], text=True).strip()
+        out1 = subprocess.check_output([binp, str(nodes), str(seed), stage, distribution], text=True).strip()
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 3)
-        out2 = subprocess.check_output([binp, str(nodes), str(seed), stage], text=True).strip()
+        out2 = subprocess.check_output([binp, str(nodes), str(seed), stage, distribution], text=True).strip()
         if out1 != out2:
-            raise SystemExit("profile stage is not deterministic for %s/%s/%s" % (nodes, seed, stage))
+            raise SystemExit("profile stage is not deterministic for %s/%s/%s/%s" % (nodes, seed, distribution, stage))
         digest = next((tok.split("=", 1)[1] for tok in out1.split() if tok.startswith("digest=")), "")
         if len(digest) != 16:
             raise SystemExit("missing dataset digest for %s/%s/%s" % (nodes, seed, stage))
@@ -33,6 +39,7 @@ for nodes, seed in configs:
         runs.append({
             "nodes": nodes,
             "seed": seed,
+            "distribution": distribution,
             "stage": stage,
             "elapsed_ms": elapsed_ms,
             "dataset_digest": digest,
@@ -43,14 +50,18 @@ for nodes, seed in configs:
     if len(digests) != 1:
         raise SystemExit("stage digests disagree for %s/%s" % (nodes, seed))
 manifest = {
-    "profile": "rh-profile/1",
-    "note": "elapsed_ms is machine-specific and noisy; stage output and dataset digests are deterministic",
+    "profile": "rh-profile/2",
+    "note": "elapsed_ms is machine-specific and noisy; distribution, stage output, and dataset digests are deterministic",
     "toolchain": "Elisa stage1 snapshot (see TOOLCHAIN.md)",
     "git_revision": subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip(),
     "platform": platform.platform(),
     "cache_state": "process-started",
     "reps": 1,
     "stages": ["graph", "query", "metrics"],
+    "workloads": [
+        {"nodes": nodes, "seed": seed, "distribution": distribution, "stages": list(stages)}
+        for nodes, seed, distribution, stages in workloads
+    ],
     "runs": runs,
 }
 path = os.path.join(out_dir, "profile-manifest.json")
@@ -58,6 +69,6 @@ with open(path, "w", encoding="utf-8") as fh:
     json.dump(manifest, fh, indent=2, sort_keys=True)
     fh.write("\n")
 for r in runs:
-    print("profile %5d seed=%d %-7s %8.3f ms %s" % (r["nodes"], r["seed"], r["stage"], r["elapsed_ms"], r["dataset_digest"]))
+    print("profile %5d seed=%d %-12s %-7s %8.3f ms %s" % (r["nodes"], r["seed"], r["distribution"], r["stage"], r["elapsed_ms"], r["dataset_digest"]))
 print("profile-manifest OK:", path)
 PY
