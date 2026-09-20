@@ -11,30 +11,37 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 
-const RH_FORGE_EVENTS_MAX_BYTES: usize = 4194304
-const RH_FORGE_EVENTS_MAX_RECORDS: i64 = 10000
-
-struct RhForgeEvent:
-    kind: mutable u8
-    native_id: mutable i64
-    status_s: mutable i64
-    status_e: mutable i64
-    has_status: mutable bool
-    created_at: mutable i64
-    has_created_at: mutable bool
-    updated_at: mutable i64
-    has_updated_at: mutable bool
-    closed_at: mutable i64
-    has_closed_at: mutable bool
-    url_s: mutable i64
-    url_e: mutable i64
-    has_url: mutable bool
-    tag_s: mutable i64
-    tag_e: mutable i64
-    has_tag: mutable bool
-
 module ForgeEvents:
     private:
+        const RH_FORGE_EVENTS_MAX_BYTES: usize = 4194304
+        const RH_FORGE_EVENTS_MAX_RECORDS: i64 = 10000
+
+        struct RhForgeEvent:
+            kind: mutable u8
+            native_id: mutable i64
+            status_s: mutable i64
+            status_e: mutable i64
+            has_status: mutable bool
+            created_at: mutable i64
+            has_created_at: mutable bool
+            updated_at: mutable i64
+            has_updated_at: mutable bool
+            closed_at: mutable i64
+            has_closed_at: mutable bool
+            url_s: mutable i64
+            url_e: mutable i64
+            has_url: mutable bool
+            tag_s: mutable i64
+            tag_e: mutable i64
+            has_tag: mutable bool
+
+        struct RhForgeCapabilityCounts:
+            attempted: mutable i64
+            normalized: mutable i64
+            duplicate_replacements: mutable i64
+            rejected: mutable i64
+            present: mutable bool
+
         def rh_fe_eq(texts: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, literal)
 
@@ -129,17 +136,19 @@ module ForgeEvents:
                 i <- i + 1
             -1
 
-        def rh_fe_add_array(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, key: u8&, kind: u8, githubish: bool, bitbucket: bool, events: mutable darray[RhForgeEvent]&, rejected_out: mutable i64&, has_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            has_out[0] <- 0
+        def rh_fe_add_array(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, key: u8&, kind: u8, githubish: bool, bitbucket: bool, events: mutable darray[RhForgeEvent]&, counts: mutable RhForgeCapabilityCounts&, total_attempts: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            counts.present <- false
             arr: i64 = Json::rh_json_obj_get(nodes, texts, root, key)
             return 0 if arr < 0
             return -1 if nodes[arr.usize()].kind != Json::RH_JSON_ARR
-            has_out[0] <- 1
+            counts.present <- true
             array: Json::RhJsonNode = nodes[arr.usize()]
-            while child >= 0 |child: i64 = array.first_child, nodes, raw, texts, events, rejected_out, kind, githubish, bitbucket|:
-                return -1 if events.count.i64() >= RH_FORGE_EVENTS_MAX_RECORDS
+            while child >= 0 |child: i64 = array.first_child, nodes, raw, texts, events, counts, total_attempts, kind, githubish, bitbucket|:
+                return -1 if total_attempts[0] >= RH_FORGE_EVENTS_MAX_RECORDS
+                counts.attempted <- counts.attempted + 1
+                total_attempts[0] <- total_attempts[0] + 1
                 if nodes[child.usize()].kind != Json::RH_JSON_OBJ:
-                    rejected_out[0] <- rejected_out[0] + 1
+                    counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
                 id_ok: mutable i64 = 0
@@ -150,11 +159,11 @@ module ForgeEvents:
                     # project-local workflow identity, with id as fallback.
                     if not githubish and not bitbucket and (kind == 0 or kind == 1):
                         if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "id", &native_id, &id_ok) or id_ok == 0 or native_id < 0:
-                            rejected_out[0] <- rejected_out[0] + 1
+                            counts.rejected <- counts.rejected + 1
                             child <- nodes[child.usize()].next_sibling
                             continue
                     else:
-                        rejected_out[0] <- rejected_out[0] + 1
+                        counts.rejected <- counts.rejected + 1
                         child <- nodes[child.usize()].next_sibling
                         continue
                 time_ok: mutable i64 = 0
@@ -162,11 +171,11 @@ module ForgeEvents:
                 if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, ForgeEvents::rh_fe_kind_time_key(kind), &created_at, &time_ok) or time_ok == 0 or created_at < 0:
                     if kind == 3:
                         if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "created_at", &created_at, &time_ok) or time_ok == 0 or created_at < 0:
-                            rejected_out[0] <- rejected_out[0] + 1
+                            counts.rejected <- counts.rejected + 1
                             child <- nodes[child.usize()].next_sibling
                             continue
                     else:
-                        rejected_out[0] <- rejected_out[0] + 1
+                        counts.rejected <- counts.rejected + 1
                         child <- nodes[child.usize()].next_sibling
                         continue
                 status_s: mutable i64 = -1
@@ -177,7 +186,7 @@ module ForgeEvents:
                     if kind == 3:
                         status_ok <- 0
                     else:
-                        rejected_out[0] <- rejected_out[0] + 1
+                        counts.rejected <- counts.rejected + 1
                         child <- nodes[child.usize()].next_sibling
                         continue
                 else:
@@ -185,29 +194,29 @@ module ForgeEvents:
                 updated_at: mutable i64 = 0
                 updated_ok: mutable i64 = 0
                 if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "updated_at", &updated_at, &updated_ok):
-                    rejected_out[0] <- rejected_out[0] + 1
+                    counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
                 if updated_ok == 1 and updated_at < 0:
-                    rejected_out[0] <- rejected_out[0] + 1
+                    counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
                 closed_at: mutable i64 = 0
                 closed_ok: mutable i64 = 0
                 if kind == 0 or kind == 1:
                     if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "closed_at", &closed_at, &closed_ok):
-                        rejected_out[0] <- rejected_out[0] + 1
+                        counts.rejected <- counts.rejected + 1
                         child <- nodes[child.usize()].next_sibling
                         continue
                     if closed_ok == 1 and closed_at < 0:
-                        rejected_out[0] <- rejected_out[0] + 1
+                        counts.rejected <- counts.rejected + 1
                         child <- nodes[child.usize()].next_sibling
                         continue
                 url_s: mutable i64 = -1
                 url_e: mutable i64 = -1
                 url_ok: mutable i64 = 0
                 if not ForgeEvents::rh_fe_optional_url(nodes, texts, child, githubish, bitbucket, &url_s, &url_e, &url_ok):
-                    rejected_out[0] <- rejected_out[0] + 1
+                    counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
                 tag_s: mutable i64 = -1
@@ -215,30 +224,47 @@ module ForgeEvents:
                 tag_ok: mutable i64 = 0
                 if kind == 3:
                     if not ForgeEvents::rh_fe_optional_str(nodes, texts, child, "tag_name", &tag_s, &tag_e, &tag_ok):
-                        rejected_out[0] <- rejected_out[0] + 1
+                        counts.rejected <- counts.rejected + 1
                         child <- nodes[child.usize()].next_sibling
                         continue
                     if tag_ok == 0:
                         if not ForgeEvents::rh_fe_optional_str(nodes, texts, child, "tag", &tag_s, &tag_e, &tag_ok):
-                            rejected_out[0] <- rejected_out[0] + 1
+                            counts.rejected <- counts.rejected + 1
                             child <- nodes[child.usize()].next_sibling
                             continue
                 normalized: RhForgeEvent = RhForgeEvent{kind: kind, native_id: native_id, status_s: status_s, status_e: status_e, has_status: status_ok == 1, created_at: created_at, has_created_at: true, updated_at: updated_at, has_updated_at: updated_ok == 1, closed_at: closed_at, has_closed_at: closed_ok == 1, url_s: url_s, url_e: url_e, has_url: url_ok == 1, tag_s: tag_s, tag_e: tag_e, has_tag: tag_ok == 1}
+                counts.normalized <- counts.normalized + 1
                 existing: i64 = ForgeEvents::rh_fe_existing(events, kind, native_id)
                 if existing >= 0:
                     events[existing.usize()] <- normalized
+                    counts.duplicate_replacements <- counts.duplicate_replacements + 1
                 else:
                     events.push(normalized)
                 child <- nodes[child.usize()].next_sibling
             0
 
-        def rh_fe_emit_cap(out: mutable darray[u8]&, kind: u8, has: i64, events: darray[RhForgeEvent]&, rejected: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_fe_emit_cap(out: mutable darray[u8]&, kind: u8, counts: RhForgeCapabilityCounts, events: darray[RhForgeEvent]&) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "\"")
             Base::rh_push_text(out, ForgeEvents::rh_fe_cap_label(kind))
             Base::rh_push_text(out, "\":{\"status\":\"")
-            Base::rh_push_text(out, "observed" if has != 0 else "unsupported")
-            Base::rh_push_text(out, "\",\"count\":")
-            if has != 0:
+            Base::rh_push_text(out, "observed" if counts.present else "unsupported")
+            Base::rh_push_text(out, "\",\"attempted\":")
+            if counts.present:
+                Base::rh_push_decimal_i64(out, counts.attempted)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"normalized\":")
+            if counts.present:
+                Base::rh_push_decimal_i64(out, counts.normalized)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"duplicate_replacements\":")
+            if counts.present:
+                Base::rh_push_decimal_i64(out, counts.duplicate_replacements)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"count\":")
+            if counts.present:
                 count: mutable i64 = 0
                 while i < events.count.i64() |i: i64 = 0, events, kind, count|:
                     count <- count + 1 if events[i.usize()].kind == kind
@@ -247,7 +273,7 @@ module ForgeEvents:
             else:
                 Base::rh_push_text(out, "null")
             Base::rh_push_text(out, ",\"rejected\":")
-            Base::rh_push_decimal_i64(out, rejected)
+            Base::rh_push_decimal_i64(out, counts.rejected)
             Base::rh_push_text(out, "}")
 
         def rh_fe_emit_event(out: mutable darray[u8]&, event: RhForgeEvent, texts: darray[u8]&, provider_s: i64, provider_e: i64) -> void can[Memory.Allocate, Abort.Panic]:
@@ -339,22 +365,19 @@ module ForgeEvents:
                 auth_state <- ForgeEvents::rh_fe_auth(texts, auth_s, auth_e)
                 return -1 if auth_state < 0
             events: mutable darray[RhForgeEvent] = []
-            rejected_issues: mutable i64 = 0
-            rejected_proposals: mutable i64 = 0
-            rejected_reviews: mutable i64 = 0
-            rejected_releases: mutable i64 = 0
-            has_issues: mutable i64 = 0
-            has_proposals: mutable i64 = 0
-            has_reviews: mutable i64 = 0
-            has_releases: mutable i64 = 0
+            issues_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false}
+            proposals_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false}
+            reviews_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false}
+            releases_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false}
+            total_attempts: mutable i64 = 0
             pagination: i64 = Json::rh_json_obj_get(nodes, texts, root, "pagination")
             pagination_present: bool = pagination >= 0
             if pagination_present:
                 return -1 if nodes[pagination.usize()].kind != Json::RH_JSON_OBJ
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "issues", 0, githubish, bitbucket, events, &rejected_issues, &has_issues) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, githubish, bitbucket, events, &rejected_proposals, &has_proposals) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, githubish, bitbucket, events, &rejected_reviews, &has_reviews) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "releases", 3, githubish, bitbucket, events, &rejected_releases, &has_releases) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "issues", 0, githubish, bitbucket, events, &issues_counts, &total_attempts) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, githubish, bitbucket, events, &proposals_counts, &total_attempts) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, githubish, bitbucket, events, &reviews_counts, &total_attempts) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "releases", 3, githubish, bitbucket, events, &releases_counts, &total_attempts) != 0
             Base::rh_push_text(out, "{\"schema\":\"rh-forge-events-result/1\",\"provider\":\"")
             Base::rh_json_escape(out, texts, provider_s.usize(), provider_e.usize())
             Base::rh_push_text(out, "\",\"captured_at\":")
@@ -362,13 +385,13 @@ module ForgeEvents:
             Base::rh_push_text(out, ",\"authorization\":{\"state\":\"")
             Base::rh_push_text(out, ForgeEvents::rh_fe_auth_label(auth_state))
             Base::rh_push_text(out, "\"},\"capabilities\":{")
-            ForgeEvents::rh_fe_emit_cap(out, 0, has_issues, events, rejected_issues)
+            ForgeEvents::rh_fe_emit_cap(out, 0, issues_counts, events)
             out.push(44)
-            ForgeEvents::rh_fe_emit_cap(out, 1, has_proposals, events, rejected_proposals)
+            ForgeEvents::rh_fe_emit_cap(out, 1, proposals_counts, events)
             out.push(44)
-            ForgeEvents::rh_fe_emit_cap(out, 2, has_reviews, events, rejected_reviews)
+            ForgeEvents::rh_fe_emit_cap(out, 2, reviews_counts, events)
             out.push(44)
-            ForgeEvents::rh_fe_emit_cap(out, 3, has_releases, events, rejected_releases)
+            ForgeEvents::rh_fe_emit_cap(out, 3, releases_counts, events)
             Base::rh_push_text(out, "}")
             if pagination_present:
                 Base::rh_push_text(out, ",\"pagination\":{")

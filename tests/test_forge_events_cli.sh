@@ -73,8 +73,8 @@ python3 - "$T/bitbucket.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["provider"] == "bitbucket", d
-assert d["capabilities"]["issues"] == {"status": "observed", "count": 1, "rejected": 0}, d
-assert d["capabilities"]["proposals"] == {"status": "observed", "count": 1, "rejected": 0}, d
+assert d["capabilities"]["issues"] == {"status":"observed", "attempted":1, "normalized":1, "duplicate_replacements":0, "count":1, "rejected":0}, d
+assert d["capabilities"]["proposals"] == {"status":"observed", "attempted":1, "normalized":1, "duplicate_replacements":0, "count":1, "rejected":0}, d
 assert d["capabilities"]["reviews"]["status"] == "unsupported" and d["capabilities"]["releases"]["status"] == "unsupported", d
 assert [e["native_id"] for e in d["events"]] == ["bitbucket:301", "bitbucket:17"], d["events"]
 assert d["events"][1]["status"] == "MERGED", d["events"][1]
@@ -93,7 +93,7 @@ PY
 python3 - "$T/malformed.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["capabilities"]["issues"] == {"status": "observed", "count": 1, "rejected": 1}, d
+assert d["capabilities"]["issues"] == {"status":"observed", "attempted":2, "normalized":1, "duplicate_replacements":0, "count":1, "rejected":1}, d
 assert d["capabilities"]["proposals"]["rejected"] == 0, d
 assert len(d["events"]) == 4, d
 print("[forge-events] per-capability rejection count OK")
@@ -110,7 +110,7 @@ PY
 python3 - "$T/duplicate-page.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["capabilities"]["issues"] == {"status": "observed", "count": 1, "rejected": 0}, d
+assert d["capabilities"]["issues"] == {"status":"observed", "attempted":2, "normalized":2, "duplicate_replacements":1, "count":1, "rejected":0}, d
 assert len(d["events"]) == 4, d
 issue = [e for e in d["events"] if e["kind"] == "issues"][0]
 assert issue["status"] == "closed" and issue["updated_at"] == 1699999999, issue
@@ -149,7 +149,7 @@ PY
 python3 - "$T/negative-time.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["capabilities"]["issues"] == {"status": "observed", "count": 0, "rejected": 1}, d
+assert d["capabilities"]["issues"] == {"status":"observed", "attempted":1, "normalized":0, "duplicate_replacements":0, "count":0, "rejected":1}, d
 print("[forge-events] negative timestamp rejection OK")
 PY
 
@@ -164,7 +164,7 @@ PY
 python3 - "$T/partial.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["capabilities"]["releases"] == {"status": "unsupported", "count": None, "rejected": 0}, d
+assert d["capabilities"]["releases"] == {"status":"unsupported", "attempted":None, "normalized":None, "duplicate_replacements":None, "count":None, "rejected":0}, d
 print("[forge-events] unsupported boundary OK")
 PY
 
@@ -180,10 +180,24 @@ PY
 python3 - "$T/empty-success.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["capabilities"]["issues"] == {"status": "observed", "count": 0, "rejected": 0}, d
-assert d["capabilities"]["proposals"] == {"status": "unsupported", "count": None, "rejected": 0}, d
+assert d["capabilities"]["issues"] == {"status":"observed", "attempted":0, "normalized":0, "duplicate_replacements":0, "count":0, "rejected":0}, d
+assert d["capabilities"]["proposals"] == {"status":"unsupported", "attempted":None, "normalized":None, "duplicate_replacements":None, "count":None, "rejected":0}, d
 print("[forge-events] empty observed and missing unsupported remain distinct")
 PY
+
+echo "[forge-events] record bound applies to attempts, including rejected rows"
+python3 - "$T/input.json" "$T/over-limit.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["issues"] = [None] * 10001
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+set +e
+"$ROOT/build/rh_cli" forge events --input "$T/over-limit.json" --out "$T/over-limit.out" >/dev/null 2>&1
+rc_records=$?
+set -e
+[[ "$rc_records" -eq 4 ]] || fail "record attempt cap must fail closed (got $rc_records)"
+[[ ! -e "$T/over-limit.out" ]] || fail "over-limit capture wrote partial output"
 
 echo "[forge-events] malformed envelopes fail closed"
 set +e
