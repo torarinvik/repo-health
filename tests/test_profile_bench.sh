@@ -23,6 +23,7 @@ assert a["stages"] == ["graph", "query", "metrics", "ecosystem"], a
 assert a["note"] and "machine-specific" in a["note"], a
 assert a["cache_state"] == "fresh process per sample; operating-system caches uncontrolled", a
 assert a["reps"] == 10 and a["warmup_runs_per_workload"] == 1, a
+assert a["concurrent_jobs"] == "1", a
 assert a["database_configuration"].startswith("not_applicable"), a
 assert a["external_requests"] == 0 and a["hardware"]["logical_cpu_count"] > 0, a
 assert a["code_revision"] and len(a["binary_sha256"]) == 64 and len(a["harness_sha256"]) == 64, a

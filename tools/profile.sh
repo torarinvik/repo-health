@@ -14,17 +14,18 @@ python3 - "$ROOT" "$OUT_DIR" <<'PY'
 import json, os, shutil, sys
 root = sys.argv[1]
 sys.path.insert(0, os.path.join(root, "tools"))
-from bench_support import environment_metadata, measure, output_fields, throughput_and_outcomes
+from bench_support import configured_concurrent_jobs, environment_metadata, measure, output_fields, throughput_and_outcomes
 root, out_dir = sys.argv[1], sys.argv[2]
 binp = os.path.join(root, "build", "bench_runner")
 reps = int(os.environ.get("RH_BENCH_REPS", "10"))
 if reps < 2:
     raise SystemExit("RH_BENCH_REPS must be at least 2")
+concurrent_jobs = configured_concurrent_jobs()
 compiler = os.environ.get("RH_COMPILER") or os.environ.get("ELISA_COMPILER_BIN") or shutil.which("elisac-stage1")
 if not compiler:
     compiler_root = os.environ.get("ELISA_COMPILER_ROOT", os.path.join(root, "..", "Elisa-compiler"))
     compiler = os.path.join(compiler_root, "scripts", "elisac_stage1.sh")
-metadata = environment_metadata(root, binp, compiler)
+metadata = environment_metadata(root, binp, compiler, concurrent_jobs)
 workloads = [
     (100, 42, "uniform", ("graph", "query", "metrics")),
     (1000, 42, "uniform", ("graph", "query", "metrics")),
@@ -38,7 +39,7 @@ runs = []
 for nodes, seed, distribution, stages in workloads:
     structural = {}
     for stage in stages:
-        sample = measure([binp, str(nodes), str(seed), stage, distribution], reps)
+        sample = measure([binp, str(nodes), str(seed), stage, distribution], reps, concurrent_jobs)
         out1 = sample["output"]
         fields = output_fields(out1)
         digest = fields.get("digest", "")

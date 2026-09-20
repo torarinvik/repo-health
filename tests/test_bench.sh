@@ -25,6 +25,7 @@ assert a["bench_version"] == "rh-bench/3", a
 assert a["runs"], a
 assert "machine-specific" in a["note"], a
 assert a["reps"] == 10, a
+assert a["concurrent_jobs"] == "1", a
 assert a["warmup_runs_per_workload"] == 1, a
 assert a["code_revision"] and len(a["binary_sha256"]) == 64 and len(a["harness_sha256"]) == 64, a
 assert isinstance(a["working_tree_dirty"], bool) and isinstance(a["working_tree_status"], list), a
@@ -57,6 +58,8 @@ for r in a["runs"]:
     assert len(r["peak_rss"]["samples_bytes"]) == 10, r
     assert r["peak_rss"]["max_bytes"] >= r["peak_rss"]["median_bytes"] > 0, r
     assert r["throughput"]["nodes_per_second"] > 0 and r["throughput"]["edges_per_second"] > 0, r
+    assert "aggregate resulting dataset counts" in r["throughput"]["basis"], r
+    assert "not aggregate batch memory" in r["peak_rss"]["basis"], r
     assert r["outcomes"]["successful_repetitions"] == 10 and r["outcomes"]["failed_repetitions"] == 0, r
     assert r["outcomes"]["error_rate"] == 0, r
     if r["stage"] == "all":

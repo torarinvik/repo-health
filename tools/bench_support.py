@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import math
 import os
 import platform
@@ -49,19 +50,45 @@ def percentile(values: Sequence[float], fraction: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def measure(command: Sequence[str], reps: int) -> dict[str, object]:
-    """Warm once, then time fresh processes while checking exact output equality."""
+def configured_concurrent_jobs() -> int:
+    """Read and bound the number of simultaneously launched workload processes."""
+    try:
+        jobs = int(os.environ.get("RH_BENCH_CONCURRENT_JOBS", "1"))
+    except ValueError as exc:
+        raise SystemExit("RH_BENCH_CONCURRENT_JOBS must be an integer from 1 to 32") from exc
+    if not 1 <= jobs <= 32:
+        raise SystemExit("RH_BENCH_CONCURRENT_JOBS must be an integer from 1 to 32")
+    return jobs
+
+
+def measure(command: Sequence[str], reps: int, concurrent_jobs: int = 1) -> dict[str, object]:
+    """Warm once, then time fresh processes in batches with identical output."""
     if reps < 2:
         raise ValueError("at least two repetitions are required")
-    expected, _, _ = run_process(command)
+    if not 1 <= concurrent_jobs <= 32:
+        raise ValueError("concurrent_jobs must be from 1 to 32")
+
+    def run_batch(executor: ThreadPoolExecutor | None) -> tuple[str, float, int]:
+        if executor is None:
+            return run_process(command)
+        started = time.perf_counter()
+        results = list(executor.map(run_process, [command] * concurrent_jobs))
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        outputs = {result[0] for result in results}
+        if len(outputs) != 1:
+            raise RuntimeError("concurrent workload output changed within a batch")
+        return outputs.pop(), elapsed_ms, max(result[2] for result in results)
+
     elapsed_samples = []
     rss_samples = []
-    for _ in range(reps):
-        output, elapsed_ms, rss_bytes = run_process(command)
-        if output != expected:
-            raise RuntimeError("workload output changed between repetitions")
-        elapsed_samples.append(round(elapsed_ms, 3))
-        rss_samples.append(rss_bytes)
+    with ThreadPoolExecutor(max_workers=concurrent_jobs) if concurrent_jobs > 1 else _NullExecutor() as executor:
+        expected, _, _ = run_batch(executor)
+        for _ in range(reps):
+            output, elapsed_ms, rss_bytes = run_batch(executor)
+            if output != expected:
+                raise RuntimeError("workload output changed between repetitions")
+            elapsed_samples.append(round(elapsed_ms, 3))
+            rss_samples.append(rss_bytes)
     latency = {
         "min_ms": min(elapsed_samples),
         "median_ms": round(statistics.median(elapsed_samples), 3),
@@ -75,6 +102,7 @@ def measure(command: Sequence[str], reps: int) -> dict[str, object]:
         "p95_bytes": int(percentile(rss_samples, 0.95)),
         "max_bytes": max(rss_samples),
         "samples_bytes": rss_samples,
+        "basis": "largest individual child peak RSS per concurrent batch; not aggregate batch memory",
     }
     return {
         "output": expected,
@@ -82,6 +110,7 @@ def measure(command: Sequence[str], reps: int) -> dict[str, object]:
         "peak_rss": memory,
         "successful_repetitions": reps,
         "failed_repetitions": 0,
+        "concurrent_processes_per_repetition": concurrent_jobs,
     }
 
 
@@ -92,14 +121,15 @@ def output_fields(output: str) -> dict[str, str]:
 def throughput_and_outcomes(sample: dict[str, object], fields: dict[str, str]) -> dict[str, object]:
     elapsed_seconds = sample["latency"]["median_ms"] / 1000.0
     repetitions = sample["successful_repetitions"]
+    concurrent_jobs = sample["concurrent_processes_per_repetition"]
     truncation = fields.get("trans_truncated")
     query_repetitions = repetitions if truncation is not None else 0
     truncated_repetitions = query_repetitions if truncation == "1" else 0
     return {
         "throughput": {
-            "nodes_per_second": round(int(fields["nodes"]) / elapsed_seconds, 3),
-            "edges_per_second": round(int(fields["edges"]) / elapsed_seconds, 3),
-            "basis": "resulting dataset counts per process wall-clock; includes process startup and dataset construction",
+            "nodes_per_second": round(int(fields["nodes"]) * concurrent_jobs / elapsed_seconds, 3),
+            "edges_per_second": round(int(fields["edges"]) * concurrent_jobs / elapsed_seconds, 3),
+            "basis": "aggregate resulting dataset counts per concurrent batch wall-clock; includes process startup and dataset construction",
         },
         "outcomes": {
             "successful_repetitions": repetitions,
@@ -108,11 +138,22 @@ def throughput_and_outcomes(sample: dict[str, object], fields: dict[str, str]) -
             "query_repetitions": query_repetitions,
             "transitive_truncated_repetitions": truncated_repetitions,
             "transitive_truncation_rate": truncated_repetitions / query_repetitions if query_repetitions else None,
+            "concurrent_processes_per_repetition": concurrent_jobs,
         },
     }
 
 
-def environment_metadata(root: str, binary_path: str, compiler: str) -> dict[str, object]:
+class _NullExecutor:
+    """Context manager sentinel that preserves the single-process timing path."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+
+def environment_metadata(root: str, binary_path: str, compiler: str, concurrent_jobs: int) -> dict[str, object]:
     disk = shutil.disk_usage(root)
     memory_total = None
     if sys.platform == "darwin":
@@ -168,7 +209,7 @@ def environment_metadata(root: str, binary_path: str, compiler: str) -> dict[str
             "memory_total_bytes": memory_total,
         },
         "disk_context": {"total_bytes": disk.total, "free_bytes": disk.free},
-        "concurrent_jobs": os.environ.get("RH_BENCH_CONCURRENT_JOBS"),
+        "concurrent_jobs": str(concurrent_jobs),
         "warmup_runs_per_workload": 1,
         "cache_state": "fresh process per sample; operating-system caches uncontrolled",
     }
