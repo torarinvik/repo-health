@@ -168,6 +168,23 @@ assert d["capabilities"]["releases"] == {"status": "unsupported", "count": None,
 print("[forge-events] unsupported boundary OK")
 PY
 
+echo "[forge-events] explicit empty response is observed, not unsupported"
+python3 - "$T/input.json" "$T/empty-success.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["issues"] = []
+d.pop("proposals")
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" forge events --input "$T/empty-success.json" --out "$T/empty-success.out" >/dev/null || fail "empty success capture"
+python3 - "$T/empty-success.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["issues"] == {"status": "observed", "count": 0, "rejected": 0}, d
+assert d["capabilities"]["proposals"] == {"status": "unsupported", "count": None, "rejected": 0}, d
+print("[forge-events] empty observed and missing unsupported remain distinct")
+PY
+
 echo "[forge-events] malformed envelopes fail closed"
 set +e
 printf '%s\n' '{"schema":"rh-forge-events-input/1","provider":"github","captured_at":1,"issues":{}}' > "$T/wrong-array-shape.json"
