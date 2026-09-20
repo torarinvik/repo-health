@@ -21,7 +21,7 @@ for p in sorted(glob.glob(os.path.join(root, "schemas", "*.schema.json"))):
     assert s["schema"] == "rh-jsonschema/1", p
     assert s["targets"], p
     names.add(s["name"])
-for want in ("connector-manifest", "canonical-repo", "dep-graph", "projection-snapshot", "cyclonedx", "spdx", "registry-meta", "distribution", "archive", "role-publication", "homebrew", "osv-query-input", "osv-commit-query-input"):
+for want in ("connector-manifest", "canonical-repo", "dep-graph", "projection-snapshot", "cyclonedx", "spdx", "registry-meta", "distribution", "archive", "role-publication", "homebrew", "osv-query-input", "osv-commit-query-input", "osv-query-batch-result", "osv-query-batch-pages-result"):
     assert want in names, ("missing schema", want)
 print("[schemas] families OK:", ", ".join(sorted(names)))
 PY

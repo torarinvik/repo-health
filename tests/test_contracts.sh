@@ -49,7 +49,7 @@ for want in ("dep-graph", "canonical-repo", "bundle-manifest", "report",
              "corrections-state", "connector-instance", "job-next",
              "job-schedule-result",
              "reconcile-result", "job-schedule-result", "projection-snapshot",
-             "worker-plan", "succession-metric", "adapter-manifest-result", "research-conformance", "pilot-review-result", "provider-roles-input", "ecosystem-lookup-result", "forge-events-result", "osv-query-input", "osv-commit-query-input", "osv-query-result", "osv-query-pages-result", "osv-query-batch-result"):
+             "worker-plan", "succession-metric", "adapter-manifest-result", "research-conformance", "pilot-review-result", "provider-roles-input", "ecosystem-lookup-result", "forge-events-result", "osv-query-input", "osv-commit-query-input", "osv-query-result", "osv-query-pages-result", "osv-query-batch-result", "osv-query-batch-pages-result"):
     assert want in ids, ("missing contract", want)
 assert d["rules"], "contract rules must be stated"
 print("[contracts] OK:", len(ids), "contracts")

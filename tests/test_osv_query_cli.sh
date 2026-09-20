@@ -59,6 +59,10 @@ request_body="$(cat "$request_path")"
 response="$OSV_QUERY_FAKE_RESPONSE"
 http="$OSV_QUERY_FAKE_HTTP"
 case "$request_body" in
+  *'"page_token":"batch-left-4"'*) response="${OSV_QUERY_FAKE_BATCH_PAGE4_RESPONSE:-$response}" ;;
+  *'"page_token":"batch-left-3"'*) response="${OSV_QUERY_FAKE_BATCH_PAGE3_RESPONSE:-$response}" ;;
+  *'"page_token":"batch-left-2"'*) response="${OSV_QUERY_FAKE_BATCH_PAGE2_RESPONSE:-$response}" ;;
+  *'"page_token":"batch-shared-2"'*) response="${OSV_QUERY_FAKE_BATCH_PAGE2_RESPONSE:-$response}" ;;
   *'"page_token":"page-2"'*) response="${OSV_QUERY_FAKE_PAGE2_RESPONSE:-$response}"; http="${OSV_QUERY_FAKE_PAGE2_HTTP:-$http}" ;;
   *'"page_token":"page-3"'*) response="${OSV_QUERY_FAKE_PAGE3_RESPONSE:-$response}"; http="${OSV_QUERY_FAKE_PAGE3_HTTP:-$http}" ;;
   *'"page_token":"page-4"'*) response="${OSV_QUERY_FAKE_PAGE4_RESPONSE:-$response}"; http="${OSV_QUERY_FAKE_PAGE4_HTTP:-$http}" ;;
@@ -154,6 +158,79 @@ assert r["state"] == "empty" and r["query_count"] == 0 and r["query_nodes"] == [
 assert r["http_status"] is None and r["raw_response_file"] is None and r["raw_response_sha256"] is None, r
 assert not (t / "empty-batch.args").exists() and not (out / "osv-query-batch-http-status.txt").exists()
 print("[osv-query] empty batch state and no-network path OK")
+PY
+
+echo "[osv-query] graph batch follows only queries with page cursors"
+cat > "$T/batch-page1.json" <<'JSON'
+{"results":[{"vulns":[{"id":"OSV-A"}]},{"vulns":[],"next_page_token":"batch-left-2"},{"vulns":[]},{"vulns":[]},{"vulns":[],"next_page_token":"batch-shared-2"},{"vulns":[]}]}
+JSON
+cat > "$T/batch-page2.json" <<'JSON'
+{"results":[{"vulns":[{"id":"OSV-C"}],"next_page_token":"batch-left-3"},{"vulns":[{"id":"OSV-E"}]}]}
+JSON
+cat > "$T/batch-page3.json" <<'JSON'
+{"results":[{"vulns":[{"id":"OSV-D"}]}]}
+JSON
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_ENDPOINT=https://api.osv.dev/v1/querybatch \
+OSV_QUERY_FAKE_RESPONSE="$T/batch-page1.json" \
+OSV_QUERY_FAKE_BATCH_PAGE2_RESPONSE="$T/batch-page2.json" \
+OSV_QUERY_FAKE_BATCH_PAGE3_RESPONSE="$T/batch-page3.json" \
+OSV_QUERY_FAKE_HTTP=200 OSV_QUERY_CAPTURE="$T/batch-pages.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/batch-pages.sent.jsonl" \
+  "$ROOT/build/rh_cli" osv-query --graph "$T/graph.json" --out "$T/batch-pages-out" --continue-pagination >/dev/null
+python3 - "$T" <<'PY'
+import hashlib, json, pathlib, sys
+t = pathlib.Path(sys.argv[1]); out = t / "batch-pages-out"
+r = json.load(open(out / "osv-query-batch-result.json"))
+assert r["schema"] == "rh-osv-query-batch-result/2", r
+assert r["state"] == "partial" and r["pagination"] == "complete", r
+assert r["page_count"] == 3 and r["page_limit"] == 4, r
+assert r["query_count"] == 6 and r["advisory_id_count"] == 4 and r["page_token_count"] == 3, r
+assert [p["query_indexes"] for p in r["page_evidence"]] == [[0,1,2,3,4,5],[1,4],[1]], r
+assert [len(json.load(open(out / p["request_file"]))["queries"]) for p in r["page_evidence"]] == [6,2,1]
+page2 = json.load(open(out / r["page_evidence"][1]["request_file"]))["queries"]
+assert [q["page_token"] for q in page2] == ["batch-left-2", "batch-shared-2"], page2
+assert page2[0]["package"]["name"] == "left" and page2[1]["version"] == "2.0.0", page2
+page3 = json.load(open(out / r["page_evidence"][2]["request_file"]))["queries"]
+assert page3 == [{"package":{"ecosystem":"crates.io","name":"left"},"version":"1.0.0","page_token":"batch-left-3"}], page3
+for page in r["page_evidence"]:
+    raw = (out / page["raw_response_file"]).read_bytes()
+    assert page["raw_response_sha256"] == hashlib.sha256(raw).hexdigest(), page
+    assert (out / page["http_status_file"]).read_text() == "200"
+sent = [json.loads(line) for line in open(t / "batch-pages.sent.jsonl") if line.strip()]
+assert len(sent) == 3, sent
+print("[osv-query] per-query pagination and positional evidence OK")
+PY
+
+echo "[osv-query] graph batch stops at four rounds and retains remaining work"
+cat > "$T/single-graph.json" <<'JSON'
+{"schema":"rh-dep-graph/1","ecosystem":"cargo","nodes":[{"id":0,"name":"capped","version":"1.0.0","source":"registry"}],"edges":[],"unresolved":[],"advisories":[]}
+JSON
+for page in 1 2 3 4; do
+  following_page=$((page + 1))
+  cat > "$T/batch-cap-page$page.json" <<JSON
+{"results":[{"vulns":[],"next_page_token":"batch-left-$following_page"}]}
+JSON
+done
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_ENDPOINT=https://api.osv.dev/v1/querybatch \
+OSV_QUERY_FAKE_RESPONSE="$T/batch-cap-page1.json" \
+OSV_QUERY_FAKE_BATCH_PAGE2_RESPONSE="$T/batch-cap-page2.json" \
+OSV_QUERY_FAKE_BATCH_PAGE3_RESPONSE="$T/batch-cap-page3.json" \
+OSV_QUERY_FAKE_BATCH_PAGE4_RESPONSE="$T/batch-cap-page4.json" \
+OSV_QUERY_FAKE_HTTP=200 OSV_QUERY_CAPTURE="$T/batch-cap.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/batch-cap.sent.jsonl" \
+  "$ROOT/build/rh_cli" osv-query --graph "$T/single-graph.json" --out "$T/batch-cap-out" --continue-pagination >/dev/null
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+t = pathlib.Path(sys.argv[1]); out = t / "batch-cap-out"
+r = json.load(open(out / "osv-query-batch-result.json"))
+assert r["state"] == "partial" and r["pagination"] == "more_available", r
+assert r["page_count"] == r["page_limit"] == 4 and len(r["page_evidence"]) == 4, r
+assert r["next_request_file"] == "osv-query-batch-next-request.json", r
+assert json.load(open(out / r["next_request_file"]))["queries"][0]["page_token"] == "batch-left-5"
+assert len([line for line in open(t / "batch-cap.sent.jsonl") if line.strip()]) == 4
+print("[osv-query] four-round cap and retained pending query OK")
 PY
 
 echo "[osv-query] full commit-hash query uses the same guarded endpoint"

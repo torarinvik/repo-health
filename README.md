@@ -48,6 +48,9 @@ the default checks use local data, while HTTPS fetches need network access.
 
 # Query up to 64 eligible nodes from a dependency graph in one OSV batch
 ./build/rh_cli osv-query --graph ./deps-cargo-graph.json --out ./osv-query-batch/
+
+# Optionally follow per-query cursors for at most four batch rounds
+./build/rh_cli osv-query --graph ./deps-cargo-graph.json --out ./osv-query-batch-pages/ --continue-pagination
 ```
 
 `osv-query` accepts `rh-osv-query-input/1` for one supported ecosystem, package
@@ -74,11 +77,16 @@ reports path/Git or versionless nodes as skipped and over-cap nodes as omitted.
 It retains the ordered request, raw response, HTTP status, stderr, and response
 digest in `rh-osv-query-batch-result/1`, including a positional map from each
 query to its graph node. OSV's batch response contains per-query
-advisory ID and modification summaries rather than full advisory records; any
-per-query continuation values remain in the raw response and make the result
-partial. This summary is not a `deps --osv` matcher input. The full-record
-single-query path remains available for matcher handoff. Batches are capped,
-so they do not establish complete lockfile coverage.
+advisory ID and modification summaries rather than full advisory records.
+Without continuation, returned per-query cursors make the result partial. With
+`--continue-pagination`, the `rh-osv-query-batch-result/2` path follows at most
+four rounds, resubmits only queries that returned cursors, and retains each
+request/response/status/stderr/digest with its original query indexes. If the
+four-round cap leaves work, the result is partial and the remaining request is
+saved as `osv-query-batch-next-request.json`. These summaries are not a
+`deps --osv` matcher input. The full-record single-query path remains available
+for matcher handoff. Batches are capped, so they do not establish complete
+lockfile coverage.
 
 ## Repository layout
 

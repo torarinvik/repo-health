@@ -48,6 +48,7 @@ assert any("full commit-hash" in u for u in osv["used_for"]), osv
 assert "more_available" in osv["failure_mode"] and "unknown" in osv["failure_mode"], osv
 assert "complete lockfile coverage" in osv["assumption"] and "four pages" in osv["assumption"], osv
 assert "fuzzi" in osv["assumption"] and "feed freshness" in osv["assumption"], osv
+assert "four rounds" in osv["assumption"] and "only outstanding query items" in osv["assumption"], osv
 assert "public redistribution is not enabled" in osv["rights"], osv
 print("[providers] lifecycle honesty OK")
 PY
@@ -65,6 +66,7 @@ assert "complete_lockfile_coverage" in src["unauthorized"], src
 assert "pagination_continuation" not in src["unauthorized"], src
 assert "at most four pages" in src["notes"] and "partial" in src["notes"], src
 assert "at most 64" in src["notes"] and "summaries, not full advisory records" in src["notes"], src
+assert "only results with cursors" in src["notes"] and "four rounds" in src["notes"], src
 assert "uniform_underlying_data_license" in src["unsupported"], src
 assert "feed_freshness" in src["unsupported"], src
 assert "source IDs and links" in osv["rights"], osv

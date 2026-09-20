@@ -344,6 +344,71 @@ module OsvQuery:
                 result <- nodes[result.usize()].next_sibling
             0
 
+        # Re-submit only the query items whose positional results carry a page
+        # cursor. The parallel index list keeps each subset tied to the original
+        # graph query order across bounded rounds.
+        def rh_osv_query_batch_next_request_inner(base_request: darray[u8]&, response: darray[u8]&, current_indices: darray[i64]&, out: mutable darray[u8]&, next_indices_out: mutable darray[i64]&, next_count_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            next_count_out[0] <- 0
+            request_nodes: mutable darray[Json::RhJsonNode] = []
+            request_texts: mutable darray[u8] = []
+            response_nodes: mutable darray[Json::RhJsonNode] = []
+            response_texts: mutable darray[u8] = []
+            request_root: i64 = Json::rh_json_parse(base_request, request_nodes, request_texts)
+            response_root: i64 = Json::rh_json_parse(response, response_nodes, response_texts)
+            return -1 if request_root < 0 or response_root < 0
+            request_queries: i64 = rh_osv_query_member(request_nodes, request_texts, request_root, "queries")
+            response_results: i64 = rh_osv_query_member(response_nodes, response_texts, response_root, "results")
+            return -1 if request_queries < 0 or response_results < 0
+            return -1 if request_nodes[request_queries.usize()].kind != Json::RH_JSON_ARR or response_nodes[response_results.usize()].kind != Json::RH_JSON_ARR
+            return -1 if request_nodes[request_queries.usize()].child_count.i64() != current_indices.count.i64()
+            return -1 if response_nodes[response_results.usize()].child_count != request_nodes[request_queries.usize()].child_count
+            Base::rh_push_text(out, "{\"queries\":[")
+            while result >= 0 |result: i64 = response_nodes[response_results.usize()].first_child, query_index: i64 = 0, request_nodes, request_texts, response_nodes, response_texts, request_queries, current_indices, out, next_indices_out, next_count_out|:
+                return -1 if response_nodes[result.usize()].kind != Json::RH_JSON_OBJ
+                page_token: i64 = rh_osv_query_member(response_nodes, response_texts, result, "next_page_token")
+                return -1 if page_token == -2
+                if page_token >= 0:
+                    token_s: mutable i64 = -1
+                    token_e: mutable i64 = -1
+                    return -1 if not rh_osv_query_span(response_nodes, page_token, &token_s, &token_e)
+                    return -1 if token_e - token_s > RH_OSV_QUERY_MAX_TOKEN or not rh_osv_query_clean_text(response_texts, token_s, token_e)
+                    request_item: i64 = Json::rh_json_arr_get(request_nodes, request_queries, query_index)
+                    return -1 if request_item < 0 or request_nodes[request_item.usize()].kind != Json::RH_JSON_OBJ
+                    return -1 if request_nodes[request_item.usize()].child_count != 4 and request_nodes[request_item.usize()].child_count != 6
+                    package: i64 = rh_osv_query_member(request_nodes, request_texts, request_item, "package")
+                    version: i64 = rh_osv_query_member(request_nodes, request_texts, request_item, "version")
+                    return -1 if package < 0 or version < 0 or not rh_osv_query_fields(request_nodes, package, 2)
+                    ecosystem: i64 = rh_osv_query_member(request_nodes, request_texts, package, "ecosystem")
+                    name: i64 = rh_osv_query_member(request_nodes, request_texts, package, "name")
+                    ecosystem_s: mutable i64 = -1
+                    ecosystem_e: mutable i64 = -1
+                    name_s: mutable i64 = -1
+                    name_e: mutable i64 = -1
+                    version_s: mutable i64 = -1
+                    version_e: mutable i64 = -1
+                    return -1 if not rh_osv_query_span(request_nodes, ecosystem, &ecosystem_s, &ecosystem_e)
+                    return -1 if not rh_osv_query_span(request_nodes, name, &name_s, &name_e)
+                    return -1 if not rh_osv_query_span(request_nodes, version, &version_s, &version_e)
+                    return -1 if not rh_osv_query_clean_text(request_texts, ecosystem_s, ecosystem_e)
+                    return -1 if not rh_osv_query_clean_text(request_texts, name_s, name_e)
+                    return -1 if not rh_osv_query_clean_text(request_texts, version_s, version_e)
+                    out.push(44) if next_count_out[0] > 0
+                    Base::rh_push_text(out, "{\"package\":{\"ecosystem\":\"")
+                    Base::rh_json_escape(out, request_texts, ecosystem_s.usize(), ecosystem_e.usize())
+                    Base::rh_push_text(out, "\",\"name\":\"")
+                    Base::rh_json_escape(out, request_texts, name_s.usize(), name_e.usize())
+                    Base::rh_push_text(out, "\"},\"version\":\"")
+                    Base::rh_json_escape(out, request_texts, version_s.usize(), version_e.usize())
+                    Base::rh_push_text(out, "\",\"page_token\":\"")
+                    Base::rh_json_escape(out, response_texts, token_s.usize(), token_e.usize())
+                    Base::rh_push_text(out, "\"}")
+                    next_indices_out.push(current_indices[query_index.usize()])
+                    next_count_out[0] <- next_count_out[0] + 1
+                query_index <- query_index + 1
+                result <- response_nodes[result.usize()].next_sibling
+            Base::rh_push_text(out, "]}")
+            0
+
         def rh_osv_query_make_request(texts: darray[u8]&, name_s: i64, name_e: i64, version_s: i64, version_e: i64, ecosystem: u8, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"package\":{\"ecosystem\":\"")
             Base::rh_push_text(out, Package::rh_osv_ecosystem(ecosystem))
@@ -376,6 +441,9 @@ module OsvQuery:
 
         def rh_osv_query_validate_batch_response(raw: darray[u8]&, expected_count: i64, page_token_count_out: mutable i64&, advisory_id_count_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             rh_osv_query_validate_batch_response_inner(raw, expected_count, page_token_count_out, advisory_id_count_out)
+
+        def rh_osv_query_batch_next_request(base_request: darray[u8]&, response: darray[u8]&, current_indices: darray[i64]&, out: mutable darray[u8]&, next_indices_out: mutable darray[i64]&, next_count_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_osv_query_batch_next_request_inner(base_request, response, current_indices, out, next_indices_out, next_count_out)
 
         # Read a versioned query contract and build OSV's v1/query body.
         # Query kind is 0 for a package/version request and 1 for a commit hash.
