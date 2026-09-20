@@ -41,6 +41,12 @@ module RolesReport:
             return "not_requested" if state == 3
             "unknown"
 
+        def rh_rr_action_kind(texts: darray[u8]&, s: i64, e: i64) -> u8:
+            return Roles::RH_ACTION_RELEASE if rh_rr_eq(texts, s, e, "release")
+            return Roles::RH_ACTION_MERGE if rh_rr_eq(texts, s, e, "merge")
+            return Roles::RH_ACTION_REVIEW if rh_rr_eq(texts, s, e, "review")
+            0
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_rr_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
@@ -66,6 +72,7 @@ module RolesReport:
             return -1 if sc < 0 or not Json::rh_json_str_span(nodes, sc, &sspan, &espan)
             return -1 if not rh_rr_eq(texts, sspan, espan, "rh-roles-input/1")
             decls: mutable darray[Roles::RhRoleDecl] = []
+            actions: mutable darray[Roles::RhObservedAction] = []
             d_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "declarations")
             return -1 if d_idx < 0 or nodes[d_idx.usize()].kind != Json::RH_JSON_ARR
             auth_state: mutable i64 = 4
@@ -94,6 +101,22 @@ module RolesReport:
                 return -1 if actor < 0
                 decls.push(Roles::RhRoleDecl{actor_id: actor, role: role, permission: rh_rr_int(nodes, raw, texts, dc, "permission", 0).u8(), source: source.u8(), declared_at: rh_rr_int(nodes, raw, texts, dc, "declared_at", 0), revoked_at: rh_rr_int(nodes, raw, texts, dc, "revoked_at", 0)})
                 dc <- nodes[dc.usize()].next_sibling
+            actions_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "observed_actions")
+            has_actions: bool = actions_idx >= 0
+            if has_actions:
+                return -1 if nodes[actions_idx.usize()].kind != Json::RH_JSON_ARR
+                action_array: Json::RhJsonNode = nodes[actions_idx.usize()]
+                while ac >= 0 |ac: i64 = action_array.first_child, nodes, texts, raw, actions|:
+                    return -1 if nodes[ac.usize()].kind != Json::RH_JSON_OBJ
+                    actor_action: i64 = rh_rr_int(nodes, raw, texts, ac, "actor_id", -1)
+                    at_action: i64 = rh_rr_int(nodes, raw, texts, ac, "at", -1)
+                    kind_s: mutable i64 = 0
+                    kind_e: mutable i64 = 0
+                    return -1 if actor_action < 0 or at_action < 0 or not rh_rr_str(nodes, texts, ac, "kind", &kind_s, &kind_e)
+                    kind_action: u8 = rh_rr_action_kind(texts, kind_s, kind_e)
+                    return -1 if kind_action == 0
+                    actions.push(Roles::RhObservedAction{actor_id: actor_action, kind: kind_action, observed_at: at_action})
+                    ac <- nodes[ac.usize()].next_sibling
             Base::rh_push_text(out, "{\"schema\":\"rh-roles-result/1\",\"declaration_count\":")
             Base::rh_push_decimal_i64(out, decls.count.i64())
             Base::rh_push_text(out, ",\"authorization_state\":\"")
@@ -177,6 +200,9 @@ module RolesReport:
                             j <- j + 1
                     active_declared_12m <- active_declared_12m + 1 if eligible and not seen_12m
                     i <- i + 1
+            observed_release_actors: i64 = Roles::rh_observed_actor_count(actions, Roles::RH_ACTION_RELEASE)
+            observed_merge_actors: i64 = Roles::rh_observed_actor_count(actions, Roles::RH_ACTION_MERGE)
+            observed_review_actors: i64 = Roles::rh_observed_actor_count(actions, Roles::RH_ACTION_REVIEW)
             Base::rh_push_decimal_i64(out, p)
             Base::rh_push_text(out, ",\"file\":")
             Base::rh_push_decimal_i64(out, f)
@@ -243,6 +269,21 @@ module RolesReport:
                 Base::rh_push_decimal_i64(out, current_as_of)
             else:
                 Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"maintainer.observed_release_actors\",\"version\":\"1.0.0\",\"status\":\"")
+            Base::rh_push_text(out, "observed\",\"value\":") if has_actions
+            Base::rh_push_decimal_i64(out, observed_release_actors) if has_actions
+            Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"" ) if not has_actions
+            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"maintainer.observed_merge_actors\",\"version\":\"1.0.0\",\"status\":\"")
+            Base::rh_push_text(out, "observed\",\"value\":") if has_actions
+            Base::rh_push_decimal_i64(out, observed_merge_actors) if has_actions
+            Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"" ) if not has_actions
+            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"maintainer.observed_review_actors\",\"version\":\"1.0.0\",\"status\":\"")
+            Base::rh_push_text(out, "observed\",\"value\":") if has_actions
+            Base::rh_push_decimal_i64(out, observed_review_actors) if has_actions
+            Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"" ) if not has_actions
             Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"maintainer.permission_observed_current\",\"version\":\"1.0.0\",\"status\":\"")
             if auth_state == 2:

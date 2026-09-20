@@ -17,7 +17,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
+{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"observed_actions":[{"actor_id":1,"kind":"release","at":120},{"actor_id":2,"kind":"release","at":130},{"actor_id":3,"kind":"merge","at":140},{"actor_id":4,"kind":"review","at":150},{"actor_id":4,"kind":"review","at":160}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
 JSON
 "$ROOT/build/rh_cli" roles --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
 python3 - "$T/out.json" <<'PY'
@@ -40,6 +40,9 @@ assert metrics["roles.operator_declaration_count"]["value"] == 1, metrics
 assert metrics["maintainer.role_assignments_with_end_dates"]["value"] == 1, metrics
 assert metrics["maintainer.declared_current"]["value"] == 1 and metrics["maintainer.declared_current"]["as_of"] == 350, metrics
 assert metrics["maintainer.permission_observed_current"]["value"] == 1, metrics
+assert metrics["maintainer.observed_release_actors"]["value"] == 2, metrics
+assert metrics["maintainer.observed_merge_actors"]["value"] == 1, metrics
+assert metrics["maintainer.observed_review_actors"]["value"] == 1, metrics
 roles = [(q["actor_id"], q["as_of"], q["declared_role"]) for q in d["queries"]]
 assert roles == [(1, 150, "owner"), (2, 150, "triager"), (2, 250, "unknown"),
                  (3, 250, "unknown"), (3, 350, "member"), (4, 150, "unknown")], roles
