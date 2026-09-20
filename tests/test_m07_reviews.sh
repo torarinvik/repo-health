@@ -52,7 +52,7 @@ for dep in d["dependencies"]:
         assert k in dep and dep[k] not in (None, "", []), (dep.get("id"), k)
     assert dep["id"] not in ids, ("duplicate dependency", dep["id"])
     ids.add(dep["id"])
-for want in ("elisa-stage1", "libc", "zlib", "git-cli"):
+for want in ("elisa-stage1", "llvm-clang-libfuzzer", "libc", "zlib", "git-cli"):
     assert want in ids, ("missing dependency", want)
 python3_dep = next(dep for dep in d["dependencies"] if dep["id"] == "python3")
 assert python3_dep["kind"] == "runtime_tool", python3_dep
