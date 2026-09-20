@@ -167,6 +167,50 @@ assert result["identity_state"] == "changed", result
 assert result["observed_digest"] != result["expected_digest"], result
 PY
 
+echo "[artifact-observe] parsed npm lock integrity flows through deps into byte verification"
+python3 - "$ROOT/build/rh_cli" <<'PY'
+import base64, hashlib, json, pathlib, subprocess, sys, tempfile
+cli = pathlib.Path(sys.argv[1])
+with tempfile.TemporaryDirectory(prefix="rh-artifact-npm-e2e-") as temporary:
+    root = pathlib.Path(temporary)
+    project = root / "project"
+    output = root / "output"
+    project.mkdir()
+    archive = bytes((i * 19 + 7) % 256 for i in range(8193))
+    tarball = root / "demo.tgz"
+    tarball.write_bytes(archive)
+    integrity = "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode()
+    package = {"name": "app", "version": "1.0.0", "dependencies": {"demo": "1.0.0"}}
+    lock = {
+        "name": "app",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": package,
+            "node_modules/demo": {"version": "1.0.0", "integrity": integrity},
+        },
+    }
+    (project / "package.json").write_text(json.dumps(package, separators=(",", ":")))
+    (project / "package-lock.json").write_text(json.dumps(lock, separators=(",", ":")))
+    subprocess.run([str(cli), "deps", "--repo", str(project), "--out", str(output)], check=True, stdout=subprocess.DEVNULL)
+    graph_path = output / "deps-npm-graph.json"
+    graph = json.loads(graph_path.read_text())
+    artifact = next((item for item in graph["artifacts"] if item["expected_digest"] == integrity), None)
+    assert artifact is not None, graph
+    observation_path = root / "observation.json"
+    subprocess.run([
+        str(cli), "artifact-observe", "--graph", str(graph_path),
+        "--artifact", str(artifact["id"]), "--file", str(tarball),
+        "--out", str(observation_path),
+    ], check=True, stdout=subprocess.DEVNULL)
+    result = json.loads(observation_path.read_text())
+    assert result["expected_digest"] == integrity, result
+    assert result["observed_digest"] == integrity, result
+    assert result["identity_state"] == "match", result
+    assert result["digest_algorithm"] == "sha512", result
+    assert result["verification_basis"] == "raw_npm_tarball_bytes", result
+PY
+
 echo "[artifact-observe] unsupported and out-of-range evidence fails closed"
 python3 - "$T" "$ROOT/fixtures/packages/artifact-observation-graph.json" <<'PY'
 import base64, json, pathlib, sys
