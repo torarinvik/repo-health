@@ -141,7 +141,7 @@ echo "[downstream] projection snapshot OK"
 
 echo "[downstream] shared snapshot stores only the sanitized public graph"
 cat > "$T/private-snapshot.json" <<'JSON'
-{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"public-root","version":"1","custom":"PUBLIC-UNKNOWN-SECRET"},{"id":1,"name":"PRIVATE-NODE-SECRET","version":"9","token":"PRIVATE-UNKNOWN-SECRET"},{"id":2,"name":"public-leaf","version":null}],"edges":[{"from":1,"to":2,"scope":"normal","custom":"PRIVATE-EDGE-SECRET"},{"from":2,"to":0,"scope":"PUBLIC-SCOPE-UNKNOWN-SECRET","introduced":10,"first_seen":20,"custom":"PUBLIC-EDGE-UNKNOWN-SECRET"}],"unresolved":[{"from":1,"name":"PRIVATE-UNRESOLVED-SECRET"}],"advisories":[{"advisory":"PRIVATE-ADVISORY-SECRET","node":1,"witness":[0,1]}]}
+{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"public-root","version":"1","custom":"PUBLIC-UNKNOWN-SECRET"},{"id":1,"name":"scope-node","version":"9","token":"PRIVATE-UNKNOWN-SECRET"},{"id":2,"name":"public-leaf","version":null}],"edges":[{"from":1,"to":2,"scope":"normal","custom":"PRIVATE-EDGE-SECRET"},{"from":2,"to":0,"scope":"PUBLIC-SCOPE-UNKNOWN-SECRET","introduced":10,"first_seen":20,"custom":"PUBLIC-EDGE-UNKNOWN-SECRET"}],"unresolved":[{"from":1,"name":"PRIVATE-UNRESOLVED-SECRET"}],"advisories":[{"advisory":"PRIVATE-ADVISORY-SECRET","node":1,"witness":[0,1]}]}
 JSON
 "$ROOT/build/rh_cli" downstream --graph "$T/private-snapshot.json" --subject 0 --out "$T/private-snapshot-report" --private 1 --snapshot-root "$T/private-snapshots" >/dev/null || fail "private snapshot run"
 python3 - "$T/private-snapshot-report/downstream.json" "$T/private-snapshots" <<'PY'
@@ -158,9 +158,24 @@ assert [node["name"] for node in graph["nodes"]] == ["public-root", "public-leaf
 assert graph["nodes"][1]["version"] is None, graph["nodes"]
 assert graph["edges"] == [{"from": 1, "to": 0, "scope": "normal", "introduced": 10, "first_seen": 20}], graph["edges"]
 assert graph["unresolved"] == [] and graph["advisories"] == [], graph
-for secret in ("PRIVATE-NODE-SECRET", "PRIVATE-UNKNOWN-SECRET", "PRIVATE-EDGE-SECRET", "PRIVATE-UNRESOLVED-SECRET", "PRIVATE-ADVISORY-SECRET", "PUBLIC-UNKNOWN-SECRET", "PUBLIC-EDGE-UNKNOWN-SECRET", "PUBLIC-SCOPE-UNKNOWN-SECRET"):
+for secret in ("scope-node", "PRIVATE-UNKNOWN-SECRET", "PRIVATE-EDGE-SECRET", "PRIVATE-UNRESOLVED-SECRET", "PRIVATE-ADVISORY-SECRET", "PUBLIC-UNKNOWN-SECRET", "PUBLIC-EDGE-UNKNOWN-SECRET", "PUBLIC-SCOPE-UNKNOWN-SECRET"):
     assert secret not in raw, secret
 print("[downstream] public projection snapshot excludes private payloads")
+PY
+"$ROOT/build/rh_cli" downstream --graph "$T/private-snapshot.json" --subject 0 --out "$T/other-private-snapshot-report" --private 2 --snapshot-root "$T/private-snapshots" >/dev/null || fail "shared-root second visibility run"
+python3 - "$T/private-snapshot-report/downstream.json" "$T/other-private-snapshot-report/downstream.json" "$T/private-snapshots" <<'PY'
+import json, pathlib, sys
+first, second = (json.load(open(path)) for path in sys.argv[1:3])
+root = pathlib.Path(sys.argv[3])
+first_id = first["projection"]["snapshot_id"]
+second_id = second["projection"]["snapshot_id"]
+assert first_id != second_id, (first_id, second_id)
+first_graph = json.loads((root / first_id).read_text())["graph"]
+second_graph = json.loads((root / second_id).read_text())["graph"]
+assert [node["name"] for node in first_graph["nodes"]] == ["public-root", "public-leaf"], first_graph
+assert [node["name"] for node in second_graph["nodes"]] == ["public-root", "scope-node"], second_graph
+assert all(set(node) == {"id", "name", "version"} for node in second_graph["nodes"]), second_graph
+print("[downstream] shared cache keeps visibility-specific projections isolated")
 PY
 
 echo "[downstream] per-metric intrinsic join has its own denominators (R011)"
