@@ -216,6 +216,33 @@ module Continuity:
             return RH_RET_RETAINED if has_return_event
             RH_RET_NOT_RETAINED
 
+        # Count actors whose observed activity returns after the configured gap.
+        # Full-history callers provide the complete intervening coverage required
+        # by the metric; windowed callers publish unsupported instead of treating
+        # an unobserved interval as inactivity. An actor is counted once, even if
+        # several qualifying gaps occur.
+        def rh_returning_after_gap(actor: darray[i64]&, inst: darray[i64]&, n_actors: i64, gap_days: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if n_actors < 0 or gap_days <= 0
+            gap_seconds: i64 = gap_days * 86400
+            actor_loop: mutable darray[i64]& = actor
+            inst_loop: mutable darray[i64]& = inst
+            actors_loop: mutable i64 = n_actors
+            gap_loop: mutable i64 = gap_seconds
+            while a < actors_loop |returning: i64 = 0, a: i64 = 0, actor_loop, inst_loop, actors_loop, gap_loop| -> returning:
+                first: mutable i64 = 9223372036854775807
+                last: mutable i64 = -9223372036854775807
+                while e < actor_loop.count.i64() |e: i64 = 0, actor_loop, inst_loop, a, first, last|:
+                    if actor_loop[e.usize()] == a:
+                        t: i64 = inst_loop[e.usize()]
+                        if t < first:
+                            first <- t
+                        if t > last:
+                            last <- t
+                    e <- e + 1
+                if last - first >= gap_loop:
+                    returning <- returning + 1
+                a <- a + 1
+
         # Coverage basis for a continuity result (R029/R002). Distinguishes a
         # full-history observation from one that is limited by how the source was
         # collected:
@@ -371,7 +398,7 @@ module Continuity:
         # is `not_applicable`, never 0 (unknown != zero). Censored/unobservable and
         # the raw concentration components are reported alongside so every
         # denominator can be audited. Raw emails never appear here.
-        def rh_continuity_metrics_write(out: mutable darray[u8]&, identity_rev: i64, actors_total: i64, persistent: i64, active3: i64, active6: i64, active9: i64, event_share_num: i64, event_share_den: i64, tenure_days: i64, retained: i64, eligible: i64, censored: i64, unobservable: i64, retained_365: i64, eligible_365: i64, censored_365: i64, unobservable_365: i64, first_seen_supported: bool, hhi_n: u64, hhi_d: u64, eff_n: u64, eff_d: u64, fifty: i64, eighty: i64, top_n: u64, top_d: u64, top3_n: u64, top3_d: u64, top5_n: u64, top5_d: u64, gini_n: u64, gini_d: u64) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_continuity_metrics_write(out: mutable darray[u8]&, identity_rev: i64, actors_total: i64, persistent: i64, active3: i64, active6: i64, active9: i64, event_share_num: i64, event_share_den: i64, tenure_days: i64, retained: i64, eligible: i64, censored: i64, unobservable: i64, retained_365: i64, eligible_365: i64, censored_365: i64, unobservable_365: i64, returning_after_gap: i64, first_seen_supported: bool, hhi_n: u64, hhi_d: u64, eff_n: u64, eff_d: u64, fifty: i64, eighty: i64, top_n: u64, top_d: u64, top3_n: u64, top3_d: u64, top5_n: u64, top5_d: u64, gini_n: u64, gini_d: u64) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"schema\":\"rh-continuity-metrics/1\",\"identity_revision\":")
             Base::rh_push_decimal_i64(out, identity_rev)
             Base::rh_push_text(out, ",\"actors_total\":")
@@ -400,6 +427,15 @@ module Continuity:
                 Base::rh_push_decimal_i64(out, eligible_365)
                 Base::rh_push_text(out, "}")
             Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
+            Base::rh_push_text(out, "{\"key\":\"persistence.returning_after_gap\",\"version\":\"1.0.0\",\"status\":\"")
+            if not first_seen_supported:
+                Base::rh_push_text(out, "unsupported\",\"reason\":\"windowed-or-shallow-history-cannot-establish-complete-intervening-coverage\"")
+            elif actors_total <= 0:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-actors\"")
+            else:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, returning_after_gap)
+            Base::rh_push_text(out, ",\"gap_days\":90,\"evidence\":[\"evidence/git-log.bin\"]},")
             Base::rh_push_text(out, "{\"key\":\"persistence.persistent_12m\",\"version\":\"1.0.0\",\"status\":\"")
             if actors_total <= 0:
                 Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-actors\"")

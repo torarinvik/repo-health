@@ -74,6 +74,8 @@ assert by["concentration.absence_factor_50"]["value"] == 2, by
 assert by["concentration.actor_count_80"]["value"] == 3, by
 assert by["persistence.retained_365d"]["status"] == "observed", by
 assert by["persistence.retained_365d"]["value"] == {"num": 0, "den": 2}, by["persistence.retained_365d"]
+assert by["persistence.returning_after_gap"]["status"] == "observed", by
+assert by["persistence.returning_after_gap"]["value"] == 1, by["persistence.returning_after_gap"]
 for key in ("persistence.active_3_of_12_months", "persistence.active_6_of_12_months", "persistence.active_9_of_12_months", "persistence.median_observed_tenure_days"):
     assert by[key]["status"] == "observed", (key, by[key])
 assert by["persistence.persistent_event_share"]["value"] == {"num": 0, "den": 5}, by
