@@ -23,6 +23,7 @@ include "./rh_json.elisa"
 include "./rh_continuity.elisa"
 include "./rh_continuity_scan.elisa"
 include "./rh_package.elisa"
+include "./rh_pylock.elisa"
 include "./rh_nuget_lock.elisa"
 include "./rh_artifact_observation.elisa"
 include "./rh_osv_query.elisa"
@@ -110,6 +111,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli continuity --bundle <manifest> --out <dir>")
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
+    rh_cli_err("       rh_cli pylock --input <pylock.toml> --out <file>")
     rh_cli_err("       rh_cli artifact-observe --graph <package-graph> --artifact <id> --file <local-artifact> --out <file>")
     rh_cli_err("       rh_cli osv-query --input <rh-osv-query-input/1|2> --out <dir> [--continue-pagination]")
     rh_cli_err("       rh_cli osv-query --graph <rh-dep-graph/1> --out <dir> [--continue-pagination] [--hydrate-advisories]")
@@ -797,6 +799,25 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dov_idx], true, slots[dr_idx], false) if dov_idx >= 0
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dou_idx], true) if dou_idx >= 0
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dr_idx], false)
+    if Base::rh_streq(cmd, "pylock"):
+        pylock_input, pylock_output =
+            while option_index < argc |pylock_input: i64 = -1, pylock_output: i64 = -1, option_index: i64 = 2, slots| -> pylock_input, pylock_output:
+                option: u8& = slots[option_index].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(option, "--input"):
+                    return rh_cli_usage(2) if pylock_input >= 0
+                    return rh_cli_usage(2) if option_index + 1 >= argc
+                    option_index <- option_index + 1
+                    pylock_input <- option_index
+                elif Base::rh_streq(option, "--out"):
+                    return rh_cli_usage(2) if pylock_output >= 0
+                    return rh_cli_usage(2) if option_index + 1 >= argc
+                    option_index <- option_index + 1
+                    pylock_output <- option_index
+                else:
+                    return rh_cli_usage(2)
+                option_index <- option_index + 1
+        return rh_cli_usage(2) if pylock_input < 0 or pylock_output < 0
+        return rh_do_pylock(slots[pylock_input], slots[pylock_output])
     if Base::rh_streq(cmd, "osv-query"):
         return rh_cli_usage(2) if argc < 6 or argc > 8
         osv_out_flag: u8& = slots[4].cast[u8&] can Unsafe.PointerCast
@@ -2550,6 +2571,36 @@ def rh_do_serve(root: cstr, port: i64, maxc: i64) -> i32 can[Memory.Allocate, Ab
 # The key is a raw byte file held separately from workers. Verification
 # proves integrity of the subject bytes and possession of the shared key;
 # it is NOT a claim that the subject is correct, safe, or trustworthy (S011).
+
+# --- PEP 751 lock observation path. ---
+def rh_do_pylock(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    return 3 if not rh_path_arg_ok(input_path) or not rh_path_arg_ok(out_path)
+    input: mutable darray[u8] =
+        input: mutable darray[u8] = []
+        Base::rh_push_cstr(input, input_path)
+        input.push(0)
+        input
+    input_ptr: cstr = (&input[0]).cast[cstr] can Unsafe.PointerCast
+    input_size: i64 = Base::rh_file_size(input_ptr)
+    return 4 if input_size <= 0 or input_size > 8388608
+    raw: mutable darray[u8] = []
+    return 4 if Base::rh_io_read(input_ptr, raw) < 0 or raw.count.i64() != input_size
+    result: mutable darray[u8] = []
+    if Pylock::rh_pylock_audit(raw, result) != 0:
+        rh_cli_err("pylock: unsupported or malformed PEP 751 lock (bounded projection, fail closed)")
+        return 4
+    result.push(10)
+    output: mutable darray[u8] =
+        output: mutable darray[u8] = []
+        Base::rh_push_cstr(output, out_path)
+        output.push(0)
+        output
+    output_ptr: cstr = (&output[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(output_ptr, result):
+        rh_cli_err("pylock: cannot write --out")
+        return 4
+    rh_cli_out("pylock: PEP 751 audit emitted")
+    0
 
 # --- M03 dependency graph execution path. ---
 # Reads a local project's Cargo.lock and npm package.json plus a

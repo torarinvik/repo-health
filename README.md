@@ -37,6 +37,9 @@ the default checks use local data, while HTTPS fetches need network access.
 # Show implemented metrics (explicit subset — never "all 360")
 ./build/rh_cli registry
 
+# Inspect PEP 751 package relationships without inventing project-root edges
+./build/rh_cli pylock --input ./pylock.toml --out ./pylock-audit.json
+
 # Query OSV for one package/version (the server version match is fuzzy)
 ./build/rh_cli osv-query --input ./fixtures/packages/osv-query-cargo.json --out ./osv-query/
 
@@ -65,6 +68,15 @@ the request, raw response, HTTP status, capture time, and response digest, and
 writes a normalized OSV response. Package/version responses can be supplied to
 `rh_cli deps --osv`; commit-query results remain separate context evidence and
 are not automatically matched against a package graph.
+
+`rh_cli pylock` accepts a bounded PEP 751 `pylock.toml` projection and emits
+`rh-pylock-audit/1`, bound to the exact source bytes by SHA-256. PEP 751 records package-to-package relationships for
+auditing but does not record project-root requirements, and those relationships
+are informational. The audit therefore preserves package markers and Python
+version constraints without evaluating them, reports missing or ambiguous
+references, and counts lock fields it does not project. It does not create a
+`rh-dep-graph/1` or OSV input; resolved graph integration and artifact-hash
+projection remain open.
 Without `--continue-pagination`, the command keeps its one-page
 `rh-osv-query-result/1` behavior and marks a returned `next_page_token` as
 `more_available`. The opt-in continuation mode emits

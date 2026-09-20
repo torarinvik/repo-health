@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# PEP 751 lock audit keeps package relationships informational and rootless.
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+T="/tmp/rh-pylock"
+
+fail() { echo "[pylock] FAIL: $1" >&2; exit 1; }
+
+echo "[pylock] build"
+bash "$ROOT/tools/build.sh" >/dev/null
+rm -rf "$T"
+mkdir -p "$T"
+cat > "$T/pylock.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+requires-python = '>=3.12'
+environments = ["sys_platform == 'win32'", "sys_platform == 'linux'"]
+
+[[packages]]
+name = 'attrs'
+version = '25.1.0'
+marker = "sys_platform == 'linux' # retained inside string"
+requires-python = '>=3.8'
+wheels = [{name = 'attrs-25.1.0-py3-none-any.whl', hashes = {sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}}]
+
+[[packages.wheels.hashes]]
+sha256 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+[[packages]]
+name = 'attrs'
+version = '24.1.0'
+
+[[packages]]
+name = 'cattrs'
+version = '24.1.2'
+dependencies = [
+  # Fake entry ignored because this line is TOML comment text: {name = 'not-a-package'}
+  {name = 'attrs', version = '25.1.0'},
+]
+
+[[packages]]
+name = 'ambiguous-consumer'
+version = '1.0.0'
+dependencies = [{name = 'attrs'}]
+
+[[packages]]
+name = 'context-consumer'
+version = '1.0.0'
+dependencies = [{name = 'private', vcs = {url = 'https://example.invalid/private'}}]
+
+[[packages]]
+name = 'missing-consumer'
+version = '1.0.0'
+[[packages.dependencies]]
+name = 'not-in-lock'
+
+[[packages]]
+name = 'table-context-consumer'
+version = '1.0.0'
+[[packages.dependencies]]
+name = 'private'
+[packages.dependencies.vcs]
+url = 'https://example.invalid/private'
+EOF
+
+"$ROOT/build/rh_cli" pylock --input "$T/pylock.toml" --out "$T/result.json" | grep -q 'PEP 751 audit emitted' || fail "command did not emit audit"
+cmp "$ROOT/fixtures/packages/pylock-audit-result.json" "$T/result.json" || fail "audit output drifted from golden"
+python3 - "$T/result.json" "$T/pylock.toml" <<'PY'
+import hashlib, json, sys
+report = json.load(open(sys.argv[1]))
+source = open(sys.argv[2], "rb").read()
+assert report["schema"] == "rh-pylock-audit/1", report
+assert report["parser"] == "bounded-core-projection", report
+assert report["created_by"] == "uv" and report["requires_python"] == ">=3.12", report
+assert report["input_sha256"] == hashlib.sha256(source).hexdigest(), report
+assert report["root_relationship"] == "not_recorded", report
+assert report["dependency_semantics"] == "informational_only", report
+pkgs = report["packages"]
+assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-consumer", "context-consumer", "missing-consumer", "table-context-consumer"], pkgs
+assert pkgs[0]["marker"] == "sys_platform == 'linux' # retained inside string", pkgs[0]
+assert pkgs[2]["dependencies"] == [{"name": "attrs", "version": "25.1.0", "target": 0, "resolution": "resolved"}], pkgs[2]
+assert pkgs[3]["dependencies"][0]["resolution"] == "ambiguous", pkgs[3]
+assert pkgs[4]["dependencies"][0]["resolution"] == "context", pkgs[4]
+assert pkgs[5]["dependencies"][0]["resolution"] == "missing", pkgs[5]
+assert pkgs[6]["dependencies"][0]["resolution"] == "context", pkgs[6]
+coverage = report["coverage"]
+assert coverage["direct_dependencies"] == "not_recorded" and coverage["markers_evaluated"] is False, coverage
+assert coverage["artifacts_projected"] is False and coverage["unprojected_top_level_fields"] == 1, coverage
+assert coverage["unprojected_package_fields"] >= 1 and coverage["unprojected_dependency_fields"] == 2, coverage
+assert coverage["unprojected_tables"] == 2, coverage
+print("[pylock] PEP 751 relationships and loss coverage OK")
+PY
+
+echo "[pylock] unsupported lock versions and string escapes fail closed"
+sed "s/lock-version = '1.0'/lock-version = '2.0'/" "$T/pylock.toml" > "$T/bad-version.toml"
+printf "lock-version = '1.0'\ncreated-by = \"bad\\\\escape\"\n[[packages]]\nname = 'x'\n" > "$T/bad-string.toml"
+for input in "$T/bad-version.toml" "$T/bad-string.toml"; do
+  set +e
+  "$ROOT/build/rh_cli" pylock --input "$input" --out "$T/bad-result.json" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" -eq 4 ]] || fail "unsupported PEP 751 input must fail closed (got $rc)"
+done
+set +e
+"$ROOT/build/rh_cli" pylock --input "$T/pylock.toml" --input "$T/pylock.toml" --out "$T/duplicate-option.json" >/dev/null 2>&1
+rc_duplicate_option=$?
+set -e
+[[ "$rc_duplicate_option" -eq 2 ]] || fail "duplicate CLI options must be rejected (got $rc_duplicate_option)"
+
+echo "test_pylock_cli OK"

@@ -19,6 +19,17 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- M03 Python lock evidence: `src/rh_pylock.elisa` and
+  `rh_cli pylock --input <pylock.toml> --out <file>` emit
+  `rh-pylock-audit/1` for bounded PEP 751 package-to-package auditing. The
+  report keeps package markers and Python constraints, marks dependency links
+  informational, and never invents a project-root relationship that the format
+  does not record; `input_sha256` binds the result to the exact lock bytes.
+  Missing, ambiguous, and source-specific references remain
+  distinct; omitted artifact, environment, and source fields are counted.
+  `tests/test_pylock_cli.sh`, a checked-in golden, schema, and public-contract
+  entry cover the new result. Full TOML validation, artifact hashes, project
+  manifest integration, and use as a resolved dependency graph remain open.
 - M11 forecast evidence now requires a named observable binary outcome and
   retains model and baseline Brier scores with the same submitted evaluation
   cohort identifier and sample count. `rh-forecast-input/2` and

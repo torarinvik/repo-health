@@ -1,0 +1,449 @@
+# rh_pylock.elisa — bounded PEP 751 package and dependency audit projection.
+#
+# PEP 751 package relationships are informational and the format does not record
+# project-root requirements. Keep this report separate from rh-dep-graph/1 so
+# lock membership is never mistaken for directness or installer input.
+
+include "./rh_base.elisa"
+include "./rh_sha256.elisa"
+
+module Pylock:
+    private:
+        const RH_PYLOCK_MAX_BYTES: usize = 8388608
+        const RH_PYLOCK_MAX_PACKAGES: i64 = 10000
+        const RH_PYLOCK_MAX_DEPENDENCIES: i64 = 200000
+
+        struct RhPylockPackage:
+            name_s: mutable i64
+            name_e: mutable i64
+            version_s: mutable i64
+            version_e: mutable i64
+            marker_s: mutable i64
+            marker_e: mutable i64
+            python_s: mutable i64
+            python_e: mutable i64
+            dependency_array: mutable u8
+
+        struct RhPylockReference:
+            owner: mutable i64
+            name_s: mutable i64
+            name_e: mutable i64
+            version_s: mutable i64
+            version_e: mutable i64
+            context: mutable u8
+
+        def rh_pylock_copy(pool: mutable darray[u8]&, data: darray[u8]&, s: usize, e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            start: i64 = pool.count.i64()
+            for i in s..<e |pool, data|:
+                pool.push(data[i])
+            start
+
+        def rh_pylock_lower(value: u8) -> u8:
+            return value + 32 if value >= 65 and value <= 90
+            value
+
+        def rh_pylock_name_eq(pool: darray[u8]&, a_s: i64, a_e: i64, b_s: i64, b_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if a_s < 0 or b_s < 0 or a_e - a_s != b_e - b_s
+            for i in 0..<(a_e - a_s).usize() |pool, a_s, b_s|:
+                a: mutable u8 = rh_pylock_lower(pool[(a_s + i.i64()).usize()])
+                b: mutable u8 = rh_pylock_lower(pool[(b_s + i.i64()).usize()])
+                a <- 45 if a == 95 or a == 46
+                b <- 45 if b == 95 or b == 46
+                return false if a != b
+            true
+
+        def rh_pylock_equal(pool: darray[u8]&, a_s: i64, a_e: i64, b_s: i64, b_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if a_s < 0 or b_s < 0 or a_e - a_s != b_e - b_s
+            for i in 0..<(a_e - a_s).usize() |pool, a_s, b_s|:
+                return false if pool[(a_s + i.i64()).usize()] != pool[(b_s + i.i64()).usize()]
+            true
+
+        def rh_pylock_trim(data: darray[u8]&, start: mutable usize&, end: mutable usize&) -> void can[Memory.Allocate, Abort.Panic]:
+            while start[0] < end[0] and (data[start[0]] == 32 or data[start[0]] == 9 or data[start[0]] == 13) |data, start, end|:
+                start[0] <- start[0] + 1
+            while end[0] > start[0] and (data[end[0] - 1] == 32 or data[end[0] - 1] == 9 or data[end[0] - 1] == 13) |data, start, end|:
+                end[0] <- end[0] - 1
+
+        def rh_pylock_comment_end(data: mutable darray[u8]&, start: usize, end: usize) -> usize can[Memory.Allocate, Abort.Panic]:
+            limit: mutable usize = end
+            quote: mutable u8 = 0
+            while i < limit |i: usize = start, data, limit, quote| -> i:
+                if data[i] == 35:
+                    return i if quote == 0
+                if data[i] == 34 or data[i] == 39:
+                    if quote == 0:
+                        quote <- data[i]
+                    elif quote == data[i]:
+                        quote <- 0
+                i <- i + 1
+            limit
+
+        # Parse one single-line TOML basic/literal string. Escapes are rejected
+        # in this projection rather than decoded incorrectly.
+        def rh_pylock_string(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, value_s: mutable i64&, value_e: mutable i64&, next_out: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= end or (data[start] != 34 and data[start] != 39)
+            quote: mutable u8 = data[start]
+            value_start: usize = start + 1
+            limit: mutable usize = end
+            close: usize =
+                while i < limit |i: usize = value_start, data, quote, limit| -> i:
+                    return false if data[i] == 92
+                    break if data[i] == quote
+                    i <- i + 1
+            return false if close >= end
+            value_s[0] <- rh_pylock_copy(pool, data, value_start, close)
+            value_e[0] <- value_s[0] + (close - value_start).i64()
+            next_out[0] <- close + 1
+            true
+
+        def rh_pylock_scalar_string(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, value_s: mutable i64&, value_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            next: mutable usize = 0
+            return false if not rh_pylock_string(data, pool, start, end, &value_s[0], &value_e[0], &next)
+            while next < end and (data[next] == 32 or data[next] == 9) |next, data, end|:
+                next <- next + 1
+            next == end
+
+        def rh_pylock_assignment(data: mutable darray[u8]&, start: usize, end: usize, key_s: mutable usize&, key_e: mutable usize&, value_s: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            limit: mutable usize = end
+            equals: usize =
+                while i < limit |i: usize = start, data, limit| -> i:
+                    break if data[i] == 61
+                    i <- i + 1
+            return false if equals >= end
+            key_s[0] <- start
+            key_e[0] <- equals
+            rh_pylock_trim(data, &key_s[0], &key_e[0])
+            value_s[0] <- equals + 1
+            while value_s[0] < end and (data[value_s[0]] == 32 or data[value_s[0]] == 9) |data, value_s, end|:
+                value_s[0] <- value_s[0] + 1
+            true
+
+        def rh_pylock_push_reference(refs: mutable darray[RhPylockReference]&, owner: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if refs.count.i64() >= RH_PYLOCK_MAX_DEPENDENCIES
+            refs.push(RhPylockReference{owner: owner, name_s: -1, name_e: -1, version_s: -1, version_e: -1, context: 0})
+            refs.count.i64() - 1
+
+        # Parse a quoted identity field in one dependency entry. Unknown keys are
+        # retained as an explicit context state; they are never used for matching.
+        def rh_pylock_reference_field(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, reference: mutable RhPylockReference&, unknown_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            key_s: mutable usize = start
+            key_e: mutable usize = end
+            value_s: mutable usize = start
+            return false if not rh_pylock_assignment(data, start, end, &key_s, &key_e, &value_s)
+            if not Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "name") and not Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "version"):
+                reference.context <- 1
+                unknown_out[0] <- unknown_out[0] + 1
+                return true
+            value_e: usize = rh_pylock_comment_end(data, value_s, end)
+            value_end: mutable usize = value_e
+            rh_pylock_trim(data, &value_s, &value_end)
+            parsed_s: mutable i64 = -1
+            parsed_e: mutable i64 = -1
+            next: mutable usize = 0
+            return false if not rh_pylock_string(data, pool, value_s, value_end, &parsed_s, &parsed_e, &next)
+            while next < value_end and (data[next] == 32 or data[next] == 9) |next, data, value_end|:
+                next <- next + 1
+            return false if next < value_end and data[next] != 44
+            if Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "name"):
+                return false if reference.name_s >= 0
+                reference.name_s <- parsed_s
+                reference.name_e <- parsed_e
+            elif Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "version"):
+                return false if reference.version_s >= 0
+                reference.version_s <- parsed_s
+                reference.version_e <- parsed_e
+            else:
+                reference.context <- 1
+                unknown_out[0] <- unknown_out[0] + 1
+            true
+
+        def rh_pylock_inline_reference(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, owner: i64, refs: mutable darray[RhPylockReference]&, unknown_out: mutable i64&, next_out: mutable usize&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if start >= end or data[start] != 123
+            depth: mutable i64 = 1
+            quote: mutable u8 = 0
+            limit: mutable usize = end
+            close: usize =
+                while i < limit |i: usize = start + 1, data, depth, quote, limit| -> i:
+                    b: u8 = data[i]
+                    if quote != 0:
+                        return -1 if b == 92
+                        quote <- 0 if b == quote
+                    elif b == 34 or b == 39:
+                        quote <- b
+                    elif b == 123:
+                        depth <- depth + 1
+                    elif b == 125:
+                        depth <- depth - 1
+                        break if depth == 0
+                    i <- i + 1
+            return -1 if close >= end or quote != 0
+            ref_index: i64 = rh_pylock_push_reference(refs, owner)
+            return -1 if ref_index < 0
+            field_start: mutable usize = start + 1
+            field_quote: mutable u8 = 0
+            field_depth: mutable i64 = 0
+            while cursor <= close |cursor: usize = field_start, close, data, pool, refs, ref_index, unknown_out, field_quote, field_depth|:
+                if cursor == close or (data[cursor] == 44 and field_quote == 0 and field_depth == 0):
+                    field_s: mutable usize = field_start
+                    field_e: mutable usize = cursor
+                    rh_pylock_trim(data, &field_s, &field_e)
+                    if field_s < field_e:
+                        ref: mutable RhPylockReference = refs[ref_index.usize()]
+                        return -1 if not rh_pylock_reference_field(data, pool, field_s, field_e, &ref, unknown_out)
+                        refs[ref_index.usize()] <- ref
+                    field_start <- cursor + 1
+                else:
+                    if field_quote != 0:
+                        field_quote <- 0 if data[cursor] == field_quote
+                    elif data[cursor] == 34 or data[cursor] == 39:
+                        field_quote <- data[cursor]
+                    elif data[cursor] == 123 or data[cursor] == 91:
+                        field_depth <- field_depth + 1
+                    elif data[cursor] == 125 or data[cursor] == 93:
+                        field_depth <- field_depth - 1 if field_depth > 0
+                    return -1 if data[cursor] == 92
+                cursor <- cursor + 1
+            ref_after: RhPylockReference = refs[ref_index.usize()]
+            return -1 if ref_after.name_s < 0 or ref_after.name_s == ref_after.name_e
+            next_out[0] <- close + 1
+            0
+
+        # Parse a PEP 751 dependencies array. The only values used to identify a
+        # package are name and optional version; source selectors stay context.
+        def rh_pylock_dependency_array(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, owner: i64, refs: mutable darray[RhPylockReference]&, unknown_out: mutable i64&, close_out: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= data.count or data[start] != 91
+            square_depth: mutable i64 = 1
+            quote: mutable u8 = 0
+            cursor: mutable usize = start + 1
+            while cursor < data.count and square_depth > 0 |cursor, data, pool, owner, refs, unknown_out, square_depth, quote, close_out|:
+                b: u8 = data[cursor]
+                if quote != 0:
+                    return false if b == 92
+                    quote <- 0 if b == quote
+                elif b == 34 or b == 39:
+                    quote <- b
+                elif b == 35:
+                    cursor <- while comment < data.count and data[comment] != 10 |comment: usize = cursor, data| -> comment:
+                        comment <- comment + 1
+                    cursor <- cursor - 1 if cursor > 0
+                elif b == 123:
+                    next: mutable usize = 0
+                    return false if rh_pylock_inline_reference(data, pool, cursor, data.count, owner, refs, unknown_out, &next) != 0
+                    cursor <- next - 1
+                elif b == 91:
+                    square_depth <- square_depth + 1
+                elif b == 93:
+                    square_depth <- square_depth - 1
+                    close_out[0] <- cursor if square_depth == 0
+                cursor <- cursor + 1
+            square_depth == 0 and quote == 0
+
+        def rh_pylock_parse(data: mutable darray[u8]&, pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, refs: mutable darray[RhPylockReference]&, created_s: mutable i64&, created_e: mutable i64&, python_s: mutable i64&, python_e: mutable i64&, unknown_top: mutable i64&, unknown_package: mutable i64&, unknown_dependency: mutable i64&, unknown_tables: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if data.count == 0 or data.count > RH_PYLOCK_MAX_BYTES
+            section: mutable i64 = 0
+            package_index: mutable i64 = -1
+            reference_index: mutable i64 = -1
+            packages_seen: mutable bool = false
+            lock_version_ok: mutable bool = false
+            line_start: mutable usize = 0
+            while line_start <= data.count |line_start, data, pool, packages, refs, created_s, created_e, python_s, python_e, unknown_top, unknown_package, unknown_dependency, unknown_tables, section, package_index, reference_index, packages_seen, lock_version_ok|:
+                line_end: mutable usize =
+                    while i < data.count and data[i] != 10 |i: usize = line_start, data| -> i:
+                        i <- i + 1
+                content_end: usize = rh_pylock_comment_end(data, line_start, line_end)
+                trimmed_start: mutable usize = line_start
+                trimmed_end: mutable usize = content_end
+                rh_pylock_trim(data, &trimmed_start, &trimmed_end)
+                if trimmed_start < trimmed_end:
+                    if Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[[packages]]"):
+                        return -1 if packages.count.i64() >= RH_PYLOCK_MAX_PACKAGES
+                        packages.push(RhPylockPackage{name_s: -1, name_e: -1, version_s: -1, version_e: -1, marker_s: -1, marker_e: -1, python_s: -1, python_e: -1, dependency_array: 0})
+                        package_index <- packages.count.i64() - 1
+                        reference_index <- -1
+                        section <- 1
+                        packages_seen <- true
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[[packages.dependencies]]"):
+                        return -1 if package_index < 0 or packages[package_index.usize()].dependency_array == 1
+                        reference_index <- rh_pylock_push_reference(refs, package_index)
+                        return -1 if reference_index < 0
+                        section <- 2
+                    elif data[trimmed_start] == 91:
+                        if section == 2 and reference_index >= 0:
+                            nested_ref: mutable RhPylockReference = refs[reference_index.usize()]
+                            nested_ref.context <- 1
+                            refs[reference_index.usize()] <- nested_ref
+                            unknown_dependency[0] <- unknown_dependency[0] + 1
+                        section <- 3
+                        reference_index <- -1
+                        unknown_tables[0] <- unknown_tables[0] + 1
+                    elif section == 0 or section == 1 or section == 2:
+                        key_s: mutable usize = trimmed_start
+                        key_e: mutable usize = trimmed_end
+                        value_s: mutable usize = trimmed_start
+                        if rh_pylock_assignment(data, trimmed_start, trimmed_end, &key_s, &key_e, &value_s):
+                            value_e: usize = rh_pylock_comment_end(data, value_s, trimmed_end)
+                            value_end: mutable usize = value_e
+                            rh_pylock_trim(data, &value_s, &value_end)
+                            if section == 0 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "lock-version"):
+                                return -1 if lock_version_ok
+                                lock_s: mutable i64 = -1
+                                lock_e: mutable i64 = -1
+                                return -1 if not rh_pylock_scalar_string(data, pool, value_s, value_end, &lock_s, &lock_e)
+                                return -1 if not Base::rh_bytes_equal_literal(pool, lock_s, lock_e, "1.0")
+                                lock_version_ok <- true
+                            elif section == 0 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "created-by"):
+                                return -1 if created_s[0] >= 0
+                                return -1 if not rh_pylock_scalar_string(data, pool, value_s, value_end, &created_s[0], &created_e[0])
+                            elif section == 0 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "requires-python"):
+                                return -1 if python_s[0] >= 0
+                                return -1 if not rh_pylock_scalar_string(data, pool, value_s, value_end, &python_s[0], &python_e[0])
+                            elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "name"):
+                                pkg: mutable RhPylockPackage = packages[package_index.usize()]
+                                return -1 if pkg.name_s >= 0
+                                return -1 if not rh_pylock_scalar_string(data, pool, value_s, value_end, &pkg.name_s, &pkg.name_e)
+                                packages[package_index.usize()] <- pkg
+                            elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "version"):
+                                pkg2: mutable RhPylockPackage = packages[package_index.usize()]
+                                return -1 if pkg2.version_s >= 0
+                                return -1 if not rh_pylock_scalar_string(data, pool, value_s, value_end, &pkg2.version_s, &pkg2.version_e)
+                                packages[package_index.usize()] <- pkg2
+                            elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "marker"):
+                                pkg3: mutable RhPylockPackage = packages[package_index.usize()]
+                                return -1 if pkg3.marker_s >= 0
+                                return -1 if not rh_pylock_scalar_string(data, pool, value_s, value_end, &pkg3.marker_s, &pkg3.marker_e)
+                                packages[package_index.usize()] <- pkg3
+                            elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "requires-python"):
+                                pkg4: mutable RhPylockPackage = packages[package_index.usize()]
+                                return -1 if pkg4.python_s >= 0
+                                return -1 if not rh_pylock_scalar_string(data, pool, value_s, value_end, &pkg4.python_s, &pkg4.python_e)
+                                packages[package_index.usize()] <- pkg4
+                            elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "dependencies"):
+                                pkg5: mutable RhPylockPackage = packages[package_index.usize()]
+                                return -1 if pkg5.dependency_array == 1 or value_s >= value_end or data[value_s] != 91
+                                pkg5.dependency_array <- 1
+                                packages[package_index.usize()] <- pkg5
+                                closed_at: mutable usize = 0
+                                return -1 if not rh_pylock_dependency_array(data, pool, value_s, package_index, refs, unknown_dependency, &closed_at)
+                                line_start <- closed_at + 1
+                                line_end <- closed_at
+                            elif section == 2 and reference_index >= 0:
+                                ref: mutable RhPylockReference = refs[reference_index.usize()]
+                                return -1 if not rh_pylock_reference_field(data, pool, trimmed_start, trimmed_end, &ref, unknown_dependency)
+                                refs[reference_index.usize()] <- ref
+                            else:
+                                if section == 0:
+                                    unknown_top[0] <- unknown_top[0] + 1
+                                elif section == 1:
+                                    unknown_package[0] <- unknown_package[0] + 1
+                                elif section == 2:
+                                    unknown_dependency[0] <- unknown_dependency[0] + 1
+                                    ref2: mutable RhPylockReference = refs[reference_index.usize()]
+                                    ref2.context <- 1
+                                    refs[reference_index.usize()] <- ref2
+                line_start <- line_end + 1
+            return -1 if not lock_version_ok or created_s[0] < 0 or not packages_seen or packages.count == 0
+            for package_id in 0..<packages.count |package_id, packages|:
+                pkg5: RhPylockPackage = packages[package_id]
+                return -1 if pkg5.name_s < 0 or pkg5.name_s == pkg5.name_e
+            for reference_id in 0..<refs.count |reference_id, refs|:
+                reference: RhPylockReference = refs[reference_id]
+                return -1 if reference.name_s < 0 or reference.name_s == reference.name_e
+                return -1 if reference.version_s >= 0 and reference.version_s == reference.version_e
+            0
+
+        def rh_pylock_emit_string(out: mutable darray[u8]&, pool: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            if start < 0:
+                Base::rh_push_text(out, "null")
+            else:
+                out.push(34)
+                Base::rh_json_escape(out, pool, start.usize(), end.usize())
+                out.push(34)
+
+        def rh_pylock_target(pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, reference: mutable RhPylockReference, target_out: mutable i64&) -> u8 can[Memory.Allocate, Abort.Panic]:
+            return 3 if reference.context == 1
+            candidates, target =
+                for i in 0..<packages.count |count: i64 = 0, target: i64 = -1, i, packages, pool, reference| -> count, target:
+                    candidate: RhPylockPackage = packages[i]
+                    if rh_pylock_name_eq(pool, candidate.name_s, candidate.name_e, reference.name_s, reference.name_e):
+                        if reference.version_s < 0 or (candidate.version_s >= 0 and rh_pylock_equal(pool, candidate.version_s, candidate.version_e, reference.version_s, reference.version_e)):
+                            count <- count + 1
+                            target <- i.i64()
+            target_out[0] <- target
+            return 0 if candidates == 1
+            return 2 if candidates > 1
+            1
+
+    public:
+        # Emit package-to-package lock evidence without projecting a synthetic
+        # root. Return -1 for malformed or unsupported core TOML constructs.
+        def rh_pylock_audit(data: mutable darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            pool: mutable darray[u8] = []
+            packages: mutable darray[RhPylockPackage] = []
+            references: mutable darray[RhPylockReference] = []
+            created_s: mutable i64 = -1
+            created_e: mutable i64 = -1
+            python_s: mutable i64 = -1
+            python_e: mutable i64 = -1
+            unknown_top: mutable i64 = 0
+            unknown_package: mutable i64 = 0
+            unknown_dependency: mutable i64 = 0
+            unknown_tables: mutable i64 = 0
+            return -1 if rh_pylock_parse(data, pool, packages, references, &created_s, &created_e, &python_s, &python_e, &unknown_top, &unknown_package, &unknown_dependency, &unknown_tables) != 0
+            input_hash: mutable darray[u8] = []
+            Sha256::rh_sha256(data, input_hash)
+            Base::rh_push_text(out, "{\"schema\":\"rh-pylock-audit/1\",\"format\":\"PEP 751\",\"parser\":\"bounded-core-projection\",\"lock_version\":\"1.0\",\"created_by\":")
+            rh_pylock_emit_string(out, pool, created_s, created_e)
+            Base::rh_push_text(out, ",\"input_sha256\":\"")
+            for i in 0..<input_hash.count |input_hash, out|:
+                out.push(input_hash[i])
+            Base::rh_push_text(out, "\"")
+            Base::rh_push_text(out, ",\"requires_python\":")
+            rh_pylock_emit_string(out, pool, python_s, python_e)
+            Base::rh_push_text(out, ",\"root_relationship\":\"not_recorded\",\"dependency_semantics\":\"informational_only\",\"packages\":[")
+            for package_id in 0..<packages.count |package_id, packages, pool, references, out|:
+                pkg: RhPylockPackage = packages[package_id]
+                if package_id > 0:
+                    out.push(44)
+                Base::rh_push_text(out, "{\"id\":")
+                Base::rh_push_decimal_i64(out, package_id.i64())
+                Base::rh_push_text(out, ",\"name\":")
+                rh_pylock_emit_string(out, pool, pkg.name_s, pkg.name_e)
+                Base::rh_push_text(out, ",\"version\":")
+                rh_pylock_emit_string(out, pool, pkg.version_s, pkg.version_e)
+                Base::rh_push_text(out, ",\"marker\":")
+                rh_pylock_emit_string(out, pool, pkg.marker_s, pkg.marker_e)
+                Base::rh_push_text(out, ",\"requires_python\":")
+                rh_pylock_emit_string(out, pool, pkg.python_s, pkg.python_e)
+                Base::rh_push_text(out, ",\"dependencies\":[")
+                first: mutable bool = true
+                for reference_id in 0..<references.count |reference_id, references, pool, packages, out, package_id, first|:
+                    reference: mutable RhPylockReference = references[reference_id]
+                    if reference.owner == package_id.i64():
+                        if not first:
+                            out.push(44)
+                        first <- false
+                        target: mutable i64 = -1
+                        state: u8 = rh_pylock_target(pool, packages, reference, &target)
+                        Base::rh_push_text(out, "{\"name\":")
+                        rh_pylock_emit_string(out, pool, reference.name_s, reference.name_e)
+                        Base::rh_push_text(out, ",\"version\":")
+                        rh_pylock_emit_string(out, pool, reference.version_s, reference.version_e)
+                        Base::rh_push_text(out, ",\"target\":")
+                        if state == 0:
+                            Base::rh_push_decimal_i64(out, target)
+                        else:
+                            Base::rh_push_text(out, "null")
+                        Base::rh_push_text(out, ",\"resolution\":\"")
+                        Base::rh_push_text(out, "resolved" if state == 0 else "missing" if state == 1 else "ambiguous" if state == 2 else "context")
+                        Base::rh_push_text(out, "\"}")
+                Base::rh_push_text(out, "]}")
+            Base::rh_push_text(out, "],\"coverage\":{\"direct_dependencies\":\"not_recorded\",\"markers_evaluated\":false,\"artifacts_projected\":false,\"unprojected_top_level_fields\":")
+            Base::rh_push_decimal_i64(out, unknown_top)
+            Base::rh_push_text(out, ",\"unprojected_package_fields\":")
+            Base::rh_push_decimal_i64(out, unknown_package)
+            Base::rh_push_text(out, ",\"unprojected_dependency_fields\":")
+            Base::rh_push_decimal_i64(out, unknown_dependency)
+            Base::rh_push_text(out, ",\"unprojected_tables\":")
+            Base::rh_push_decimal_i64(out, unknown_tables)
+            Base::rh_push_text(out, "}}")
+            0
