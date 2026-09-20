@@ -31,6 +31,7 @@ assert d["schema"] == "rh-identity-result/1", d
 assert d["actor_count"] == 4 and d["identity_revision"] == 2, d
 assert d["cluster_count"] == 2, d
 assert d["metrics"][0]["key"] == "contributor.accepted_actor_clusters" and d["metrics"][0]["value"] == 2, d
+assert d["metrics"][1]["key"] == "contributor.known_human_accounts" and d["metrics"][1]["value"] == 2, d
 assert d["clusters"] == [[0, 1, 2], [3]], d["clusters"]
 assert d["cluster_id_by_actor"] == [0, 0, 0, 3], d["cluster_id_by_actor"]
 assert d["actor_kinds"] == {"human": 2, "bot_known": 1, "unresolved": 1}, d["actor_kinds"]
