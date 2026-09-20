@@ -681,14 +681,14 @@ module Git:
 
         # Assemble the fixed transport policy in one private helper so the
         # public operation only validates, prepares the pin, and runs it.
-        def rh_https_get_command(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def rh_https_get_command(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&, max_secs: i64) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             cmd: mutable darray[u8] = []
             Base::rh_push_text(cmd, "curl --disable -sS --noproxy '*' --proto '=https,file' --max-redirs 0")
             if pin.count > 0:
                 Base::rh_push_text(cmd, " --resolve ")
                 rh_push_quoted(cmd, (&pin[0]).cast[cstr] can Unsafe.PointerCast)
             Base::rh_push_text(cmd, " --max-time ")
-            Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_SECS)
+            Base::rh_push_decimal_i64(cmd, max_secs)
             Base::rh_push_text(cmd, " --max-filesize ")
             Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_BYTES)
             Base::rh_push_text(cmd, " -H 'User-Agent: repo-health-m02' -o ")
@@ -701,6 +701,22 @@ module Git:
             rh_push_quoted(cmd, url)
             cmd.push(0)
             cmd
+
+        def rh_run_https_get_with_timeout(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if max_secs <= 0 or max_secs > RH_FETCH_MAX_SECS
+            return -1 if not rh_fetch_guard(url)
+            return -1 if not rh_fetch_arg_safe(url)
+            return -1 if not rh_arg_safe(body_file)
+            return -1 if not rh_arg_safe(code_file)
+            return -1 if not rh_arg_safe(err_file)
+            pin: mutable darray[u8] = []
+            if Base::rh_cstr_starts_with(url, "https://"):
+                return -1 if not rh_prepare_https_pin(url, err_file, pin)
+            transport: i64 =
+                cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin, max_secs)
+                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+                block_result
+            transport
 
         # Build the one permitted JSON POST request. The URL is not a caller
         # argument: the public wrapper below fixes it to OSV's query endpoint.
@@ -761,21 +777,10 @@ module Git:
         # -1 on validation failure (nothing executed).
         const RH_FETCH_MAX_BYTES: i64 = 8388608
         const RH_FETCH_MAX_SECS: i64 = 60
+        const RH_OSV_VULNERABILITY_GET_MAX_SECS: i64 = 10
 
         def rh_run_https_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            return -1 if not rh_fetch_guard(url)
-            return -1 if not rh_fetch_arg_safe(url)
-            return -1 if not rh_arg_safe(body_file)
-            return -1 if not rh_arg_safe(code_file)
-            return -1 if not rh_arg_safe(err_file)
-            pin: mutable darray[u8] = []
-            if Base::rh_cstr_starts_with(url, "https://"):
-                return -1 if not rh_prepare_https_pin(url, err_file, pin)
-            transport: i64 =
-                cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin)
-                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
-                block_result
-            transport
+            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS)
 
         # Run a single bounded JSON package/version query to OSV. The endpoint
         # is fixed here, so this POST cannot be redirected to a caller URL. DNS
@@ -789,6 +794,23 @@ module Git:
         # querybatch is kept separate because its response contains IDs only.
         def rh_run_osv_query_batch(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             rh_run_osv_post("https://api.osv.dev/v1/querybatch", request_file, body_file, code_file, err_file)
+
+        # Fetch one full OSV vulnerability by a validated ID from a prior
+        # query/querybatch response. The endpoint host and route are fixed here;
+        # the ID alphabet is restricted before it can enter the URL path.
+        def rh_run_osv_vulnerability_get(advisory_id: darray[u8]&, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if advisory_id.count == 0 or advisory_id.count > 128
+            while i < advisory_id.count |i: usize = 0, advisory_id|:
+                b: u8 = advisory_id[i]
+                valid: bool = (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 45 or b == 46 or b == 95
+                return -1 if not valid
+                i <- i + 1
+            url: mutable darray[u8] = []
+            Base::rh_push_text(url, "https://api.osv.dev/v1/vulns/")
+            url.extend(bytes_view(advisory_id))
+            url.push(0)
+            url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
+            rh_run_https_get_with_timeout(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS)
 
         # Run a bounded bare clone for https remotes (M01-03): no worktree, no
         # checkout (so no smudge/clean filters, no hooks execute), blob-less and

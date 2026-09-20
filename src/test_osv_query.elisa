@@ -188,6 +188,39 @@ def oq_check_graph_batch(fails: mutable i64&) -> void can[Memory.Allocate, Abort
     oq_check(next_rc == 0 and next_count == 1 and next_indices[0] == 9, "batch-pagination-index-map", fails)
     oq_check(Base::rh_bytes_equal_literal(next_batch, 0, next_batch.count.i64(), next_expected), "batch-pagination-request", fails)
 
+    hydration_batch: mutable darray[u8] = []
+    Base::rh_push_text(hydration_batch, "{\"results\":[{\"vulns\":[{\"id\":\"OSV-A\"},{\"id\":\"OSV-A\"},{\"modified\":\"2026-01-01\"},{\"id\":\"../unsafe\"}]}]}")
+    advisory_bytes: mutable darray[u8] = []
+    advisory_starts: mutable darray[i64] = []
+    advisory_lengths: mutable darray[i64] = []
+    invalid_advisories: mutable i64 = 0
+    omitted_advisories: mutable i64 = 0
+    collect_rc: i64 = OsvQuery::rh_osv_query_collect_batch_ids(hydration_batch, advisory_bytes, advisory_starts, advisory_lengths, &invalid_advisories, &omitted_advisories)
+    oq_check(collect_rc == 0 and advisory_starts.count == 1 and invalid_advisories == 2 and omitted_advisories == 0, "batch-hydration-id-dedup-and-rejection", fails)
+    oq_check(Base::rh_bytes_equal_literal(advisory_bytes, advisory_starts[0], advisory_starts[0] + advisory_lengths[0], "OSV-A"), "batch-hydration-id-span", fails)
+    full_advisory: mutable darray[u8] = []
+    Base::rh_push_text(full_advisory, "{\"id\":\"OSV-A\",\"affected\":[]}")
+    oq_check(OsvQuery::rh_osv_query_validate_vulnerability(full_advisory, advisory_bytes, advisory_starts[0], advisory_lengths[0]) == 0, "hydrated-record-id-match", fails)
+    wrong_advisory: mutable darray[u8] = []
+    Base::rh_push_text(wrong_advisory, "{\"id\":\"OSV-B\",\"affected\":[]}")
+    oq_check(OsvQuery::rh_osv_query_validate_vulnerability(wrong_advisory, advisory_bytes, advisory_starts[0], advisory_lengths[0]) != 0, "hydrated-record-id-mismatch", fails)
+    many_advisories: mutable darray[u8] = []
+    Base::rh_push_text(many_advisories, "{\"results\":[{\"vulns\":[")
+    while advisory_index < 65 |advisory_index: i64 = 0, many_advisories|:
+        many_advisories.push(44) if advisory_index > 0
+        Base::rh_push_text(many_advisories, "{\"id\":\"OSV-CAP-")
+        Base::rh_push_decimal_i64(many_advisories, advisory_index)
+        Base::rh_push_text(many_advisories, "\"}")
+        advisory_index <- advisory_index + 1
+    Base::rh_push_text(many_advisories, "]}]}")
+    capped_bytes: mutable darray[u8] = []
+    capped_starts: mutable darray[i64] = []
+    capped_lengths: mutable darray[i64] = []
+    capped_invalid: mutable i64 = 0
+    hydration_capped_omitted: mutable i64 = 0
+    hydration_cap_rc: i64 = OsvQuery::rh_osv_query_collect_batch_ids(many_advisories, capped_bytes, capped_starts, capped_lengths, &capped_invalid, &hydration_capped_omitted)
+    oq_check(hydration_cap_rc == 0 and capped_starts.count == OsvQuery::RH_OSV_QUERY_MAX_HYDRATED_IDS and hydration_capped_omitted == 1 and capped_invalid == 0, "hydration-unique-id-cap", fails)
+
     capped: mutable darray[u8] = []
     capped_map: mutable darray[u8] = []
     Base::rh_push_text(capped, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"cargo\",\"nodes\":[")

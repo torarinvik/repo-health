@@ -51,6 +51,9 @@ the default checks use local data, while HTTPS fetches need network access.
 
 # Optionally follow per-query cursors for at most four batch rounds
 ./build/rh_cli osv-query --graph ./deps-cargo-graph.json --out ./osv-query-batch-pages/ --continue-pagination
+
+# Optionally fetch full records for at most 64 distinct batch advisory IDs
+./build/rh_cli osv-query --graph ./deps-cargo-graph.json --out ./osv-query-batch-hydrated/ --continue-pagination --hydrate-advisories
 ```
 
 `osv-query` accepts `rh-osv-query-input/1` for one supported ecosystem, package
@@ -84,9 +87,17 @@ four rounds, resubmits only queries that returned cursors, and retains each
 request/response/status/stderr/digest with its original query indexes. If the
 four-round cap leaves work, the result is partial and the remaining request is
 saved as `osv-query-batch-next-request.json`. These summaries are not a
-`deps --osv` matcher input. The full-record single-query path remains available
-for matcher handoff. Batches are capped, so they do not establish complete
-lockfile coverage.
+`deps --osv` matcher input. With `--hydrate-advisories`, the
+`rh-osv-query-batch-result/3` path fetches each distinct returned ID from the
+fixed `/v1/vulns/{id}` endpoint, checks that the full record contains the exact
+requested ID, and retains request, raw response, status, stderr, and digest
+evidence. Hydration stops after 64 distinct records, 32 MiB of combined record
+bodies, 120 seconds total, or 10 seconds for one request; any unsafe ID, failed lookup, cap, or unfinished batch is
+reported as partial. The resulting `osv-query-hydrated-response.json` can be
+passed to `deps --osv` for offline matching, with the result envelope retained
+to inspect its coverage state. This only hydrates IDs observed for submitted
+nodes and captured rounds. Batches remain capped, so they do not establish
+complete lockfile coverage.
 
 ## Repository layout
 

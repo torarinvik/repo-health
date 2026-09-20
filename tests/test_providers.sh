@@ -61,11 +61,13 @@ source = json.load(open(sys.argv[2]))
 osv = {x["id"]: x for x in provider["dependencies"]}["osv-data"]
 src = {x["id"]: x for x in source["sources"]}["osv-data"]
 assert src["base_url"] == "https://api.osv.dev/v1/", src
-assert set(src["capabilities"]) == {"package_version_string_query", "full_commit_hash_query", "bounded_pagination", "bounded_graph_batch_query"}, src
+assert set(src["capabilities"]) == {"package_version_string_query", "full_commit_hash_query", "bounded_pagination", "bounded_graph_batch_query", "bounded_full_record_hydration"}, src
 assert "complete_lockfile_coverage" in src["unauthorized"], src
 assert "pagination_continuation" not in src["unauthorized"], src
 assert "at most four pages" in src["notes"] and "partial" in src["notes"], src
-assert "at most 64" in src["notes"] and "summaries, not full advisory records" in src["notes"], src
+assert "at most 64" in src["notes"] and "ID/modification summaries" in src["notes"] and "Opt-in hydration" in src["notes"], src
+assert "32 MiB" in src["notes"] and "checks each returned record ID" in src["notes"], src
+assert "120 seconds total" in src["notes"] and "10 seconds per request" in src["notes"], src
 assert "only results with cursors" in src["notes"] and "four rounds" in src["notes"], src
 assert "uniform_underlying_data_license" in src["unsupported"], src
 assert "feed_freshness" in src["unsupported"], src

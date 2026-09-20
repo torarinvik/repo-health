@@ -108,7 +108,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
     rh_cli_err("       rh_cli osv-query --input <rh-osv-query-input/1|2> --out <dir> [--continue-pagination]")
-    rh_cli_err("       rh_cli osv-query --graph <rh-dep-graph/1> --out <dir> [--continue-pagination]")
+    rh_cli_err("       rh_cli osv-query --graph <rh-dep-graph/1> --out <dir> [--continue-pagination] [--hydrate-advisories]")
     rh_cli_err("       rh_cli depsdev (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli ecosystem lookup --input <captured-lookup.json> --out <file>")
     rh_cli_err("       rh_cli adapter-manifest --input <file> --out <file>")
@@ -792,20 +792,28 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dou_idx], true) if dou_idx >= 0
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dr_idx], false)
     if Base::rh_streq(cmd, "osv-query"):
-        return rh_cli_usage(2) if argc != 6 and argc != 7
+        return rh_cli_usage(2) if argc < 6 or argc > 8
         osv_out_flag: u8& = slots[4].cast[u8&] can Unsafe.PointerCast
         return rh_cli_usage(2) if not Base::rh_streq(osv_out_flag, "--out")
         osv_mode_flag: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
-        if argc == 6:
-            if Base::rh_streq(osv_mode_flag, "--input"):
-                return OsvQueryCli::rh_do_osv_query(slots[3], slots[5], false)
-            if Base::rh_streq(osv_mode_flag, "--graph"):
-                return OsvQueryCli::rh_do_osv_graph_query(slots[3], slots[5], false)
-            return rh_cli_usage(2)
-        page_flag: u8& = slots[6].cast[u8&] can Unsafe.PointerCast
-        return rh_cli_usage(2) if not Base::rh_streq(page_flag, "--continue-pagination")
-        return OsvQueryCli::rh_do_osv_query(slots[3], slots[5], true) if Base::rh_streq(osv_mode_flag, "--input")
-        return OsvQueryCli::rh_do_osv_graph_query(slots[3], slots[5], true) if Base::rh_streq(osv_mode_flag, "--graph")
+        continue_pages: mutable bool = false
+        hydrate_advisories: mutable bool = false
+        while option_index < argc |option_index: i64 = 6, continue_pages, hydrate_advisories, slots|:
+            option_flag: u8& = slots[option_index].cast[u8&] can Unsafe.PointerCast
+            if Base::rh_streq(option_flag, "--continue-pagination"):
+                return rh_cli_usage(2) if continue_pages
+                continue_pages <- true
+            elif Base::rh_streq(option_flag, "--hydrate-advisories"):
+                return rh_cli_usage(2) if hydrate_advisories
+                hydrate_advisories <- true
+            else:
+                return rh_cli_usage(2)
+            option_index <- option_index + 1
+        if Base::rh_streq(osv_mode_flag, "--input"):
+            return rh_cli_usage(2) if hydrate_advisories or argc > 7
+            return OsvQueryCli::rh_do_osv_query(slots[3], slots[5], continue_pages)
+        if Base::rh_streq(osv_mode_flag, "--graph"):
+            return OsvQueryCli::rh_do_osv_graph_query(slots[3], slots[5], continue_pages, hydrate_advisories)
         return rh_cli_usage(2)
     if Base::rh_streq(cmd, "depsdev"):
         dvi_idx, dvu_idx, dvo_idx =
@@ -3481,6 +3489,177 @@ module OsvQueryCli:
             Base::rh_push_text(evidence, "]}")
             true
 
+        def rh_osv_advisory_name(index: i64, kind: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if index < 1 or index > OsvQuery::RH_OSV_QUERY_MAX_HYDRATED_IDS or kind < 0 or kind > 3
+            Base::rh_push_text(out, "osv-query-advisory-")
+            Base::rh_push_decimal_i64(out, index)
+            Base::rh_push_text(out, "-request.json") if kind == 0
+            Base::rh_push_text(out, "-response.raw.json") if kind == 1
+            Base::rh_push_text(out, "-http-status.txt") if kind == 2
+            Base::rh_push_text(out, ".err") if kind == 3
+            true
+
+        def rh_osv_hydration_time_remaining(started_at: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            now: i64 = Base::rh_now()
+            return false if started_at < 0 or now < started_at
+            now - started_at < OsvQuery::RH_OSV_QUERY_MAX_HYDRATED_SECS
+
+        # Hydrate distinct IDs returned by the retained batch pages. The page
+        # responses remain the source evidence; full records are independently
+        # fetched, ID-checked, byte-bounded, and assembled only from successes.
+        def rh_osv_query_hydrate_batch_pages(out: cstr, page_count: i64, matcher_response_out: mutable darray[u8]&, evidence_out: mutable darray[u8]&, hydrated_count_out: mutable i64&, invalid_count_out: mutable i64&, omitted_count_out: mutable i64&, failure_count_out: mutable i64&, state_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            hydrated_count_out[0] <- 0
+            invalid_count_out[0] <- 0
+            omitted_count_out[0] <- 0
+            failure_count_out[0] <- 0
+            state_out[0] <- 0
+            id_bytes: mutable darray[u8] = []
+            id_starts: mutable darray[i64] = []
+            id_lengths: mutable darray[i64] = []
+            while page <= page_count |page: i64 = 1, page_count, out, id_bytes, id_starts, id_lengths, invalid_count_out, omitted_count_out|:
+                raw_name: mutable darray[u8] = []
+                return 4 if not rh_osv_batch_page_name(page, 1, raw_name)
+                raw_path: mutable darray[u8] = []
+                return 4 if not rh_osv_page_path(out, raw_name, raw_path)
+                raw_ptr: cstr = (&raw_path[0]).cast[cstr] can Unsafe.PointerCast
+                raw_size: i64 = Base::rh_file_size(raw_ptr)
+                if raw_size <= 0 or raw_size > Git::RH_FETCH_MAX_BYTES:
+                    rh_osv_query_err("osv-query: retained batch page is missing or exceeds its read bound during hydration")
+                    return 4
+                raw_response: mutable darray[u8] = []
+                return 4 if Base::rh_io_read(raw_ptr, raw_response) != raw_size
+                invalid_page: mutable i64 = 0
+                omitted_page: mutable i64 = 0
+                if OsvQuery::rh_osv_query_collect_batch_ids(raw_response, id_bytes, id_starts, id_lengths, &invalid_page, &omitted_page) != 0:
+                    rh_osv_query_err("osv-query: cannot collect bounded IDs from retained batch response")
+                    return 4
+                invalid_count_out[0] <- invalid_count_out[0] + invalid_page
+                omitted_count_out[0] <- omitted_count_out[0] + omitted_page
+                page <- page + 1
+            Base::rh_push_text(matcher_response_out, "{\"vulns\":[")
+            evidence_out.push(91)
+            attempted: mutable i64 = 0
+            processed: mutable i64 = 0
+            body_bytes: mutable i64 = 0
+            stopped: mutable bool = false
+            hydration_started_at: i64 = Base::rh_now()
+            while id_index < id_starts.count.i64() and not stopped and rh_osv_hydration_time_remaining(hydration_started_at) |id_index: i64 = 0, id_starts, id_lengths, id_bytes, out, matcher_response_out, evidence_out, attempted, processed, body_bytes, hydrated_count_out, invalid_count_out, omitted_count_out, failure_count_out, stopped|:
+                request_name: mutable darray[u8] = []
+                response_name: mutable darray[u8] = []
+                status_name: mutable darray[u8] = []
+                error_name: mutable darray[u8] = []
+                return 4 if not rh_osv_advisory_name((id_index + 1), 0, request_name)
+                return 4 if not rh_osv_advisory_name((id_index + 1), 1, response_name)
+                return 4 if not rh_osv_advisory_name((id_index + 1), 2, status_name)
+                return 4 if not rh_osv_advisory_name((id_index + 1), 3, error_name)
+                request_path: mutable darray[u8] = []
+                response_path: mutable darray[u8] = []
+                status_path: mutable darray[u8] = []
+                error_path: mutable darray[u8] = []
+                return 4 if not rh_osv_page_path(out, request_name, request_path)
+                return 4 if not rh_osv_page_path(out, response_name, response_path)
+                return 4 if not rh_osv_page_path(out, status_name, status_path)
+                return 4 if not rh_osv_page_path(out, error_name, error_path)
+                request_ptr: cstr = (&request_path[0]).cast[cstr] can Unsafe.PointerCast
+                response_ptr: cstr = (&response_path[0]).cast[cstr] can Unsafe.PointerCast
+                status_ptr: cstr = (&status_path[0]).cast[cstr] can Unsafe.PointerCast
+                error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
+                advisory_id: mutable darray[u8] = []
+                id_start: i64 = id_starts[id_index.usize()]
+                id_length: i64 = id_lengths[id_index.usize()]
+                id_end: i64 = id_start + id_length
+                while copy_id < id_end |copy_id: i64 = id_start, id_end, id_bytes, advisory_id|:
+                    advisory_id.push(id_bytes[copy_id.usize()])
+                    copy_id <- copy_id + 1
+                request: mutable darray[u8] = []
+                Base::rh_push_text(request, "{\"id\":\"")
+                request.extend(bytes_view(advisory_id))
+                Base::rh_push_text(request, "\",\"endpoint\":\"https://api.osv.dev/v1/vulns/")
+                request.extend(bytes_view(advisory_id))
+                Base::rh_push_text(request, "\"}\n")
+                if not Base::rh_io_write(request_ptr, request):
+                    rh_osv_query_err("osv-query: cannot retain advisory hydration request")
+                    return 4
+                transport: i64 = Git::rh_run_osv_vulnerability_get(advisory_id, response_ptr, status_ptr, error_ptr)
+                item_state: mutable i64 = 0
+                response_hash: mutable darray[u8] = []
+                raw_record: mutable darray[u8] = []
+                status: mutable darray[u8] = []
+                status_read: mutable i64 = -1
+                status_read <- Base::rh_io_read(status_ptr, status) if transport == 0
+                if transport != 0:
+                    item_state <- 1
+                    failure_count_out[0] <- failure_count_out[0] + 1
+                    stopped <- true
+                elif status_read != 3 or status[0] != 50 or status[1] != 48 or status[2] != 48:
+                    item_state <- 2
+                    failure_count_out[0] <- failure_count_out[0] + 1
+                    stopped <- true
+                else:
+                    response_size: i64 = Base::rh_file_size(response_ptr)
+                    if response_size <= 0 or response_size > Git::RH_FETCH_MAX_BYTES:
+                        item_state <- 3
+                        failure_count_out[0] <- failure_count_out[0] + 1
+                        stopped <- true
+                    elif Base::rh_io_read(response_ptr, raw_record) != response_size:
+                        item_state <- 4
+                        failure_count_out[0] <- failure_count_out[0] + 1
+                        stopped <- true
+                    else:
+                        Sha256::rh_sha256(raw_record, response_hash)
+                        if body_bytes + response_size > OsvQuery::RH_OSV_QUERY_MAX_HYDRATED_BYTES:
+                            item_state <- 5
+                            omitted_count_out[0] <- omitted_count_out[0] + 1
+                            stopped <- true
+                        elif OsvQuery::rh_osv_query_validate_vulnerability(raw_record, id_bytes, id_start, id_length) != 0:
+                            item_state <- 6
+                            failure_count_out[0] <- failure_count_out[0] + 1
+                            stopped <- true
+                        else:
+                            matcher_response_out.push(44) if hydrated_count_out[0] > 0
+                            matcher_response_out.extend(bytes_view(raw_record))
+                            body_bytes <- body_bytes + response_size
+                            hydrated_count_out[0] <- hydrated_count_out[0] + 1
+                evidence_out.push(44) if attempted > 0
+                Base::rh_push_text(evidence_out, "{\"id\":\"")
+                evidence_out.extend(bytes_view(advisory_id))
+                Base::rh_push_text(evidence_out, "\",\"state\":\"")
+                Base::rh_push_text(evidence_out, "collected") if item_state == 0
+                Base::rh_push_text(evidence_out, "transport_failed") if item_state == 1
+                Base::rh_push_text(evidence_out, "http_failed") if item_state == 2
+                Base::rh_push_text(evidence_out, "response_size_failed") if item_state == 3
+                Base::rh_push_text(evidence_out, "response_read_failed") if item_state == 4
+                Base::rh_push_text(evidence_out, "byte_cap") if item_state == 5
+                Base::rh_push_text(evidence_out, "record_id_mismatch") if item_state == 6
+                Base::rh_push_text(evidence_out, "\",\"request_file\":\"")
+                evidence_out.extend(bytes_view(request_name))
+                Base::rh_push_text(evidence_out, "\",\"raw_response_file\":\"")
+                evidence_out.extend(bytes_view(response_name))
+                Base::rh_push_text(evidence_out, "\",\"http_status_file\":\"")
+                evidence_out.extend(bytes_view(status_name))
+                Base::rh_push_text(evidence_out, "\",\"stderr_file\":\"")
+                evidence_out.extend(bytes_view(error_name))
+                Base::rh_push_text(evidence_out, "\",\"raw_response_sha256\":")
+                if response_hash.count == 64:
+                    evidence_out.push(34)
+                    evidence_out.extend(bytes_view(response_hash))
+                    evidence_out.push(34)
+                else:
+                    Base::rh_push_text(evidence_out, "null")
+                evidence_out.push(125)
+                attempted <- attempted + 1
+                processed <- id_index + 1
+                id_index <- id_index + 1
+            if processed < id_starts.count.i64():
+                omitted_count_out[0] <- omitted_count_out[0] + (id_starts.count.i64() - processed)
+            matcher_response_out.push(93)
+            matcher_response_out.push(125)
+            evidence_out.push(93)
+            state_out[0] <- 2 if invalid_count_out[0] > 0 or omitted_count_out[0] > 0 or failure_count_out[0] > 0
+            state_out[0] <- 0 if id_starts.count == 0 and invalid_count_out[0] == 0 and omitted_count_out[0] == 0 and failure_count_out[0] == 0
+            state_out[0] <- 1 if id_starts.count > 0 and hydrated_count_out[0] == id_starts.count and invalid_count_out[0] == 0 and omitted_count_out[0] == 0 and failure_count_out[0] == 0
+            0
+
         def rh_osv_query_err(message: u8&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
             buffer: mutable darray[u8] =
                 buffer: mutable darray[u8] = []
@@ -3499,9 +3678,8 @@ module OsvQueryCli:
             Base::rh_write_stdout(buffer)
 
         # Query at most 64 versioned registry coordinates from a canonical
-        # graph. querybatch returns ID summaries only; this path never hands
-        # them to the full-record offline matcher.
-        def rh_do_osv_graph_query_inner(graph_path: cstr, out: cstr, continue_pages: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        # graph. Full-record hydration is separately opt-in and remains bounded.
+        def rh_do_osv_graph_query_inner(graph_path: cstr, out: cstr, continue_pages: bool, hydrate_advisories: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             if not Git::rh_arg_safe(graph_path) or not Git::rh_arg_safe(out):
                 rh_osv_query_err("osv-query: rejected path argument (allowlist)")
                 return 3
@@ -3513,12 +3691,17 @@ module OsvQueryCli:
             return 4 if not rh_osv_output_path(out, "osv-query-batch-result.json", result_path)
             next_request_path: mutable darray[u8] = []
             return 4 if not rh_osv_output_path(out, "osv-query-batch-next-request.json", next_request_path)
+            matcher_response_path: mutable darray[u8] = []
+            return 4 if not rh_osv_output_path(out, "osv-query-hydrated-response.json", matcher_response_path)
             result_path.push(0)
             next_request_path.push(0)
+            matcher_response_path.push(0)
             result_ptr: cstr = (&result_path[0]).cast[cstr] can Unsafe.PointerCast
             next_request_ptr: cstr = (&next_request_path[0]).cast[cstr] can Unsafe.PointerCast
+            matcher_response_ptr: cstr = (&matcher_response_path[0]).cast[cstr] can Unsafe.PointerCast
             _ = remove_file(result_ptr)
             _ = remove_file(next_request_ptr)
+            _ = remove_file(matcher_response_ptr)
             stale_page: mutable i64 = 1
             while stale_page <= OsvQuery::RH_OSV_QUERY_MAX_PAGES |stale_page|:
                 stale_kind: mutable i64 = 0
@@ -3531,6 +3714,18 @@ module OsvQueryCli:
                     _ = remove_file(stale_ptr)
                     stale_kind <- stale_kind + 1
                 stale_page <- stale_page + 1
+            stale_advisory: mutable i64 = 1
+            while stale_advisory <= OsvQuery::RH_OSV_QUERY_MAX_HYDRATED_IDS |stale_advisory|:
+                stale_kind: mutable i64 = 0
+                while stale_kind < 4 |stale_kind, stale_advisory|:
+                    stale_name: mutable darray[u8] = []
+                    return 4 if not rh_osv_advisory_name(stale_advisory, stale_kind, stale_name)
+                    stale_path: mutable darray[u8] = []
+                    return 4 if not rh_osv_page_path(out, stale_name, stale_path)
+                    stale_ptr: cstr = (&stale_path[0]).cast[cstr] can Unsafe.PointerCast
+                    _ = remove_file(stale_ptr)
+                    stale_kind <- stale_kind + 1
+                stale_advisory <- stale_advisory + 1
 
             input_size: i64 = Base::rh_file_size(graph_path)
             if input_size <= 0 or input_size > OsvQuery::RH_OSV_QUERY_BATCH_MAX_INPUT:
@@ -3630,7 +3825,7 @@ module OsvQueryCli:
                 total_page_tokens <- total_page_tokens + page_tokens
                 total_advisory_ids <- total_advisory_ids + page_ids
                 first_response_hash.extend(bytes_view(page_hash)) if page_number == 1
-                if continue_pages and not rh_osv_query_append_batch_page_evidence(page_number, page_hash, current_indices, page_evidence):
+                if (continue_pages or hydrate_advisories) and not rh_osv_query_append_batch_page_evidence(page_number, page_hash, current_indices, page_evidence):
                     rh_osv_query_err("osv-query: cannot retain batch page index evidence")
                     return 4
                 page_count <- page_number
@@ -3655,7 +3850,7 @@ module OsvQueryCli:
                     done <- true
                 if not done:
                     page_number <- page_number + 1
-            page_evidence.push(93) if continue_pages
+            page_evidence.push(93) if continue_pages or hydrate_advisories
             if continue_pages and more_available:
                 remaining: mutable darray[u8] = []
                 remaining.extend(bytes_view(pending_request))
@@ -3664,21 +3859,39 @@ module OsvQueryCli:
                     rh_osv_query_err("osv-query: cannot retain remaining batch request")
                     return 4
 
+            matcher_response: mutable darray[u8] = []
+            hydration_evidence: mutable darray[u8] = []
+            hydrated_count: mutable i64 = 0
+            invalid_hydration_count: mutable i64 = 0
+            omitted_hydration_count: mutable i64 = 0
+            hydration_failure_count: mutable i64 = 0
+            hydration_state: mutable i64 = 0
+            if hydrate_advisories:
+                if rh_osv_query_hydrate_batch_pages(out, page_count, matcher_response, hydration_evidence, &hydrated_count, &invalid_hydration_count, &omitted_hydration_count, &hydration_failure_count, &hydration_state) != 0:
+                    rh_osv_query_err("osv-query: full advisory hydration failed before a complete evidence result")
+                    return 4
+                matcher_response.push(10)
+                if not Base::rh_io_write(matcher_response_ptr, matcher_response):
+                    rh_osv_query_err("osv-query: cannot retain hydrated matcher response")
+                    return 4
             captured_at: i64 = Base::rh_now()
-            is_partial: bool = skipped_count > 0 or omitted_count > 0 or more_available
+            is_partial: mutable bool = skipped_count > 0 or omitted_count > 0 or more_available or (hydrate_advisories and hydration_state == 2)
             result: mutable darray[u8] =
                 result: mutable darray[u8] = []
-                Base::rh_push_text(result, "{\"schema\":\"rh-osv-query-batch-result/2\",\"endpoint\":\"https://api.osv.dev/v1/querybatch\",\"captured_at_epoch\":") if continue_pages
-                Base::rh_push_text(result, "{\"schema\":\"rh-osv-query-batch-result/1\",\"endpoint\":\"https://api.osv.dev/v1/querybatch\",\"captured_at_epoch\":") if not continue_pages
+                Base::rh_push_text(result, "{\"schema\":\"rh-osv-query-batch-result/3\",\"endpoint\":\"https://api.osv.dev/v1/querybatch\",\"captured_at_epoch\":") if hydrate_advisories
+                Base::rh_push_text(result, "{\"schema\":\"rh-osv-query-batch-result/2\",\"endpoint\":\"https://api.osv.dev/v1/querybatch\",\"captured_at_epoch\":") if continue_pages and not hydrate_advisories
+                Base::rh_push_text(result, "{\"schema\":\"rh-osv-query-batch-result/1\",\"endpoint\":\"https://api.osv.dev/v1/querybatch\",\"captured_at_epoch\":") if not continue_pages and not hydrate_advisories
                 Base::rh_push_decimal_i64(result, captured_at) if captured_at >= 0
                 Base::rh_push_text(result, "null") if captured_at < 0
                 Base::rh_push_text(result, ",\"http_status\":")
                 Base::rh_push_text(result, "200" if query_count > 0 else "null")
                 Base::rh_push_text(result, ",\"state\":\"")
-                Base::rh_push_text(result, "empty" if query_count == 0 else "partial" if is_partial else "collected")
-                Base::rh_push_text(result, "\",\"pagination\":\"") if continue_pages
-                Base::rh_push_text(result, "more_available" if more_available else "complete") if continue_pages
-                Base::rh_push_text(result, "\",\"response_detail\":\"advisory_ids_only\",\"query_nodes\":")
+                Base::rh_push_text(result, "partial" if is_partial else "empty" if query_count == 0 else "collected")
+                Base::rh_push_text(result, "\",\"pagination\":\"") if continue_pages or hydrate_advisories
+                Base::rh_push_text(result, "more_available" if more_available else "complete") if continue_pages or hydrate_advisories
+                Base::rh_push_text(result, "\",\"response_detail\":\"advisory_ids_with_hydrated_records\"") if hydrate_advisories
+                Base::rh_push_text(result, "\",\"response_detail\":\"advisory_ids_only\"") if not hydrate_advisories
+                Base::rh_push_text(result, ",\"query_nodes\":")
                 result.extend(bytes_view(query_nodes))
                 Base::rh_push_text(result, ",\"query_count\":")
                 Base::rh_push_decimal_i64(result, query_count)
@@ -3703,20 +3916,35 @@ module OsvQueryCli:
                     result.push(34)
                 else:
                     Base::rh_push_text(result, "null")
-                if continue_pages:
+                if continue_pages or hydrate_advisories:
                     Base::rh_push_text(result, ",\"page_count\":")
                     Base::rh_push_decimal_i64(result, page_count)
                     Base::rh_push_text(result, ",\"page_limit\":")
                     Base::rh_push_decimal_i64(result, page_limit)
                     Base::rh_push_text(result, ",\"page_evidence\":")
                     result.extend(bytes_view(page_evidence))
-                    Base::rh_push_text(result, ",\"next_request_file\":\"osv-query-batch-next-request.json\"") if more_available
+                    Base::rh_push_text(result, ",\"next_request_file\":\"osv-query-batch-next-request.json\"") if continue_pages and more_available
+                if hydrate_advisories:
+                    Base::rh_push_text(result, ",\"hydration_state\":\"")
+                    Base::rh_push_text(result, "empty" if hydration_state == 0 else "collected" if hydration_state == 1 else "partial")
+                    Base::rh_push_text(result, "\",\"hydrated_advisory_count\":")
+                    Base::rh_push_decimal_i64(result, hydrated_count)
+                    Base::rh_push_text(result, ",\"unhydrated_advisory_count\":")
+                    Base::rh_push_decimal_i64(result, invalid_hydration_count + omitted_hydration_count + hydration_failure_count)
+                    Base::rh_push_text(result, ",\"hydration_limit\":")
+                    Base::rh_push_decimal_i64(result, OsvQuery::RH_OSV_QUERY_MAX_HYDRATED_IDS)
+                    Base::rh_push_text(result, ",\"hydration_byte_limit\":")
+                    Base::rh_push_decimal_i64(result, OsvQuery::RH_OSV_QUERY_MAX_HYDRATED_BYTES)
+                    Base::rh_push_text(result, ",\"hydration_time_limit_secs\":")
+                    Base::rh_push_decimal_i64(result, OsvQuery::RH_OSV_QUERY_MAX_HYDRATED_SECS)
+                    Base::rh_push_text(result, ",\"matcher_response_file\":\"osv-query-hydrated-response.json\",\"hydration_evidence\":")
+                    result.extend(bytes_view(hydration_evidence))
                 Base::rh_push_text(result, "}\n")
                 result
             if not Base::rh_io_write(result_ptr, result):
                 rh_osv_query_err("osv-query: cannot write graph batch result envelope")
                 return 4
-            rh_osv_query_out("osv-query: graph batch pagination remains partial at the four-page cap" if continue_pages and more_available else "osv-query: graph batch captured; response contains advisory IDs only" if query_count > 0 else "osv-query: graph has no eligible versioned nodes")
+            rh_osv_query_out("osv-query: advisory hydration remains partial at a declared bound or provider failure" if hydrate_advisories and hydration_state == 2 else "osv-query: full advisory records captured for the bounded batch" if hydrate_advisories and hydration_state != 2 else "osv-query: graph batch pagination remains partial at the four-page cap" if continue_pages and more_available else "osv-query: graph batch captured; response contains advisory IDs only" if query_count > 0 else "osv-query: graph has no eligible versioned nodes")
             0
         # --- M03-08 OSV package/version and commit query adapter. ---
         # Page continuation is opt-in, retains per-page transport evidence, and stops
@@ -3969,8 +4197,8 @@ module OsvQueryCli:
             rh_osv_query_out("osv-query: captured bounded paginated response" if continue_pages and not more_available else "osv-query: pagination bound reached; result is partial" if more_available else "osv-query: captured response for the supplied query")
             0
 
-        def rh_do_osv_graph_query(graph_path: cstr, out: cstr, continue_pages: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-            rh_do_osv_graph_query_inner(graph_path, out, continue_pages)
+        def rh_do_osv_graph_query(graph_path: cstr, out: cstr, continue_pages: bool, hydrate_advisories: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            rh_do_osv_graph_query_inner(graph_path, out, continue_pages, hydrate_advisories)
 
 # --- M03-09 deps.dev enrichment adapter. ---
 # Captures one provider version response with bounded transport evidence and

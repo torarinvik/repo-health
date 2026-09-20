@@ -37,11 +37,13 @@ pin=''
 proto=''
 redirects=''
 content_type=''
+max_time=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --resolve) shift; pin="$1" ;;
     --proto) shift; proto="$1" ;;
     --max-redirs) shift; redirects="$1" ;;
+    --max-time) shift; max_time="$1" ;;
     --data-binary) shift; payload="$1" ;;
     -H) shift; case "$1" in 'Content-Type: application/json') content_type="$1" ;; esac ;;
     -o) shift; body="$1" ;;
@@ -49,10 +51,21 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-[ "$url" = "${OSV_QUERY_FAKE_ENDPOINT:-https://api.osv.dev/v1/query}" ] || exit 88
 [ "$pin" = 'api.osv.dev:443:93.184.216.34' ] || exit 89
-[ "$proto" = '=https' ] || exit 90
 [ "$redirects" = '0' ] || exit 91
+case "$url" in
+  https://api.osv.dev/v1/vulns/*)
+    [ "$proto" = '=https,file' ] || exit 94
+    [ "$max_time" = '10' ] || exit 95
+    response="$OSV_QUERY_FAKE_VULN_RESPONSE"
+    http="${OSV_QUERY_FAKE_VULN_HTTP:-200}"
+    cp "$response" "$body"
+    printf '%s' "$http"
+    exit 0
+    ;;
+esac
+[ "$url" = "${OSV_QUERY_FAKE_ENDPOINT:-https://api.osv.dev/v1/query}" ] || exit 88
+[ "$proto" = '=https' ] || exit 90
 [ "$content_type" = 'Content-Type: application/json' ] || exit 92
 case "$payload" in @*) request_path="$(printf '%s' "$payload" | cut -c2-)"; cat "$request_path" >> "$OSV_QUERY_REQUEST_CAPTURE"; printf '\n' >> "$OSV_QUERY_REQUEST_CAPTURE" ;; *) exit 93 ;; esac
 request_body="$(cat "$request_path")"
@@ -136,6 +149,155 @@ assert (out / r["http_status_file"]).read_text() == "200"
 assert (out / r["stderr_file"]).exists()
 assert not (out / "osv-query-response.json").exists(), "IDs-only response must not look matcher-ready"
 print("[osv-query] bounded graph batch and IDs-only response evidence OK")
+PY
+
+echo "[osv-query] bounded optional hydration produces matcher-ready full records"
+cat > "$T/hydration-graph.json" <<'JSON'
+{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"left-pad","version":"1.0.0","source":"registry"}],"edges":[],"unresolved":[],"advisories":[]}
+JSON
+cat > "$T/hydration-batch.json" <<'JSON'
+{"results":[{"vulns":[{"id":"OSV-HYDRATE-1","modified":"2026-01-01T00:00:00Z"},{"id":"OSV-HYDRATE-1","modified":"2026-01-01T00:00:00Z"}]}]}
+JSON
+cat > "$T/hydration-record.json" <<'JSON'
+{"id":"OSV-HYDRATE-1","modified":"2026-01-01T00:00:00Z","affected":[{"package":{"ecosystem":"npm","name":"left-pad"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"1.0.1"}]}]}]}
+JSON
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_ENDPOINT=https://api.osv.dev/v1/querybatch \
+OSV_QUERY_FAKE_RESPONSE="$T/hydration-batch.json" \
+OSV_QUERY_FAKE_VULN_RESPONSE="$T/hydration-record.json" \
+OSV_QUERY_FAKE_HTTP=200 \
+OSV_QUERY_CAPTURE="$T/hydration.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/hydration.sent.json" \
+  "$ROOT/build/rh_cli" osv-query --graph "$T/hydration-graph.json" --out "$T/hydration-out" --hydrate-advisories >/dev/null
+python3 - "$T" <<'PY'
+import hashlib, json, pathlib, sys
+t = pathlib.Path(sys.argv[1]); out = t / "hydration-out"
+r = json.load(open(out / "osv-query-batch-result.json"))
+assert r["schema"] == "rh-osv-query-batch-result/3" and r["state"] == "collected", r
+assert r["hydration_state"] == "collected" and r["hydrated_advisory_count"] == 1 and r["unhydrated_advisory_count"] == 0, r
+assert r["response_detail"] == "advisory_ids_with_hydrated_records", r
+assert r["hydration_time_limit_secs"] == 120, r
+matcher = json.load(open(out / r["matcher_response_file"]))
+assert [v["id"] for v in matcher["vulns"]] == ["OSV-HYDRATE-1"], matcher
+assert len(r["hydration_evidence"]) == 1 and r["hydration_evidence"][0]["state"] == "collected", r
+item = r["hydration_evidence"][0]
+raw = (out / item["raw_response_file"]).read_bytes()
+assert item["raw_response_sha256"] == hashlib.sha256(raw).hexdigest(), item
+request = json.load(open(out / item["request_file"]))
+assert request == {"id":"OSV-HYDRATE-1","endpoint":"https://api.osv.dev/v1/vulns/OSV-HYDRATE-1"}, request
+args = open(t / "hydration.args").read().splitlines()
+assert "https://api.osv.dev/v1/vulns/OSV-HYDRATE-1" in args, args
+assert args.count("--resolve") == 2, args
+print("[osv-query] unique full-record hydration and retained provenance OK")
+PY
+mkdir -p "$T/hydration-repo"
+cat > "$T/hydration-repo/package-lock.json" <<'JSON'
+{"name":"hydration-app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"hydration-app","version":"1.0.0","dependencies":{"left-pad":"^1.0.0"}},"node_modules/left-pad":{"version":"1.0.0"}}}
+JSON
+"$ROOT/build/rh_cli" deps --repo "$T/hydration-repo" --out "$T/hydration-deps-out" --osv "$T/hydration-out/osv-query-hydrated-response.json" >/dev/null
+python3 - "$T/hydration-deps-out/deps-npm-graph.json" <<'PY'
+import json, sys
+graph = json.load(open(sys.argv[1]))
+assert [item["advisory"] for item in graph["advisories"]] == ["OSV-HYDRATE-1"], graph["advisories"]
+print("[osv-query] hydrated records pass through the existing offline matcher")
+PY
+
+echo "[osv-query] pagination and hydration compose under one bounded contract"
+cat > "$T/hydration-page1.json" <<'JSON'
+{"results":[{"vulns":[{"id":"OSV-HYDRATE-1","modified":"2026-01-01T00:00:00Z"}],"next_page_token":"batch-left-2"}]}
+JSON
+cat > "$T/hydration-page2.json" <<'JSON'
+{"results":[{"vulns":[{"id":"OSV-HYDRATE-1","modified":"2026-01-01T00:00:00Z"}]}]}
+JSON
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_ENDPOINT=https://api.osv.dev/v1/querybatch \
+OSV_QUERY_FAKE_RESPONSE="$T/hydration-page1.json" \
+OSV_QUERY_FAKE_BATCH_PAGE2_RESPONSE="$T/hydration-page2.json" \
+OSV_QUERY_FAKE_VULN_RESPONSE="$T/hydration-record.json" \
+OSV_QUERY_FAKE_HTTP=200 \
+OSV_QUERY_CAPTURE="$T/hydration-pages.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/hydration-pages.sent.json" \
+  "$ROOT/build/rh_cli" osv-query --graph "$T/hydration-graph.json" --out "$T/hydration-pages-out" --continue-pagination --hydrate-advisories >/dev/null
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+t = pathlib.Path(sys.argv[1]); out = t / "hydration-pages-out"
+r = json.load(open(out / "osv-query-batch-result.json"))
+assert r["schema"] == "rh-osv-query-batch-result/3" and r["state"] == "collected", r
+assert r["page_count"] == 2 and r["page_evidence"][1]["query_indexes"] == [0], r
+assert r["advisory_id_count"] == 2 and r["hydrated_advisory_count"] == 1, r
+assert [v["id"] for v in json.load(open(out / r["matcher_response_file"]))["vulns"]] == ["OSV-HYDRATE-1"]
+args = open(t / "hydration-pages.args").read().splitlines()
+assert args.count("--resolve") == 3, args
+print("[osv-query] cursor continuation and cross-page advisory deduplication OK")
+PY
+
+echo "[osv-query] ID mismatches stay partial and never enter matcher input"
+cat > "$T/hydration-wrong-record.json" <<'JSON'
+{"id":"OSV-WRONG","affected":[]}
+JSON
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_ENDPOINT=https://api.osv.dev/v1/querybatch \
+OSV_QUERY_FAKE_RESPONSE="$T/hydration-batch.json" \
+OSV_QUERY_FAKE_VULN_RESPONSE="$T/hydration-wrong-record.json" \
+OSV_QUERY_FAKE_HTTP=200 \
+OSV_QUERY_CAPTURE="$T/hydration-wrong.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/hydration-wrong.sent.json" \
+  "$ROOT/build/rh_cli" osv-query --graph "$T/hydration-graph.json" --out "$T/hydration-wrong-out" --hydrate-advisories >/dev/null
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+t = pathlib.Path(sys.argv[1]); out = t / "hydration-wrong-out"
+r = json.load(open(out / "osv-query-batch-result.json"))
+assert r["state"] == "partial" and r["hydration_state"] == "partial", r
+assert r["hydrated_advisory_count"] == 0 and r["unhydrated_advisory_count"] == 1, r
+assert json.load(open(out / r["matcher_response_file"])) == {"vulns": []}
+assert r["hydration_evidence"][0]["state"] == "record_id_mismatch", r
+print("[osv-query] advisory ID mismatch fails closed with partial coverage")
+PY
+
+echo "[osv-query] provider lookup failure stays visible and partial"
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_ENDPOINT=https://api.osv.dev/v1/querybatch \
+OSV_QUERY_FAKE_RESPONSE="$T/hydration-batch.json" \
+OSV_QUERY_FAKE_VULN_RESPONSE="$T/hydration-record.json" \
+OSV_QUERY_FAKE_VULN_HTTP=429 \
+OSV_QUERY_FAKE_HTTP=200 \
+OSV_QUERY_CAPTURE="$T/hydration-http.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/hydration-http.sent.json" \
+  "$ROOT/build/rh_cli" osv-query --graph "$T/hydration-graph.json" --out "$T/hydration-http-out" --hydrate-advisories >/dev/null
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+t = pathlib.Path(sys.argv[1]); out = t / "hydration-http-out"
+r = json.load(open(out / "osv-query-batch-result.json"))
+assert r["state"] == "partial" and r["hydration_state"] == "partial", r
+assert r["hydrated_advisory_count"] == 0 and r["unhydrated_advisory_count"] == 1, r
+item = r["hydration_evidence"][0]
+assert item["state"] == "http_failed" and (out / item["http_status_file"]).read_text() == "429", item
+assert json.load(open(out / r["matcher_response_file"])) == {"vulns": []}
+print("[osv-query] advisory lookup 429 is retained and never reported complete")
+PY
+
+echo "[osv-query] unsafe or missing IDs are counted without a network path"
+cat > "$T/hydration-invalid-batch.json" <<'JSON'
+{"results":[{"vulns":[{"id":"../unsafe"},{"modified":"2026-01-01T00:00:00Z"}]}]}
+JSON
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_ENDPOINT=https://api.osv.dev/v1/querybatch \
+OSV_QUERY_FAKE_RESPONSE="$T/hydration-invalid-batch.json" \
+OSV_QUERY_FAKE_HTTP=200 \
+OSV_QUERY_CAPTURE="$T/hydration-invalid.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/hydration-invalid.sent.json" \
+  "$ROOT/build/rh_cli" osv-query --graph "$T/hydration-graph.json" --out "$T/hydration-invalid-out" --hydrate-advisories >/dev/null
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+t = pathlib.Path(sys.argv[1]); out = t / "hydration-invalid-out"
+r = json.load(open(out / "osv-query-batch-result.json"))
+assert r["state"] == "partial" and r["hydration_state"] == "partial", r
+assert r["hydrated_advisory_count"] == 0 and r["unhydrated_advisory_count"] == 2, r
+assert r["hydration_evidence"] == []
+assert json.load(open(out / r["matcher_response_file"])) == {"vulns": []}
+args = open(t / "hydration-invalid.args").read().splitlines()
+assert not any("/vulns/" in x for x in args), args
+print("[osv-query] unsafe/missing IDs are partial and never interpolated into the endpoint")
 PY
 
 echo "[osv-query] empty graph batch avoids an unnecessary request"

@@ -409,6 +409,86 @@ module OsvQuery:
             Base::rh_push_text(out, "]}")
             0
 
+        # Advisory IDs cross a URL-path boundary during full-record hydration.
+        # Accept only the stable OSV identifier alphabet; unsupported provider
+        # IDs stay visible as incomplete coverage instead of being URL-escaped
+        # into a different resource path.
+        def rh_osv_query_advisory_id_valid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or end <= start or end - start > RH_OSV_QUERY_MAX_ADVISORY_ID
+            while i < end |i: i64 = start, texts, end|:
+                b: u8 = texts[i.usize()]
+                valid: bool = (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 45 or b == 46 or b == 95
+                return false if not valid
+                i <- i + 1
+            true
+
+        # Gather the unique vulnerability IDs returned across positional batch
+        # results. `id_bytes` plus start/length spans avoid per-ID heap objects;
+        # duplicates are cheap to detect under the fixed hydration limit.
+        def rh_osv_query_collect_batch_ids_inner(raw: darray[u8]&, id_bytes: mutable darray[u8]&, id_starts: mutable darray[i64]&, id_lengths: mutable darray[i64]&, invalid_out: mutable i64&, omitted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            invalid_out[0] <- 0
+            omitted_out[0] <- 0
+            return -1 if raw.count.i64() > RH_OSV_QUERY_MAX_RESPONSE
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or not rh_osv_query_fields(nodes, root, 1)
+            results: i64 = rh_osv_query_member(nodes, texts, root, "results")
+            return -1 if results < 0 or nodes[results.usize()].kind != Json::RH_JSON_ARR
+            while result >= 0 |result: i64 = nodes[results.usize()].first_child, nodes, texts, id_bytes, id_starts, id_lengths, invalid_out, omitted_out|:
+                return -1 if nodes[result.usize()].kind != Json::RH_JSON_OBJ
+                vulns: i64 = rh_osv_query_member(nodes, texts, result, "vulns")
+                return -1 if vulns == -2
+                if vulns >= 0:
+                    return -1 if nodes[vulns.usize()].kind != Json::RH_JSON_ARR
+                    while vuln >= 0 |vuln: i64 = nodes[vulns.usize()].first_child, nodes, texts, id_bytes, id_starts, id_lengths, invalid_out, omitted_out|:
+                        return -1 if nodes[vuln.usize()].kind != Json::RH_JSON_OBJ
+                        id: i64 = rh_osv_query_member(nodes, texts, vuln, "id")
+                        if id < 0 or id == -2 or nodes[id.usize()].kind != Json::RH_JSON_STR:
+                            invalid_out[0] <- invalid_out[0] + 1
+                            vuln <- nodes[vuln.usize()].next_sibling
+                            continue
+                        id_node: mutable Json::RhJsonNode = nodes[id.usize()]
+                        if not rh_osv_query_advisory_id_valid(texts, id_node.text_start, id_node.text_end):
+                            invalid_out[0] <- invalid_out[0] + 1
+                            vuln <- nodes[vuln.usize()].next_sibling
+                            continue
+                        id_width: mutable i64 = id_node.text_end - id_node.text_start
+                        duplicate: bool =
+                            while seen < id_starts.count.i64() |duplicate: bool = false, seen: i64 = 0, seen_end: i64 = 0, id_width, id_node, texts, id_bytes, id_starts, id_lengths| -> duplicate:
+                                seen_end <- id_starts[seen.usize()] + id_lengths[seen.usize()]
+                                duplicate <- true if id_lengths[seen.usize()] == id_width and Base::rh_bytes_equal_span(id_bytes, id_starts[seen.usize()], seen_end, texts, id_node.text_start, id_node.text_end)
+                                seen <- seen + 1
+                        if not duplicate:
+                            if id_starts.count.i64() >= RH_OSV_QUERY_MAX_HYDRATED_IDS:
+                                omitted_out[0] <- omitted_out[0] + 1
+                            else:
+                                id_starts.push(id_bytes.count.i64())
+                                id_lengths.push(id_width)
+                                while copy < id_node.text_end |copy: i64 = id_node.text_start, texts, id_bytes, id_node|:
+                                    id_bytes.push(texts[copy.usize()])
+                                    copy <- copy + 1
+                        vuln <- nodes[vuln.usize()].next_sibling
+                result <- nodes[result.usize()].next_sibling
+            0
+
+        # A hydrated endpoint must return a full object whose unique ID exactly
+        # matches the requested path segment before its bytes can reach matcher
+        # input. The caller retains raw bytes independently for evidence.
+        def rh_osv_query_validate_vulnerability_inner(raw: darray[u8]&, id_bytes: darray[u8]&, id_start: i64, id_length: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count.i64() <= 0 or raw.count.i64() > RH_OSV_QUERY_MAX_RESPONSE
+            return -1 if id_start < 0 or id_length <= 0 or id_start + id_length > id_bytes.count.i64()
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            id: i64 = rh_osv_query_member(nodes, texts, root, "id")
+            return -1 if id < 0 or id == -2 or nodes[id.usize()].kind != Json::RH_JSON_STR
+            id_node: Json::RhJsonNode = nodes[id.usize()]
+            return -1 if id_node.text_end - id_node.text_start != id_length
+            return -1 if not Base::rh_bytes_equal_span(id_bytes, id_start, id_start + id_length, texts, id_node.text_start, id_node.text_end)
+            0
+
         def rh_osv_query_make_request(texts: darray[u8]&, name_s: i64, name_e: i64, version_s: i64, version_e: i64, ecosystem: u8, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"package\":{\"ecosystem\":\"")
             Base::rh_push_text(out, Package::rh_osv_ecosystem(ecosystem))
@@ -423,6 +503,10 @@ module OsvQuery:
         const RH_OSV_QUERY_MAX_PAGES: i64 = 4
         const RH_OSV_QUERY_BATCH_MAX_INPUT: i64 = 4194304
         const RH_OSV_QUERY_BATCH_MAX_ITEMS: i64 = 64
+        const RH_OSV_QUERY_MAX_ADVISORY_ID: i64 = 128
+        const RH_OSV_QUERY_MAX_HYDRATED_IDS: i64 = 64
+        const RH_OSV_QUERY_MAX_HYDRATED_BYTES: i64 = 33554432
+        const RH_OSV_QUERY_MAX_HYDRATED_SECS: i64 = 120
 
         # CLI-facing bounded pagination primitives. JSON scanning, span tracking,
         # and token storage remain private to this module.
@@ -444,6 +528,14 @@ module OsvQuery:
 
         def rh_osv_query_batch_next_request(base_request: darray[u8]&, response: darray[u8]&, current_indices: darray[i64]&, out: mutable darray[u8]&, next_indices_out: mutable darray[i64]&, next_count_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             rh_osv_query_batch_next_request_inner(base_request, response, current_indices, out, next_indices_out, next_count_out)
+
+        # The hydration boundary exports IDs and exact span storage only; JSON
+        # nodes, URL-path checks, and response identity validation stay private.
+        def rh_osv_query_collect_batch_ids(raw: darray[u8]&, id_bytes: mutable darray[u8]&, id_starts: mutable darray[i64]&, id_lengths: mutable darray[i64]&, invalid_out: mutable i64&, omitted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_osv_query_collect_batch_ids_inner(raw, id_bytes, id_starts, id_lengths, invalid_out, omitted_out)
+
+        def rh_osv_query_validate_vulnerability(raw: darray[u8]&, id_bytes: darray[u8]&, id_start: i64, id_length: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_osv_query_validate_vulnerability_inner(raw, id_bytes, id_start, id_length)
 
         # Read a versioned query contract and build OSV's v1/query body.
         # Query kind is 0 for a package/version request and 1 for a commit hash.
