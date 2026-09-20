@@ -79,6 +79,7 @@ include "./rh_adoption.elisa"
 include "./rh_lineage.elisa"
 include "./rh_population.elisa"
 include "./rh_ingest_conformance.elisa"
+include "./rh_snapshot_reconcile.elisa"
 include "./rh_drilldown.elisa"
 include "./rh_role_grain.elisa"
 include "./rh_render.elisa"
@@ -135,6 +136,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
     rh_cli_err("       rh_cli job classify --input <file> --out <file> | job run --input <file> --out <file>")
     rh_cli_err("       rh_cli reconcile --input <file> --out <file>")
+    rh_cli_err("       rh_cli snapshot-reconcile --input <rh-snapshot-reconcile-input/1> --out <file>")
     rh_cli_err("       rh_cli worker tick --input <file> --out <file>")
     rh_cli_err("       rh_cli inventory --format cyclonedx|spdx (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli vcs --format hg|svn|fossil|patch --input <file> --out <file>")
@@ -1946,6 +1948,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 rcq <- rcq + 1
         return rh_cli_usage(2) if rci < 0 or rco < 0
         return rh_do_reconcile(slots[rci], slots[rco])
+    if Base::rh_streq(cmd, "snapshot-reconcile"):
+        sri, sro =
+            while srq < argc |sri: i64 = -1, sro: i64 = -1, srq: i64 = 2, slots| -> sri, sro:
+                asr: u8& = slots[srq].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(asr, "--input"):
+                    if srq + 1 < argc:
+                        srq <- srq + 1
+                        sri <- srq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(asr, "--out"):
+                    if srq + 1 < argc:
+                        srq <- srq + 1
+                        sro <- srq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                srq <- srq + 1
+        return rh_cli_usage(2) if sri < 0 or sro < 0
+        return rh_do_snapshot_reconcile(slots[sri], slots[sro])
     if Base::rh_streq(cmd, "worker"):
         return rh_cli_usage(2) if argc < 3
         wsub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
@@ -6128,6 +6151,40 @@ def rh_do_reconcile(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate
     Base::rh_push_decimal_i64(done, debt)
     done.push(10)
     Base::rh_write_stdout(done)
+    0
+
+# --- M02-06 scope-safe snapshot reconciliation. ---
+# Complete/empty snapshots may tombstone unseen current-state IDs inside the
+# exact supplied scope. Partial, failed, and unsupported acquisition preserve
+# unseen records as unconfirmed; immutable event evidence is untouched.
+def rh_do_snapshot_reconcile(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected snapshot-reconcile argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        Base::rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(ipp, raw) < 0:
+        rh_cli_err("snapshot-reconcile: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if SnapshotReconcile::rh_snapshot_reconcile_report(raw, body) != 0:
+        rh_cli_err("snapshot-reconcile: invalid snapshot input (fail closed)")
+        return 4
+    op: mutable darray[u8] =
+        op: mutable darray[u8] = []
+        Base::rh_push_cstr(op, out_path)
+        op.push(0)
+        op
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(opp, body):
+        rh_cli_err("snapshot-reconcile: cannot write --out")
+        return 4
+    rh_cli_out("snapshot-reconcile: ok")
     0
 
 # --- M02-03/M02-06 unattended worker pass. ---

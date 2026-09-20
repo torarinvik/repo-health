@@ -1,0 +1,216 @@
+# rh_snapshot_reconcile.elisa — scope-safe current-state projection (M02-06).
+#
+# A complete or successful-empty acquisition may mark unseen native IDs absent
+# only inside the exact source/capability/scope tuple in the input. Partial,
+# failed, and unsupported acquisition never turns missing IDs into absence.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module SnapshotReconcile:
+    private:
+        struct RhSnapshotId:
+            mutable start: i64
+            mutable end: i64
+
+        const RH_SR_MAX_IDS: i64 = 4096
+        const RH_SR_MAX_ID_BYTES: i64 = 512
+        const RH_SR_MAX_SCOPE_BYTES: i64 = 256
+        const RH_SR_COMPLETE: i64 = 0
+        const RH_SR_EMPTY: i64 = 1
+        const RH_SR_PARTIAL: i64 = 2
+        const RH_SR_FAILED: i64 = 3
+        const RH_SR_UNSUPPORTED: i64 = 4
+
+        def rh_sr_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            Json::rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_sr_span(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = SnapshotReconcile::rh_sr_get(nodes, texts, obj, key)
+            return false if idx < 0 or not Json::rh_json_str_span(nodes, idx, start_out, end_out)
+            return false if end_out[0] <= start_out[0] or end_out[0] - start_out[0] > RH_SR_MAX_SCOPE_BYTES
+            true
+
+        def rh_sr_schema_ok(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            start: mutable i64 = 0
+            end: mutable i64 = 0
+            SnapshotReconcile::rh_sr_span(nodes, texts, obj, "schema", &start, &end) and SnapshotReconcile::rh_sr_eq(texts, start, end, "rh-snapshot-reconcile-input/1")
+
+        def rh_sr_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_sr_acquisition(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            start: mutable i64 = 0
+            end: mutable i64 = 0
+            return -1 if not SnapshotReconcile::rh_sr_span(nodes, texts, obj, "acquisition", &start, &end)
+            return RH_SR_COMPLETE if SnapshotReconcile::rh_sr_eq(texts, start, end, "complete")
+            return RH_SR_EMPTY if SnapshotReconcile::rh_sr_eq(texts, start, end, "empty")
+            return RH_SR_PARTIAL if SnapshotReconcile::rh_sr_eq(texts, start, end, "partial")
+            return RH_SR_FAILED if SnapshotReconcile::rh_sr_eq(texts, start, end, "failed")
+            return RH_SR_UNSUPPORTED if SnapshotReconcile::rh_sr_eq(texts, start, end, "unsupported")
+            -1
+
+        def rh_sr_acquisition_label(status: i64) -> u8&:
+            return "complete" if status == RH_SR_COMPLETE
+            return "empty" if status == RH_SR_EMPTY
+            return "partial" if status == RH_SR_PARTIAL
+            return "failed" if status == RH_SR_FAILED
+            "unsupported"
+
+        def rh_sr_nonnegative_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, SnapshotReconcile::rh_sr_get(nodes, texts, obj, key), &ok)
+            return -1 if ok == 0 or value < 0
+            value
+
+        def rh_sr_index(ids: darray[RhSnapshotId]&, texts: darray[u8]&, slots: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            slots <- []
+            capacity: usize = ids.count * 2 + 1
+            while i < capacity |i: usize = 0, slots|:
+                slots.push(-1)
+                i <- i + 1
+            while id_idx < ids.count |id_idx: usize = 0, ids, texts, slots, capacity|:
+                item: RhSnapshotId = ids[id_idx]
+                hash: usize = hash_sview(string_view_slice(bytes_view(texts), item.start, item.end)).usize()
+                slot: mutable usize = hash % capacity
+                inserted: mutable bool = false
+                while probe < capacity |probe: usize = 0, slot, ids, texts, slots, id_idx, item, inserted, capacity|:
+                    prior_idx: i64 = slots[slot]
+                    if prior_idx < 0:
+                        slots[slot] <- id_idx.i64()
+                        inserted <- true
+                        break
+                    prior: RhSnapshotId = ids[prior_idx.usize()]
+                    return false if Base::rh_bytes_equal_span(texts, prior.start, prior.end, texts, item.start, item.end)
+                    slot <- (slot + 1) % capacity
+                    probe <- probe + 1
+                return false if not inserted
+                id_idx <- id_idx + 1
+            true
+
+        def rh_sr_has(ids: darray[RhSnapshotId]&, texts: darray[u8]&, slots: darray[i64]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or end <= start or end > texts.count.i64() or slots.count == 0
+            hash: usize = hash_sview(string_view_slice(bytes_view(texts), start, end)).usize()
+            slot: mutable usize = hash % slots.count
+            while probe < slots.count |probe: usize = 0, slot, ids, texts, slots, start, end|:
+                id_idx: i64 = slots[slot]
+                return false if id_idx < 0
+                item: RhSnapshotId = ids[id_idx.usize()]
+                return true if Base::rh_bytes_equal_span(texts, item.start, item.end, texts, start, end)
+                slot <- (slot + 1) % slots.count
+                probe <- probe + 1
+            false
+
+        def rh_sr_read_ids(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, array_idx: i64, ids: mutable darray[RhSnapshotId]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if array_idx < 0 or nodes[array_idx.usize()].kind != Json::RH_JSON_ARR
+            return false if nodes[array_idx.usize()].child_count > RH_SR_MAX_IDS
+            while item >= 0 |item: i64 = nodes[array_idx.usize()].first_child, nodes, texts, ids|:
+                return false if nodes[item.usize()].kind != Json::RH_JSON_STR
+                entry: Json::RhJsonNode = nodes[item.usize()]
+                return false if entry.text_start < 0 or entry.text_end <= entry.text_start or entry.text_end - entry.text_start > RH_SR_MAX_ID_BYTES
+                ids.push(RhSnapshotId{start: entry.text_start, end: entry.text_end})
+                item <- nodes[item.usize()].next_sibling
+            true
+
+        def rh_sr_read_named_ids(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, ids: mutable darray[RhSnapshotId]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            SnapshotReconcile::rh_sr_read_ids(nodes, texts, SnapshotReconcile::rh_sr_get(nodes, texts, obj, key), ids)
+
+        def rh_sr_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            Base::rh_json_escape(out, texts, start.usize(), end.usize())
+            out.push(34)
+
+        def rh_sr_emit_record(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64, state: u8&) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "{\"native_id\":")
+            SnapshotReconcile::rh_sr_emit_span(out, texts, start, end)
+            Base::rh_push_text(out, ",\"state\":\"")
+            Base::rh_push_text(out, state)
+            Base::rh_push_text(out, "\"}")
+
+    public:
+        def rh_snapshot_reconcile_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+
+            return -1 if not SnapshotReconcile::rh_sr_schema_ok(nodes, texts, root)
+            source_start: mutable i64 = 0
+            source_end: mutable i64 = 0
+            capability_start: mutable i64 = 0
+            capability_end: mutable i64 = 0
+            scope_start: mutable i64 = 0
+            scope_end: mutable i64 = 0
+            return -1 if not SnapshotReconcile::rh_sr_span(nodes, texts, root, "source", &source_start, &source_end)
+            return -1 if not SnapshotReconcile::rh_sr_span(nodes, texts, root, "capability", &capability_start, &capability_end)
+            return -1 if not SnapshotReconcile::rh_sr_span(nodes, texts, root, "scope", &scope_start, &scope_end)
+
+            captured_at: i64 = SnapshotReconcile::rh_sr_nonnegative_int(nodes, raw, texts, root, "captured_at")
+            return -1 if captured_at < 0
+            acquisition: i64 = SnapshotReconcile::rh_sr_acquisition(nodes, texts, root)
+            return -1 if acquisition < 0
+
+            prior: mutable darray[RhSnapshotId] = []
+            observed: mutable darray[RhSnapshotId] = []
+            return -1 if not SnapshotReconcile::rh_sr_read_named_ids(nodes, texts, root, "prior", prior)
+            return -1 if not SnapshotReconcile::rh_sr_read_named_ids(nodes, texts, root, "observed", observed)
+            return -1 if prior.count + observed.count > RH_SR_MAX_IDS
+            prior_index: mutable darray[i64] = []
+            observed_index: mutable darray[i64] = []
+            return -1 if not SnapshotReconcile::rh_sr_index(prior, texts, prior_index)
+            return -1 if not SnapshotReconcile::rh_sr_index(observed, texts, observed_index)
+            return -1 if acquisition == RH_SR_EMPTY and observed.count != 0
+            return -1 if acquisition == RH_SR_COMPLETE and observed.count == 0
+            return -1 if (acquisition == RH_SR_FAILED or acquisition == RH_SR_UNSUPPORTED) and observed.count != 0
+
+            clear_unseen: bool = acquisition == RH_SR_COMPLETE or acquisition == RH_SR_EMPTY
+            missing_prior: i64 =
+                for i in 0..<prior.count |count: i64 = 0, i: usize = 0, prior, observed, texts| -> count:
+                    count <- count + 1 if not SnapshotReconcile::rh_sr_has(observed, texts, observed_index, prior[i].start, prior[i].end)
+            new_present: i64 =
+                for i in 0..<observed.count |count: i64 = 0, i: usize = 0, prior, observed, texts| -> count:
+                    count <- count + 1 if not SnapshotReconcile::rh_sr_has(prior, texts, prior_index, observed[i].start, observed[i].end)
+            record_count: i64 = prior.count.i64() + new_present
+
+            Base::rh_push_text(out, "{\"schema\":\"rh-snapshot-reconcile-result/1\",\"scope\":{\"source\":")
+            SnapshotReconcile::rh_sr_emit_span(out, texts, source_start, source_end)
+            Base::rh_push_text(out, ",\"capability\":")
+            SnapshotReconcile::rh_sr_emit_span(out, texts, capability_start, capability_end)
+            Base::rh_push_text(out, ",\"scope\":")
+            SnapshotReconcile::rh_sr_emit_span(out, texts, scope_start, scope_end)
+            Base::rh_push_text(out, "},\"captured_at\":")
+            Base::rh_push_decimal_i64(out, captured_at)
+            Base::rh_push_text(out, ",\"acquisition\":\"")
+            Base::rh_push_text(out, SnapshotReconcile::rh_sr_acquisition_label(acquisition))
+            out.push(34)
+            Base::rh_push_text(out, ",\"successful_acquisition\":")
+            Base::rh_push_text(out, "true" if clear_unseen else "false")
+            Base::rh_push_text(out, ",\"refresh_last_success\":")
+            Base::rh_push_text(out, "true" if clear_unseen else "false")
+            Base::rh_push_text(out, ",\"clear_unseen_in_scope\":")
+            Base::rh_push_text(out, "true" if clear_unseen else "false")
+            Base::rh_push_text(out, ",\"counts\":{\"prior\":")
+            Base::rh_push_decimal_i64(out, prior.count.i64())
+            Base::rh_push_text(out, ",\"observed\":")
+            Base::rh_push_decimal_i64(out, observed.count.i64())
+            Base::rh_push_text(out, ",\"absent\":")
+            Base::rh_push_decimal_i64(out, missing_prior if clear_unseen else 0)
+            Base::rh_push_text(out, ",\"retained_unconfirmed\":")
+            Base::rh_push_decimal_i64(out, missing_prior if not clear_unseen else 0)
+            Base::rh_push_text(out, ",\"current\":")
+            Base::rh_push_decimal_i64(out, record_count)
+            Base::rh_push_text(out, "},\"records\":[")
+            while i < prior.count |i: usize = 0, prior, observed, observed_index, texts, out, clear_unseen|:
+                out.push(44) if i > 0
+                state: u8& = "present" if SnapshotReconcile::rh_sr_has(observed, texts, observed_index, prior[i].start, prior[i].end) else ("absent" if clear_unseen else "retained_unconfirmed")
+                SnapshotReconcile::rh_sr_emit_record(out, texts, prior[i].start, prior[i].end, state)
+                i <- i + 1
+            while i < observed.count |i: usize = 0, prior, prior_index, observed, texts, out, emitted: i64 = prior.count.i64()|:
+                if not SnapshotReconcile::rh_sr_has(prior, texts, prior_index, observed[i].start, observed[i].end):
+                    out.push(44) if emitted > 0
+                    SnapshotReconcile::rh_sr_emit_record(out, texts, observed[i].start, observed[i].end, "present")
+                    emitted <- emitted + 1
+                i <- i + 1
+            Base::rh_push_text(out, "],\"note\":\"absence is scoped to this exact source, capability, and scope; partial, failed, or unsupported acquisition preserves unseen prior IDs as unconfirmed\"}")
+            out.push(10)
+            0
