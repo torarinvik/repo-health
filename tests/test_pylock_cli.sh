@@ -74,7 +74,7 @@ dependencies = [{name = 'attrs'}]
 [[packages]]
 name = 'context-consumer'
 version = '1.0.0'
-dependencies = [{name = 'private', vcs = {url = 'https://example.invalid/private'}}]
+dependencies = [{name = 'private', vcs = {url = 'https://example.invalid/private', requested-revision = 'locked', subdirectory = 'python'}}]
 [packages.archive]
 name = 'context-consumer-1.0.0.zip'
 path = 'vendor/context-consumer-1.0.0.zip'
@@ -96,6 +96,15 @@ version = '1.0.0'
 name = 'private'
 [packages.dependencies.vcs]
 url = 'https://example.invalid/private'
+requested-revision = 'locked'
+subdirectory = 'python'
+
+[[packages.dependencies]]
+name = 'editable-library'
+[packages.dependencies.directory]
+path = '../workspace/editable-library'
+editable = true
+subdirectory = 'packages/python'
 
 [[packages]]
 name = 'inline-artifact-consumer'
@@ -132,6 +141,43 @@ name = 'local-git-library'
 type = 'git'
 path = '../git/local-library'
 commit-id = '89abcdef0123456789abcdef0123456789abcdef'
+
+[[packages]]
+name = 'private'
+[packages.vcs]
+type = 'git'
+url = 'https://example.invalid/private'
+requested-revision = 'locked'
+commit-id = '00112233445566778899aabbccddeeff00112233'
+subdirectory = 'python'
+
+[[packages]]
+name = 'private'
+[packages.vcs]
+type = 'git'
+url = 'https://example.invalid/private'
+requested-revision = 'other'
+commit-id = 'aabbccddeeff00112233445566778899aabbccdd'
+subdirectory = 'python'
+
+[[packages]]
+name = 'editable-library'
+[packages.directory]
+path = '../workspace/alternate-library'
+editable = true
+subdirectory = 'packages/python'
+
+[[packages]]
+name = 'directory-consumer'
+dependencies = [{name = 'editable-library', directory = {path = '../workspace/editable-library', editable = true, subdirectory = 'packages/python'}}]
+
+[[packages]]
+name = 'unknown-source-consumer'
+dependencies = [{name = 'private', vcs = {url = 'https://example.invalid/private', branch = 'unsupported'}}]
+
+[[packages]]
+name = 'name-only-private-consumer'
+dependencies = [{name = 'private'}]
 EOF
 
 "$ROOT/build/rh_cli" pylock --input "$T/pylock.toml" --out "$T/result.json" | grep -q 'PEP 751 audit emitted' || fail "command did not emit audit"
@@ -151,15 +197,21 @@ assert report["extras"] == ["speedups", "docs"], report
 assert report["dependency_groups"] == ["dev", "test"], report
 assert report["default_groups"] == ["dev"], report
 pkgs = report["packages"]
-assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-consumer", "context-consumer", "missing-consumer", "table-context-consumer", "inline-artifact-consumer", "git-library", "editable-library", "locked-library", "local-git-library"], pkgs
+assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-consumer", "context-consumer", "missing-consumer", "table-context-consumer", "inline-artifact-consumer", "git-library", "editable-library", "locked-library", "local-git-library", "private", "private", "editable-library", "directory-consumer", "unknown-source-consumer", "name-only-private-consumer"], pkgs
 assert pkgs[0]["marker"] == "sys_platform == 'linux' # retained inside string", pkgs[0]
 assert pkgs[0]["index_sha256"] == hashlib.sha256(b"https://index.example.invalid/simple/").hexdigest(), pkgs[0]
 assert pkgs[1]["index_sha256"] is None, pkgs[1]
 assert pkgs[2]["dependencies"] == [{"name": "attrs", "version": "25.1.0", "target": 0, "resolution": "resolved"}], pkgs[2]
 assert pkgs[3]["dependencies"][0]["resolution"] == "ambiguous", pkgs[3]
-assert pkgs[4]["dependencies"][0]["resolution"] == "context", pkgs[4]
+assert pkgs[4]["dependencies"][0]["resolution"] == "resolved" and pkgs[4]["dependencies"][0]["target"] == 12, pkgs[4]
+assert pkgs[4]["dependencies"][0]["source"]["source_sha256"] == hashlib.sha256(b"https://example.invalid/private").hexdigest(), pkgs[4]
+assert pkgs[4]["dependencies"][0]["source"]["requested_revision"] == "locked" and pkgs[4]["dependencies"][0]["source"]["subdirectory"] == "python", pkgs[4]
 assert pkgs[5]["dependencies"][0]["resolution"] == "missing", pkgs[5]
-assert pkgs[6]["dependencies"][0]["resolution"] == "context", pkgs[6]
+assert pkgs[6]["dependencies"][0]["resolution"] == "resolved" and pkgs[6]["dependencies"][0]["target"] == 12, pkgs[6]
+assert pkgs[6]["dependencies"][1]["resolution"] == "resolved" and pkgs[6]["dependencies"][1]["target"] == 9, pkgs[6]
+assert pkgs[15]["dependencies"][0]["resolution"] == "resolved" and pkgs[15]["dependencies"][0]["target"] == 9, pkgs[15]
+assert pkgs[16]["dependencies"][0]["resolution"] == "context", pkgs[16]
+assert pkgs[17]["dependencies"][0]["resolution"] == "ambiguous", pkgs[17]
 assert [a["kind"] for a in pkgs[0]["artifacts"]] == ["wheel", "wheel", "sdist"], pkgs[0]["artifacts"]
 assert pkgs[0]["artifacts"][0]["hashes"] == [
     {"algorithm": "sha256", "value": "a" * 64},
@@ -203,14 +255,14 @@ assert pkgs[11]["source"]["kind"] == "vcs" and pkgs[11]["source"]["source_kind"]
 assert pkgs[11]["source"]["source_sha256"] == hashlib.sha256(b"../git/local-library").hexdigest(), pkgs[11]
 assert pkgs[11]["source"]["requested_revision"] is None and pkgs[11]["source"]["commit_id"] == "89abcdef0123456789abcdef0123456789abcdef", pkgs[11]
 serialized = json.dumps(report)
-for locator in ["https://index.example.invalid/simple/", "https://files.example.invalid/attrs-25.1.0.whl", "https://files.example.invalid/inline.whl", "vendor/inline-alt.whl", "vendor/context-consumer-1.0.0.zip", "https://git.example.invalid/team/library.git", "../workspace/editable-library", "vendor/locked-library", "../git/local-library"]:
+for locator in ["https://index.example.invalid/simple/", "https://files.example.invalid/attrs-25.1.0.whl", "https://files.example.invalid/inline.whl", "vendor/inline-alt.whl", "vendor/context-consumer-1.0.0.zip", "https://git.example.invalid/team/library.git", "https://example.invalid/private", "../workspace/editable-library", "../workspace/alternate-library", "vendor/locked-library", "../git/local-library"]:
     assert locator not in serialized, report
 coverage = report["coverage"]
 assert coverage["direct_dependencies"] == "not_recorded" and coverage["markers_evaluated"] is False, coverage
 assert coverage["artifacts_projected"] is False and coverage["artifact_hashes_projected"] is True, coverage
 assert coverage["unprojected_artifact_fields"] == 0 and coverage["unprojected_top_level_fields"] == 0, coverage
-assert coverage["unprojected_package_fields"] == 0 and coverage["unprojected_dependency_fields"] == 2, coverage
-assert coverage["unprojected_tables"] == 1, coverage
+assert coverage["unprojected_package_fields"] == 0 and coverage["unprojected_dependency_fields"] == 1, coverage
+assert coverage["unprojected_tables"] == 0, coverage
 print("[pylock] PEP 751 relationships and loss coverage OK")
 PY
 
