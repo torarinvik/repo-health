@@ -31,10 +31,14 @@ on the real execution path.
   table and inline-table input forms.
   Environment/group selection, complete artifact projection, and unsupported
   source fields remain counted as gaps.
-  `tests/test_pylock_cli.sh`, a checked-in golden, schema, and public-contract
-  entry cover the new result. Full TOML validation, complete artifact metadata
-  and byte observation, project manifest integration, and use as a resolved
-  dependency graph remain open.
+  `rh_cli pylock-observe` now verifies supplied local bytes against SHA-256,
+  SHA-384, and SHA-512 values and emits a separate
+  `rh-pylock-artifact-observation-result/1` sidecar bound to the audit digest
+  and artifact ID. Unknown algorithms remain unsupported, and mismatches do
+  not become matches. `tests/test_pylock_cli.sh`, checked-in goldens, schemas,
+  and public-contract entries cover both paths. Full TOML validation,
+  complete artifact metadata, project manifest integration, and use as a
+  resolved dependency graph remain open.
 - M11 forecast evidence now requires a named observable binary outcome and
   retains model and baseline Brier scores with the same submitted evaluation
   cohort identifier and sample count. `rh-forecast-input/2` and

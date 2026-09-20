@@ -1,0 +1,227 @@
+# rh_pylock_observation.elisa — compare bounded PEP 751 expected hashes with
+# caller-supplied local artifact bytes, without opening or extracting archives.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+include "./rh_sha512.elisa"
+
+module PylockObservation:
+    private:
+        const RH_PYLOCK_OBSERVATION_SHA256: u8 = 1
+        const RH_PYLOCK_OBSERVATION_SHA384: u8 = 2
+        const RH_PYLOCK_OBSERVATION_SHA512: u8 = 3
+        const RH_PYLOCK_OBSERVATION_MATCH: u8 = 1
+        const RH_PYLOCK_OBSERVATION_CHANGED: u8 = 2
+        const RH_PYLOCK_OBSERVATION_UNSUPPORTED: u8 = 3
+
+        struct RhPylockObservedHash:
+            algorithm_s: mutable i64
+            algorithm_e: mutable i64
+            expected_s: mutable i64
+            expected_e: mutable i64
+            digest_kind: mutable u8
+            state: mutable u8
+
+        def rh_pylock_observation_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            Json::rh_json_obj_get(nodes, texts, object, key)
+
+        def rh_pylock_observation_lower(value: u8) -> u8:
+            return value + 32 if value >= 65 and value <= 90
+            value
+
+        def rh_pylock_observation_literal(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            width: usize = strlen(literal)
+            return false if start < 0 or end - start != width.i64()
+            for i in 0..<width |i, texts, start, literal|:
+                return false if rh_pylock_observation_lower(texts[(start.usize() + i)]) != rh_pylock_observation_lower(literal[i])
+            true
+
+        def rh_pylock_observation_algorithm(texts: darray[u8]&, start: i64, end: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
+            return RH_PYLOCK_OBSERVATION_SHA256 if rh_pylock_observation_literal(texts, start, end, "sha256")
+            return RH_PYLOCK_OBSERVATION_SHA384 if rh_pylock_observation_literal(texts, start, end, "sha384")
+            return RH_PYLOCK_OBSERVATION_SHA512 if rh_pylock_observation_literal(texts, start, end, "sha512")
+            0
+
+        def rh_pylock_observation_hex(texts: darray[u8]&, start: i64, end: i64, width: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or end - start != width
+            for i in start.usize()..<end.usize() |i, texts|:
+                b: u8 = texts[i]
+                return false if not ((b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102))
+            true
+
+        def rh_pylock_observation_digest_equal(texts: darray[u8]&, start: i64, end: i64, digest: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or end - start != digest.count.i64()
+            for i in 0..<digest.count |i, texts, start, digest|:
+                return false if rh_pylock_observation_lower(texts[(start.usize() + i)]) != digest[i]
+            true
+
+        def rh_pylock_observation_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            Base::rh_json_escape(out, texts, start.usize(), end.usize())
+            out.push(34)
+
+    public:
+        const RH_PYLOCK_OBSERVATION_MAX_AUDIT_BYTES: i64 = 8388608
+        const RH_PYLOCK_OBSERVATION_MAX_FILE_BYTES: i64 = 67108864
+        const RH_PYLOCK_OBSERVATION_MAX_HASHES: i64 = 64
+
+        # Bind local byte evidence to one artifact id in rh-pylock-audit/1.
+        # Known SHA-256/384/512 values are compared; unknown algorithms remain
+        # explicitly unsupported and cannot turn a partial comparison into a
+        # complete match. No archive is opened or executed.
+        def rh_pylock_artifact_observation(audit: darray[u8]&, file_bytes: darray[u8]&, artifact_id: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if audit.count.i64() <= 0 or audit.count.i64() > RH_PYLOCK_OBSERVATION_MAX_AUDIT_BYTES
+            return -1 if file_bytes.count.i64() <= 0 or file_bytes.count.i64() > RH_PYLOCK_OBSERVATION_MAX_FILE_BYTES or artifact_id < 0
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(audit, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            schema: i64 = rh_pylock_observation_member(nodes, texts, root, "schema")
+            packages: i64 = rh_pylock_observation_member(nodes, texts, root, "packages")
+            source_digest: i64 = rh_pylock_observation_member(nodes, texts, root, "input_sha256")
+            return -1 if schema < 0 or packages < 0 or source_digest < 0
+            return -1 if nodes[schema.usize()].kind != Json::RH_JSON_STR or nodes[packages.usize()].kind != Json::RH_JSON_ARR
+            schema_s: mutable i64 = -1
+            schema_e: mutable i64 = -1
+            return -1 if not Json::rh_json_str_span(nodes, schema, &schema_s, &schema_e) or not Base::rh_bytes_equal_literal(texts, schema_s, schema_e, "rh-pylock-audit/1")
+            source_digest_s: mutable i64 = -1
+            source_digest_e: mutable i64 = -1
+            return -1 if not Json::rh_json_str_span(nodes, source_digest, &source_digest_s, &source_digest_e) or not rh_pylock_observation_hex(texts, source_digest_s, source_digest_e, 64)
+            selected_package_id: mutable i64 = -1
+            selected_name_s: mutable i64 = -1
+            selected_name_e: mutable i64 = -1
+            selected_version_s: mutable i64 = -1
+            selected_version_e: mutable i64 = -1
+            selected_kind_s: mutable i64 = -1
+            selected_kind_e: mutable i64 = -1
+            selected_hashes: mutable i64 = -1
+            while package_cursor >= 0 |package_cursor: i64 = nodes[packages.usize()].first_child, nodes, texts, artifact_id, selected_package_id, selected_name_s, selected_name_e, selected_version_s, selected_version_e, selected_kind_s, selected_kind_e, selected_hashes|:
+                return -1 if nodes[package_cursor.usize()].kind != Json::RH_JSON_OBJ
+                artifacts: i64 = rh_pylock_observation_member(nodes, texts, package_cursor, "artifacts")
+                package_id_field: i64 = rh_pylock_observation_member(nodes, texts, package_cursor, "id")
+                package_name: i64 = rh_pylock_observation_member(nodes, texts, package_cursor, "name")
+                package_version: i64 = rh_pylock_observation_member(nodes, texts, package_cursor, "version")
+                return -1 if artifacts < 0 or package_id_field < 0 or package_name < 0 or package_version < 0 or nodes[artifacts.usize()].kind != Json::RH_JSON_ARR or nodes[package_id_field.usize()].kind != Json::RH_JSON_NUM
+                package_id_ok: mutable i64 = 0
+                package_id: i64 = Json::rh_json_int(nodes, audit, package_id_field, &package_id_ok)
+                return -1 if package_id_ok != 1 or package_id < 0
+                return -1 if nodes[package_name.usize()].kind != Json::RH_JSON_STR or (nodes[package_version.usize()].kind != Json::RH_JSON_STR and nodes[package_version.usize()].kind != Json::RH_JSON_NULL)
+                while artifact_cursor >= 0 |artifact_cursor: i64 = nodes[artifacts.usize()].first_child, nodes, texts, artifact_id, selected_package_id, selected_name_s, selected_name_e, selected_version_s, selected_version_e, selected_kind_s, selected_kind_e, selected_hashes, package_id|:
+                    return -1 if nodes[artifact_cursor.usize()].kind != Json::RH_JSON_OBJ
+                    id_field: i64 = rh_pylock_observation_member(nodes, texts, artifact_cursor, "id")
+                    kind_field: i64 = rh_pylock_observation_member(nodes, texts, artifact_cursor, "kind")
+                    hashes_field: i64 = rh_pylock_observation_member(nodes, texts, artifact_cursor, "hashes")
+                    return -1 if id_field < 0 or kind_field < 0 or hashes_field < 0
+                    return -1 if nodes[id_field.usize()].kind != Json::RH_JSON_NUM or nodes[kind_field.usize()].kind != Json::RH_JSON_STR or nodes[hashes_field.usize()].kind != Json::RH_JSON_ARR
+                    id_ok: mutable i64 = 0
+                    found_id: i64 = Json::rh_json_int(nodes, audit, id_field, &id_ok)
+                    return -1 if id_ok != 1 or found_id < 0
+                    if found_id == artifact_id:
+                        return -1 if selected_package_id >= 0
+                        selected_package_id <- package_id
+                        selected_name_s <- nodes[package_name.usize()].text_start
+                        selected_name_e <- nodes[package_name.usize()].text_end
+                        if nodes[package_version.usize()].kind == Json::RH_JSON_STR:
+                            selected_version_s <- nodes[package_version.usize()].text_start
+                            selected_version_e <- nodes[package_version.usize()].text_end
+                        selected_kind_s <- nodes[kind_field.usize()].text_start
+                        selected_kind_e <- nodes[kind_field.usize()].text_end
+                        selected_hashes <- hashes_field
+                    artifact_cursor <- nodes[artifact_cursor.usize()].next_sibling
+                package_cursor <- nodes[package_cursor.usize()].next_sibling
+            return -1 if selected_package_id < 0 or selected_hashes < 0 or nodes[selected_hashes.usize()].child_count <= 0 or nodes[selected_hashes.usize()].child_count > RH_PYLOCK_OBSERVATION_MAX_HASHES
+            sha256: mutable darray[u8] = []
+            sha384: mutable darray[u8] = []
+            sha512: mutable darray[u8] = []
+            Sha256::rh_sha256(file_bytes, sha256)
+            results: mutable darray[RhPylockObservedHash] = []
+            checked: mutable i64 = 0
+            changed: mutable i64 = 0
+            unsupported: mutable i64 = 0
+            while hash_cursor >= 0 |hash_cursor: i64 = nodes[selected_hashes.usize()].first_child, nodes, texts, results, checked, changed, unsupported, sha256, sha384, sha512|:
+                return -1 if nodes[hash_cursor.usize()].kind != Json::RH_JSON_OBJ
+                algorithm: i64 = rh_pylock_observation_member(nodes, texts, hash_cursor, "algorithm")
+                expected: i64 = rh_pylock_observation_member(nodes, texts, hash_cursor, "value")
+                return -1 if algorithm < 0 or expected < 0 or nodes[algorithm.usize()].kind != Json::RH_JSON_STR or nodes[expected.usize()].kind != Json::RH_JSON_STR
+                algorithm_s: mutable i64 = -1
+                algorithm_e: mutable i64 = -1
+                expected_s: mutable i64 = -1
+                expected_e: mutable i64 = -1
+                return -1 if not Json::rh_json_str_span(nodes, algorithm, &algorithm_s, &algorithm_e) or not Json::rh_json_str_span(nodes, expected, &expected_s, &expected_e)
+                digest_kind: u8 = rh_pylock_observation_algorithm(texts, algorithm_s, algorithm_e)
+                state: mutable u8 = RH_PYLOCK_OBSERVATION_UNSUPPORTED
+                if digest_kind == RH_PYLOCK_OBSERVATION_SHA256:
+                    return -1 if not rh_pylock_observation_hex(texts, expected_s, expected_e, 64)
+                    state <- RH_PYLOCK_OBSERVATION_MATCH if rh_pylock_observation_digest_equal(texts, expected_s, expected_e, sha256)
+                    state <- RH_PYLOCK_OBSERVATION_CHANGED if state != RH_PYLOCK_OBSERVATION_MATCH
+                elif digest_kind == RH_PYLOCK_OBSERVATION_SHA384:
+                    return -1 if not rh_pylock_observation_hex(texts, expected_s, expected_e, 96)
+                    Sha512::rh_sha384(file_bytes, sha384) if sha384.count == 0
+                    state <- RH_PYLOCK_OBSERVATION_MATCH if rh_pylock_observation_digest_equal(texts, expected_s, expected_e, sha384)
+                    state <- RH_PYLOCK_OBSERVATION_CHANGED if state != RH_PYLOCK_OBSERVATION_MATCH
+                elif digest_kind == RH_PYLOCK_OBSERVATION_SHA512:
+                    return -1 if not rh_pylock_observation_hex(texts, expected_s, expected_e, 128)
+                    Sha512::rh_sha512(file_bytes, sha512) if sha512.count == 0
+                    state <- RH_PYLOCK_OBSERVATION_MATCH if rh_pylock_observation_digest_equal(texts, expected_s, expected_e, sha512)
+                    state <- RH_PYLOCK_OBSERVATION_CHANGED if state != RH_PYLOCK_OBSERVATION_MATCH
+                checked <- checked + 1 if digest_kind != 0
+                unsupported <- unsupported + 1 if digest_kind == 0
+                changed <- changed + 1 if state == RH_PYLOCK_OBSERVATION_CHANGED
+                results.push(RhPylockObservedHash{algorithm_s: algorithm_s, algorithm_e: algorithm_e, expected_s: expected_s, expected_e: expected_e, digest_kind: digest_kind, state: state})
+                hash_cursor <- nodes[hash_cursor.usize()].next_sibling
+            audit_digest: mutable darray[u8] = []
+            Sha256::rh_sha256(audit, audit_digest)
+            Base::rh_push_text(out, "{\"schema\":\"rh-pylock-artifact-observation-result/1\",\"audit_sha256\":\"")
+            out.extend(bytes_view(audit_digest))
+            Base::rh_push_text(out, "\",\"source_input_sha256\":\"")
+            Base::rh_json_escape(out, texts, source_digest_s.usize(), source_digest_e.usize())
+            Base::rh_push_text(out, "\",\"artifact_id\":")
+            Base::rh_push_decimal_i64(out, artifact_id)
+            Base::rh_push_text(out, ",\"package_id\":")
+            Base::rh_push_decimal_i64(out, selected_package_id)
+            Base::rh_push_text(out, ",\"package_name\":")
+            rh_pylock_observation_emit_span(out, texts, selected_name_s, selected_name_e)
+            Base::rh_push_text(out, ",\"package_version\":")
+            if selected_version_s < 0:
+                Base::rh_push_text(out, "null")
+            else:
+                rh_pylock_observation_emit_span(out, texts, selected_version_s, selected_version_e)
+            Base::rh_push_text(out, ",\"artifact_kind\":")
+            rh_pylock_observation_emit_span(out, texts, selected_kind_s, selected_kind_e)
+            Base::rh_push_text(out, ",\"file_size_bytes\":")
+            Base::rh_push_decimal_i64(out, file_bytes.count.i64())
+            Base::rh_push_text(out, ",\"observed_file_sha256\":\"")
+            out.extend(bytes_view(sha256))
+            Base::rh_push_text(out, "\",\"checked_hash_count\":")
+            Base::rh_push_decimal_i64(out, checked)
+            Base::rh_push_text(out, ",\"unsupported_hash_count\":")
+            Base::rh_push_decimal_i64(out, unsupported)
+            Base::rh_push_text(out, ",\"state\":\"")
+            Base::rh_push_text(out, "unsupported" if checked == 0 else "changed" if changed > 0 else "partially_verified" if unsupported > 0 else "match")
+            Base::rh_push_text(out, "\",\"hashes\":[")
+            for result_id in 0..<results.count |result_id, results, texts, out, sha256, sha384, sha512|:
+                result: RhPylockObservedHash = results[result_id]
+                if result_id > 0:
+                    out.push(44)
+                Base::rh_push_text(out, "{\"algorithm\":")
+                rh_pylock_observation_emit_span(out, texts, result.algorithm_s, result.algorithm_e)
+                Base::rh_push_text(out, ",\"expected\":")
+                rh_pylock_observation_emit_span(out, texts, result.expected_s, result.expected_e)
+                Base::rh_push_text(out, ",\"observed\":")
+                if result.digest_kind == 0:
+                    Base::rh_push_text(out, "null")
+                else:
+                    out.push(34)
+                    if result.digest_kind == RH_PYLOCK_OBSERVATION_SHA256:
+                        out.extend(bytes_view(sha256))
+                    elif result.digest_kind == RH_PYLOCK_OBSERVATION_SHA384:
+                        out.extend(bytes_view(sha384))
+                    else:
+                        out.extend(bytes_view(sha512))
+                    out.push(34)
+                Base::rh_push_text(out, ",\"state\":\"")
+                Base::rh_push_text(out, "unsupported" if result.state == RH_PYLOCK_OBSERVATION_UNSUPPORTED else "match" if result.state == RH_PYLOCK_OBSERVATION_MATCH else "changed")
+                Base::rh_push_text(out, "\"}")
+            Base::rh_push_text(out, "]}")
+            0

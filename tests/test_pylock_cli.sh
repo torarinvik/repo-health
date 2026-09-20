@@ -190,6 +190,94 @@ assert coverage["artifact_hashes_projected"] is False, coverage
 assert coverage["unprojected_artifact_fields"] == 1, coverage
 PY
 
+echo "[pylock] local artifact hashes bind to audit and file bytes"
+"$ROOT/build/rh_cli" pylock-observe \
+  --audit "$ROOT/fixtures/packages/pylock-observation-audit.json" \
+  --artifact 0 \
+  --file "$ROOT/fixtures/packages/pylock-observation-artifact.whl" \
+  --out "$T/observation-match.json" >/dev/null
+cmp "$ROOT/fixtures/packages/pylock-artifact-observation-result.json" "$T/observation-match.json" || fail "artifact observation drifted from golden"
+python3 - "$T/observation-match.json" "$ROOT/fixtures/packages/pylock-observation-audit.json" "$ROOT/fixtures/packages/pylock-observation-artifact.whl" <<'PY'
+import hashlib, json, sys
+report = json.load(open(sys.argv[1]))
+audit_bytes = open(sys.argv[2], "rb").read()
+artifact = open(sys.argv[3], "rb").read()
+assert report["schema"] == "rh-pylock-artifact-observation-result/1", report
+assert report["audit_sha256"] == hashlib.sha256(audit_bytes).hexdigest(), report
+assert report["source_input_sha256"] == json.loads(audit_bytes)["input_sha256"], report
+assert report["package_name"] == "attrs" and report["artifact_kind"] == "wheel", report
+assert report["file_size_bytes"] == len(artifact), report
+assert report["observed_file_sha256"] == hashlib.sha256(artifact).hexdigest(), report
+assert report["state"] == "match" and report["checked_hash_count"] == 3, report
+assert [h["algorithm"] for h in report["hashes"]] == ["sha256", "sha384", "sha512"], report
+assert all(h["state"] == "match" and h["observed"] == h["expected"] for h in report["hashes"]), report
+serialized = json.dumps(report)
+for locator in ["https://files.example.invalid/attrs-25.1.0.whl", "../wheelhouse/attrs-cp312.whl"]:
+    assert locator not in serialized, report
+print("[pylock] SHA-256/384/512 match and evidence binding OK")
+PY
+
+python3 - "$ROOT/fixtures/packages/pylock-observation-audit.json" "$T" <<'PY'
+import json, os, sys
+source, target = sys.argv[1:]
+for state, hashes in (
+    ("partial", [{"algorithm": "sha256", "value": json.load(open(source))["packages"][0]["artifacts"][0]["hashes"][0]["value"]}, {"algorithm": "blake2b_256", "value": "opaque"}]),
+    ("unsupported", [{"algorithm": "blake2b_256", "value": "opaque"}]),
+    ("malformed", []),
+):
+    audit = json.load(open(source))
+    audit["packages"][0]["artifacts"][0]["hashes"] = hashes
+    with open(os.path.join(target, state + "-audit.json"), "w") as f:
+        json.dump(audit, f, separators=(",", ":"))
+        f.write("\n")
+bad_length = json.load(open(source))
+bad_length["packages"][0]["artifacts"][0]["hashes"] = [{"algorithm": "sha256", "value": "0"}]
+with open(os.path.join(target, "bad-length-audit.json"), "w") as f:
+    json.dump(bad_length, f, separators=(",", ":"))
+    f.write("\n")
+PY
+for state in partial unsupported; do
+  "$ROOT/build/rh_cli" pylock-observe \
+    --audit "$T/$state-audit.json" --artifact 0 \
+    --file "$ROOT/fixtures/packages/pylock-observation-artifact.whl" \
+    --out "$T/$state-result.json" >/dev/null
+done
+printf 'modified artifact bytes\n' > "$T/changed.whl"
+"$ROOT/build/rh_cli" pylock-observe \
+  --audit "$ROOT/fixtures/packages/pylock-observation-audit.json" --artifact 0 \
+  --file "$T/changed.whl" --out "$T/changed-result.json" >/dev/null
+python3 - "$T" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+partial = json.load(open(os.path.join(root, "partial-result.json")))
+unsupported = json.load(open(os.path.join(root, "unsupported-result.json")))
+changed = json.load(open(os.path.join(root, "changed-result.json")))
+assert partial["state"] == "partially_verified" and partial["checked_hash_count"] == 1 and partial["unsupported_hash_count"] == 1, partial
+assert [h["state"] for h in partial["hashes"]] == ["match", "unsupported"], partial
+assert unsupported["state"] == "unsupported" and unsupported["checked_hash_count"] == 0 and unsupported["unsupported_hash_count"] == 1, unsupported
+assert unsupported["hashes"][0]["observed"] is None, unsupported
+assert changed["state"] == "changed" and changed["checked_hash_count"] == 3, changed
+assert all(h["state"] == "changed" for h in changed["hashes"]), changed
+print("[pylock] changed, partial, and unsupported states remain distinct")
+PY
+
+for audit in "$T/malformed-audit.json" "$T/bad-length-audit.json"; do
+  set +e
+  "$ROOT/build/rh_cli" pylock-observe --audit "$audit" --artifact 0 \
+    --file "$ROOT/fixtures/packages/pylock-observation-artifact.whl" \
+    --out "$T/invalid-observation.json" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" -eq 4 ]] || fail "malformed artifact hashes must fail closed (got $rc)"
+done
+set +e
+"$ROOT/build/rh_cli" pylock-observe --audit "$ROOT/fixtures/packages/pylock-observation-audit.json" \
+  --artifact 999 --file "$ROOT/fixtures/packages/pylock-observation-artifact.whl" \
+  --out "$T/missing-observation.json" >/dev/null 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 4 ]] || fail "unknown artifact id must fail closed (got $rc)"
+
 set +e
 "$ROOT/build/rh_cli" pylock --input "$T/pylock.toml" --input "$T/pylock.toml" --out "$T/duplicate-option.json" >/dev/null 2>&1
 rc_duplicate_option=$?
