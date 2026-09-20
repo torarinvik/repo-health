@@ -19,7 +19,7 @@ import json, glob
 keys = sorted(json.load(open(p))['key'] for p in glob.glob('$ROOT/metrics/definitions/*.json'))
 print('\n'.join(keys))")"
 keys_count="$(echo "$keys_json" | wc -l | tr -d ' ')"
-[[ "$keys_count" == "153" ]] || { echo "[m00] FAIL: expected 153 definitions, got $keys_count"; exit 1; }
+[[ "$keys_count" == "154" ]] || { echo "[m00] FAIL: expected 154 definitions, got $keys_count"; exit 1; }
 # The runtime registry mirrors exactly the PUBLISHED definitions: every
 # implemented/prototype (key, version) must be present, and a planned metric
 # must NOT be in the registry, so the system never implies availability.
@@ -39,8 +39,8 @@ for p in sorted(glob.glob(os.path.join(root, "metrics", "definitions", "*.json")
     else:
         assert ('"%s"' % d["key"]) in reg, ("published metric missing from registry", d["key"])
         assert ('"%s"' % d["version"]) in reg, ("version missing from registry", d["version"])
-assert impl == 151, ("implemented definitions", impl)
-print("[m00] registry mirror OK: published are present, planned are absent; 151 implemented")
+assert impl == 152, ("implemented definitions", impl)
+print("[m00] registry mirror OK: published are present, planned are absent; 152 implemented")
 EOF
 # The M09 admission template is enforced mechanically for every definition.
 bash "$ROOT/tools/metric-lint.sh" | tail -n 1
@@ -52,7 +52,7 @@ grep -q "M04 continuity/identity.*in_progress" "$ROOT/STATUS.md" || { echo "[m00
 grep -q "M05 temporal/downstream.*in_progress" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md misstates M05"; exit 1; }
 grep -q "M06 API/policy/corrections.*in_progress" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md misstates M06"; exit 1; }
 grep -q "M07 beta gate.*in_progress" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md misstates M07"; exit 1; }
-grep -q "209 of the 360" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md must scope the 360-metric catalog"; exit 1; }
+grep -q "208 of the 360" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md must scope the 360-metric catalog"; exit 1; }
 # STATUS metric table and JSON definitions must agree on the implemented set.
 python3 - "$ROOT/STATUS.md" "$ROOT/metrics/definitions" <<'EOF'
 import json, glob, re, sys
