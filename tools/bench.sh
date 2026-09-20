@@ -8,7 +8,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-$ROOT/build}"
 mkdir -p "$OUT_DIR"
 
-[[ -x "$ROOT/build/bench_runner" ]] || bash "$ROOT/tools/build.sh" >/dev/null
+[[ -x "$ROOT/build/bench_runner" && -x "$ROOT/build/rh_cli" ]] || bash "$ROOT/tools/build.sh" >/dev/null
 
 python3 - "$ROOT" "$OUT_DIR" <<'PY'
 import hashlib, json, os, shutil, subprocess, sys, tempfile
