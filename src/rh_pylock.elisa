@@ -6,6 +6,7 @@
 
 include "./rh_base.elisa"
 include "./rh_sha256.elisa"
+include "./rh_temporal.elisa"
 
 module Pylock:
     private:
@@ -60,6 +61,8 @@ module Pylock:
             locator_s: mutable i64
             locator_e: mutable i64
             locator_kind: mutable u8
+            upload_time_s: mutable i64
+            upload_time_e: mutable i64
             size_bytes: mutable i64
             first_hash: mutable i64
             hash_count: mutable i64
@@ -79,7 +82,7 @@ module Pylock:
 
         def rh_pylock_artifact_push(artifacts: mutable darray[RhPylockArtifact]&, owner: i64, kind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if artifacts.count.i64() >= RH_PYLOCK_MAX_ARTIFACTS
-            artifacts.push(RhPylockArtifact{owner: owner, kind: kind, name_s: -1, name_e: -1, locator_s: -1, locator_e: -1, locator_kind: 0, size_bytes: -1, first_hash: -1, hash_count: 0})
+            artifacts.push(RhPylockArtifact{owner: owner, kind: kind, name_s: -1, name_e: -1, locator_s: -1, locator_e: -1, locator_kind: 0, upload_time_s: -1, upload_time_e: -1, size_bytes: -1, first_hash: -1, hash_count: 0})
             artifacts.count.i64() - 1
 
         def rh_pylock_artifact_exists(artifacts: darray[RhPylockArtifact]&, owner: i64, kind: u8) -> bool:
@@ -184,6 +187,54 @@ module Pylock:
             ok_out[0] <- 1
             value
 
+        def rh_pylock_date_part(data: darray[u8]&, start: usize, end: usize, value_out: mutable i64&) -> bool can[Abort.Panic]:
+            return false if start >= end or end > data.count
+            for index in start..<end |index, data|:
+                return false if data[index] < 48 or data[index] > 57
+            parsed_ok: mutable i64 = 0
+            parsed: i64 = Base::rh_parse_i64(data, start, end, &parsed_ok)
+            return false if parsed_ok != 1
+            value_out[0] <- parsed
+            true
+
+        # Validate a TOML offset date-time in UTC and retain its original
+        # spelling. Local times and non-zero offsets cannot satisfy PEP 751.
+        def rh_pylock_utc_datetime(data: darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, value_s: mutable i64&, value_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= end or end > data.count or end - start < 20
+            return false if data[start + 4] != 45 or data[start + 7] != 45 or (data[start + 10] != 84 and data[start + 10] != 116 and data[start + 10] != 32) or data[start + 13] != 58 or data[start + 16] != 58
+            year: mutable i64 = 0
+            month: mutable i64 = 0
+            day: mutable i64 = 0
+            hour: mutable i64 = 0
+            minute: mutable i64 = 0
+            second: mutable i64 = 0
+            return false if not rh_pylock_date_part(data, start, start + 4, &year) or not rh_pylock_date_part(data, start + 5, start + 7, &month) or not rh_pylock_date_part(data, start + 8, start + 10, &day)
+            return false if not rh_pylock_date_part(data, start + 11, start + 13, &hour) or not rh_pylock_date_part(data, start + 14, start + 16, &minute) or not rh_pylock_date_part(data, start + 17, start + 19, &second)
+            return false if year < 1 or month < 1 or month > 12 or hour > 23 or minute > 59 or second > 60
+            return false if second == 60 and (hour != 23 or minute != 59)
+            days: i64 = Temporal::rh_days_from_civil(year, month, day)
+            normalized_year: mutable i64 = 0
+            normalized_month: mutable i64 = 0
+            normalized_day: mutable i64 = 0
+            Temporal::rh_civil_from_days(days, &normalized_year, &normalized_month, &normalized_day)
+            return false if normalized_year != year or normalized_month != month or normalized_day != day
+            cursor: mutable usize = start + 19
+            if data[cursor] == 46:
+                cursor <- cursor + 1
+                fraction_start: usize = cursor
+                while cursor < end and data[cursor] >= 48 and data[cursor] <= 57 |cursor, data, end|:
+                    cursor <- cursor + 1
+                return false if cursor == fraction_start
+            if end - cursor == 1:
+                return false if data[cursor] != 90 and data[cursor] != 122
+            elif end - cursor == 6:
+                return false if data[cursor] != 43 or data[cursor + 1] != 48 or data[cursor + 2] != 48 or data[cursor + 3] != 58 or data[cursor + 4] != 48 or data[cursor + 5] != 48
+            else:
+                return false
+            value_s[0] <- rh_pylock_copy(pool, data, start, end)
+            value_e[0] <- value_s[0] + (end - start).i64()
+            true
+
         def rh_pylock_inline_hashes(data: mutable darray[u8]&, pool: mutable darray[u8]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, artifact: i64, start: usize, end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if start >= end or data[start] != 123 or data[end - 1] != 125
             cursor: mutable usize = start + 1
@@ -240,6 +291,8 @@ module Pylock:
                 size_bytes: i64 = rh_pylock_size_integer(data, value_s, value_end, &size_ok)
                 return false if size_ok != 1
                 artifact.size_bytes <- size_bytes
+            elif Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "upload-time"):
+                return false if artifact.upload_time_s >= 0 or not rh_pylock_utc_datetime(data, pool, value_s, value_end, &artifact.upload_time_s, &artifact.upload_time_e)
             elif Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "url"):
                 return false if artifact.locator_kind != 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &artifact.locator_s, &artifact.locator_e)
                 artifact.locator_kind <- 1
@@ -795,6 +848,7 @@ module Pylock:
                 artifact: RhPylockArtifact = artifacts[artifact_id]
                 return -1 if (artifact.name_s < 0 and artifact.name_e >= 0) or (artifact.name_s >= 0 and artifact.name_s == artifact.name_e)
                 return -1 if (artifact.locator_kind == 0 and (artifact.locator_s >= 0 or artifact.locator_e >= 0)) or (artifact.locator_kind != 0 and (artifact.locator_s < 0 or artifact.locator_s == artifact.locator_e))
+                return -1 if (artifact.upload_time_s < 0 and artifact.upload_time_e >= 0) or (artifact.upload_time_s >= 0 and artifact.upload_time_s == artifact.upload_time_e)
                 return -1 if artifact.name_s < 0 and artifact.locator_kind == 0
                 return -1 if artifact.hash_count == 0
             0
@@ -941,6 +995,8 @@ module Pylock:
                     Base::rh_push_text(out, "\"url\"" if artifact.locator_kind == 1 else "\"path\"" if artifact.locator_kind == 2 else "\"name_only\"")
                     Base::rh_push_text(out, ",\"source_sha256\":")
                     rh_pylock_emit_fingerprint(out, pool, artifact.locator_s, artifact.locator_e)
+                    Base::rh_push_text(out, ",\"upload_time\":")
+                    rh_pylock_emit_string(out, pool, artifact.upload_time_s, artifact.upload_time_e)
                     Base::rh_push_text(out, ",\"size_bytes\":")
                     if artifact.size_bytes < 0:
                         Base::rh_push_text(out, "null")

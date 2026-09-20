@@ -31,7 +31,8 @@ on the real execution path.
   wheel, sdist, and archive records retain expected hash values and fingerprint
   URL/path locators with SHA-256 without publishing the locators, including
   table and inline-table input forms. Optional declared artifact sizes are
-  projected as `size_bytes` and checked against supplied local bytes. Optional
+  projected as `size_bytes` and checked against supplied local bytes. Explicit UTC
+  artifact `upload-time` values are retained as source event times. Optional
   package index URLs are retained only as `index_sha256` fingerprints.
   Environment/group selection, complete artifact projection, and unsupported
   source fields remain counted as gaps.

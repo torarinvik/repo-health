@@ -35,6 +35,7 @@ requires-python = '>=3.8'
 [[packages.wheels]]
 name = 'attrs-25.1.0-py3-none-any.whl'
 url = 'https://files.example.invalid/attrs-25.1.0.whl'
+upload-time = 2025-01-02T03:04:05.123456Z
 size = 50
 hashes = {sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', blake2b_256 = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'}
 
@@ -48,6 +49,7 @@ sha256 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 [packages.sdist]
 name = 'attrs-25.1.0.tar.gz'
 url = 'https://files.example.invalid/attrs-25.1.0.tar.gz'
+upload-time = 2024-02-29 10:11:12+00:00
 size = +50
 [packages.sdist.hashes]
 sha256 = 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
@@ -97,7 +99,7 @@ url = 'https://example.invalid/private'
 [[packages]]
 name = 'inline-artifact-consumer'
 wheels = [
-  {name = 'inline.whl', url = 'https://files.example.invalid/inline.whl', size = 0x32, hashes = {sha256 = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'}},
+  {name = 'inline.whl', url = 'https://files.example.invalid/inline.whl', upload-time = 2025-01-02T03:04:05+00:00, size = 0x32, hashes = {sha256 = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'}},
   {name = 'inline-alt.whl', path = 'vendor/inline-alt.whl', hashes = {sha512 = '11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111'}},
 ]
 sdist = {name = 'inline.tar.gz', url = 'https://files.example.invalid/inline.tar.gz', hashes = {sha256 = '2222222222222222222222222222222222222222222222222222222222222222'}}
@@ -135,10 +137,13 @@ assert pkgs[0]["artifacts"][0]["hashes"] == [
     {"algorithm": "blake2b_256", "value": "c" * 64},
 ], pkgs[0]["artifacts"][0]
 assert pkgs[0]["artifacts"][0]["size_bytes"] == 50, pkgs[0]["artifacts"][0]
+assert pkgs[0]["artifacts"][0]["upload_time"] == "2025-01-02T03:04:05.123456Z", pkgs[0]["artifacts"][0]
 assert pkgs[0]["artifacts"][1]["hashes"] == [{"algorithm": "sha256", "value": "b" * 64}], pkgs[0]["artifacts"][1]
 assert pkgs[0]["artifacts"][1]["size_bytes"] == 50, pkgs[0]["artifacts"][1]
+assert pkgs[0]["artifacts"][1]["upload_time"] is None, pkgs[0]["artifacts"][1]
 assert pkgs[0]["artifacts"][2]["hashes"] == [{"algorithm": "sha256", "value": "d" * 64}], pkgs[0]["artifacts"][2]
 assert pkgs[0]["artifacts"][2]["size_bytes"] == 50, pkgs[0]["artifacts"][2]
+assert pkgs[0]["artifacts"][2]["upload_time"] == "2024-02-29 10:11:12+00:00", pkgs[0]["artifacts"][2]
 assert pkgs[0]["artifacts"][0]["source_kind"] == "url", pkgs[0]["artifacts"][0]
 assert pkgs[0]["artifacts"][0]["source_sha256"] == hashlib.sha256(b"https://files.example.invalid/attrs-25.1.0.whl").hexdigest(), pkgs[0]["artifacts"][0]
 assert pkgs[0]["artifacts"][1]["source_kind"] == "path", pkgs[0]["artifacts"][1]
@@ -147,6 +152,7 @@ assert pkgs[4]["artifacts"][0]["size_bytes"] == 50, pkgs[4]
 assert [a["kind"] for a in pkgs[7]["artifacts"]] == ["wheel", "wheel", "sdist"], pkgs[7]
 assert pkgs[7]["artifacts"][0]["hashes"] == [{"algorithm": "sha256", "value": "f" * 64}], pkgs[7]["artifacts"][0]
 assert pkgs[7]["artifacts"][0]["size_bytes"] == 50, pkgs[7]["artifacts"][0]
+assert pkgs[7]["artifacts"][0]["upload_time"] == "2025-01-02T03:04:05+00:00", pkgs[7]["artifacts"][0]
 assert pkgs[7]["artifacts"][1]["hashes"] == [{"algorithm": "sha512", "value": "1" * 128}], pkgs[7]["artifacts"][1]
 assert pkgs[7]["artifacts"][0]["source_sha256"] == hashlib.sha256(b"https://files.example.invalid/inline.whl").hexdigest(), pkgs[7]["artifacts"][0]
 serialized = json.dumps(report)
@@ -259,6 +265,30 @@ set +e
 rc_duplicate_context=$?
 set -e
 [[ "$rc_duplicate_context" -eq 4 ]] || fail "duplicate context arrays must fail closed (got $rc_duplicate_context)"
+
+cat > "$T/non-utc-upload-time.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[packages.sdist]
+name = 'x.tar.gz'
+url = 'https://example.invalid/x.tar.gz'
+upload-time = 2025-01-02T03:04:05+01:00
+hashes = {sha256 = 'aa'}
+EOF
+set +e
+"$ROOT/build/rh_cli" pylock --input "$T/non-utc-upload-time.toml" --out "$T/non-utc-upload-time.json" >/dev/null 2>&1
+rc_non_utc_upload=$?
+set -e
+[[ "$rc_non_utc_upload" -eq 4 ]] || fail "non-UTC artifact upload time must fail closed (got $rc_non_utc_upload)"
+
+sed 's/2025-01-02T03:04:05+01:00/2025-02-30T03:04:05Z/' "$T/non-utc-upload-time.toml" > "$T/invalid-upload-date.toml"
+set +e
+"$ROOT/build/rh_cli" pylock --input "$T/invalid-upload-date.toml" --out "$T/invalid-upload-date.json" >/dev/null 2>&1
+rc_invalid_upload_date=$?
+set -e
+[[ "$rc_invalid_upload_date" -eq 4 ]] || fail "invalid artifact upload date must fail closed (got $rc_invalid_upload_date)"
 
 echo "[pylock] local artifact hashes bind to audit and file bytes"
 "$ROOT/build/rh_cli" pylock-observe \
