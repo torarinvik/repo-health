@@ -9,6 +9,19 @@ evidence references, indexes, and fenced job/cursor methods. The migration is
 not applied by the local CLI, so the SQL file is a target contract and not
 evidence of a deployed database.
 
+The first application method is in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa).
+It dynamically loads `libpq` and commits one complete or successful-empty
+collection page through `rh_commit_collection_page`. It binds all nine values
+through `PQexecParams`, applies a five-second connection timeout, and returns
+separate committed, duplicate, and failure outcomes. Set `RH_LIBPQ_PATH` when
+the library is outside the platform loader path; otherwise the adapter checks
+the standard Homebrew paths on macOS and `libpq.so.5` on Linux. Supply the
+connection string through the calling Elisa program, never through a shell
+command. Remote connection strings should use `sslmode=verify-full` and a
+trusted root certificate. The mock ABI gate is `tests/test_pg_adapter.sh`; set
+`RH_PG_ADAPTER=1` and optionally `RH_LIBPQ_PATH` to run the same operation
+against an ephemeral PostgreSQL instance with `tests/test_pg_adapter_live.sh`.
+
 ## Versioned things that can change
 
 | Artifact | Version marker | Where |
@@ -61,9 +74,10 @@ evidence of a deployed database.
 
 - There is no automatic migration runner; migrations are operator-led using
   the runbooks.
-- The active CLI has no database transaction layer. The migration contains
-  the planned PostgreSQL lease and cursor methods, while concurrency remains
-  handled by the filesystem fencing lease until a database adapter is wired.
+- The active CLI has no database transaction layer yet. Only collection-page
+  commit has a native application method; canonical event/evidence persistence,
+  PostgreSQL job methods, configuration, and `rh_cli ingest` wiring remain open.
+  Filesystem fencing continues to govern the active runtime.
 - No migration has been performed across a format change in this repository
   yet; the rules above are the contract, and the first real migration must
   add a rehearsal to `tests/`.

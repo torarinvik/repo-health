@@ -1,0 +1,162 @@
+# rh_postgres.elisa — bounded PostgreSQL application adapter (M02-01).
+
+include "./rh_base.elisa"
+
+module Postgres:
+    private:
+        const RH_PG_TUPLES_OK: i32 = 2
+        const RH_PG_RTLD_NOW: i32 = 2
+
+        struct RhPgApi:
+            library: void&?
+            connectdb_params: uintptr
+            status: uintptr
+            exec_params: uintptr
+            result_status: uintptr
+            tuples: uintptr
+            fields: uintptr
+            is_null: uintptr
+            value: uintptr
+            clear: uintptr
+            finish: uintptr
+
+        @link_name("dlopen")
+        extern rh_pg_dlopen(path: cstr, flags: i32) -> void&?
+
+        @link_name("dlsym")
+        extern rh_pg_dlsym(library: void&, name: cstr) -> void&?
+
+        @link_name("dlclose")
+        extern rh_pg_dlclose(library: void&) -> i32
+
+        def rh_pg_empty_api() -> RhPgApi:
+            RhPgApi{library: null, connectdb_params: 0, status: 0, exec_params: 0, result_status: 0, tuples: 0, fields: 0, is_null: 0, value: 0, clear: 0, finish: 0}
+
+        def rh_pg_load_symbol(library: void&, name: cstr) -> uintptr can[Unsafe.PointerCast]:
+            symbol: void&? = rh_pg_dlsym(library, name)
+            return 0 if symbol == null
+            symbol.cast[uintptr] can Unsafe.PointerCast
+
+        static if ELISA_TARGET_OS_MACOS:
+            def rh_pg_default_library() -> void&? can[Blocking.IO]:
+                first: void&? = rh_pg_dlopen("/opt/homebrew/opt/libpq/lib/libpq.5.dylib", RH_PG_RTLD_NOW)
+                return first if first != null
+                second: void&? = rh_pg_dlopen("/usr/local/opt/libpq/lib/libpq.5.dylib", RH_PG_RTLD_NOW)
+                return second if second != null
+                rh_pg_dlopen("libpq.5.dylib", RH_PG_RTLD_NOW)
+
+        static elif ELISA_TARGET_OS_LINUX:
+            def rh_pg_default_library() -> void&? can[Blocking.IO]:
+                rh_pg_dlopen("libpq.so.5", RH_PG_RTLD_NOW)
+
+        static else:
+            def rh_pg_default_library() -> void&?:
+                null
+
+        def rh_pg_load_api() -> RhPgApi can[Blocking.IO, Unsafe.PointerCast]:
+            library: void&? =
+                configured: u8&? = getenv("RH_LIBPQ_PATH")
+                if configured != null:
+                    configured_path: cstr = configured.cast[cstr] can Unsafe.PointerCast
+                    rh_pg_dlopen(configured_path, RH_PG_RTLD_NOW)
+                else:
+                    Postgres::rh_pg_default_library()
+            return rh_pg_empty_api() if library == null
+            handle: void& = library
+            api: RhPgApi = RhPgApi{
+                library: library,
+                connectdb_params: rh_pg_load_symbol(handle, "PQconnectdbParams"),
+                status: rh_pg_load_symbol(handle, "PQstatus"),
+                exec_params: rh_pg_load_symbol(handle, "PQexecParams"),
+                result_status: rh_pg_load_symbol(handle, "PQresultStatus"),
+                tuples: rh_pg_load_symbol(handle, "PQntuples"),
+                fields: rh_pg_load_symbol(handle, "PQnfields"),
+                is_null: rh_pg_load_symbol(handle, "PQgetisnull"),
+                value: rh_pg_load_symbol(handle, "PQgetvalue"),
+                clear: rh_pg_load_symbol(handle, "PQclear"),
+                finish: rh_pg_load_symbol(handle, "PQfinish")
+            }
+            ready: bool = api.connectdb_params != 0 and api.status != 0 and api.exec_params != 0 and api.result_status != 0 and api.tuples != 0 and api.fields != 0 and api.is_null != 0 and api.value != 0 and api.clear != 0 and api.finish != 0
+            if not ready:
+                _ = rh_pg_dlclose(handle)
+                return rh_pg_empty_api()
+            api
+
+        def rh_pg_decimal(value: i64) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
+            bytes: mutable darray[u8] = []
+            Base::rh_push_decimal_i64(bytes, value)
+            bytes.push(0)
+            bytes
+
+    public:
+        # Commit one complete collection page through the migration's fenced,
+        # idempotent transaction. Parameters use libpq's extended query protocol;
+        # none are interpolated into SQL or passed through a shell. Empty optional
+        # JSON/evidence strings map to SQL NULL. Returns 1 when committed, 0 when
+        # this page was already committed, or -1 on connection/query failure.
+        def rh_pg_commit_collection_page(conninfo: cstr, run_id: cstr, page_number: i64, scope_hash: cstr, cursor_before: cstr, cursor_after: cstr, completeness: cstr, record_count: i64, evidence_id: cstr, now: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if page_number < 0 or record_count < 0
+            return -1 if not Base::rh_streq(completeness, "complete") and not Base::rh_streq(completeness, "empty")
+            api: RhPgApi = Postgres::rh_pg_load_api()
+            return -1 if api.library == null
+            handle: void& = api.library
+            connectdb_params: fn(void&, void&, i32) -> void&? = api.connectdb_params.cast[fn(void&, void&, i32) -> void&?] can Unsafe.PointerCast
+            status: fn(void&) -> i32 = api.status.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            exec_params: fn(void&, cstr, i32, void&?, void&, void&?, void&?, i32) -> void&? = api.exec_params.cast[fn(void&, cstr, i32, void&?, void&, void&?, void&?, i32) -> void&?] can Unsafe.PointerCast
+            result_status: fn(void&) -> i32 = api.result_status.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            tuples: fn(void&) -> i32 = api.tuples.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            fields: fn(void&) -> i32 = api.fields.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            is_null: fn(void&, i32, i32) -> i32 = api.is_null.cast[fn(void&, i32, i32) -> i32] can Unsafe.PointerCast
+            value: fn(void&, i32, i32) -> cstr = api.value.cast[fn(void&, i32, i32) -> cstr] can Unsafe.PointerCast
+            clear: fn(void&) -> void = api.clear.cast[fn(void&) -> void] can Unsafe.PointerCast
+            finish: fn(void&) -> void = api.finish.cast[fn(void&) -> void] can Unsafe.PointerCast
+            keywords: mutable darray[cstr?] = []
+            values: mutable darray[cstr?] = []
+            keywords.push("dbname")
+            values.push(conninfo)
+            keywords.push("connect_timeout")
+            values.push("5")
+            keywords.push(null)
+            values.push(null)
+            keyword_ptr: void& = (&keywords[0]).cast[void&] can Unsafe.PointerCast
+            value_ptr: void& = (&values[0]).cast[void&] can Unsafe.PointerCast
+            connection: void&? = connectdb_params(keyword_ptr, value_ptr, 1)
+            if connection == null:
+                _ = rh_pg_dlclose(handle)
+                return -1
+            conn: void& = connection
+            outcome: i64 =
+                if status(conn) != 0:
+                    -1
+                else:
+                    page_text: mutable darray[u8] = Postgres::rh_pg_decimal(page_number)
+                    count_text: mutable darray[u8] = Postgres::rh_pg_decimal(record_count)
+                    page_ptr: cstr = (&page_text[0]).cast[cstr] can Unsafe.PointerCast
+                    count_ptr: cstr = (&count_text[0]).cast[cstr] can Unsafe.PointerCast
+                    params: mutable darray[cstr] = []
+                    params.push(run_id)
+                    params.push(page_ptr)
+                    params.push(scope_hash)
+                    params.push(cursor_before)
+                    params.push(cursor_after)
+                    params.push(completeness)
+                    params.push(count_ptr)
+                    params.push(evidence_id)
+                    params.push(now)
+                    param_values: void& = (&params[0]).cast[void&] can Unsafe.PointerCast
+                    query_result: void&? = exec_params(conn, "SELECT public.rh_commit_collection_page($1::uuid, $2::integer, $3::text, NULLIF($4, '')::jsonb, $5::jsonb, $6::text, $7::integer, NULLIF($8, '')::uuid, $9::timestamptz)", 9, null, param_values, null, null, 0)
+                    if query_result == null:
+                        -1
+                    else:
+                        result: void& = query_result
+                        parsed: i64 =
+                            if result_status(result) != RH_PG_TUPLES_OK or tuples(result) != 1 or fields(result) != 1 or is_null(result, 0, 0) != 0:
+                                -1
+                            else:
+                                cell: cstr = value(result, 0, 0)
+                                1 if Base::rh_streq(cell, "t") else 0 if Base::rh_streq(cell, "f") else -1
+                        clear(result)
+                        parsed
+            finish(conn)
+            _ = rh_pg_dlclose(handle)
+            outcome

@@ -70,6 +70,8 @@ compile "$ROOT/src/test_job.elisa" test_job
 compile "$ROOT/src/test_reconcile.elisa" test_reconcile
 compile "$ROOT/src/test_worker.elisa" test_worker
 compile "$ROOT/src/test_http.elisa" test_http
+compile "$ROOT/src/test_postgres.elisa" test_postgres
+compile "$ROOT/src/test_postgres_live.elisa" test_postgres_live
 # M01 entry point lands here once rh_cli.elisa exists (backlog item 9).
 if [[ -f "$ROOT/src/rh_cli.elisa" ]]; then
   compile "$ROOT/src/rh_cli.elisa" rh_cli
