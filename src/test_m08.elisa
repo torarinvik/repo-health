@@ -451,6 +451,47 @@ def check_svn_bounds(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Pan
     t8check(Subversion::rh_svn_parse(notxml, 0).ok == 0, "svn-not-xml-fails", fails)
     return
 
+def check_svn_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    log: mutable Subversion::RhSvnLog = Subversion::rh_svn_parse(raw, 0)
+    spans_valid: bool =
+        while i < log.entries.count |valid: bool = true, i: usize = 0, log| -> valid:
+            entry: Subversion::RhSvnEntry = log.entries[i]
+            valid <- false if entry.author_s >= 0 and (entry.author_e < entry.author_s or entry.author_e > log.pool.count.i64())
+            valid <- false if entry.msg_s >= 0 and (entry.msg_e < entry.msg_s or entry.msg_e > log.pool.count.i64())
+            valid <- false if entry.date_s >= 0 and (entry.date_e < entry.date_s or entry.date_e > log.pool.count.i64())
+            i <- i + 1
+    bounded_result: bool = (log.ok == 0 or log.ok == 1) and log.entries.count <= raw.count and log.pool.count.i64() <= raw.count.i64() * 8 + 512 and log.rejected >= 0 and log.rejected <= raw.count.i64()
+    t8check(spans_valid and bounded_result, "svn-fuzz-bounds-and-spans", fails)
+    return
+
+def check_svn_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    corpus: darray[u8] = svn_fixture()
+    while trial < 96 |trial: i64 = 0, rng: i64 = 173205, corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < corpus.count |copied: usize = 0, corpus, fuzzed|:
+            fuzzed.push(corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_svn_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+
+    while trial < 96 |trial: i64 = 0, corpus, fails|:
+        prefix: usize = (trial * corpus.count.i64() / 96).usize()
+        truncated: mutable darray[u8] = []
+        while copied < prefix |copied: usize = 0, corpus, truncated|:
+            truncated.push(corpus[copied])
+            copied <- copied + 1
+        check_svn_fuzz_case(truncated, fails)
+        trial <- trial + 1
+    return
+
 def check_svn_native_form(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     t8check(Subversion::rh_svn_action_label(Subversion::RH_SVN_ACT_ADD)[0] == 65, "svn-add-label", fails)
     t8check(Subversion::rh_svn_action_of(68) == Subversion::RH_SVN_ACT_DELETE, "svn-action-D", fails)
@@ -557,6 +598,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_svn_parse(&fails)
     check_svn_reject(&fails)
     check_svn_bounds(&fails)
+    check_svn_fuzz(&fails)
     check_svn_native_form(&fails)
     check_fossil_parse(&fails)
     check_fossil_native_form(&fails)
