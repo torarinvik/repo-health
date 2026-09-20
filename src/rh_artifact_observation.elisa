@@ -9,8 +9,9 @@ include "./rh_sha512.elisa"
 module ArtifactObservation:
     private:
         const RH_ARTIFACT_OBSERVATION_TARGET_OK: i64 = 0
-        const RH_ARTIFACT_OBSERVATION_SHA256: i64 = 0
-        const RH_ARTIFACT_OBSERVATION_SHA512: i64 = 1
+        const RH_ARTIFACT_OBSERVATION_CARGO_SHA256: i64 = 0
+        const RH_ARTIFACT_OBSERVATION_NPM_SHA512: i64 = 1
+        const RH_ARTIFACT_OBSERVATION_NPM_SHA256: i64 = 2
         const RH_ARTIFACT_OBSERVATION_MAX_GRAPH_BYTES: i64 = 8388608
 
         def rh_artifact_observation_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -58,18 +59,31 @@ module ArtifactObservation:
             return 63 if value == 47
             -1
 
-        def rh_artifact_observation_sri_sha512_prefix(texts: darray[u8]&, start: i64, end: i64) -> bool:
-            return false if end - start < 7
-            while index < 7 |index: usize = 0, texts, start|:
+        def rh_artifact_observation_sri_algorithm_prefix(texts: darray[u8]&, start: i64, end: i64, algorithm: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            width: usize = strlen(algorithm)
+            return false if end - start < width.i64()
+            while index < width |index: usize = 0, texts, start, algorithm, width|:
                 actual: mutable u8 = texts[start.usize() + index]
-                expected: u8 = "sha512-"[index]
+                expected: u8 = algorithm[index]
                 actual <- actual + 32 if actual >= 65 and actual <= 90
                 return false if actual != expected
                 index <- index + 1
             true
 
+        def rh_artifact_observation_sri_has_algorithm(texts: darray[u8]&, start: i64, end: i64, algorithm: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            found: mutable bool = false
+            while token_start < end |token_start: i64 = start, token_end: i64 = start, texts, end, algorithm, found|:
+                while token_start < end and rh_artifact_observation_sri_space(texts[token_start.usize()]) |token_start, texts, end|:
+                    token_start <- token_start + 1
+                token_end <- token_start
+                while token_end < end and not rh_artifact_observation_sri_space(texts[token_end.usize()]) |token_end, texts, end|:
+                    token_end <- token_end + 1
+                found <- true if rh_artifact_observation_sri_algorithm_prefix(texts, token_start, token_end, algorithm)
+                token_start <- token_end
+            found
+
         def rh_artifact_observation_sri_sha512_token(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            return false if end - start != 95 or not rh_artifact_observation_sri_sha512_prefix(texts, start, end)
+            return false if end - start != 95 or not rh_artifact_observation_sri_algorithm_prefix(texts, start, end, "sha512-")
             while i < end - 2 |i: i64 = start + 7, texts, end|:
                 b: u8 = texts[i.usize()]
                 return false if rh_artifact_observation_base64_value(b) < 0
@@ -85,21 +99,45 @@ module ArtifactObservation:
                 token_end <- token_start
                 while token_end < end and not rh_artifact_observation_sri_space(texts[token_end.usize()]) |token_end, texts, end|:
                     token_end <- token_end + 1
-                if rh_artifact_observation_sri_sha512_prefix(texts, token_start, token_end):
+                if rh_artifact_observation_sri_algorithm_prefix(texts, token_start, token_end, "sha512-"):
                     return false if not rh_artifact_observation_sri_sha512_token(texts, token_start, token_end)
                     found <- true
                 token_start <- token_end
             found
 
-        def rh_artifact_observation_sri_sha512_matches(texts: darray[u8]&, start: i64, end: i64, observed: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
-            while token_start < end |token_start: i64 = start, token_end: i64 = start, texts, end, observed|:
+        def rh_artifact_observation_sri_sha256_token(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != 51 or not rh_artifact_observation_sri_algorithm_prefix(texts, start, end, "sha256-")
+            while i < end - 1 |i: i64 = start + 7, texts, end|:
+                b: u8 = texts[i.usize()]
+                return false if rh_artifact_observation_base64_value(b) < 0
+                i <- i + 1
+            return false if texts[(end - 1).usize()] != 61
+            rh_artifact_observation_base64_value(texts[(end - 2).usize()]) % 4 == 0
+
+        def rh_artifact_observation_sri_sha256_valid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            found: mutable bool = false
+            while token_start < end |token_start: i64 = start, token_end: i64 = start, texts, end, found|:
                 while token_start < end and rh_artifact_observation_sri_space(texts[token_start.usize()]) |token_start, texts, end|:
                     token_start <- token_start + 1
                 token_end <- token_start
                 while token_end < end and not rh_artifact_observation_sri_space(texts[token_end.usize()]) |token_end, texts, end|:
                     token_end <- token_end + 1
-                if rh_artifact_observation_sri_sha512_prefix(texts, token_start, token_end):
-                    if Base::rh_bytes_equal_span(texts, token_start + 7, token_end, observed, 7, observed.count.i64()):
+                if rh_artifact_observation_sri_algorithm_prefix(texts, token_start, token_end, "sha256-"):
+                    return false if not rh_artifact_observation_sri_sha256_token(texts, token_start, token_end)
+                    found <- true
+                token_start <- token_end
+            found
+
+        def rh_artifact_observation_sri_matches(texts: darray[u8]&, start: i64, end: i64, observed: darray[u8]&, algorithm: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            width: usize = strlen(algorithm)
+            while token_start < end |token_start: i64 = start, token_end: i64 = start, texts, end, observed, algorithm, width|:
+                while token_start < end and rh_artifact_observation_sri_space(texts[token_start.usize()]) |token_start, texts, end|:
+                    token_start <- token_start + 1
+                token_end <- token_start
+                while token_end < end and not rh_artifact_observation_sri_space(texts[token_end.usize()]) |token_end, texts, end|:
+                    token_end <- token_end + 1
+                if rh_artifact_observation_sri_algorithm_prefix(texts, token_start, token_end, algorithm):
+                    if Base::rh_bytes_equal_span(texts, token_start + width.i64(), token_end, observed, width.i64(), observed.count.i64()):
                         return true
                 token_start <- token_end
             false
@@ -167,11 +205,19 @@ module ArtifactObservation:
             return -1 if not Json::rh_json_str_span(nodes, kind, &kind_s, &kind_e) or not Base::rh_bytes_equal_literal(texts_out, kind_s, kind_e, "archive")
             return -1 if not Json::rh_json_str_span(nodes, expected, expected_start_out, expected_end_out)
             if cargo_graph:
-                digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_SHA256
+                digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_CARGO_SHA256
                 return -1 if not rh_artifact_observation_hex(texts_out, expected_start_out[0], expected_end_out[0])
             else:
-                digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_SHA512
-                return -1 if not rh_artifact_observation_sri_sha512_valid(texts_out, expected_start_out[0], expected_end_out[0])
+                has_sha512: bool = rh_artifact_observation_sri_has_algorithm(texts_out, expected_start_out[0], expected_end_out[0], "sha512-")
+                has_sha384: bool = rh_artifact_observation_sri_has_algorithm(texts_out, expected_start_out[0], expected_end_out[0], "sha384-")
+                if has_sha512:
+                    digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_NPM_SHA512
+                    return -1 if not rh_artifact_observation_sri_sha512_valid(texts_out, expected_start_out[0], expected_end_out[0])
+                elif has_sha384:
+                    return -1
+                else:
+                    digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_NPM_SHA256
+                    return -1 if not rh_artifact_observation_sri_sha256_valid(texts_out, expected_start_out[0], expected_end_out[0])
             RH_ARTIFACT_OBSERVATION_TARGET_OK
 
     public:
@@ -192,19 +238,24 @@ module ArtifactObservation:
             return -1 if ArtifactObservation::rh_artifact_observation_target(graph, artifact_id, &package_node, &expected_s, &expected_e, &digest_algorithm, graph_texts) != RH_ARTIFACT_OBSERVATION_TARGET_OK
             observed: mutable darray[u8] =
                 observed: mutable darray[u8] = []
-                if digest_algorithm == RH_ARTIFACT_OBSERVATION_SHA256:
+                if digest_algorithm == RH_ARTIFACT_OBSERVATION_CARGO_SHA256:
                     Sha256::rh_sha256(archive, observed)
-                else:
+                elif digest_algorithm == RH_ARTIFACT_OBSERVATION_NPM_SHA512:
                     Base::rh_push_text(observed, "sha512-")
                     Sha512::rh_sha512_base64(archive, observed)
+                else:
+                    Base::rh_push_text(observed, "sha256-")
+                    Sha256::rh_sha256_base64(archive, observed)
                 observed
             graph_digest: mutable darray[u8] = []
             Sha256::rh_sha256(graph, graph_digest)
             matches: bool =
-                if digest_algorithm == RH_ARTIFACT_OBSERVATION_SHA256:
+                if digest_algorithm == RH_ARTIFACT_OBSERVATION_CARGO_SHA256:
                     ArtifactObservation::rh_artifact_observation_hex_equal(graph_texts, expected_s, observed)
+                elif digest_algorithm == RH_ARTIFACT_OBSERVATION_NPM_SHA512:
+                    ArtifactObservation::rh_artifact_observation_sri_matches(graph_texts, expected_s, expected_e, observed, "sha512-")
                 else:
-                    ArtifactObservation::rh_artifact_observation_sri_sha512_matches(graph_texts, expected_s, expected_e, observed)
+                    ArtifactObservation::rh_artifact_observation_sri_matches(graph_texts, expected_s, expected_e, observed, "sha256-")
             Base::rh_push_text(out, "{\"schema\":\"rh-artifact-observation-result/1\",\"graph_sha256\":\"")
             out.extend(bytes_view(graph_digest))
             Base::rh_push_text(out, "\",\"artifact_id\":")
@@ -218,10 +269,12 @@ module ArtifactObservation:
             Base::rh_push_text(out, "\",\"identity_state\":\"")
             Base::rh_push_text(out, "match") if matches
             Base::rh_push_text(out, "changed") if not matches
-            if digest_algorithm == RH_ARTIFACT_OBSERVATION_SHA256:
+            if digest_algorithm == RH_ARTIFACT_OBSERVATION_CARGO_SHA256:
                 Base::rh_push_text(out, "\",\"digest_algorithm\":\"sha256\",\"verification_basis\":\"raw_cargo_archive_bytes\",\"archive_size_bytes\":")
-            else:
+            elif digest_algorithm == RH_ARTIFACT_OBSERVATION_NPM_SHA512:
                 Base::rh_push_text(out, "\",\"digest_algorithm\":\"sha512\",\"verification_basis\":\"raw_npm_tarball_bytes\",\"archive_size_bytes\":")
+            else:
+                Base::rh_push_text(out, "\",\"digest_algorithm\":\"sha256\",\"verification_basis\":\"raw_npm_tarball_bytes\",\"archive_size_bytes\":")
             Base::rh_push_decimal_i64(out, archive.count.i64())
             Base::rh_push_text(out, "}")
             0

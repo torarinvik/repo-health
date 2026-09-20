@@ -1,4 +1,5 @@
 include "./rh_base.elisa"
+include "./rh_base64.elisa"
 
 module Sha256:
     private:
@@ -160,9 +161,8 @@ module Sha256:
             out.push(((v >> 8) & 255).u8())
             out.push((v & 255).u8())
 
-        # SHA-256 of data; 64 lowercase hex characters appended to out_hex.
-    public:
-        def rh_sha256(data: darray[u8]&, out_hex: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+        # SHA-256 of data; 32 digest bytes appended to out_digest.
+        def rh_sha256_digest(data: darray[u8]&, out_digest: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             # padded copy: data || 0x80 || 0x00.. || 64-bit bit length
             buf: mutable darray[u8] =
                 buf: mutable darray[u8] = []
@@ -183,37 +183,43 @@ module Sha256:
             while off < buf.count |off: usize = 0, buf, h|:
                 rh_sha256_block(buf, off, h)
                 off <- off + 64
-            while z < 8 |z: i64 = 0, h, out_hex|:
-                v: u32 = h[z.usize()]
-                rh_push_hex_u32(out_hex, v)
+            while z < 8 |z: i64 = 0, h, out_digest|:
+                rh_push_be32(out_digest, h[z.usize()])
                 z <- z + 1
             return
 
-        # (private to this file)
-    private:
-        def rh_push_hex_u32(out: mutable darray[u8]&, v: u32) -> void:
-            while nibbles >= 0 |nibbles: i64 = 7, out, v|:
-                n: u32 =
-                    sh: u32 = (nibbles * 4).u32()
-                    (v >> sh) & 15
-                if n < 10:
-                    out.push((48 + n).u8())
-                else:
-                    out.push((87 + n).u8())
-                nibbles <- nibbles - 1
+        def rh_push_hex_bytes(out_hex: mutable darray[u8]&, digest: darray[u8]&) -> void:
+            while index < digest.count |index: usize = 0, digest, out_hex|:
+                byte: u8 = digest[index]
+                high: u8 = byte >> 4
+                low: u8 = byte & 15
+                out_hex.push((48 + high).u8()) if high < 10
+                out_hex.push((87 + high).u8()) if high >= 10
+                out_hex.push((48 + low).u8()) if low < 10
+                out_hex.push((87 + low).u8()) if low >= 10
+                index <- index + 1
+
+    public:
+        # SHA-256 of data; 64 lowercase hex characters appended to out_hex.
+        def rh_sha256(data: darray[u8]&, out_hex: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            digest: mutable darray[u8] = []
+            Sha256::rh_sha256_digest(data, digest)
+            Sha256::rh_push_hex_bytes(out_hex, digest)
+
+        # SHA-256 of data; canonical SRI Base64 appended to out_base64.
+        def rh_sha256_base64(data: darray[u8]&, out_base64: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            digest: mutable darray[u8] = []
+            Sha256::rh_sha256_digest(data, digest)
+            Base64::rh_base64(digest, out_base64)
 
         # HMAC-SHA256 (RFC 2104). key and msg are byte strings; out_hex gets 64 hex.
-    public:
         def rh_hmac_sha256(key: darray[u8]&, msg: darray[u8]&, out_hex: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             blk: i64 = 64
             kpad: mutable darray[u8] = []
             if key.count.i64() > blk:
-                kh: mutable darray[u8] = []
-                rh_sha256(key, kh)
-                # hex key must be reduced to its 32 raw bytes: decode
-                raw: mutable darray[u8] = []
-                rh_hex_decode(kh, raw)
-                kpad.extend(bytes_view(raw))
+                key_digest: mutable darray[u8] = []
+                Sha256::rh_sha256_digest(key, key_digest)
+                kpad.extend(bytes_view(key_digest))
             else:
                 kpad.extend(bytes_view(key))
             while kpad.count.i64() < blk |kpad|:
@@ -225,37 +231,16 @@ module Sha256:
                 o <- o + 1
             inner.extend(bytes_view(msg))
             inner_hash: mutable darray[u8] = []
-            rh_sha256(inner, inner_hash)
-            ih: mutable darray[u8] = []
-            rh_hex_decode(inner_hash, ih)
+            Sha256::rh_sha256_digest(inner, inner_hash)
             outer: mutable darray[u8] = []
             while p < blk |p: usize = 0, kpad, outer|:
                 v2: u8 = kpad[p]
                 outer.push(v2 ^ 92)
                 p <- p + 1
-            outer.extend(bytes_view(ih))
-            rh_sha256(outer, out_hex)
-            return
-
-        # Decode a lowercase-hex string to bytes, appended to out.
-        # (private to this file)
-    private:
-        def rh_hex_decode(hex: darray[u8]&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-            while i + 1 < hex.count |i: usize = 0, hex, out|:
-                hi: u8 = hex[i]
-                v: u8 =
-                    lo: u8 = hex[i + 1]
-                    (rh_hex_nibble(hi) << 4) | rh_hex_nibble(lo)
-                out.push(v)
-                i <- i + 2
-            return
-
-        # (private to this file)
-        def rh_hex_nibble(c: u8) -> u8:
-            return c - 48 if c >= 48 and c <= 57
-            return c - 87 if c >= 97 and c <= 102
-            return c - 55 if c >= 65 and c <= 70
-            0
+            outer.extend(bytes_view(inner_hash))
+            digest: mutable darray[u8] = []
+            Sha256::rh_sha256_digest(outer, digest)
+            Sha256::rh_push_hex_bytes(out_hex, digest)
 
         # Constant-time-ish comparison of two hex strings of equal length. Length
         # mismatch is false. Not a timing-attack guarantee in a scripting runtime,

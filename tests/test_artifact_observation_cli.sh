@@ -49,7 +49,7 @@ assert result["observed_digest"] == hashlib.sha256(archive).hexdigest(), result
 assert result["observed_digest"] != result["expected_digest"], result
 PY
 
-echo "[artifact-observe] npm multi-token SRI selects SHA-512 across blocks"
+echo "[artifact-observe] npm multi-token SRI selects SHA-512; SHA-256-only SRI verifies"
 python3 - "$T" <<'PY'
 import base64, hashlib, json, pathlib, sys
 t = pathlib.Path(sys.argv[1])
@@ -65,6 +65,7 @@ graph = {
         "kind": "archive",
         "expected_digest": " ".join([
             "sha256-" + base64.b64encode(hashlib.sha256(archive).digest()).decode(),
+            "sha384-" + base64.b64encode(hashlib.sha384(archive).digest()).decode(),
             "sha512-" + base64.b64encode(bytes([0xaa]) * 64).decode(),
             "SHA512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(),
         ]),
@@ -89,6 +90,7 @@ result = json.load(open(sys.argv[1]))
 archive = pathlib.Path(sys.argv[2]).read_bytes()
 integrity = " ".join([
     "sha256-" + base64.b64encode(hashlib.sha256(archive).digest()).decode(),
+    "sha384-" + base64.b64encode(hashlib.sha384(archive).digest()).decode(),
     "sha512-" + base64.b64encode(bytes([0xaa]) * 64).decode(),
     "SHA512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(),
 ])
@@ -97,6 +99,30 @@ assert result["expected_digest"] == integrity, result
 assert result["observed_digest"] == sha512_integrity, result
 assert result["identity_state"] == "match", result
 assert result["digest_algorithm"] == "sha512", result
+assert result["verification_basis"] == "raw_npm_tarball_bytes", result
+PY
+python3 - "$T/npm-graph.json" "$T/npm-sha256-graph.json" "$T/npm.tarball" <<'PY'
+import base64, hashlib, json, pathlib, sys
+graph = json.load(open(sys.argv[1]))
+archive = pathlib.Path(sys.argv[3]).read_bytes()
+graph["artifacts"][0]["expected_digest"] = "sha256-" + base64.b64encode(hashlib.sha256(archive).digest()).decode()
+with open(sys.argv[2], "w") as out:
+    json.dump(graph, out, separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" artifact-observe \
+  --graph "$T/npm-sha256-graph.json" \
+  --artifact 0 \
+  --file "$T/npm.tarball" \
+  --out "$T/npm-sha256-observation.json" >/dev/null
+python3 - "$T/npm-sha256-observation.json" "$T/npm.tarball" <<'PY'
+import base64, hashlib, json, pathlib, sys
+result = json.load(open(sys.argv[1]))
+archive = pathlib.Path(sys.argv[2]).read_bytes()
+integrity = "sha256-" + base64.b64encode(hashlib.sha256(archive).digest()).decode()
+assert result["expected_digest"] == integrity, result
+assert result["observed_digest"] == integrity, result
+assert result["identity_state"] == "match", result
+assert result["digest_algorithm"] == "sha256", result
 assert result["verification_basis"] == "raw_npm_tarball_bytes", result
 PY
 python3 - "$T/npm.tarball" <<'PY'
@@ -118,7 +144,7 @@ PY
 
 echo "[artifact-observe] unsupported and out-of-range evidence fails closed"
 python3 - "$T" "$ROOT/fixtures/packages/artifact-observation-graph.json" <<'PY'
-import json, pathlib, sys
+import base64, json, pathlib, sys
 t = pathlib.Path(sys.argv[1])
 graph = json.load(open(sys.argv[2]))
 graph["ecosystem"] = "npm"
@@ -128,8 +154,14 @@ with open(t / "unsupported.json", "w") as out:
 graph["artifacts"][0]["expected_digest"] = "sha512-" + "A" * 85 + "B=="
 with open(t / "malformed-sri.json", "w") as out:
     json.dump(graph, out, separators=(",", ":"))
+graph["artifacts"][0]["expected_digest"] = "sha256-" + "A" * 42 + "B="
+with open(t / "malformed-sri-sha256.json", "w") as out:
+    json.dump(graph, out, separators=(",", ":"))
+graph["artifacts"][0]["expected_digest"] = "sha384-" + base64.b64encode(bytes([0xaa]) * 48).decode()
+with open(t / "unsupported-sri-sha384.json", "w") as out:
+    json.dump(graph, out, separators=(",", ":"))
 PY
-for graph in unsupported malformed-sri; do
+for graph in unsupported malformed-sri malformed-sri-sha256 unsupported-sri-sha384; do
   if "$ROOT/build/rh_cli" artifact-observe --graph "$T/$graph.json" --artifact 0 --file "$ROOT/fixtures/packages/artifact-observation.archive" --out "$T/$graph-out.json" >/dev/null 2>&1; then
     echo "unsupported or malformed SRI unexpectedly accepted: $graph" >&2
     exit 1
