@@ -14,6 +14,26 @@ include "./rh_json.elisa"
 include "./rh_release_feed.elisa"
 
 module ReleaseFeedReport:
+    private:
+        def rh_rel_supported_line_count(pool: darray[u8]&, releases: darray[ReleaseFeed::RhRelease]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            pool_loop: mutable darray[u8]& = pool
+            releases_loop: mutable darray[ReleaseFeed::RhRelease]& = releases
+            while i < releases_loop.count.i64() |total: i64 = 0, i: i64 = 0, pool_loop, releases_loop| -> total:
+                release: ReleaseFeed::RhRelease = releases_loop[i.usize()]
+                seen: mutable bool = false
+                if release.supported_line_s >= 0:
+                    while j < i |j: i64 = 0, i, pool_loop, releases_loop, release, seen|:
+                        prior: ReleaseFeed::RhRelease = releases_loop[j.usize()]
+                        if prior.supported_line_s >= 0 and prior.supported_line_e - prior.supported_line_s == release.supported_line_e - release.supported_line_s:
+                            same: mutable bool = true
+                            while k < release.supported_line_e - release.supported_line_s |k: i64 = 0, release, prior, pool_loop, same|:
+                                same <- false if pool_loop[(prior.supported_line_s + k).usize()] != pool_loop[(release.supported_line_s + k).usize()]
+                                k <- k + 1
+                            seen <- true if same
+                        j <- j + 1
+                    total <- total + 1 if not seen
+                i <- i + 1
+
     public:
         def rh_rel_sort_times(values: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
             while i < values.count |i: i64 = 1, values|:
@@ -36,6 +56,7 @@ module ReleaseFeedReport:
             stable_total: mutable i64 = 0
             prerelease_total: mutable i64 = 0
             withdrawn_total: mutable i64 = 0
+            supported_line_total: i64 = ReleaseFeedReport::rh_rel_supported_line_count(pool, releases)
             stable_times: mutable darray[i64] = []
             Base::rh_push_text(out, "{\"schema\":\"rh-release-feed-result/1\",\"releases\":[")
             while i < releases.count.i64() |i: i64 = 0, releases, pool, out, asset_total, digest_total, published_total, stable_total, prerelease_total, stable_times|:
@@ -71,6 +92,13 @@ module ReleaseFeedReport:
                     Base::rh_push_text(out, "true")
                 else:
                     Base::rh_push_text(out, "false")
+                Base::rh_push_text(out, ",\"supported_line\":")
+                if r.supported_line_s < 0:
+                    Base::rh_push_text(out, "null")
+                else:
+                    out.push(34)
+                    Base::rh_json_escape(out, pool, r.supported_line_s.usize(), r.supported_line_e.usize())
+                    out.push(34)
                 Base::rh_push_text(out, ",\"first_seen\":")
                 Base::rh_push_decimal_i64(out, r.first_seen)
                 Base::rh_push_text(out, ",\"asset_count\":")
@@ -141,6 +169,9 @@ module ReleaseFeedReport:
             Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"release.withdrawn_publications\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, withdrawn_total)
+            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"release.supported_lines\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_decimal_i64(out, supported_line_total)
             Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"release.latest_stable_age_days\",\"version\":\"1.0.0\",\"status\":\"")
             if latest_stable_age >= 0:
