@@ -28,14 +28,15 @@ on the real execution path.
   Missing, ambiguous, and source-specific references remain distinct. Bounded
   wheel, sdist, and archive records retain expected hash values and fingerprint
   URL/path locators with SHA-256 without publishing the locators, including
-  table and inline-table input forms.
+  table and inline-table input forms. Optional declared artifact sizes are
+  projected as `size_bytes` and checked against supplied local bytes.
   Environment/group selection, complete artifact projection, and unsupported
   source fields remain counted as gaps.
   `rh_cli pylock-observe` now verifies supplied local bytes against SHA-256,
   SHA-384, and SHA-512 values and emits a separate
   `rh-pylock-artifact-observation-result/1` sidecar bound to the audit digest
-  and artifact ID. Unknown algorithms remain unsupported, and mismatches do
-  not become matches. `tests/test_pylock_cli.sh`, checked-in goldens, schemas,
+  and artifact ID. Size/hash mismatches remain `changed`; unknown algorithms
+  remain unsupported. `tests/test_pylock_cli.sh`, checked-in goldens, schemas,
   and public-contract entries cover both paths. Full TOML validation,
   complete artifact metadata, project manifest integration, and use as a
   resolved dependency graph remain open.

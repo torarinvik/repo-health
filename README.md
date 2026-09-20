@@ -76,14 +76,16 @@ are informational. The audit therefore preserves package markers and Python
 version constraints without evaluating them, reports missing or ambiguous
 references, and retains expected hashes for bounded wheel, sdist, and archive
 entries. URL and path locators are represented by SHA-256 fingerprints. It
-counts lock fields it does not project and does not create a `rh-dep-graph/1`
-or OSV input. `rh_cli pylock-observe --audit <audit.json> --artifact <id>
---file <local-artifact> --out <file>` verifies supplied bytes against expected
-SHA-256, SHA-384, and SHA-512 values and writes a separate
+retains declared artifact sizes when present, counts lock fields it does not
+project, and does not create a `rh-dep-graph/1` or OSV input.
+`rh_cli pylock-observe` verifies caller-supplied bytes against expected
+SHA-256, SHA-384, and SHA-512 values, compares the declared size when present,
+and writes a separate
 `rh-pylock-artifact-observation-result/1` sidecar bound to the exact audit and
-artifact ID. Unknown hash algorithms remain unsupported, and partial evidence
-never reports a complete match. It does not open or extract the artifact;
-complete artifact metadata and Python lockfile integration remain open.
+artifact ID. A size mismatch is reported as changed; unknown hash algorithms
+remain unsupported, and partial evidence never reports a complete match. It
+does not open or extract the artifact; complete artifact metadata and Python
+lockfile integration remain open. ([PEP 751](https://peps.python.org/pep-0751/))
 Without `--continue-pagination`, the command keeps its one-page
 `rh-osv-query-result/1` behavior and marks a returned `next_page_token` as
 `more_available`. The opt-in continuation mode emits

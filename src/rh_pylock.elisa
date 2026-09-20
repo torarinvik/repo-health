@@ -43,6 +43,7 @@ module Pylock:
             locator_s: mutable i64
             locator_e: mutable i64
             locator_kind: mutable u8
+            size_bytes: mutable i64
             first_hash: mutable i64
             hash_count: mutable i64
 
@@ -61,7 +62,7 @@ module Pylock:
 
         def rh_pylock_artifact_push(artifacts: mutable darray[RhPylockArtifact]&, owner: i64, kind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if artifacts.count.i64() >= RH_PYLOCK_MAX_ARTIFACTS
-            artifacts.push(RhPylockArtifact{owner: owner, kind: kind, name_s: -1, name_e: -1, locator_s: -1, locator_e: -1, locator_kind: 0, first_hash: -1, hash_count: 0})
+            artifacts.push(RhPylockArtifact{owner: owner, kind: kind, name_s: -1, name_e: -1, locator_s: -1, locator_e: -1, locator_kind: 0, size_bytes: -1, first_hash: -1, hash_count: 0})
             artifacts.count.i64() - 1
 
         def rh_pylock_artifact_exists(artifacts: darray[RhPylockArtifact]&, owner: i64, kind: u8) -> bool:
@@ -109,6 +110,62 @@ module Pylock:
                 b: u8 = data[i]
                 return false if not ((b >= 65 and b <= 90) or (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 45 or b == 95)
             true
+
+        def rh_pylock_integer_digit(value: u8) -> i64:
+            return (value - 48).i64() if value >= 48 and value <= 57
+            return (value - 55).i64() if value >= 65 and value <= 70
+            return (value - 87).i64() if value >= 97 and value <= 102
+            -1
+
+        # TOML integer subset for non-negative PEP artifact sizes. Decimal,
+        # binary, octal, and hexadecimal spellings retain the same byte count.
+        def rh_pylock_size_integer(data: darray[u8]&, start: usize, end: usize, ok_out: mutable i64&) -> i64 can[Abort.Panic]:
+            ok_out[0] <- 0
+            return 0 if start >= end or end > data.count
+            cursor: mutable usize = start
+            signed: mutable bool = false
+            if data[cursor] == 45:
+                return 0
+            if data[cursor] == 43:
+                signed <- true
+                cursor <- cursor + 1
+            return 0 if cursor >= end
+            base: mutable i64 = 10
+            if cursor + 1 < end and data[cursor] == 48:
+                if data[cursor + 1] == 120:
+                    base <- 16
+                    cursor <- cursor + 2
+                elif data[cursor + 1] == 111:
+                    base <- 8
+                    cursor <- cursor + 2
+                elif data[cursor + 1] == 98:
+                    base <- 2
+                    cursor <- cursor + 2
+            return 0 if cursor >= end or (signed and base != 10)
+            value: mutable i64 = 0
+            digit_count: mutable i64 = 0
+            leading_zero: mutable bool = false
+            previous_digit: mutable bool = false
+            while cursor < end |cursor, end, data, base, value, digit_count, leading_zero, previous_digit|:
+                byte: u8 = data[cursor]
+                if byte == 95:
+                    return 0 if not previous_digit or cursor + 1 >= end
+                    next_digit: i64 = rh_pylock_integer_digit(data[cursor + 1])
+                    return 0 if next_digit < 0 or next_digit >= base
+                    previous_digit <- false
+                else:
+                    digit: i64 = rh_pylock_integer_digit(byte)
+                    return 0 if digit < 0 or digit >= base
+                    return 0 if base == 10 and leading_zero and digit_count > 0
+                    leading_zero <- true if digit_count == 0 and base == 10 and digit == 0
+                    return 0 if value > 9223372036854775807 / base or (value == 9223372036854775807 / base and digit > 9223372036854775807 % base)
+                    value <- value * base + digit
+                    digit_count <- digit_count + 1
+                    previous_digit <- true
+                cursor <- cursor + 1
+            return 0 if digit_count == 0 or not previous_digit
+            ok_out[0] <- 1
+            value
 
         def rh_pylock_inline_hashes(data: mutable darray[u8]&, pool: mutable darray[u8]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, artifact: i64, start: usize, end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if start >= end or data[start] != 123 or data[end - 1] != 125
@@ -160,6 +217,12 @@ module Pylock:
             artifact: mutable RhPylockArtifact = artifacts[artifact_index.usize()]
             if Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "name"):
                 return false if artifact.name_s >= 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &artifact.name_s, &artifact.name_e)
+            elif Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "size"):
+                return false if artifact.size_bytes >= 0
+                size_ok: mutable i64 = 0
+                size_bytes: i64 = rh_pylock_size_integer(data, value_s, value_end, &size_ok)
+                return false if size_ok != 1
+                artifact.size_bytes <- size_bytes
             elif Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "url"):
                 return false if artifact.locator_kind != 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &artifact.locator_s, &artifact.locator_e)
                 artifact.locator_kind <- 1
@@ -752,6 +815,11 @@ module Pylock:
                     Base::rh_push_text(out, "\"url\"" if artifact.locator_kind == 1 else "\"path\"" if artifact.locator_kind == 2 else "\"name_only\"")
                     Base::rh_push_text(out, ",\"source_sha256\":")
                     rh_pylock_emit_fingerprint(out, pool, artifact.locator_s, artifact.locator_e)
+                    Base::rh_push_text(out, ",\"size_bytes\":")
+                    if artifact.size_bytes < 0:
+                        Base::rh_push_text(out, "null")
+                    else:
+                        Base::rh_push_decimal_i64(out, artifact.size_bytes)
                     Base::rh_push_text(out, ",\"hashes\":[")
                     first_hash: mutable bool = true
                     while hash_cursor < hashes.count and hashes[hash_cursor].artifact == artifact_id.i64() |hash_cursor, hashes, pool, out, artifact_id, first_hash|:

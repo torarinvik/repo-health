@@ -96,6 +96,7 @@ module PylockObservation:
             selected_kind_s: mutable i64 = -1
             selected_kind_e: mutable i64 = -1
             selected_hashes: mutable i64 = -1
+            selected_expected_size: mutable i64 = -1
             while package_cursor >= 0 |package_cursor: i64 = nodes[packages.usize()].first_child, nodes, texts, artifact_id, selected_package_id, selected_name_s, selected_name_e, selected_version_s, selected_version_e, selected_kind_s, selected_kind_e, selected_hashes|:
                 return -1 if nodes[package_cursor.usize()].kind != Json::RH_JSON_OBJ
                 artifacts: i64 = rh_pylock_observation_member(nodes, texts, package_cursor, "artifacts")
@@ -107,7 +108,7 @@ module PylockObservation:
                 package_id: i64 = Json::rh_json_int(nodes, audit, package_id_field, &package_id_ok)
                 return -1 if package_id_ok != 1 or package_id < 0
                 return -1 if nodes[package_name.usize()].kind != Json::RH_JSON_STR or (nodes[package_version.usize()].kind != Json::RH_JSON_STR and nodes[package_version.usize()].kind != Json::RH_JSON_NULL)
-                while artifact_cursor >= 0 |artifact_cursor: i64 = nodes[artifacts.usize()].first_child, nodes, texts, artifact_id, selected_package_id, selected_name_s, selected_name_e, selected_version_s, selected_version_e, selected_kind_s, selected_kind_e, selected_hashes, package_id|:
+                while artifact_cursor >= 0 |artifact_cursor: i64 = nodes[artifacts.usize()].first_child, nodes, texts, artifact_id, selected_package_id, selected_name_s, selected_name_e, selected_version_s, selected_version_e, selected_kind_s, selected_kind_e, selected_hashes, selected_expected_size, package_id|:
                     return -1 if nodes[artifact_cursor.usize()].kind != Json::RH_JSON_OBJ
                     id_field: i64 = rh_pylock_observation_member(nodes, texts, artifact_cursor, "id")
                     kind_field: i64 = rh_pylock_observation_member(nodes, texts, artifact_cursor, "kind")
@@ -128,6 +129,13 @@ module PylockObservation:
                         selected_kind_s <- nodes[kind_field.usize()].text_start
                         selected_kind_e <- nodes[kind_field.usize()].text_end
                         selected_hashes <- hashes_field
+                        size_field: i64 = rh_pylock_observation_member(nodes, texts, artifact_cursor, "size_bytes")
+                        if size_field >= 0 and nodes[size_field.usize()].kind != Json::RH_JSON_NULL:
+                            return -1 if nodes[size_field.usize()].kind != Json::RH_JSON_NUM
+                            size_ok: mutable i64 = 0
+                            size_bytes: i64 = Json::rh_json_int(nodes, audit, size_field, &size_ok)
+                            return -1 if size_ok != 1 or size_bytes < 0
+                            selected_expected_size <- size_bytes
                     artifact_cursor <- nodes[artifact_cursor.usize()].next_sibling
                 package_cursor <- nodes[package_cursor.usize()].next_sibling
             return -1 if selected_package_id < 0 or selected_hashes < 0 or nodes[selected_hashes.usize()].child_count <= 0 or nodes[selected_hashes.usize()].child_count > RH_PYLOCK_OBSERVATION_MAX_HASHES
@@ -170,6 +178,7 @@ module PylockObservation:
                 changed <- changed + 1 if state == RH_PYLOCK_OBSERVATION_CHANGED
                 results.push(RhPylockObservedHash{algorithm_s: algorithm_s, algorithm_e: algorithm_e, expected_s: expected_s, expected_e: expected_e, digest_kind: digest_kind, state: state})
                 hash_cursor <- nodes[hash_cursor.usize()].next_sibling
+            size_changed: bool = selected_expected_size >= 0 and selected_expected_size != file_bytes.count.i64()
             audit_digest: mutable darray[u8] = []
             Sha256::rh_sha256(audit, audit_digest)
             Base::rh_push_text(out, "{\"schema\":\"rh-pylock-artifact-observation-result/1\",\"audit_sha256\":\"")
@@ -189,6 +198,14 @@ module PylockObservation:
                 rh_pylock_observation_emit_span(out, texts, selected_version_s, selected_version_e)
             Base::rh_push_text(out, ",\"artifact_kind\":")
             rh_pylock_observation_emit_span(out, texts, selected_kind_s, selected_kind_e)
+            Base::rh_push_text(out, ",\"expected_size_bytes\":")
+            if selected_expected_size < 0:
+                Base::rh_push_text(out, "null")
+            else:
+                Base::rh_push_decimal_i64(out, selected_expected_size)
+            Base::rh_push_text(out, ",\"size_state\":\"")
+            Base::rh_push_text(out, "not_recorded" if selected_expected_size < 0 else "changed" if size_changed else "match")
+            Base::rh_push_text(out, "\"")
             Base::rh_push_text(out, ",\"file_size_bytes\":")
             Base::rh_push_decimal_i64(out, file_bytes.count.i64())
             Base::rh_push_text(out, ",\"observed_file_sha256\":\"")
@@ -198,7 +215,7 @@ module PylockObservation:
             Base::rh_push_text(out, ",\"unsupported_hash_count\":")
             Base::rh_push_decimal_i64(out, unsupported)
             Base::rh_push_text(out, ",\"state\":\"")
-            Base::rh_push_text(out, "unsupported" if checked == 0 else "changed" if changed > 0 else "partially_verified" if unsupported > 0 else "match")
+            Base::rh_push_text(out, "unsupported" if checked == 0 and not size_changed else "changed" if changed > 0 or size_changed else "partially_verified" if unsupported > 0 else "match")
             Base::rh_push_text(out, "\",\"hashes\":[")
             for result_id in 0..<results.count |result_id, results, texts, out, sha256, sha384, sha512|:
                 result: RhPylockObservedHash = results[result_id]
