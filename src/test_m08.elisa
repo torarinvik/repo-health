@@ -111,6 +111,57 @@ def check_hg_bounds(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Pani
     t8check(c4.author_s == -1, "hg-wrong-type-author-unknown", fails)
     return
 
+def check_hg_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    result_valid: bool =
+        pool: mutable darray[u8] = []
+        changes: mutable darray[Mercurial::RhHgChange] = []
+        rejected: mutable i64 = 0
+        status: i64 = Mercurial::rh_hg_parse(raw, 0, pool, changes, &rejected)
+        all_spans_valid: bool =
+            while i < changes.count |valid: bool = true, i: usize = 0, pool, changes| -> valid:
+                change: Mercurial::RhHgChange = changes[i]
+                valid <- false if change.node_s < 0 or change.node_e < change.node_s or change.node_e > pool.count.i64()
+                valid <- false if change.author_s >= 0 and (change.author_e < change.author_s or change.author_e > pool.count.i64())
+                valid <- false if change.desc_s >= 0 and (change.desc_e < change.desc_s or change.desc_e > pool.count.i64())
+                valid <- false if change.branch_s >= 0 and (change.branch_e < change.branch_s or change.branch_e > pool.count.i64())
+                i <- i + 1
+        block_result: bool = (status == -1 or status == 0) and changes.count <= raw.count and pool.count <= raw.count and rejected >= 0 and rejected <= raw.count.i64()
+        all_spans_valid and block_result
+    t8check(result_valid, "hg-fuzz-bounds-and-spans", fails)
+    return
+
+def check_hg_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    corpus: darray[u8] = hg_fixture()
+    while trial < 96 |trial: i64 = 0, rng: i64 = 271828, corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < corpus.count |copied: usize = 0, corpus, fuzzed|:
+            fuzzed.push(corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_hg_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+
+    alphabet: mutable darray[u8] = [91, 93, 123, 125, 34, 58, 44, 45, 48, 49, 116, 114, 117, 101, 102, 97, 108, 115, 110, 32, 92, 46]
+    while trial < 128 |trial: i64 = 0, rng: i64 = 1618033, alphabet, fails|:
+        rng <- (rng * 48271) % 2147483647
+        byte_count: usize = (1 + rng % 96).usize()
+        fuzzed: mutable darray[u8] = []
+        while pos < byte_count |pos: usize = 0, rng, alphabet, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            choice: usize = (rng % alphabet.count.i64()).usize()
+            fuzzed.push(alphabet[choice])
+            pos <- pos + 1
+        check_hg_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+    return
+
 def check_hg_native_form(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     pool: mutable darray[u8] = []
     Base::rh_push_text(pool, "0123456789abcdef0123456789abcdef01234567")
@@ -501,6 +552,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_pep440(&fails)
     check_hg_reject(&fails)
     check_hg_bounds(&fails)
+    check_hg_fuzz(&fails)
     check_hg_native_form(&fails)
     check_svn_parse(&fails)
     check_svn_reject(&fails)
