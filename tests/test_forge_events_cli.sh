@@ -29,6 +29,19 @@ assert all("title" not in e and "body" not in e for e in got["events"])
 print("[forge-events] result and provider-native boundary OK")
 PY
 
+echo "[forge-events] additive provider fields survive schema evolution"
+python3 - "$T/input.json" "$T/additive-fields.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["api_revision"] = "2026-09"
+d["issues"][0]["reactions"] = {"total_count": 3}
+d["issues"][0]["new_provider_flag"] = True
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" forge events --input "$T/additive-fields.json" --out "$T/additive-fields.out" >/dev/null || fail "additive provider fields"
+cmp -s "$T/additive-fields.out" "$T/expected.json" || fail "additive provider fields changed the canonical result"
+echo "[forge-events] additive input fields are ignored without losing canonical output"
+
 echo "[forge-events] replay is deterministic"
 "$ROOT/build/rh_cli" forge events --input "$T/input.json" --out "$T/out2.json" >/dev/null || fail "replay"
 cmp -s "$T/out.json" "$T/out2.json" || fail "replay changed bytes"
