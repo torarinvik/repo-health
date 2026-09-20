@@ -32,6 +32,11 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "scope ' ; SELECT pg_sleep(60); --", "", "{\"page\":8}", "complete",
         "2", "", "2026-01-01T00:01:00Z"
     };
+    static const char *page_events_values[10] = {
+        "00000000-0000-0000-0000-000000000001", "7",
+        "scope ' ; SELECT pg_sleep(60); --", "", "{\"page\":8}", "complete",
+        "0", "", "[]", "2026-01-01T00:01:00Z"
+    };
     static const char *heartbeat_values[4] = {
         "00000000-0000-0000-0000-000000000002", "4", "2026-01-01T00:01:00Z", "60"
     };
@@ -58,6 +63,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = claim_values;
         expected_count = 3;
         prefix = "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job(";
+    } else if (operation != NULL && strcmp(operation, "page_events") == 0) {
+        expected = page_events_values;
+        expected_count = 10;
+        prefix = "SELECT public.rh_commit_collection_page_events(";
     }
     if (handle != &connection || query == NULL || strncmp(query, prefix, strlen(prefix)) != 0 ||
         count != expected_count || types != NULL || values == NULL || lengths != NULL || formats != NULL || result_format != 0)

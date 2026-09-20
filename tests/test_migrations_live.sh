@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/test_migrations_live.sh — M02-01 live PostgreSQL rehearsal.
 # Applies the checked-in migration to an ephemeral PostgreSQL container and
-# exercises the fenced job and collection cursor functions. The default local
+# exercises the fenced job, collection cursor, and atomic event-page functions. The default local
 # suite remains dependency-free; set RH_PG_MIGRATION=1 to run this gate.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -62,6 +62,10 @@ END $$;
 
 INSERT INTO collection_run (id, source_instance_id, capability, connector_name, connector_version, started_at, status, completeness)
 VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-01T00:00:00Z', 'running', 'unknown');
+INSERT INTO entity (id, entity_kind, visibility_scope, created_at)
+VALUES ('00000000-0000-0000-0000-000000000005', 'issue', 'public', '2026-01-01T00:00:00Z');
+INSERT INTO evidence_object (id, visibility_scope, digest_algorithm, digest_value, media_type, byte_length, storage_key, retention_class, transformation_kind, created_at)
+VALUES ('00000000-0000-0000-0000-000000000006', 'public', 'sha256', repeat('a', 64), 'application/json', 18, 'sha256/aaaaaaaa', 'standard', 'captured', '2026-01-01T00:00:00Z');
 DO $$
 BEGIN
   BEGIN
@@ -89,6 +93,40 @@ BEGIN
     RAISE EXCEPTION 'cursor replay invariant failed: %, %, %', page_count, cursor_page, cursor_value;
   END IF;
 END $$;
+
+DO $$
+DECLARE event_page jsonb := '[{"source_object_type":"issue","source_object_id":"issue:7","source_revision":"rev-1","event_kind":"created","subject_id":"00000000-0000-0000-0000-000000000005","actor_account_id":null,"occurred_at":"2026-01-01T00:00:30Z","observed_at":"2026-01-01T00:03:00Z","time_basis":"event","evidence_id":"00000000-0000-0000-0000-000000000006","parser_version":"fixture/1","payload":{"state":"open"}}]'::jsonb;
+BEGIN
+  IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 1, 'scope-events', NULL, '{"page":2}'::jsonb, 'complete', 1, NULL, event_page, '2026-01-01T00:03:00Z') THEN
+    RAISE EXCEPTION 'event page was refused';
+  END IF;
+  IF rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 1, 'scope-events', NULL, '{"page":99}'::jsonb, 'complete', 1, NULL, jsonb_set(event_page, '{0,source_object_id}', '"issue:8"'::jsonb), '2026-01-01T00:03:30Z') THEN
+    RAISE EXCEPTION 'duplicate page was accepted';
+  END IF;
+  IF (SELECT count(*) FROM canonical_event WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid) <> 1
+     OR (SELECT last_page_number FROM collection_cursor WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid AND capability = 'issues' AND scope_hash = 'scope-events') <> 1 THEN
+    RAISE EXCEPTION 'duplicate page changed event or cursor state';
+  END IF;
+  IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 2, 'scope-events', '{"page":2}'::jsonb, '{"page":3}'::jsonb, 'complete', 1, NULL, event_page, '2026-01-01T00:04:00Z') THEN
+    RAISE EXCEPTION 'replayed event page was refused';
+  END IF;
+  IF (SELECT count(*) FROM canonical_event WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid) <> 1 THEN
+    RAISE EXCEPTION 'source-native event replay was not absorbed';
+  END IF;
+  BEGIN
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, '[{"source_object_type":"issue"}]'::jsonb, '2026-01-01T00:05:00Z');
+    RAISE EXCEPTION 'malformed event page committed';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('page event is missing a required typed field' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  IF EXISTS (SELECT 1 FROM collection_page WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND page_number = 3)
+     OR (SELECT last_page_number FROM collection_cursor WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid AND capability = 'issues' AND scope_hash = 'scope-events') <> 2 THEN
+    RAISE EXCEPTION 'failed event page left a page or advanced cursor';
+  END IF;
+END $$;
 SQL
 
+echo "[migrations-live] canonical event commit, duplicate replay, and rollback boundary OK"
 echo "test_migrations_live OK"

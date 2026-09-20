@@ -13,7 +13,10 @@ Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa
 with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).
 `rh_cli postgres --input <rh-postgres-command/1> --out <file>` commits one
 complete or successful-empty collection page through `rh_commit_collection_page`,
-or performs fenced job claim, heartbeat, and finish. It binds values through
+or commits normalized event rows, page metadata, and cursor advancement together
+through `rh_commit_collection_page_events`; it also performs fenced job claim,
+heartbeat, and finish. Event rows reference existing subject and evidence-object
+rows. It binds values through
 `PQexecParams`, applies a five-second connection timeout, and reports separate
 committed/duplicate, claimed/empty, and applied/fenced outcomes; transport or
 query failures exit without writing a result. Supply
@@ -82,8 +85,8 @@ The CLI command contract and failure gates are covered by
 - There is no automatic migration runner; migrations are operator-led using
   the runbooks.
 - The active `rh_cli ingest` path still uses the filesystem store. PostgreSQL
-  page commit and job lease operations are available through `rh_cli postgres`,
-  while canonical event/evidence persistence and transactional ingestion wiring
+  can commit normalized event pages and job leases through `rh_cli postgres`,
+  while evidence-object/blob registration and transactional ingestion wiring
   remain open. Filesystem fencing continues to govern the active ingest runtime.
 - No migration has been performed across a format change in this repository
   yet; the rules above are the contract, and the first real migration must

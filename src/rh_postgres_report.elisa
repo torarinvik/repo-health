@@ -67,7 +67,8 @@ module PostgresReport:
             operation_e: mutable i64 = 0
             return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "operation", &operation_s, &operation_e, false)
 
-            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "page_commit"):
+            commit_events: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "page_commit_events")
+            if commit_events or PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "page_commit"):
                 run_s: mutable i64 = 0
                 run_e: mutable i64 = 0
                 scope_s: mutable i64 = 0
@@ -108,9 +109,23 @@ module PostgresReport:
                 completeness_ptr: cstr = (&completeness[0]).cast[cstr] can Unsafe.PointerCast
                 evidence_ptr: cstr = (&evidence_id[0]).cast[cstr] can Unsafe.PointerCast
                 now_ptr: cstr = (&now[0]).cast[cstr] can Unsafe.PointerCast
-                committed: i64 = Postgres::rh_pg_commit_collection_page(conninfo, run_ptr, page_number, scope_ptr, before_ptr, after_ptr, completeness_ptr, record_count, evidence_ptr, now_ptr)
+                events_json_ptr: mutable cstr = ""
+                events_json: mutable darray[u8] = []
+                if commit_events:
+                    events_s: mutable i64 = 0
+                    events_e: mutable i64 = 0
+                    return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "events_json", &events_s, &events_e, false) or events_e - events_s > RH_PG_REPORT_MAX_BYTES.i64()
+                    events_json <- PostgresReport::rh_pg_report_text(texts, events_s, events_e)
+                    events_json_ptr <- (&events_json[0]).cast[cstr] can Unsafe.PointerCast
+                committed: i64 =
+                    if commit_events:
+                        Postgres::rh_pg_commit_collection_page_events(conninfo, run_ptr, page_number, scope_ptr, before_ptr, after_ptr, completeness_ptr, record_count, evidence_ptr, events_json_ptr, now_ptr)
+                    else:
+                        Postgres::rh_pg_commit_collection_page(conninfo, run_ptr, page_number, scope_ptr, before_ptr, after_ptr, completeness_ptr, record_count, evidence_ptr, now_ptr)
                 return -1 if committed < 0
-                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"page_commit\",\"status\":\"")
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"")
+                Base::rh_push_text(out, "page_commit_events" if commit_events else "page_commit")
+                Base::rh_push_text(out, "\",\"status\":\"")
                 Base::rh_push_text(out, "committed" if committed == 1 else "duplicate")
                 Base::rh_push_text(out, "\"}")
                 return 0

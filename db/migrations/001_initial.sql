@@ -758,7 +758,7 @@ DECLARE
     v_capability text;
     v_page_id uuid;
 BEGIN
-    IF p_completeness NOT IN ('complete', 'empty') THEN
+    IF p_completeness IS NULL OR p_completeness NOT IN ('complete', 'empty') THEN
         RAISE EXCEPTION 'a partial page cannot advance a durable cursor';
     END IF;
 
@@ -792,6 +792,148 @@ BEGIN
         last_page_number, last_success_at, updated_at
     ) VALUES (
         md5(v_source_instance_id::text || ':' || v_capability || ':' || p_scope_hash)::uuid, v_source_instance_id, v_capability, p_scope_hash,
+        COALESCE(p_cursor_after, '{}'::jsonb), p_page_number, p_now, p_now
+    )
+    ON CONFLICT (source_instance_id, capability, scope_hash)
+    DO UPDATE SET cursor = EXCLUDED.cursor,
+                  last_page_number = EXCLUDED.last_page_number,
+                  last_success_at = EXCLUDED.last_success_at,
+                  updated_at = EXCLUDED.updated_at
+    WHERE collection_cursor.last_page_number < EXCLUDED.last_page_number;
+
+    RETURN true;
+END;
+$$;
+
+-- Commit one complete provider page together with its normalized events. The
+-- run row serializes page replay; event uniqueness absorbs record replays, and
+-- any bad event rolls back the page and cursor writes in this same statement.
+CREATE FUNCTION rh_commit_collection_page_events(
+    p_run_id uuid,
+    p_page_number integer,
+    p_scope_hash text,
+    p_cursor_before jsonb,
+    p_cursor_after jsonb,
+    p_completeness text,
+    p_record_count integer,
+    p_evidence_id uuid,
+    p_events jsonb,
+    p_now timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_source_instance_id uuid;
+    v_capability text;
+    v_event jsonb;
+    v_event_count integer;
+BEGIN
+    IF p_completeness IS NULL OR p_completeness NOT IN ('complete', 'empty') THEN
+        RAISE EXCEPTION 'a partial page cannot advance a durable cursor';
+    END IF;
+    IF p_page_number IS NULL OR p_record_count IS NULL OR p_page_number < 0 OR p_record_count < 0 THEN
+        RAISE EXCEPTION 'page number and record count must be non-negative';
+    END IF;
+    IF p_events IS NULL OR jsonb_typeof(p_events) <> 'array' THEN
+        RAISE EXCEPTION 'page events must be a JSON array';
+    END IF;
+    v_event_count := jsonb_array_length(p_events);
+    IF v_event_count > 10000 OR v_event_count <> p_record_count THEN
+        RAISE EXCEPTION 'page event count does not match the declared bounded record count';
+    END IF;
+
+    SELECT source_instance_id, capability
+    INTO v_source_instance_id, v_capability
+    FROM collection_run
+    WHERE id = p_run_id AND status = 'running'
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'collection run is not running: %', p_run_id;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM collection_page
+        WHERE collection_run_id = p_run_id AND page_number = p_page_number
+    ) THEN
+        RETURN false;
+    END IF;
+
+    INSERT INTO collection_page (
+        id, collection_run_id, page_number, scope_hash,
+        cursor_before, cursor_after, status, completeness,
+        record_count, evidence_id, attempted_at, completed_at
+    ) VALUES (
+        md5(p_run_id::text || ':' || p_page_number::text)::uuid,
+        p_run_id, p_page_number, p_scope_hash,
+        p_cursor_before, p_cursor_after, 'success', p_completeness,
+        p_record_count, p_evidence_id, p_now, p_now
+    );
+
+    FOR v_event IN SELECT value FROM jsonb_array_elements(p_events) AS events(value) LOOP
+        IF jsonb_typeof(v_event) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(v_event->'source_object_type') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'source_object_id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'source_revision') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'event_kind') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'subject_id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'observed_at') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'time_basis') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'evidence_id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'parser_version') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'payload') IS DISTINCT FROM 'object' THEN
+            RAISE EXCEPTION 'page event is missing a required typed field';
+        END IF;
+        IF COALESCE(v_event->>'source_object_type', '') = ''
+           OR COALESCE(v_event->>'source_object_id', '') = ''
+           OR COALESCE(v_event->>'source_revision', '') = ''
+           OR COALESCE(v_event->>'event_kind', '') = ''
+           OR COALESCE(v_event->>'parser_version', '') = ''
+           OR v_event->>'time_basis' NOT IN ('event', 'observation', 'unknown') THEN
+            RAISE EXCEPTION 'page event identity, parser, or time basis is invalid';
+        END IF;
+        IF v_event ? 'actor_account_id'
+           AND jsonb_typeof(v_event->'actor_account_id') NOT IN ('string', 'null') THEN
+            RAISE EXCEPTION 'page event actor_account_id must be a UUID string or null';
+        END IF;
+        IF v_event ? 'occurred_at'
+           AND jsonb_typeof(v_event->'occurred_at') NOT IN ('string', 'null') THEN
+            RAISE EXCEPTION 'page event occurred_at must be a timestamp string or null';
+        END IF;
+
+        INSERT INTO canonical_event (
+            id, source_instance_id, source_object_type, source_object_id,
+            source_revision, event_kind, subject_id, actor_account_id,
+            occurred_at, observed_at, time_basis, evidence_id,
+            parser_version, payload
+        ) VALUES (
+            md5(v_source_instance_id::text || ':' || (v_event->>'source_object_type') || ':' ||
+                (v_event->>'source_object_id') || ':' || (v_event->>'source_revision') || ':' ||
+                (v_event->>'event_kind'))::uuid,
+            v_source_instance_id,
+            v_event->>'source_object_type',
+            v_event->>'source_object_id',
+            v_event->>'source_revision',
+            v_event->>'event_kind',
+            (v_event->>'subject_id')::uuid,
+            NULLIF(v_event->>'actor_account_id', '')::uuid,
+            NULLIF(v_event->>'occurred_at', '')::timestamptz,
+            (v_event->>'observed_at')::timestamptz,
+            v_event->>'time_basis',
+            (v_event->>'evidence_id')::uuid,
+            v_event->>'parser_version',
+            v_event->'payload'
+        ) ON CONFLICT (
+            source_instance_id, source_object_type, source_object_id,
+            source_revision, event_kind
+        ) DO NOTHING;
+    END LOOP;
+
+    INSERT INTO collection_cursor (
+        id, source_instance_id, capability, scope_hash, cursor,
+        last_page_number, last_success_at, updated_at
+    ) VALUES (
+        md5(v_source_instance_id::text || ':' || v_capability || ':' || p_scope_hash)::uuid,
+        v_source_instance_id, v_capability, p_scope_hash,
         COALESCE(p_cursor_after, '{}'::jsonb), p_page_number, p_now, p_now
     )
     ON CONFLICT (source_instance_id, capability, scope_hash)

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # tests/test_postgres_cli.sh — RH_DATABASE_URL-backed PostgreSQL command path.
+# Contracts: rh-postgres-command/1 -> rh-postgres-result/1.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="/tmp/rh-postgres-cli"
@@ -31,6 +32,8 @@ run_ok() {
 
 run_ok page committed page-commit
 run_ok page duplicate page-commit
+run_ok page_events committed page-events
+run_ok page_events duplicate page-events
 run_ok heartbeat committed heartbeat-job
 run_ok heartbeat duplicate heartbeat-job
 run_ok finish committed finish-job
@@ -46,6 +49,9 @@ def read(name):
         return json.load(f)
 assert read("page-commit-committed.json")["status"] == "committed"
 assert read("page-commit-duplicate.json")["status"] == "duplicate"
+assert read("page-events-committed.json")["operation"] == "page_commit_events"
+assert read("page-events-committed.json")["status"] == "committed"
+assert read("page-events-duplicate.json")["status"] == "duplicate"
 assert read("heartbeat-job-committed.json")["status"] == "applied"
 assert read("heartbeat-job-duplicate.json")["status"] == "fenced"
 assert read("finish-job-committed.json")["status"] == "applied"
@@ -57,7 +63,7 @@ assert claim["lease_expires_at"] == "2026-01-01 00:02:00+00", claim
 assert read("claim-job-duplicate.json")["status"] == "empty"
 all_output = "".join(open(os.path.join(root, p)).read() for p in os.listdir(root) if p.endswith(".json"))
 assert "never-emit-this" not in all_output
-print("[postgres-cli] page commit, claim, heartbeat, finish, and bounded reports OK")
+print("[postgres-cli] atomic event-page commit, page commit, claim, heartbeat, finish, and bounded reports OK")
 PY
 
 cp "$ROOT/fixtures/postgres/page-commit-command.json" "$T/page-commit-command.json"
