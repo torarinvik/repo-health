@@ -471,6 +471,64 @@ def check_gem_composer_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Ab
         trial <- trial + 1
     return
 
+def check_python_requirement_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    bounded_result: bool =
+        requirements: mutable darray[Package::RhRequire] = []
+        packages: mutable darray[Package::RhPkgNode] = []
+        pool: mutable darray[u8] = []
+        edges: mutable darray[Package::RhDepEdge] = []
+        unresolved: mutable darray[Package::RhUnresolved] = []
+        unknown: mutable i64 = 0
+        parsed: i64 = Package::rh_pypi_parse(raw, packages, pool, requirements, edges, unresolved, &unknown)
+        project_requirements: mutable darray[Package::RhRequire] = []
+        project_packages: mutable darray[Package::RhPkgNode] = []
+        project_pool: mutable darray[u8] = []
+        project_edges: mutable darray[Package::RhDepEdge] = []
+        project_unresolved: mutable darray[Package::RhUnresolved] = []
+        project_unknown: mutable i64 = 0
+        project_status: i64 = Package::rh_pypi_parse_pep621(raw, project_packages, project_pool, project_requirements, project_edges, project_unresolved, &project_unknown)
+        (parsed == -1 or parsed == 0) and (project_status == -1 or project_status == 0) and packages.count <= raw.count + 1 and project_packages.count <= raw.count + 1 and pool.count.i64() <= raw.count.i64() * 8 + 32 and project_pool.count.i64() <= raw.count.i64() * 8 + 32 and requirements.count <= raw.count and project_requirements.count <= raw.count and edges.count <= raw.count and project_edges.count <= raw.count and unresolved.count <= raw.count and project_unresolved.count <= raw.count and unknown >= 0 and unknown <= raw.count.i64() + 1 and project_unknown >= 0 and project_unknown <= raw.count.i64() + 1
+    t7check(bounded_result, "python-requirement-fuzz-bounds", fails)
+    return
+
+def check_python_requirement_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    corpus: mutable darray[u8] = []
+    Base::rh_push_text(corpus, "requests==2.32.0\ncolorama>=0.4 ; python_version >= \"3.8\"\ngitdep @ git+https://example.org/pkg.git\n")
+    while trial < 64 |trial: i64 = 0, rng: i64 = 8944271, corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < corpus.count |copied: usize = 0, corpus, fuzzed|:
+            fuzzed.push(corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_python_requirement_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+
+    project_corpus: mutable darray[u8] = []
+    Base::rh_push_text(project_corpus, "[project]\nname = \"sample\"\nversion = \"1.0.0\"\ndependencies = [\n  \"requests==2.32.0\",\n  \"colorama>=0.4\",\n]\n[project.optional-dependencies]\ntest = [\"pytest==8.0.0\"]\n")
+    while trial < 128 |trial: i64 = 0, rng: i64 = 9486832, project_corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < project_corpus.count |copied: usize = 0, project_corpus, fuzzed|:
+            fuzzed.push(project_corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_python_requirement_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+    return
+
 def try_bad_semver(data: darray[u8]&, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     ok: bool =
         vv: mutable Package::RhSemver = Package::RhSemver{0, 0, 0, 0, 0}
@@ -751,6 +809,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_go_fuzz(&fails)
     check_xml_lock_fuzz(&fails)
     check_gem_composer_fuzz(&fails)
+    check_python_requirement_fuzz(&fails)
     check_semver_hardening(&fails)
     check_semver_fuzz(&fails)
     check_lock_hardening(&fails)
