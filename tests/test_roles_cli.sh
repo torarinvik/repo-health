@@ -54,6 +54,20 @@ echo "[roles] determinism"
 "$ROOT/build/rh_cli" roles --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "roles output not deterministic"
 
+echo "[roles] twelve-month declared continuity uses the explicit as-of time"
+cat > "$T/long.json" <<'JSON'
+{"schema":"rh-roles-input/1","as_of":31536100,"declarations":[{"actor_id":9,"role":"maintainer","permission":0,"source":"file","declared_at":100}]}
+JSON
+"$ROOT/build/rh_cli" roles --input "$T/long.json" --out "$T/long.out.json" >/dev/null || fail "long declaration run"
+python3 - "$T/long.out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+assert m["maintainer.active_declared_12m"]["value"] == 1, m
+assert m["maintainer.active_declared_12m"]["as_of"] == 31536100, m
+print("[roles] twelve-month declaration metric OK")
+PY
+
 echo "[roles] bounded file URL capture retains transport evidence"
 file_url="file://$T/in.json"
 "$ROOT/build/rh_cli" roles --url "$file_url" --out "$T/url-out.json" >/dev/null || fail "file URL run"
