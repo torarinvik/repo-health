@@ -66,7 +66,7 @@ graph = {
         "expected_digest": " ".join([
             "sha256-" + base64.b64encode(hashlib.sha256(archive).digest()).decode(),
             "sha512-" + base64.b64encode(bytes([0xaa]) * 64).decode(),
-            "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(),
+            "SHA512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(),
         ]),
         "observed_digest": None,
         "identity_state": "unknown",
@@ -90,7 +90,7 @@ archive = pathlib.Path(sys.argv[2]).read_bytes()
 integrity = " ".join([
     "sha256-" + base64.b64encode(hashlib.sha256(archive).digest()).decode(),
     "sha512-" + base64.b64encode(bytes([0xaa]) * 64).decode(),
-    "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(),
+    "SHA512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(),
 ])
 sha512_integrity = "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode()
 assert result["expected_digest"] == integrity, result
