@@ -109,8 +109,10 @@ Gitea, and Forgejo issues, proposals, reviews, and releases through
 IDs (`github:<id>`/`gitlab:<id>`), emits explicit `observed` or `unsupported`
 capability states, and reports attempted, normalized, duplicate-replacement,
 unique, and rejected counts per capability. It retains no titles or bodies.
-It does not perform live authentication, pagination, or role inference; those
-remain separate admission work.
+The input envelope is versioned in `schemas/forge-events-input.schema.json`
+and registered with the public contract checks. It does not perform live
+authentication, pagination, or role inference; those remain separate
+admission work.
 
 **RP-03 ingestion conformance path:** `rh_cli ingest --root <dir> --input
 <rh-ingest-input/1> --out <file>` pins `collection_start`, writes immutable

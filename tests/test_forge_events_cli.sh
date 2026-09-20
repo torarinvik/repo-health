@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/test_forge_events_cli.sh — M02-05 bounded workflow-event import.
-# Public contract: rh-forge-events-result/1.
+# Public contracts: rh-forge-events-input/1 and rh-forge-events-result/1.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="/tmp/rh-forge-events"
