@@ -742,6 +742,39 @@ assert not g["unresolved"], g["unresolved"]
 print("[deps] npm v2 layout + exact graph OK")
 PY
 
+echo "[deps] pnpm v9 importer locks resolve exact peer-specific snapshots"
+mkdir -p "$T/pnpm-v9"
+cp "$ROOT/fixtures/packages/pnpm-v9-lock.yaml" "$T/pnpm-v9/pnpm-lock.yaml"
+cp "$ROOT/fixtures/packages/pnpm-v9.package.json" "$T/pnpm-v9/package.json"
+# pnpm wins over the Yarn fallback when npm-native lockfiles are absent.
+printf '# yarn lockfile v2\n' > "$T/pnpm-v9/yarn.lock"
+"$ROOT/build/rh_cli" deps --repo "$T/pnpm-v9" --out "$T/pnpm-v9-out" \
+  | grep -q "ecosystems=1 npm=7/8 unresolved=1 unsupported=1" || fail "pnpm v9 deps summary"
+python3 - "$T/pnpm-v9-out/deps-npm-graph.json" <<'PY'
+import hashlib, json, sys
+g = json.load(open(sys.argv[1]))
+nodes = {n["id"]: n for n in g["nodes"]}
+assert [nodes[i]["name"] for i in range(9)] == ["pnpm-app", "foo", "context-tool", "context-tool", "peer", "peer", "context-tool", "@scope/tool", "optional-only"], nodes
+assert [nodes[i]["version"] for i in (2, 3, 6)] == ["1.0.0"] * 3, nodes
+edges = {(e["from"], e["to"], e["scope"]) for e in g["edges"]}
+assert edges == {(0, 1, "normal"), (0, 2, "normal"), (0, 7, "dev"), (0, 8, "optional"), (1, 4, "normal"), (2, 5, "normal"), (3, 4, "normal")}, edges
+assert g["unresolved"] == [{"from": 0, "name": "workspace-kit", "requirement": "workspace:*", "reason": "context"}], g["unresolved"]
+assert len(g["artifacts"]) == 8 and nodes[8]["source_identity_sha256"] == hashlib.sha256(b"https://registry.example/optional-only-3.1.0.tgz").hexdigest(), g
+payload = open(sys.argv[1], "rb").read()
+assert b"registry.example" not in payload, "raw pnpm locator leaked"
+print("[deps] pnpm v9 scopes, exact snapshots, peer variants, integrity, and locator privacy OK")
+PY
+
+echo "[deps] npm package lock keeps precedence over pnpm"
+cp "$ROOT/fixtures/packages/npm-v2-lock.json" "$T/pnpm-v9/package-lock.json"
+"$ROOT/build/rh_cli" deps --repo "$T/pnpm-v9" --out "$T/pnpm-v9-npm-precedence-out" >/dev/null || fail "npm lockfile precedence over pnpm"
+python3 - "$T/pnpm-v9-npm-precedence-out/deps-npm-graph.json" <<'PY'
+import json, sys
+g = json.load(open(sys.argv[1]))
+assert [n["name"] for n in g["nodes"]] == ["v2-app", "left"], g["nodes"]
+print("[deps] npm lockfile keeps precedence over pnpm")
+PY
+
 echo "[deps] Yarn Classic v1 selectors resolve exact scopes and preserve source identities"
 mkdir -p "$T/yarn-classic"
 cp "$ROOT/fixtures/packages/yarn-classic-v1.lock" "$T/yarn-classic/yarn.lock"
@@ -784,6 +817,35 @@ rc_bad_yarn_revision=$?
 set -e
 [[ "$rc_bad_yarn_revision" -eq 4 ]] || fail "unsupported Yarn lockfile revision must exit 4 (got $rc_bad_yarn_revision)"
 [[ ! -f "$T/yarn-v2-out/deps-npm-graph.json" ]] || fail "unsupported Yarn revision wrote a partial graph"
+
+echo "[deps] unsupported pnpm lockfile revisions fail closed"
+mkdir -p "$T/pnpm-v10"
+printf "lockfileVersion: '10.0'\nimporters:\n  .:\npackages:\nsnapshots:\n" > "$T/pnpm-v10/pnpm-lock.yaml"
+cp "$ROOT/fixtures/packages/pnpm-v9.package.json" "$T/pnpm-v10/package.json"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/pnpm-v10" --out "$T/pnpm-v10-out" >/dev/null 2>&1
+rc_bad_pnpm_revision=$?
+set -e
+[[ "$rc_bad_pnpm_revision" -eq 4 ]] || fail "unsupported pnpm lockfile revision must exit 4 (got $rc_bad_pnpm_revision)"
+[[ ! -f "$T/pnpm-v10-out/deps-npm-graph.json" ]] || fail "unsupported pnpm revision wrote a partial graph"
+
+echo "[deps] pnpm workspace importer subset fails closed"
+mkdir -p "$T/pnpm-workspace"
+cat > "$T/pnpm-workspace/pnpm-lock.yaml" <<'EOF'
+lockfileVersion: '9.0'
+importers:
+  .:
+  packages/child:
+packages:
+snapshots:
+EOF
+cp "$ROOT/fixtures/packages/pnpm-v9.package.json" "$T/pnpm-workspace/package.json"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/pnpm-workspace" --out "$T/pnpm-workspace-out" >/dev/null 2>&1
+rc_pnpm_workspace=$?
+set -e
+[[ "$rc_pnpm_workspace" -eq 4 ]] || fail "unsupported pnpm workspace importers must exit 4 (got $rc_pnpm_workspace)"
+[[ ! -f "$T/pnpm-workspace-out/deps-npm-graph.json" ]] || fail "unsupported pnpm workspace wrote a partial graph"
 
 echo "[deps] Yarn does not infer edges from package names when selectors differ"
 mkdir -p "$T/yarn-missing"

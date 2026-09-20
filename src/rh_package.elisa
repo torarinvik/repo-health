@@ -812,6 +812,25 @@ module Package:
         # verbatim in req_s/req_e and never treated as resolved versions (R009).
 
     private:
+        # pnpm's package table identifies the artifact while each snapshot
+        # keeps its full peer-suffixed dependency path. The latter is graph
+        # resolution context, not part of the published version label.
+        struct RhPnpmPackage:
+            name_s: mutable i64
+            name_e: mutable i64
+            ver_s: mutable i64
+            ver_e: mutable i64
+            origin_s: mutable i64
+            origin_e: mutable i64
+            digest_s: mutable i64
+            digest_e: mutable i64
+            src_kind: mutable u8
+
+        struct RhPnpmSnapshot:
+            key_s: mutable i64
+            key_e: mutable i64
+            node: mutable i64
+
         # Yarn Classic lock selectors resolve requirements by the exact
         # name/range descriptor written by Yarn. These spans stay private to
         # this adapter; graph consumers receive only package nodes and edges.
@@ -959,6 +978,262 @@ module Package:
                 same: bool = rh_span_eq2(pool, existing.name_s.usize(), existing.name_e.usize(), pool, name_s, name_e) and rh_span_eq2(pool, existing.req_s.usize(), existing.req_e.usize(), pool, req_s, req_e)
                 return true if same
                 i <- i + 1
+            false
+
+        # YAML scalar subset used by pnpm v9. Single quotes follow YAML's
+        # doubled-quote escape; double quotes use the existing bounded decoder.
+        def rh_pnpm_scalar(line: darray[u8]&, s: usize, e: usize, pool: mutable darray[u8]&, value_s: mutable i64&, value_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            trimmed_s: mutable i64 = 0
+            trimmed_e: mutable i64 = 0
+            rh_trim_span(line, s, e, &trimmed_s, &trimmed_e)
+            a: usize = trimmed_s.usize()
+            b: usize = trimmed_e.usize()
+            return false if b <= a
+            if line[a] == 34:
+                after: i64 = rh_quoted_span(line, a, b, pool, &value_s, &value_e)
+                return false if after < 0 or after.usize() != b
+                return true
+            if line[a] == 39:
+                start: i64 = pool.count.i64()
+                return false if b < a + 2 or line[b - 1] != 39
+                while i < b - 1 |i: usize = a + 1, pool, line, b|:
+                    if line[i] == 39:
+                        return false if i + 1 >= b - 1 or line[i + 1] != 39
+                        pool.push(39)
+                        i <- i + 2
+                    else:
+                        pool.push(line[i])
+                        i <- i + 1
+                value_s[0] <- start
+                value_e[0] <- pool.count.i64()
+                return true
+            plain_end: usize =
+                while i < b |i: usize = a| -> i:
+                    if line[i] == 35 and i > a and (line[i - 1] == 32 or line[i - 1] == 9):
+                        break
+                    i <- i + 1
+            return false if plain_end <= a
+            value_s[0] <- rh_pool_copy(pool, line, a, plain_end)
+            value_e[0] <- pool.count.i64()
+            true
+
+        # Split one YAML mapping line at its structural colon. Colons inside a
+        # quoted key or URL value are not separators.
+        def rh_pnpm_pair(line: darray[u8]&, s: usize, e: usize, pool: mutable darray[u8]&, key_s: mutable i64&, key_e: mutable i64&, value_s: mutable i64&, value_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            quoted: mutable u8 = 0
+            escaped: mutable bool = false
+            colon: mutable i64 = -1
+            while i < e |i: usize = s, quoted, escaped, colon, line|:
+                b: u8 = line[i]
+                if quoted == 34 and escaped:
+                    escaped <- false
+                elif quoted == 34 and b == 92:
+                    escaped <- true
+                elif quoted != 0 and b == quoted:
+                    if quoted == 39 and i + 1 < e and line[i + 1] == 39:
+                        i <- i + 1
+                    else:
+                        quoted <- 0
+                elif quoted == 0 and (b == 34 or b == 39):
+                    quoted <- b
+                elif quoted == 0 and b == 58 and (i + 1 == e or line[i + 1] == 32 or line[i + 1] == 9):
+                    colon <- i.i64()
+                    i <- e
+                i <- i + 1
+            return false if quoted != 0 or escaped or colon < 0
+            return false if not rh_pnpm_scalar(line, s, colon.usize(), pool, key_s, key_e)
+            raw_value_s: mutable i64 = 0
+            raw_value_e: mutable i64 = 0
+            rh_trim_span(line, colon.usize() + 1, e, &raw_value_s, &raw_value_e)
+            value_s[0] <- raw_value_s
+            value_e[0] <- raw_value_e
+            true
+
+        def rh_pnpm_snapshot_match(pool: darray[u8]&, snapshot: RhPnpmSnapshot, name_s: usize, name_e: usize, ver_s: usize, ver_e: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if snapshot.key_s < 0 or snapshot.key_e <= snapshot.key_s or name_e <= name_s or ver_e <= ver_s
+            key_s: usize = snapshot.key_s.usize()
+            key_e: usize = snapshot.key_e.usize()
+            return false if key_e - key_s != (name_e - name_s) + 1 + (ver_e - ver_s)
+            return false if not rh_span_eq2(pool, key_s, key_s + (name_e - name_s), pool, name_s, name_e)
+            return false if pool[key_s + (name_e - name_s)] != 64
+            rh_span_eq2(pool, key_s + (name_e - name_s) + 1, key_e, pool, ver_s, ver_e)
+
+        def rh_pnpm_source_for_version(pool: darray[u8]&, s: usize, e: usize) -> u8 can[Memory.Allocate, Abort.Panic]:
+            return RH_PSRC_GIT if rh_span_prefix(pool, s, e, "git+") or rh_span_prefix(pool, s, e, "git://") or rh_span_prefix(pool, s, e, "github:")
+            return RH_PSRC_PATH if rh_span_prefix(pool, s, e, "link:") or rh_span_prefix(pool, s, e, "file:") or rh_span_prefix(pool, s, e, "workspace:")
+            RH_PSRC_REGISTRY
+
+        def rh_pnpm_unsupported_locator(pool: darray[u8]&, s: usize, e: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if rh_span_prefix(pool, s, e, "npm:") or rh_span_prefix(pool, s, e, "link:") or rh_span_prefix(pool, s, e, "file:") or rh_span_prefix(pool, s, e, "workspace:") or rh_span_prefix(pool, s, e, "git+") or rh_span_prefix(pool, s, e, "git://") or rh_span_prefix(pool, s, e, "github:")
+            false
+
+        def rh_pnpm_id_parts(data: darray[u8]&, s: usize, e: usize, name_s: mutable i64&, name_e: mutable i64&, version_s: mutable i64&, version_e: mutable i64&, allow_peers: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if e <= s
+            scoped: bool = data[s] == 64
+            delimiter: usize =
+                while i < e |delimiter: usize = e, i: usize = s, after_slash: bool = false| -> delimiter:
+                    if scoped and data[i] == 47:
+                        after_slash <- true
+                    delimiter <- i if data[i] == 64 and (not scoped or after_slash)
+                    break if data[i] == 64 and (not scoped or after_slash)
+                    i <- i + 1
+            return false if delimiter <= s or delimiter + 1 >= e
+            suffix_s: usize =
+                while i < e |suffix_s: usize = e, i: usize = delimiter + 1| -> suffix_s:
+                    suffix_s <- i if allow_peers and data[i] == 40
+                    break if allow_peers and data[i] == 40
+                    i <- i + 1
+            return false if suffix_s <= delimiter + 1
+            return false if suffix_s < e and (not allow_peers or data[e - 1] != 41)
+            depth: i64 =
+                while i < e |depth: i64 = 0, i: usize = suffix_s| -> depth:
+                    depth <- depth + 1 if data[i] == 40
+                    depth <- depth - 1 if data[i] == 41
+                    break if depth < 0
+                    i <- i + 1
+            return false if depth < 0 or (suffix_s < e and depth != 0)
+            name_s[0] <- s.i64()
+            name_e[0] <- delimiter.i64()
+            version_s[0] <- (delimiter + 1).i64()
+            version_e[0] <- suffix_s.i64()
+            true
+
+        def rh_pnpm_find_package(packages: darray[RhPnpmPackage]&, pool: darray[u8]&, name_s: usize, name_e: usize, ver_s: usize, ver_e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < packages.count.i64() |i: i64 = 0, packages|:
+                package: RhPnpmPackage = packages[i.usize()]
+                if rh_span_eq2(pool, package.name_s.usize(), package.name_e.usize(), pool, name_s, name_e) and rh_span_eq2(pool, package.ver_s.usize(), package.ver_e.usize(), pool, ver_s, ver_e):
+                    return i
+                i <- i + 1
+            -1
+
+        def rh_pnpm_find_snapshot(snapshots: darray[RhPnpmSnapshot]&, pool: darray[u8]&, name_s: usize, name_e: usize, ver_s: usize, ver_e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < snapshots.count.i64() |i: i64 = 0, snapshots|:
+                snapshot: RhPnpmSnapshot = snapshots[i.usize()]
+                return snapshot.node if rh_pnpm_snapshot_match(pool, snapshot, name_s, name_e, ver_s, ver_e)
+                i <- i + 1
+            -1
+
+        def rh_pnpm_snapshot_duplicate(snapshots: darray[RhPnpmSnapshot]&, pool: darray[u8]&, key_s: usize, key_e: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < snapshots.count.i64() |i: i64 = 0, snapshots, pool|:
+                snapshot: RhPnpmSnapshot = snapshots[i.usize()]
+                return true if rh_span_eq2(pool, snapshot.key_s.usize(), snapshot.key_e.usize(), pool, key_s, key_e)
+                i <- i + 1
+            false
+
+        def rh_pnpm_importer_flush(reqs: mutable darray[RhRequire]&, name_s: i64, name_e: i64, spec_s: i64, spec_e: i64, ver_s: i64, ver_e: i64, depctx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if name_s < 0
+            return false if name_e <= name_s or spec_s < 0 or spec_e <= spec_s or ver_s < 0 or ver_e <= ver_s or depctx < 0
+            return false if reqs.count.i64() >= 200000
+            reqs.push(RhRequire{from: 0, name_s: name_s, name_e: name_e, ver_s: ver_s, ver_e: ver_e, src_s: -1, src_e: -1, req_s: spec_s, req_e: spec_e, depctx: depctx.u8(), optional: 0})
+            true
+
+        def rh_pnpm_resolution_field(line: darray[u8]&, value_s: usize, value_e: usize, pool: mutable darray[u8]&, packages: mutable darray[RhPnpmPackage]&, package_idx: i64, field_s: usize, field_e: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if package_idx < 0 or package_idx >= packages.count.i64()
+            package: mutable RhPnpmPackage = packages[package_idx.usize()]
+            parsed_s: mutable i64 = -1
+            parsed_e: mutable i64 = -1
+            return false if value_e <= value_s or not rh_pnpm_scalar(line, value_s, value_e, pool, &parsed_s, &parsed_e)
+            if rh_span_eq_text(pool, field_s, field_e, "integrity"):
+                return false if package.digest_s >= 0
+                package.digest_s <- parsed_s
+                package.digest_e <- parsed_e
+                packages[package_idx.usize()] <- package
+                return true
+            if rh_span_eq_text(pool, field_s, field_e, "tarball"):
+                return false if package.origin_s >= 0
+                package.origin_s <- parsed_s
+                package.origin_e <- parsed_e
+                package.src_kind <- rh_pnpm_source_for_version(pool, parsed_s.usize(), parsed_e.usize())
+                packages[package_idx.usize()] <- package
+                return true
+            if rh_span_eq_text(pool, field_s, field_e, "directory"):
+                return false if package.origin_s >= 0
+                package.origin_s <- parsed_s
+                package.origin_e <- parsed_e
+                package.src_kind <- RH_PSRC_PATH
+                packages[package_idx.usize()] <- package
+                return true
+            false
+
+        def rh_pnpm_inline_resolution(line: darray[u8]&, value_s: usize, value_e: usize, pool: mutable darray[u8]&, packages: mutable darray[RhPnpmPackage]&, package_idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if value_e - value_s < 2 or line[value_s] != 123 or line[value_e - 1] != 125
+            start: usize = value_s + 1
+            end: usize = value_e - 1
+            return true if start == end
+            while pos <= end |pos: usize = start, pool, packages|:
+                item_end: usize =
+                    while i < end |item_end: usize = end, i: usize = pos, quoted: mutable u8 = 0, escaped: mutable bool = false| -> item_end:
+                        b: u8 = line[i]
+                        if quoted == 34 and escaped:
+                            escaped <- false
+                        elif quoted == 34 and b == 92:
+                            escaped <- true
+                        elif quoted != 0 and b == quoted:
+                            if quoted == 39 and i + 1 < end and line[i + 1] == 39:
+                                i <- i + 1
+                            else:
+                                quoted <- 0
+                        elif quoted == 0 and (b == 34 or b == 39):
+                            quoted <- b
+                        elif quoted == 0 and b == 44:
+                            item_end <- i
+                            i <- end
+                        i <- i + 1
+                key_s: mutable i64 = 0
+                key_e: mutable i64 = 0
+                field_s: mutable i64 = 0
+                field_e: mutable i64 = 0
+                return false if not rh_pnpm_pair(line, pos, item_end, pool, &key_s, &key_e, &field_s, &field_e)
+                return false if field_s >= field_e or not rh_pnpm_resolution_field(line, field_s.usize(), field_e.usize(), pool, packages, package_idx, key_s.usize(), key_e.usize())
+                pos <- item_end + 1
+            true
+
+        def rh_pnpm_root(pkg_bytes: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if pkg_bytes.count == 0 or pkg_bytes.count > 1048576
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            parsed: i64 = Json::rh_json_parse(pkg_bytes, nodes, texts)
+            return -1 if parsed < 0
+            manifest: Json::RhJsonNode = nodes[parsed.usize()]
+            return -1 if manifest.kind != 5
+            name_idx: i64 = Json::rh_json_obj_get(nodes, texts, parsed, "name")
+            version_idx: i64 = Json::rh_json_obj_get(nodes, texts, parsed, "version")
+            return -1 if name_idx < 0 or version_idx < 0
+            name: Json::RhJsonNode = nodes[name_idx.usize()]
+            version: Json::RhJsonNode = nodes[version_idx.usize()]
+            return -1 if name.kind != 3 or version.kind != 3 or name.text_start == name.text_end or version.text_start == version.text_end
+            root: i64 = rh_node_add(pkgs, RH_ECO_NPM)
+            return -1 if root < 0
+            node: mutable RhPkgNode = pkgs[root.usize()]
+            node.name_s <- rh_pool_copy(pool, texts, name.text_start.usize(), name.text_end.usize())
+            node.name_e <- pool.count.i64()
+            node.ver_s <- rh_pool_copy(pool, texts, version.text_start.usize(), version.text_end.usize())
+            node.ver_e <- pool.count.i64()
+            pkgs[root.usize()] <- node
+            root
+
+        def rh_pnpm_resolve(pool: darray[u8]&, snapshots: darray[RhPnpmSnapshot]&, reqs: darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < reqs.count.i64() |i: i64 = 0, edges, unresolved|:
+                requirement: RhRequire = reqs[i.usize()]
+                target: mutable i64 = -1
+                reason: mutable u8 = RH_UNRES_MISSING
+                if requirement.ver_s >= 0 and rh_pnpm_unsupported_locator(pool, requirement.ver_s.usize(), requirement.ver_e.usize()):
+                    reason <- RH_UNRES_CONTEXT
+                elif requirement.ver_s >= 0:
+                    target <- rh_pnpm_find_snapshot(snapshots, pool, requirement.name_s.usize(), requirement.name_e.usize(), requirement.ver_s.usize(), requirement.ver_e.usize())
+                if target >= 0:
+                    _ = rh_edge_add(edges, requirement.from, target, requirement.depctx, requirement.optional)
+                else:
+                    unresolved.push(RhUnresolved{from: requirement.from, name_s: requirement.name_s, name_e: requirement.name_e, req_s: requirement.req_s, req_e: requirement.req_e, reason: reason, optional: requirement.optional})
+                i <- i + 1
+            edges.count.i64()
+
+        def rh_pnpm_setting_known(pool: darray[u8]&, s: usize, e: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if rh_span_eq_text(pool, s, e, "autoInstallPeers") or rh_span_eq_text(pool, s, e, "excludeLinksFromLockfile") or rh_span_eq_text(pool, s, e, "peersSuffixMaxLength") or rh_span_eq_text(pool, s, e, "injectWorkspacePackages") or rh_span_eq_text(pool, s, e, "dedupePeerDependents") or rh_span_eq_text(pool, s, e, "resolvePeersFromWorkspaceRoot") or rh_span_eq_text(pool, s, e, "linkWorkspacePackages") or rh_span_eq_text(pool, s, e, "preferWorkspacePackages") or rh_span_eq_text(pool, s, e, "strictPeerDependencies") or rh_span_eq_text(pool, s, e, "nodeLinker") or rh_span_eq_text(pool, s, e, "sharedWorkspaceLockfile") or rh_span_eq_text(pool, s, e, "saveWorkspaceProtocol") or rh_span_eq_text(pool, s, e, "resolutionMode") or rh_span_eq_text(pool, s, e, "packageManagerStrict") or rh_span_eq_text(pool, s, e, "packageManagerStrictVersion") or rh_span_eq_text(pool, s, e, "virtualStoreDir") or rh_span_eq_text(pool, s, e, "hoistPattern") or rh_span_eq_text(pool, s, e, "publicHoistPattern") or rh_span_eq_text(pool, s, e, "registry") or rh_span_eq_text(pool, s, e, "pnpmfileChecksum") or rh_span_eq_text(pool, s, e, "packageExtensionsChecksum")
+            false
+
+        def rh_pnpm_package_field_known(pool: darray[u8]&, s: usize, e: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if rh_span_eq_text(pool, s, e, "peerDependencies") or rh_span_eq_text(pool, s, e, "peerDependenciesMeta") or rh_span_eq_text(pool, s, e, "engines") or rh_span_eq_text(pool, s, e, "os") or rh_span_eq_text(pool, s, e, "cpu") or rh_span_eq_text(pool, s, e, "libc") or rh_span_eq_text(pool, s, e, "deprecated") or rh_span_eq_text(pool, s, e, "bundledDependencies") or rh_span_eq_text(pool, s, e, "hasBin") or rh_span_eq_text(pool, s, e, "requiresBuild") or rh_span_eq_text(pool, s, e, "prepare") or rh_span_eq_text(pool, s, e, "optional") or rh_span_eq_text(pool, s, e, "dev") or rh_span_eq_text(pool, s, e, "patched")
             false
 
         def rh_yarn_resolve(pool: darray[u8]&, selectors: darray[RhYarnSelector]&, reqs: darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -1642,6 +1917,294 @@ module Package:
                 return -1
             return -1 if not header_seen or entry_count == 0
             _ = rh_yarn_resolve(pool, selectors, reqs, edges, unresolved)
+            root
+
+        # pnpm v9's importer resolution and snapshot graph are exact lockfile
+        # evidence. Workspace importers and non-registry locators remain
+        # explicit context-unresolved requirements; peer suffixes distinguish
+        # private snapshot paths while published node versions stay plain.
+        def rh_pnpm_lock_parse(lock: darray[u8]&, pkg_bytes: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if lock.count == 0 or lock.count > 4194304
+            root: i64 = rh_pnpm_root(pkg_bytes, pkgs, pool)
+            return -1 if root != 0
+            packages: mutable darray[RhPnpmPackage] = []
+            snapshots: mutable darray[RhPnpmSnapshot] = []
+            section: mutable i64 = 0
+            lock_version_seen: mutable bool = false
+            settings_seen: mutable bool = false
+            importers_seen: mutable bool = false
+            packages_seen: mutable bool = false
+            snapshots_seen: mutable bool = false
+            root_importer_seen: mutable bool = false
+            importer_count: mutable i64 = 0
+            importer_scope: mutable i64 = -1
+            importer_name_s: mutable i64 = -1
+            importer_name_e: mutable i64 = -1
+            importer_spec_s: mutable i64 = -1
+            importer_spec_e: mutable i64 = -1
+            importer_ver_s: mutable i64 = -1
+            importer_ver_e: mutable i64 = -1
+            current_package: mutable i64 = -1
+            package_resolution_nested: mutable bool = false
+            package_resolution_seen: mutable bool = false
+            package_metadata_skip: mutable bool = false
+            current_snapshot: mutable i64 = -1
+            snapshot_scope: mutable i64 = -1
+            peer_list_skip: mutable bool = false
+            while pos < lock.count |pos: usize = 0, section, lock_version_seen, settings_seen, importers_seen, packages_seen, snapshots_seen, root_importer_seen, importer_count, importer_scope, importer_name_s, importer_name_e, importer_spec_s, importer_spec_e, importer_ver_s, importer_ver_e, current_package, package_resolution_nested, package_resolution_seen, package_metadata_skip, current_snapshot, snapshot_scope, peer_list_skip, packages, snapshots, pkgs, pool, reqs, edges, unresolved, lock|:
+                line_end: usize =
+                    newline: i64 = Base::rh_find_byte(lock, pos, 10)
+                    newline.usize() if newline >= 0 else lock.count
+                return -1 if line_end - pos > 65536
+                start: mutable i64 = 0
+                end: mutable i64 = 0
+                rh_trim_span(lock, pos, line_end, &start, &end)
+                indent: usize = start.usize() - pos
+                if end > start:
+                    return -1 if lock[pos] == 9
+                    if lock[start.usize()] != 35:
+                        return -1 if section == 2 and indent < 8 and not rh_pnpm_importer_flush(reqs, importer_name_s, importer_name_e, importer_spec_s, importer_spec_e, importer_ver_s, importer_ver_e, importer_scope)
+                        if section == 2 and indent < 8 and importer_name_s >= 0:
+                            importer_name_s <- -1
+                            importer_name_e <- -1
+                            importer_spec_s <- -1
+                            importer_spec_e <- -1
+                            importer_ver_s <- -1
+                            importer_ver_e <- -1
+                        if section == 3 and indent <= 4:
+                            package_resolution_nested <- false
+                            package_resolution_seen <- false if indent == 2
+                            package_metadata_skip <- false
+                        if section == 4 and indent < 6:
+                            snapshot_scope <- -1
+                            peer_list_skip <- false
+                        if section == 3 and package_metadata_skip and indent > 4:
+                            pos <- line_end + 1
+                            continue
+                        if indent == 0:
+                            key_s: mutable i64 = 0
+                            key_e: mutable i64 = 0
+                            value_s: mutable i64 = 0
+                            value_e: mutable i64 = 0
+                            return -1 if not rh_pnpm_pair(lock, start.usize(), end.usize(), pool, &key_s, &key_e, &value_s, &value_e)
+                            if rh_span_lit(pool, key_s.usize(), key_e.usize(), "lockfileVersion"):
+                                return -1 if lock_version_seen or value_s >= value_e
+                                version_s: mutable i64 = -1
+                                version_e: mutable i64 = -1
+                                return -1 if not rh_pnpm_scalar(lock, value_s.usize(), value_e.usize(), pool, &version_s, &version_e)
+                                return -1 if not rh_span_lit(pool, version_s.usize(), version_e.usize(), "9.0")
+                                lock_version_seen <- true
+                            elif rh_span_lit(pool, key_s.usize(), key_e.usize(), "settings"):
+                                return -1 if settings_seen or value_s < value_e
+                                settings_seen <- true
+                                section <- 1
+                            elif rh_span_lit(pool, key_s.usize(), key_e.usize(), "importers"):
+                                return -1 if importers_seen or value_s < value_e
+                                importers_seen <- true
+                                section <- 2
+                            elif rh_span_lit(pool, key_s.usize(), key_e.usize(), "packages"):
+                                return -1 if packages_seen or value_s < value_e or not importers_seen
+                                packages_seen <- true
+                                section <- 3
+                            elif rh_span_lit(pool, key_s.usize(), key_e.usize(), "snapshots"):
+                                return -1 if snapshots_seen or value_s < value_e or not packages_seen
+                                snapshots_seen <- true
+                                section <- 4
+                            else:
+                                return -1
+                        elif section == 1:
+                            return -1 if indent != 2
+                            key_s: mutable i64 = 0
+                            key_e: mutable i64 = 0
+                            value_s: mutable i64 = 0
+                            value_e: mutable i64 = 0
+                            return -1 if not rh_pnpm_pair(lock, start.usize(), end.usize(), pool, &key_s, &key_e, &value_s, &value_e)
+                            return -1 if not rh_pnpm_setting_known(pool, key_s.usize(), key_e.usize()) or value_s >= value_e
+                            valid_setting: bool =
+                                setting_s: mutable i64 = -1
+                                setting_e: mutable i64 = -1
+                                rh_pnpm_scalar(lock, value_s.usize(), value_e.usize(), pool, &setting_s, &setting_e)
+                            return -1 if not valid_setting
+                        elif section == 2:
+                            key_s: mutable i64 = 0
+                            key_e: mutable i64 = 0
+                            value_s: mutable i64 = 0
+                            value_e: mutable i64 = 0
+                            return -1 if not rh_pnpm_pair(lock, start.usize(), end.usize(), pool, &key_s, &key_e, &value_s, &value_e)
+                            if indent == 2:
+                                return -1 if importer_count > 0 or value_s < value_e or not rh_span_lit(pool, key_s.usize(), key_e.usize(), ".")
+                                importer_count <- importer_count + 1
+                                root_importer_seen <- true
+                                importer_scope <- -1
+                            elif indent == 4:
+                                return -1 if not root_importer_seen or value_s < value_e
+                                importer_scope <- -1
+                                importer_scope <- 0 if rh_span_lit(pool, key_s.usize(), key_e.usize(), "dependencies")
+                                importer_scope <- 1 if rh_span_lit(pool, key_s.usize(), key_e.usize(), "devDependencies")
+                                importer_scope <- 2 if rh_span_lit(pool, key_s.usize(), key_e.usize(), "optionalDependencies")
+                                return -1 if importer_scope < 0
+                            elif indent == 6:
+                                return -1 if importer_scope < 0 or importer_name_s >= 0 or value_s < value_e
+                                importer_name_s <- key_s
+                                importer_name_e <- key_e
+                            elif indent == 8:
+                                return -1 if importer_name_s < 0 or value_s >= value_e
+                                field_s: mutable i64 = -1
+                                field_e: mutable i64 = -1
+                                return -1 if not rh_pnpm_scalar(lock, value_s.usize(), value_e.usize(), pool, &field_s, &field_e)
+                                if rh_span_lit(pool, key_s.usize(), key_e.usize(), "specifier"):
+                                    return -1 if importer_spec_s >= 0
+                                    importer_spec_s <- field_s
+                                    importer_spec_e <- field_e
+                                elif rh_span_lit(pool, key_s.usize(), key_e.usize(), "version"):
+                                    return -1 if importer_ver_s >= 0
+                                    importer_ver_s <- field_s
+                                    importer_ver_e <- field_e
+                                else:
+                                    return -1
+                            else:
+                                return -1
+                        elif section == 3:
+                            if indent == 2:
+                                key_s: mutable i64 = 0
+                                key_e: mutable i64 = 0
+                                value_s: mutable i64 = 0
+                                value_e: mutable i64 = 0
+                                return -1 if packages.count.i64() >= 200000 or not rh_pnpm_pair(lock, start.usize(), end.usize(), pool, &key_s, &key_e, &value_s, &value_e)
+                                return -1 if value_s < value_e and not rh_span_lit(lock, value_s.usize(), value_e.usize(), "{}")
+                                name_s: mutable i64 = -1
+                                name_e: mutable i64 = -1
+                                ver_s: mutable i64 = -1
+                                ver_e: mutable i64 = -1
+                                return -1 if not rh_pnpm_id_parts(pool, key_s.usize(), key_e.usize(), &name_s, &name_e, &ver_s, &ver_e, false)
+                                return -1 if rh_pnpm_find_package(packages, pool, name_s.usize(), name_e.usize(), ver_s.usize(), ver_e.usize()) >= 0
+                                source_kind: u8 = rh_pnpm_source_for_version(pool, ver_s.usize(), ver_e.usize())
+                                packages.push(RhPnpmPackage{name_s: name_s, name_e: name_e, ver_s: ver_s, ver_e: ver_e, origin_s: -1, origin_e: -1, digest_s: -1, digest_e: -1, src_kind: source_kind})
+                                current_package <- packages.count.i64() - 1
+                                package_resolution_nested <- false
+                                package_resolution_seen <- false
+                            elif indent == 4:
+                                return -1 if current_package < 0
+                                key_s: mutable i64 = 0
+                                key_e: mutable i64 = 0
+                                value_s: mutable i64 = 0
+                                value_e: mutable i64 = 0
+                                return -1 if not rh_pnpm_pair(lock, start.usize(), end.usize(), pool, &key_s, &key_e, &value_s, &value_e)
+                                if rh_span_lit(pool, key_s.usize(), key_e.usize(), "resolution"):
+                                    return -1 if package_resolution_seen
+                                    package_resolution_seen <- true
+                                    if value_s >= value_e:
+                                        package_resolution_nested <- true
+                                    else:
+                                        return -1 if not rh_pnpm_inline_resolution(lock, value_s.usize(), value_e.usize(), pool, packages, current_package)
+                                elif rh_pnpm_package_field_known(pool, key_s.usize(), key_e.usize()):
+                                    if value_s < value_e:
+                                        valid_metadata_scalar: bool =
+                                            field_s: mutable i64 = -1
+                                            field_e: mutable i64 = -1
+                                            rh_pnpm_scalar(lock, value_s.usize(), value_e.usize(), pool, &field_s, &field_e)
+                                        return -1 if not valid_metadata_scalar
+                                    else:
+                                        package_metadata_skip <- true
+                                else:
+                                    return -1
+                            elif indent == 6 and package_resolution_nested:
+                                key_s: mutable i64 = 0
+                                key_e: mutable i64 = 0
+                                value_s: mutable i64 = 0
+                                value_e: mutable i64 = 0
+                                return -1 if not rh_pnpm_pair(lock, start.usize(), end.usize(), pool, &key_s, &key_e, &value_s, &value_e)
+                                return -1 if value_s >= value_e or not rh_pnpm_resolution_field(lock, value_s.usize(), value_e.usize(), pool, packages, current_package, key_s.usize(), key_e.usize())
+                            else:
+                                return -1
+                        elif section == 4:
+                            if indent == 2:
+                                key_s: mutable i64 = 0
+                                key_e: mutable i64 = 0
+                                value_s: mutable i64 = 0
+                                value_e: mutable i64 = 0
+                                return -1 if snapshots.count.i64() >= 200000 or not rh_pnpm_pair(lock, start.usize(), end.usize(), pool, &key_s, &key_e, &value_s, &value_e)
+                                return -1 if value_s < value_e and not rh_span_lit(lock, value_s.usize(), value_e.usize(), "{}")
+                                name_s: mutable i64 = -1
+                                name_e: mutable i64 = -1
+                                ver_s: mutable i64 = -1
+                                ver_e: mutable i64 = -1
+                                return -1 if not rh_pnpm_id_parts(pool, key_s.usize(), key_e.usize(), &name_s, &name_e, &ver_s, &ver_e, true)
+                                package_index: i64 = rh_pnpm_find_package(packages, pool, name_s.usize(), name_e.usize(), ver_s.usize(), ver_e.usize())
+                                return -1 if package_index < 0
+                                return -1 if rh_pnpm_snapshot_duplicate(snapshots, pool, key_s.usize(), key_e.usize())
+                                package: RhPnpmPackage = packages[package_index.usize()]
+                                node_index: i64 = rh_node_add(pkgs, RH_ECO_NPM)
+                                return -1 if node_index < 0
+                                node: mutable RhPkgNode = pkgs[node_index.usize()]
+                                node.name_s <- name_s
+                                node.name_e <- name_e
+                                node.ver_s <- ver_s
+                                node.ver_e <- ver_e
+                                node.src_kind <- package.src_kind
+                                node.origin_s <- package.origin_s
+                                node.origin_e <- package.origin_e
+                                if package.digest_s >= 0:
+                                    node.has_digest <- 1
+                                    node.dig_s <- package.digest_s
+                                    node.dig_e <- package.digest_e
+                                pkgs[node_index.usize()] <- node
+                                snapshots.push(RhPnpmSnapshot{key_s: key_s, key_e: key_e, node: node_index})
+                                current_snapshot <- snapshots.count.i64() - 1
+                                snapshot_scope <- -1
+                                peer_list_skip <- false
+                            elif indent == 4:
+                                return -1 if current_snapshot < 0
+                                key_s: mutable i64 = 0
+                                key_e: mutable i64 = 0
+                                value_s: mutable i64 = 0
+                                value_e: mutable i64 = 0
+                                return -1 if not rh_pnpm_pair(lock, start.usize(), end.usize(), pool, &key_s, &key_e, &value_s, &value_e)
+                                if rh_span_lit(pool, key_s.usize(), key_e.usize(), "dependencies"):
+                                    return -1 if value_s < value_e
+                                    snapshot_scope <- 0
+                                    peer_list_skip <- false
+                                elif rh_span_lit(pool, key_s.usize(), key_e.usize(), "optionalDependencies"):
+                                    return -1 if value_s < value_e
+                                    snapshot_scope <- 2
+                                    peer_list_skip <- false
+                                elif rh_span_lit(pool, key_s.usize(), key_e.usize(), "transitivePeerDependencies"):
+                                    snapshot_scope <- 5
+                                    peer_list_skip <- value_s == value_e
+                                    if value_s < value_e:
+                                        list_s: mutable i64 = -1
+                                        list_e: mutable i64 = -1
+                                        return -1 if not rh_pnpm_scalar(lock, value_s.usize(), value_e.usize(), pool, &list_s, &list_e)
+                                        return -1 if list_e - list_s < 2 or pool[list_s.usize()] != 91 or pool[list_e.usize() - 1] != 93
+                                else:
+                                    return -1
+                            elif indent == 6 and snapshot_scope == 5 and peer_list_skip:
+                                return -1 if lock[start.usize()] != 45 or start.usize() + 1 >= end.usize() or lock[start.usize() + 1] != 32
+                                valid_peer_item: bool =
+                                    peer_s: mutable i64 = -1
+                                    peer_e: mutable i64 = -1
+                                    rh_pnpm_scalar(lock, start.usize() + 2, end.usize(), pool, &peer_s, &peer_e)
+                                return -1 if not valid_peer_item
+                            elif indent == 6 and (snapshot_scope == 0 or snapshot_scope == 2):
+                                key_s: mutable i64 = 0
+                                key_e: mutable i64 = 0
+                                value_s: mutable i64 = 0
+                                value_e: mutable i64 = 0
+                                return -1 if reqs.count.i64() >= 200000 or not rh_pnpm_pair(lock, start.usize(), end.usize(), pool, &key_s, &key_e, &value_s, &value_e)
+                                return -1 if value_s >= value_e
+                                locked_s: mutable i64 = -1
+                                locked_e: mutable i64 = -1
+                                return -1 if not rh_pnpm_scalar(lock, value_s.usize(), value_e.usize(), pool, &locked_s, &locked_e)
+                                snapshot: RhPnpmSnapshot = snapshots[current_snapshot.usize()]
+                                reqs.push(RhRequire{from: snapshot.node, name_s: key_s, name_e: key_e, ver_s: locked_s, ver_e: locked_e, src_s: -1, src_e: -1, req_s: locked_s, req_e: locked_e, depctx: snapshot_scope.u8(), optional: 0})
+                            else:
+                                return -1
+                        else:
+                            return -1
+                pos <- line_end + 1
+            return -1 if not lock_version_seen or not importers_seen or not root_importer_seen or not packages_seen or not snapshots_seen
+            return -1 if not rh_pnpm_importer_flush(reqs, importer_name_s, importer_name_e, importer_spec_s, importer_spec_e, importer_ver_s, importer_ver_e, importer_scope)
+            _ = rh_pnpm_resolve(pool, snapshots, reqs, edges, unresolved)
             root
 
         def rh_span_eq_text(texts: darray[u8]&, s: usize, e: usize, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
