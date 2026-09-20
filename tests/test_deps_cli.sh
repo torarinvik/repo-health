@@ -437,6 +437,70 @@ assert by["nuget"]["development_resolved_edges"] == 1, by
 print("[deps] NuGet graph + development scope OK")
 PY
 
+echo "[deps] NuGet packages.lock.json preserves one target, transitive edges, and content hashes"
+mkdir -p "$T/nuget-lock-src"
+cp "$ROOT/fixtures/packages/nuget-packages.lock.json" "$T/nuget-lock-src/packages.lock.json"
+"$ROOT/build/rh_cli" deps --repo "$T/nuget-lock-src" --out "$T/nuget-lock-out" \
+  | grep -q "ecosystems=1 nuget=2/2 unresolved=0 unsupported=1" || fail "NuGet lock summary"
+cmp -s "$T/nuget-lock-out/deps-nuget-graph.json" "$ROOT/fixtures/packages/nuget-packages-lock.golden.json" || fail "NuGet lock graph differs from golden"
+python3 - "$T/nuget-lock-out" <<'PY'
+import json, sys
+out = sys.argv[1]
+g = json.load(open(out + "/deps-nuget-graph.json"))
+m = json.load(open(out + "/deps-metrics.json"))
+assert g["nodes"][0]["target_framework"] == "net8.0", g["nodes"][0]
+assert [n["name"] for n in g["nodes"]] == ["root", "Newtonsoft.Json", "System.Memory"], g["nodes"]
+assert [(e["from"], e["to"]) for e in g["edges"]] == [(0, 1), (1, 2)], g["edges"]
+assert [a["kind"] for a in g["artifacts"]] == ["nuget_content", "nuget_content"], g["artifacts"]
+assert all(a["identity_state"] == "unknown" and a["expected_digest"].startswith("nuget-sha512:") for a in g["artifacts"]), g["artifacts"]
+by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
+assert by["nuget"]["evidence"] == "packages.lock.json", by
+assert by["nuget"]["artifact_digest_coverage"] == {"num": 2, "den": 2}, by
+print("[deps] NuGet lock graph + target + expected content hashes OK")
+PY
+
+echo "[deps] NuGet lock rejects unsupported versions/fields, multiple targets, malformed dependencies, bad hashes, and ambiguous dual inputs"
+python3 - "$ROOT/fixtures/packages/nuget-packages.lock.json" "$T" <<'PY'
+import copy, json, os, sys
+source, root = sys.argv[1:]
+base = json.load(open(source))
+cases = {
+    "nuget-lock-bad-version": copy.deepcopy(base),
+    "nuget-lock-unknown-field": copy.deepcopy(base),
+    "nuget-lock-multi-target": copy.deepcopy(base),
+    "nuget-lock-malformed-dependencies": copy.deepcopy(base),
+    "nuget-lock-bad-hash": copy.deepcopy(base),
+    "nuget-lock-duplicate-id": copy.deepcopy(base),
+}
+cases["nuget-lock-bad-version"]["version"] = 2
+cases["nuget-lock-unknown-field"]["futureNuGetField"] = True
+framework = cases["nuget-lock-multi-target"]["dependencies"]["net8.0"]
+cases["nuget-lock-multi-target"]["dependencies"]["net9.0"] = copy.deepcopy(framework)
+cases["nuget-lock-malformed-dependencies"]["dependencies"]["net8.0"]["Newtonsoft.Json"]["dependencies"] = []
+cases["nuget-lock-bad-hash"]["dependencies"]["net8.0"]["Newtonsoft.Json"]["contentHash"] = "not-a-sha512"
+framework = cases["nuget-lock-duplicate-id"]["dependencies"]["net8.0"]
+framework["newtonsoft.json"] = copy.deepcopy(framework["Newtonsoft.Json"])
+for name, document in cases.items():
+    directory = os.path.join(root, name)
+    os.makedirs(directory, exist_ok=True)
+    json.dump(document, open(os.path.join(directory, "packages.lock.json"), "w"))
+PY
+for name in nuget-lock-bad-version nuget-lock-unknown-field nuget-lock-multi-target nuget-lock-malformed-dependencies nuget-lock-bad-hash nuget-lock-duplicate-id; do
+  set +e
+  "$ROOT/build/rh_cli" deps --repo "$T/$name" --out "$T/$name-out" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" -eq 4 ]] || fail "$name must fail closed (got $rc)"
+  [[ ! -f "$T/$name-out/deps-nuget-graph.json" ]] || fail "$name wrote a partial graph"
+done
+cp "$T/nugetsrc/packages.config" "$T/nuget-lock-src/packages.config"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/nuget-lock-src" --out "$T/nuget-dual-out" >/dev/null 2>&1
+rc_dual_nuget=$?
+set -e
+[[ "$rc_dual_nuget" -eq 4 ]] || fail "packages.config + packages.lock.json must be rejected (got $rc_dual_nuget)"
+echo "[deps] NuGet lock negative cases OK"
+
 echo "[deps] pom.xml resolves exact Maven coordinates and preserves scopes"
 mkdir -p "$T/mavensrc"
 cat > "$T/mavensrc/pom.xml" <<'EOF'

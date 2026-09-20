@@ -1,0 +1,272 @@
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_base64.elisa"
+include "./rh_package.elisa"
+
+module NugetLock:
+    public:
+        # Bounded NuGet packages.lock.json reader. Version 1 and one target
+        # framework are accepted; all package identities, versions, and edge
+        # targets come from the lock file, never from a restore operation.
+        def rh_nuget_lock_parse(lock_bytes: darray[u8]&, pkgs: mutable darray[Package::RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[Package::RhRequire]&, edges: mutable darray[Package::RhDepEdge]&, unresolved: mutable darray[Package::RhUnresolved]&, artifacts: mutable darray[Package::RhArtifact]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root_json: i64 = Json::rh_json_parse(lock_bytes, nodes, texts)
+            return -1 if root_json < 0
+            return -1 if nodes[root_json.usize()].kind != Json::RH_JSON_OBJ
+            return -1 if not rh_nuget_keys_allowed(nodes, texts, root_json, false)
+
+            version_idx: i64 = rh_json_field(nodes, texts, root_json, "version")
+            version_ok: mutable i64 = 0
+            version: i64 = Json::rh_json_int(nodes, lock_bytes, version_idx, &version_ok)
+            return -1 if version_ok != 1 or version != 1
+
+            frameworks_idx: i64 = rh_json_field(nodes, texts, root_json, "dependencies")
+            return -1 if frameworks_idx < 0 or nodes[frameworks_idx.usize()].kind != Json::RH_JSON_OBJ
+            frameworks: Json::RhJsonNode = nodes[frameworks_idx.usize()]
+            return -1 if frameworks.child_count % 2 != 0 or frameworks.child_count > 2
+            framework_name: i64 = frameworks.first_child
+            return -1 if framework_name < 0
+            framework_value: i64 = nodes[framework_name.usize()].next_sibling
+            return -1 if framework_value < 0
+            return -1 if nodes[framework_name.usize()].kind != Json::RH_JSON_STR
+            return -1 if nodes[framework_value.usize()].kind != Json::RH_JSON_OBJ
+
+            package_count: i64 = nodes[framework_value.usize()].child_count / 2
+            return -1 if package_count > 10000
+            name_table: mutable darray[i64] =
+                while i < package_count * 2 + 1 |table: mutable darray[i64] = [], i: i64 = 0| -> table:
+                    table.push(-1)
+                    i <- i + 1
+
+            root: i64 = Package::rh_node_add(pkgs, Package::RH_ECO_NUGET)
+            return -1 if root != 0
+            root_name: mutable darray[u8] = []
+            Base::rh_push_text(root_name, "root")
+            root_name_s: i64 = Package::rh_pool_copy(pool, root_name, 0, root_name.count)
+            root_node: mutable Package::RhPkgNode = pkgs[0]
+            root_node.name_s <- root_name_s
+            root_node.name_e <- root_name_s + root_name.count.i64()
+            root_node.src_kind <- Package::RH_PSRC_UNKNOWN
+            root_node.framework_s <- Package::rh_pool_copy(pool, texts, nodes[framework_name.usize()].text_start.usize(), nodes[framework_name.usize()].text_end.usize())
+            root_node.framework_e <- pool.count.i64()
+            pkgs[0] <- root_node
+
+            while member >= 0 |member: i64 = nodes[framework_value.usize()].first_child, pkgs, pool, reqs, edges, artifacts, name_table|:
+                key_idx: i64 = member
+                value_idx: i64 = nodes[key_idx.usize()].next_sibling
+                return -1 if value_idx < 0 or nodes[key_idx.usize()].kind != Json::RH_JSON_STR
+                package_s: i64 = nodes[key_idx.usize()].text_start
+                package_e: i64 = nodes[key_idx.usize()].text_end
+                return -1 if package_e <= package_s
+                entry: i64 = value_idx
+                return -1 if nodes[entry.usize()].kind != Json::RH_JSON_OBJ
+                return -1 if not rh_nuget_keys_allowed(nodes, texts, entry, true)
+
+                type_idx: i64 = rh_json_field(nodes, texts, entry, "type")
+                type_s: mutable i64 = -1
+                type_e: mutable i64 = -1
+                return -1 if not Json::rh_json_str_span(nodes, type_idx, &type_s, &type_e)
+                direct: bool = rh_span_literal(texts, type_s, type_e, "Direct")
+                transitive: bool = rh_span_literal(texts, type_s, type_e, "Transitive")
+                return -1 if not direct and not transitive
+
+                resolved_idx: i64 = rh_json_field(nodes, texts, entry, "resolved")
+                resolved_s: mutable i64 = -1
+                resolved_e: mutable i64 = -1
+                return -1 if not Json::rh_json_str_span(nodes, resolved_idx, &resolved_s, &resolved_e)
+                return -1 if not Package::rh_nuget_version_exact(texts, resolved_s, resolved_e)
+
+                requested_idx: i64 = rh_json_field(nodes, texts, entry, "requested")
+                requested_s: mutable i64 = -1
+                requested_e: mutable i64 = -1
+                if direct:
+                    return -1 if not Json::rh_json_str_span(nodes, requested_idx, &requested_s, &requested_e)
+                    return -1 if requested_e <= requested_s
+                elif requested_idx >= 0:
+                    return -1 if not Json::rh_json_str_span(nodes, requested_idx, &requested_s, &requested_e)
+                    return -1 if requested_e <= requested_s
+
+                slot: mutable i64 = -1
+                existing: mutable i64 = -1
+                return -1 if not rh_nuget_name_slot(name_table, pkgs, pool, texts, package_s, package_e, &slot, &existing)
+                return -1 if existing >= 0
+
+                package: i64 = Package::rh_node_add(pkgs, Package::RH_ECO_NUGET)
+                return -1 if package < 1
+                name_s: i64 = Package::rh_pool_copy(pool, texts, package_s.usize(), package_e.usize())
+                name_e: i64 = name_s + (package_e - package_s)
+                version_s: i64 = Package::rh_pool_copy(pool, texts, resolved_s.usize(), resolved_e.usize())
+                version_e: i64 = version_s + (resolved_e - resolved_s)
+                package_node: mutable Package::RhPkgNode = pkgs[package.usize()]
+                package_node.name_s <- name_s
+                package_node.name_e <- name_e
+                package_node.ver_s <- version_s
+                package_node.ver_e <- version_e
+                package_node.src_kind <- Package::RH_PSRC_REGISTRY
+                pkgs[package.usize()] <- package_node
+                name_table[slot.usize()] <- package
+
+                hash_idx: i64 = rh_json_field(nodes, texts, entry, "contentHash")
+                if hash_idx >= 0:
+                    hash_s: mutable i64 = -1
+                    hash_e: mutable i64 = -1
+                    return -1 if not Json::rh_json_str_span(nodes, hash_idx, &hash_s, &hash_e)
+                    return -1 if not Base64::rh_base64_sha512_valid(texts, hash_s.usize(), hash_e.usize())
+                    expected_s: i64 = pool.count.i64()
+                    Base::rh_push_text(pool, "nuget-sha512:")
+                    Package::rh_pool_copy(pool, texts, hash_s.usize(), hash_e.usize())
+                    expected_e: i64 = pool.count.i64()
+                    package_node.has_digest <- 1
+                    package_node.dig_s <- expected_s
+                    package_node.dig_e <- expected_e
+                    pkgs[package.usize()] <- package_node
+                    return -1 if Package::rh_artifact_add_expected(artifacts, package, Package::RH_ART_KIND_NUGET_CONTENT, expected_s, expected_e) < 0
+
+                if direct:
+                    request_s: i64 = Package::rh_pool_copy(pool, texts, requested_s.usize(), requested_e.usize())
+                    reqs.push(Package::RhRequire{from: root, name_s: name_s, name_e: name_e, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: request_s, req_e: request_s + (requested_e - requested_s), depctx: Package::RH_SCOPE_NORMAL, optional: 0})
+                    edges.push(Package::RhDepEdge{from: root, dst: package, depctx: Package::RH_SCOPE_NORMAL, optional: 0})
+
+                member <- nodes[value_idx.usize()].next_sibling
+
+            while member >= 0 |member: i64 = nodes[framework_value.usize()].first_child, reqs, edges, unresolved, name_table|:
+                key_idx: i64 = member
+                source_s: i64 = nodes[key_idx.usize()].text_start
+                source_e: i64 = nodes[key_idx.usize()].text_end
+                source_slot: mutable i64 = -1
+                source_idx: mutable i64 = -1
+                return -1 if not rh_nuget_name_slot(name_table, pkgs, pool, texts, source_s, source_e, &source_slot, &source_idx) or source_idx < 0
+                entry: i64 = nodes[key_idx.usize()].next_sibling
+                dep_idx: i64 = rh_json_field(nodes, texts, entry, "dependencies")
+                if dep_idx >= 0:
+                    return -1 if nodes[dep_idx.usize()].kind != Json::RH_JSON_OBJ
+                    dependencies: Json::RhJsonNode = nodes[dep_idx.usize()]
+                    return -1 if dependencies.child_count % 2 != 0 or dependencies.child_count / 2 > 512
+                    dependency_count: i64 = dependencies.child_count / 2
+                    dependency_names: mutable darray[i64] =
+                        while i < dependency_count * 2 + 1 |table: mutable darray[i64] = [], i: i64 = 0| -> table:
+                            table.push(-1)
+                            i <- i + 1
+                    while dependency >= 0 |dependency: i64 = dependencies.first_child, reqs, edges, unresolved, dependency_names|:
+                        dependency_key: i64 = dependency
+                        dependency_value: i64 = nodes[dependency_key.usize()].next_sibling
+                        return -1 if dependency_value < 0 or nodes[dependency_key.usize()].kind != Json::RH_JSON_STR
+                        dep_name_s: i64 = nodes[dependency_key.usize()].text_start
+                        dep_name_e: i64 = nodes[dependency_key.usize()].text_end
+                        return -1 if dep_name_e <= dep_name_s
+                        return -1 if not rh_json_seen_name(dependency_names, nodes, texts, dependency_key)
+                        dep_version_s: mutable i64 = -1
+                        dep_version_e: mutable i64 = -1
+                        return -1 if not Json::rh_json_str_span(nodes, dependency_value, &dep_version_s, &dep_version_e)
+                        return -1 if dep_version_e <= dep_version_s
+                        return -1 if reqs.count.i64() >= 100000
+                        name_pool_s: i64 = Package::rh_pool_copy(pool, texts, dep_name_s.usize(), dep_name_e.usize())
+                        name_pool_e: i64 = name_pool_s + (dep_name_e - dep_name_s)
+                        requirement_s: i64 = Package::rh_pool_copy(pool, texts, dep_version_s.usize(), dep_version_e.usize())
+                        reqs.push(Package::RhRequire{from: source_idx, name_s: name_pool_s, name_e: name_pool_e, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: requirement_s, req_e: requirement_s + (dep_version_e - dep_version_s), depctx: Package::RH_SCOPE_NORMAL, optional: 0})
+
+                        target_slot: mutable i64 = -1
+                        target_idx: mutable i64 = -1
+                        return -1 if not rh_nuget_name_slot(name_table, pkgs, pool, texts, dep_name_s, dep_name_e, &target_slot, &target_idx)
+                        if target_idx >= 0:
+                            target_node: Package::RhPkgNode = pkgs[target_idx.usize()]
+                            if rh_nuget_name_eq_text(pool, target_node.ver_s.usize(), target_node.ver_e.usize(), texts, dep_version_s.usize(), dep_version_e.usize()):
+                                edges.push(Package::RhDepEdge{from: source_idx, dst: target_idx, depctx: Package::RH_SCOPE_NORMAL, optional: 0})
+                            else:
+                                unresolved.push(Package::RhUnresolved{from: source_idx, name_s: name_pool_s, name_e: name_pool_e, req_s: requirement_s, req_e: requirement_s + (dep_version_e - dep_version_s), reason: Package::RH_UNRES_MISSING, optional: 0})
+                        else:
+                            unresolved.push(Package::RhUnresolved{from: source_idx, name_s: name_pool_s, name_e: name_pool_e, req_s: requirement_s, req_e: requirement_s + (dep_version_e - dep_version_s), reason: Package::RH_UNRES_MISSING, optional: 0})
+                        dependency <- nodes[dependency_value.usize()].next_sibling
+                member <- nodes[nodes[key_idx.usize()].next_sibling.usize()].next_sibling
+            0
+
+    private:
+        def rh_span_literal(data: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or end < start
+            Base::rh_bytes_equal_literal(data, start, end, literal)
+
+        def rh_json_field(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, field: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -2 if object < 0
+            object_node: Json::RhJsonNode = nodes[object.usize()]
+            return -2 if object_node.kind != Json::RH_JSON_OBJ or object_node.child_count % 2 != 0
+            found: mutable i64 = -1
+            while key >= 0 |key: i64 = object_node.first_child, found|:
+                value: i64 = nodes[key.usize()].next_sibling
+                return -2 if value < 0
+                key_node: Json::RhJsonNode = nodes[key.usize()]
+                if key_node.kind == Json::RH_JSON_STR and Base::rh_bytes_equal_literal(texts, key_node.text_start, key_node.text_end, field):
+                    return -2 if found >= 0
+                    found <- value
+                key <- nodes[value.usize()].next_sibling
+            found
+
+        def rh_nuget_keys_allowed(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, package_entry: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if object < 0
+            object_node: Json::RhJsonNode = nodes[object.usize()]
+            return false if object_node.kind != Json::RH_JSON_OBJ or object_node.child_count % 2 != 0
+            while key >= 0 |key: i64 = object_node.first_child|:
+                value: i64 = nodes[key.usize()].next_sibling
+                return false if value < 0
+                node: Json::RhJsonNode = nodes[key.usize()]
+                return false if node.kind != Json::RH_JSON_STR
+                known: bool = (Base::rh_bytes_equal_literal(texts, node.text_start, node.text_end, "dependencies") or (not package_entry and Base::rh_bytes_equal_literal(texts, node.text_start, node.text_end, "version")) or (package_entry and (Base::rh_bytes_equal_literal(texts, node.text_start, node.text_end, "type") or Base::rh_bytes_equal_literal(texts, node.text_start, node.text_end, "requested") or Base::rh_bytes_equal_literal(texts, node.text_start, node.text_end, "resolved") or Base::rh_bytes_equal_literal(texts, node.text_start, node.text_end, "contentHash"))))
+                return false if not known
+                key <- nodes[value.usize()].next_sibling
+            true
+
+        def rh_nuget_name_eq_text(data: darray[u8]&, start: usize, end: usize, other: darray[u8]&, other_start: usize, other_end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != other_end - other_start
+            while i < end - start |i: usize = 0|:
+                a: mutable u8 = data[start + i]
+                b: mutable u8 = other[other_start + i]
+                a <- a + 32 if a >= 65 and a <= 90
+                b <- b + 32 if b >= 65 and b <= 90
+                return false if a != b
+                i <- i + 1
+            true
+
+        def rh_nuget_name_hash(texts: darray[u8]&, start: usize, end: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < end |hash: i64 = 7, i: usize = start| -> hash:
+                b: mutable u8 = texts[i]
+                b <- b + 32 if b >= 65 and b <= 90
+                hash <- (hash * 131 + b.i64()) % 2147483629
+                i <- i + 1
+
+        def rh_nuget_name_slot(table: darray[i64]&, pkgs: darray[Package::RhPkgNode]&, pool: darray[u8]&, texts: darray[u8]&, name_s: i64, name_e: i64, slot_out: mutable i64&, found_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            slot_out[0] <- -1
+            found_out[0] <- -1
+            return false if name_s < 0 or name_e <= name_s or table.count == 0
+            slot: mutable usize = (rh_nuget_name_hash(texts, name_s.usize(), name_e.usize()) % table.count.i64()).usize()
+            while probe < table.count.i64() |probe: i64 = 0, slot, slot_out, found_out|:
+                package: i64 = table[slot]
+                if package < 0:
+                    slot_out[0] <- slot.i64()
+                    return true
+                node: Package::RhPkgNode = pkgs[package.usize()]
+                if rh_nuget_name_eq_text(pool, node.name_s.usize(), node.name_e.usize(), texts, name_s.usize(), name_e.usize()):
+                    slot_out[0] <- slot.i64()
+                    found_out[0] <- package
+                    return true
+                slot <- (slot + 1) % table.count
+                probe <- probe + 1
+            false
+
+        def rh_json_seen_name(table: mutable darray[i64]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, key_idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if key_idx < 0 or table.count == 0
+            key_node: Json::RhJsonNode = nodes[key_idx.usize()]
+            return false if key_node.kind != Json::RH_JSON_STR or key_node.text_end <= key_node.text_start
+            start: usize = key_node.text_start.usize()
+            end: usize = key_node.text_end.usize()
+            slot: mutable usize = (rh_nuget_name_hash(texts, start, end) % table.count.i64()).usize()
+            while probe < table.count.i64() |probe: i64 = 0, slot, table|:
+                prior: i64 = table[slot]
+                if prior < 0:
+                    table[slot] <- key_idx
+                    return true
+                prior_node: Json::RhJsonNode = nodes[prior.usize()]
+                if rh_nuget_name_eq_text(texts, prior_node.text_start.usize(), prior_node.text_end.usize(), texts, start, end):
+                    return false
+                slot <- (slot + 1) % table.count
+                probe <- probe + 1
+            false

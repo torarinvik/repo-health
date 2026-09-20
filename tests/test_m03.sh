@@ -26,14 +26,14 @@ out="$("$ROOT/build/test_package" "$W" check)" || fail "test_package: $out"
 [[ "$out" == *"PACKAGE OK"* ]] || fail "test_package: $out"
 echo "$out"
 
-echo "[m03] fixtures are valid JSON (goldens parse; lock is TOML, skipped)"
+echo "[m03] fixtures are valid JSON (including NuGet JSON lock; Cargo TOML lock is skipped)"
 python3 - "$ROOT/fixtures/packages" <<'EOF'
 import json, glob, sys
 for p in sorted(glob.glob(sys.argv[1] + "/*.json")):
     d = json.load(open(p))
     if p.endswith(".golden.json"):
         assert d["schema"] == "rh-dep-graph/1", p
-        assert d["ecosystem"] in ("cargo", "npm", "pypi", "go"), p
+        assert d["ecosystem"] in ("cargo", "npm", "pypi", "go", "rubygems", "composer", "nuget", "maven"), p
         ids = [n["id"] for n in d["nodes"]]
         assert ids == list(range(len(ids))), ("node ids must be dense", p)
         for e in d["edges"]:
