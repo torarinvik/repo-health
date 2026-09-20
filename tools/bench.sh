@@ -11,7 +11,7 @@ mkdir -p "$OUT_DIR"
 [[ -x "$ROOT/build/bench_runner" ]] || bash "$ROOT/tools/build.sh" >/dev/null
 
 python3 - "$ROOT" "$OUT_DIR" <<'PY'
-import json, os, shutil, sys
+import hashlib, json, os, shutil, subprocess, sys, tempfile
 root = sys.argv[1]
 sys.path.insert(0, os.path.join(root, "tools"))
 from bench_support import configured_concurrent_jobs, environment_metadata, measure, output_fields, throughput_and_outcomes
@@ -55,11 +55,75 @@ for nodes, seed, stage, distribution in workloads:
         "digest": digest,
         "output": out1,
     })
+
+def storage_disk_profile() -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix="rh-bench-storage-", dir="/tmp") as work_dir:
+        return storage_disk_profile_at(work_dir)
+
+def storage_disk_profile_at(work_dir: str) -> dict[str, object]:
+    source_dir = os.path.join(work_dir, "sources")
+    store_dir = os.path.join(work_dir, "objects")
+    os.makedirs(source_dir)
+    os.makedirs(store_dir)
+    cli = os.path.join(root, "build", "rh_cli")
+
+    def payload(label: str, size: int) -> bytes:
+        seed = hashlib.sha256(label.encode("utf-8")).digest()
+        chunks = []
+        length = 0
+        ordinal = 0
+        while length < size:
+            block = hashlib.sha256(seed + ordinal.to_bytes(8, "big")).digest()
+            chunks.append(block)
+            length += len(block)
+            ordinal += 1
+        return b"".join(chunks)[:size]
+
+    unique = [payload("small-%d" % i, 4096) for i in range(8)]
+    unique.extend(payload("medium-%d" % i, 65536) for i in range(4))
+    unique.append(payload("large-0", 1048576))
+    corpus = unique + [unique[0], unique[3], unique[8], unique[12]]
+    corpus_digest = hashlib.sha256()
+    source_bytes = 0
+    for index, content in enumerate(corpus):
+        source_path = os.path.join(source_dir, "evidence-%04d.bin" % index)
+        with open(source_path, "wb") as stream:
+            stream.write(content)
+        source_bytes += len(content)
+        corpus_digest.update(index.to_bytes(8, "big"))
+        corpus_digest.update(content)
+        subprocess.run([cli, "store", "put", "--root", store_dir, "--file", source_path], check=True, stdout=subprocess.DEVNULL)
+
+    names = sorted(os.listdir(store_dir))
+    if len(names) != len(unique):
+        raise SystemExit("content-addressed store did not deduplicate identical evidence")
+    object_stats = [os.stat(os.path.join(store_dir, name)) for name in names]
+    stored_bytes = sum(stat.st_size for stat in object_stats)
+    allocated = [stat.st_blocks * 512 for stat in object_stats if hasattr(stat, "st_blocks")]
+    verified = 0
+    for name in names:
+        subprocess.run([cli, "store", "verify", "--root", store_dir, "--name", name], check=True, stdout=subprocess.DEVNULL)
+        verified += 1
+    return {
+        "profile": "rh-store-disk/1",
+        "dataset_sha256": corpus_digest.hexdigest(),
+        "source_files": len(corpus),
+        "unique_objects": len(names),
+        "verified_objects": verified,
+        "source_bytes": source_bytes,
+        "stored_logical_bytes": stored_bytes,
+        "deduplicated_source_bytes": source_bytes - stored_bytes,
+        "stored_allocated_bytes": sum(allocated) if len(allocated) == len(object_stats) else None,
+        "allocation_basis": "sum of st_blocks * 512" if len(allocated) == len(object_stats) else None,
+    }
+
+disk_workload = storage_disk_profile()
 manifest = {
     **metadata,
     "bench_version": "rh-bench/3",
-    "note": "timings and peak RSS are machine-specific; graph distributions, stage output, dataset digests, and counts are deterministic",
+    "note": "timings and peak RSS are machine-specific; graph distributions, store corpus, stage output, dataset digests, and counts are deterministic",
     "reps": reps,
+    "disk_workload": disk_workload,
     "runs": runs,
 }
 path = os.path.join(out_dir, "bench-manifest.json")

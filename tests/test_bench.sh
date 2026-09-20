@@ -33,6 +33,13 @@ assert a["toolchain_revision"] and a["compiler_path"] and a["compiler_settings"]
 assert a["database_configuration"].startswith("not_applicable"), a
 assert a["external_requests"] == 0 and "cache" in a["cache_state"], a
 assert a["hardware"]["machine"] and a["disk_context"]["free_bytes"] >= 0, a
+disk = a["disk_workload"]
+assert disk["dataset_sha256"] == b["disk_workload"]["dataset_sha256"], (disk, b["disk_workload"])
+assert disk["profile"] == "rh-store-disk/1" and len(disk["dataset_sha256"]) == 64, disk
+assert disk["source_files"] == 17 and disk["unique_objects"] == disk["verified_objects"] == 13, disk
+assert disk["source_bytes"] == 2465792 and disk["stored_logical_bytes"] == 1343488, disk
+assert disk["deduplicated_source_bytes"] == 1122304, disk
+assert disk["stored_allocated_bytes"] is None or disk["stored_allocated_bytes"] >= 0, disk
 def digests(m):
     return [(r["nodes"], r["seed"], r["stage"], r["distribution"], r["digest"]) for r in m["runs"]]
 assert digests(a) == digests(b), ("datasets not deterministic", digests(a), digests(b))

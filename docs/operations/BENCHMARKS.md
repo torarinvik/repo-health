@@ -22,7 +22,16 @@ revision, OS/architecture/CPU and available memory context, disk capacity/free
 space, database applicability, warmup and cache conditions, and the actual
 concurrent-process count. The workload itself makes zero external requests. OS
 cache state and other host processes remain
-uncontrolled; disk fields describe host context, not workload disk consumption.
+uncontrolled; `disk_context` describes the host, while `disk_workload` reports
+the temporary store corpus footprint described below.
+
+Each `rh-bench/3` manifest also contains a temporary local-store disk profile.
+The harness puts 17 deterministic evidence files (13 unique contents) through
+`rh_cli store put`, verifies every content-addressed object, and records source
+bytes, stored logical bytes, deduplication, and allocated bytes when the
+filesystem reports them. Temporary files are removed after measurement. This
+measures the current local filesystem store's footprint; it does not measure
+write latency, PostgreSQL, or remote object storage.
 
 The current graph workloads are:
 
