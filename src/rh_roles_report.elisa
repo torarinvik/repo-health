@@ -110,10 +110,43 @@ module RolesReport:
             member_count: mutable i64 = 0
             unknown_count: mutable i64 = 0
             Roles::rh_role_tally(decls, &owner_count, &maintainer_count, &triager_count, &member_count, &unknown_count)
+            q_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "queries")
+            has_as_of: mutable bool = false
+            current_as_of: mutable i64 = 0
+            explicit_as_of: i64 = Json::rh_json_obj_get(nodes, texts, root, "as_of")
+            if explicit_as_of >= 0:
+                as_of_ok: mutable i64 = 0
+                current_as_of <- rh_rr_int(nodes, raw, texts, root, "as_of", 0)
+                has_as_of <- Json::rh_json_int(nodes, raw, explicit_as_of, &as_of_ok) >= 0 and as_of_ok == 1
+            if not has_as_of and q_idx >= 0:
+                return -1 if nodes[q_idx.usize()].kind != Json::RH_JSON_ARR
+                qtime: Json::RhJsonNode = nodes[q_idx.usize()]
+                while qt >= 0 |qt: i64 = qtime.first_child, nodes, texts, raw, current_as_of, has_as_of|:
+                    return -1 if nodes[qt.usize()].kind != Json::RH_JSON_OBJ
+                    qas: i64 = rh_rr_int(nodes, raw, texts, qt, "as_of", 0)
+                    if not has_as_of or qas > current_as_of:
+                        current_as_of <- qas
+                        has_as_of <- true
+                    qt <- nodes[qt.usize()].next_sibling
             ended_count: mutable i64 = 0
             while i < decls.count |i: usize = 0, decls, ended_count|:
                 ended_count <- ended_count + 1 if decls[i].revoked_at > 0
                 i <- i + 1
+            declared_current: mutable i64 = 0
+            if has_as_of:
+                while i < decls.count |i: usize = 0, decls, current_as_of, declared_current|:
+                    d: Roles::RhRoleDecl = decls[i]
+                    relevant: bool = d.role == Roles::RH_ROLE_OWNER or d.role == Roles::RH_ROLE_MAINTAINER
+                    active: bool = relevant and d.declared_at <= current_as_of and (d.revoked_at == 0 or d.revoked_at > current_as_of)
+                    seen: mutable bool = false
+                    if active:
+                        while j < i |j: usize = 0, i, decls, current_as_of, d, seen|:
+                            prior: Roles::RhRoleDecl = decls[j]
+                            prior_active: bool = prior.actor_id == d.actor_id and (prior.role == Roles::RH_ROLE_OWNER or prior.role == Roles::RH_ROLE_MAINTAINER) and prior.declared_at <= current_as_of and (prior.revoked_at == 0 or prior.revoked_at > current_as_of)
+                            seen <- true if prior_active
+                            j <- j + 1
+                    declared_current <- declared_current + 1 if active and not seen
+                    i <- i + 1
             Base::rh_push_decimal_i64(out, p)
             Base::rh_push_text(out, ",\"file\":")
             Base::rh_push_decimal_i64(out, f)
@@ -156,8 +189,19 @@ module RolesReport:
             Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"maintainer.role_assignments_with_end_dates\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, ended_count)
+            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"maintainer.declared_current\",\"version\":\"1.0.0\",\"status\":\"")
+            if has_as_of:
+                Base::rh_push_text(out, "observed\",\"value\":")
+                Base::rh_push_decimal_i64(out, declared_current)
+            else:
+                Base::rh_push_text(out, "unsupported\",\"reason\":\"no-declaration-as-of-time\"")
+            Base::rh_push_text(out, ",\"as_of\":")
+            if has_as_of:
+                Base::rh_push_decimal_i64(out, current_as_of)
+            else:
+                Base::rh_push_text(out, "null")
             Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]}],\"queries\":[")
-            q_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "queries")
             first: mutable bool = true
             if q_idx >= 0:
                 return -1 if nodes[q_idx.usize()].kind != Json::RH_JSON_ARR
