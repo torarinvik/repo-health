@@ -41,6 +41,20 @@ run_ok finish duplicate finish-job
 run_ok claim committed claim-job
 run_ok claim duplicate claim-job
 
+mkdir -p "$T/evidence"
+printf 'hello evidence\n' > "$T/evidence-source.txt"
+stored_name="$("$ROOT/build/rh_cli" store put --root "$T/evidence" --file "$T/evidence-source.txt" | awk '{print $3}')"
+[[ "$stored_name" == "f5e19178d3ff184e" ]] || fail "content-addressed evidence fixture changed"
+cp "$ROOT/fixtures/postgres/register-evidence-command.json" "$T/register-evidence-command.json"
+for mode in committed duplicate; do
+  RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+    RH_EVIDENCE_ROOT="$T/evidence" RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=evidence RH_FAKE_PG_EXPECT="$mode" \
+    "$ROOT/build/rh_cli" postgres --input "$T/register-evidence-command.json" \
+      --out "$T/register-evidence-$mode.json" >/dev/null \
+    || fail "register evidence $mode command"
+done
+
 python3 - "$T" <<'PY'
 import json, os, sys
 root = sys.argv[1]
@@ -61,10 +75,38 @@ assert claim["status"] == "claimed" and claim["fencing_token"] == 5, claim
 assert claim["job_id"] == "00000000-0000-0000-0000-000000000004", claim
 assert claim["lease_expires_at"] == "2026-01-01 00:02:00+00", claim
 assert read("claim-job-duplicate.json")["status"] == "empty"
+registered = read("register-evidence-committed.json")
+assert registered == {
+    "schema": "rh-postgres-result/1", "operation": "register_evidence",
+    "status": "registered", "evidence_id": "00000000-0000-0000-0000-000000000006",
+    "digest_algorithm": "sha256",
+    "digest_value": "fe482b5e524c67728f4f2b4f430cd10d9a25659641f995ae537b282ccd181e0b",
+    "byte_length": 15, "storage_key": "fnv1a64:f5e19178d3ff184e",
+}, registered
+duplicate = read("register-evidence-duplicate.json")
+assert duplicate["status"] == "duplicate" and duplicate["digest_value"] == registered["digest_value"]
 all_output = "".join(open(os.path.join(root, p)).read() for p in os.listdir(root) if p.endswith(".json"))
 assert "never-emit-this" not in all_output
-print("[postgres-cli] atomic event-page commit, page commit, claim, heartbeat, finish, and bounded reports OK")
+print("[postgres-cli] verified evidence registration, event-page commit, page commit, claim, heartbeat, finish, and bounded reports OK")
 PY
+
+printf 'X' >> "$T/evidence/$stored_name"
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_EVIDENCE_ROOT="$T/evidence" \
+    RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=evidence RH_FAKE_PG_EXPECT=committed \
+    "$ROOT/build/rh_cli" postgres --input "$T/register-evidence-command.json" \
+      --out "$T/corrupt-evidence.json" >/dev/null 2>&1; then
+  fail "corrupt evidence blob accepted"
+fi
+[[ ! -e "$T/corrupt-evidence.json" ]] || fail "corrupt evidence wrote a result"
+rm -f "$T/evidence/$stored_name"
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_EVIDENCE_ROOT="$T/evidence" \
+    RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=evidence RH_FAKE_PG_EXPECT=committed \
+    "$ROOT/build/rh_cli" postgres --input "$T/register-evidence-command.json" \
+      --out "$T/missing-evidence.json" >/dev/null 2>&1; then
+  fail "missing evidence blob accepted"
+fi
+[[ ! -e "$T/missing-evidence.json" ]] || fail "missing evidence wrote a result"
+echo "[postgres-cli] missing and corrupt evidence fail before database registration"
 
 cp "$ROOT/fixtures/postgres/page-commit-command.json" "$T/page-commit-command.json"
 if env -u RH_DATABASE_URL RH_LIBPQ_PATH="$LIBPQ" "$ROOT/build/rh_cli" postgres --input "$T/page-commit-command.json" --out "$T/missing-url.json" >/dev/null 2>&1; then

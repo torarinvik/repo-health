@@ -22,7 +22,7 @@ catalog below contains 209 implemented definitions across 208 distinct keys.**
 | M09 catalog expansion | `in_progress` | admission lint (`tools/metric-lint.sh`) over 211 definitions (209 `implemented`, 2 `prototype`, 0 `planned`); experimental prototypes remain outside the runtime registry (see below) |
 | M10 proven scaling | `in_progress` | `src/bench_runner.elisa` + `tools/bench.sh` + `tools/profile.sh` + `src/rh_columnar.elisa` + `src/rh_aggregates.elisa` + `src/rh_index.elisa` + `tests/test_bench.sh` + `tests/test_profile_bench.sh` + `tests/test_snapshot_cli.sh` + `tests/test_aggregate_cli.sh` + `tests/test_index_cli.sh` (deterministic datasets, stage profiles, machine-specific timings, perf manifests, rebuildable `rh-columnar-snapshot/1` exports, validated daily/weekly `rh-aggregate-result/1` projections with correction invalidation, and digest-bound incoming/outgoing `rh-index-manifest/1` CSR indexes) (see below) |
 | M11 experimental/advanced | `in_progress` | `src/rh_experimental.elisa` + `src/rh_experimental_report.elisa` (`rh_cli experimental`) + `src/rh_proof.elisa` (`rh_cli proof`) + `src/rh_forecast.elisa` (`rh_cli forecast`, `rh-forecast-input/2` -> `rh-forecast-result/2`, submitted-cohort-matched baseline comparison) + `src/rh_intervention.elisa` (`rh_cli intervention`) + cadence adapter and definitions; `test_m11` (`M11 OK`), `tests/test_m11.sh`, `tests/test_experimental_cli.sh`, `tests/test_proof_cli.sh`, `tests/test_forecast_cli.sh`, `tests/test_intervention_cli.sh`; all currently scoped M11 adapters are opt-in and experimental |
-| M12 stable 1.0 | `in_progress` | `ops/public-contracts.json` (87 public contracts, version tokens, compat rules) + `ops/research-conformance.json` (48-case RP-F01–F48 crosswalk) + `rh_cli pilot-review` (`rh-pilot-review-result/1`) + governance/migration/release docs + `test_contracts`/`test_research_conformance`/`test_pilot_review_cli` (`OK`); governance sign-off pending (see below) |
+| M12 stable 1.0 | `in_progress` | `ops/public-contracts.json` (95 public contracts, version tokens, compat rules) + `ops/research-conformance.json` (48-case RP-F01–F48 crosswalk) + `rh_cli pilot-review` (`rh-pilot-review-result/1`) + governance/migration/release docs + `test_contracts`/`test_research_conformance`/`test_pilot_review_cli` (`OK`); governance sign-off pending (see below) |
 
 **M02 scope (in progress):** `db/migrations/001_initial.sql` target schema
 contract (55 typed PostgreSQL tables, visibility/source-scoped constraints,
@@ -30,13 +30,16 @@ evidence and graph indexes, fenced lease/cursor SQL methods) with the static
 `tests/test_migrations.sh` contract gate; the opt-in
 `RH_PG_MIGRATION=1 tests/test_migrations_live.sh` rehearsal applies
 the migration to PostgreSQL 16 and exercises stale fencing, terminal finish,
-complete-only cursor advancement, and duplicate-page idempotence. The first
-dynamically loaded `libpq` application methods commit a collection page and
-claim/heartbeat/finish fenced jobs through the migration functions, with bound
-parameters and `connect_timeout=5`, verified by the ABI fixture in
-`tests/test_pg_adapter.sh` and the opt-in real-database path in
-`tests/test_pg_adapter_live.sh` (`RH_PG_ADAPTER=1`); event/evidence persistence
-and wiring into `rh_cli ingest` remain open. Capability manifests
+complete-only cursor advancement, evidence registration replay/conflict, and
+duplicate-page idempotence. Dynamically loaded `libpq` methods register
+verified evidence metadata, commit collection/event pages, and claim/heartbeat/
+finish fenced jobs through migration functions, with bound parameters and
+`connect_timeout=5`, verified by the ABI fixture in `tests/test_pg_adapter.sh`
+and the opt-in real-database path in `tests/test_pg_adapter_live.sh`
+(`RH_PG_ADAPTER=1`). `rh_cli postgres register_evidence` verifies the
+content-addressed blob under `RH_EVIDENCE_ROOT`, computes SHA-256 metadata,
+and registers it idempotently; blob distribution and wiring into `rh_cli ingest`
+remain open. Capability manifests
 (5 connectors), bounded JSON parser, ISO8601, fetch guard + curl transport, GitHub/GitLab/Gitea/Forgejo
 normalizers with goldens, per-capability status mapping, durable
 filesystem store (content-addressed blobs with tamper-blocked publication,
@@ -1297,7 +1300,7 @@ cross-source identity are deferred to M04.
 | 8 | First ten foundational metrics | `implemented` (see table) |
 | 9 | JSON/Markdown report + explain | `implemented` (report.json/md; `rh_cli explain` emits `repo-health-explain/1`) |
 | 10 | Extend to the initial 30–40 metric subset | `implemented` (209 metric definitions are implemented; registry/status agreement and admission lint pass in `tests/test_m00.sh`) |
-| 11 | PostgreSQL ingestion, cursor transaction, and lease tests | `partial` (the PostgreSQL 16 migration rehearsal covers atomic canonical event/page/cursor commit, duplicate absorption, malformed-page rollback, fenced jobs, and complete-only cursor advancement; `rh_cli postgres` exposes parameterized page/event-page and job methods with ABI and command-path coverage, while evidence-object/blob registration, ingestion wiring, and database crash/restart boundary tests remain open) |
+| 11 | PostgreSQL ingestion, cursor transaction, and lease tests | `partial` (the PostgreSQL 16 migration rehearsal covers idempotent evidence metadata registration and conflict rejection, atomic canonical event/page/cursor commit, duplicate absorption, malformed-page rollback, fenced jobs, and complete-only cursor advancement; `rh_cli postgres` exposes parameterized evidence, page/event-page, and job methods with ABI and command-path coverage, while shared-blob distribution, ingestion wiring, and database crash/restart boundary tests remain open) |
 | 12 | First forge adapter and controlled-instance fixtures | `implemented` (GitHub normalization, captured workflow events, and controlled connector-instance checks in `tests/test_forge_cli.sh`, `tests/test_forge_events_cli.sh`, and `tests/test_connector_cli.sh`) |
 | 13 | Second forge plus generic self-hosted URL support | `implemented` (GitLab, Gitea, Forgejo, and Bitbucket mappings plus approved self-hosted connector fixtures; `tests/test_m02.sh`, `tests/test_forge_cli.sh`, `tests/test_connector_cli.sh`) |
 | 14 | Package identity and first lockfile parser | `implemented` (Cargo and npm graph parsers with exact contextual resolution; `tests/test_deps_cli.sh`) |

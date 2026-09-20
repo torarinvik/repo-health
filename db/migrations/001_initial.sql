@@ -652,6 +652,70 @@ CREATE INDEX job_runnable ON job (priority DESC, next_attempt_at, created_at)
     WHERE state = 'queued' OR (state = 'running' AND lease_expires_at IS NOT NULL);
 CREATE INDEX outbox_pending ON outbox_event (created_at) WHERE published_at IS NULL;
 
+-- Register metadata only after the caller verifies the content-addressed blob.
+-- The SHA-256 key is unique within visibility; retries are accepted only when
+-- they present the same evidence identity and immutable metadata.
+CREATE FUNCTION rh_register_evidence_object(
+    p_id uuid,
+    p_visibility_scope rh_visibility_scope,
+    p_digest_value text,
+    p_byte_length bigint,
+    p_media_type text,
+    p_storage_key text,
+    p_retention_class text,
+    p_transformation_kind text,
+    p_created_at timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_existing evidence_object%ROWTYPE;
+BEGIN
+    IF p_digest_value IS NULL OR p_digest_value !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'evidence digest must be a lowercase SHA-256 value';
+    END IF;
+    IF p_byte_length IS NULL OR p_byte_length < 0 OR p_byte_length > 67108864 THEN
+        RAISE EXCEPTION 'evidence byte length is outside the bounded range';
+    END IF;
+    IF COALESCE(p_media_type, '') = '' OR COALESCE(p_storage_key, '') = ''
+       OR COALESCE(p_retention_class, '') = '' OR COALESCE(p_transformation_kind, '') = '' THEN
+        RAISE EXCEPTION 'evidence metadata fields must be non-empty';
+    END IF;
+
+    INSERT INTO evidence_object (
+        id, visibility_scope, digest_algorithm, digest_value, media_type,
+        byte_length, storage_key, retention_class, transformation_kind, created_at
+    ) VALUES (
+        p_id, p_visibility_scope, 'sha256', p_digest_value, p_media_type,
+        p_byte_length, p_storage_key, p_retention_class, p_transformation_kind, p_created_at
+    )
+    ON CONFLICT (visibility_scope, digest_algorithm, digest_value) DO NOTHING;
+
+    IF FOUND THEN
+        RETURN true;
+    END IF;
+
+    SELECT * INTO v_existing
+    FROM evidence_object
+    WHERE visibility_scope = p_visibility_scope
+      AND digest_algorithm = 'sha256'
+      AND digest_value = p_digest_value;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'evidence digest conflict could not be read';
+    END IF;
+    IF v_existing.id IS DISTINCT FROM p_id
+       OR v_existing.byte_length IS DISTINCT FROM p_byte_length
+       OR v_existing.media_type IS DISTINCT FROM p_media_type
+       OR v_existing.storage_key IS DISTINCT FROM p_storage_key
+       OR v_existing.retention_class IS DISTINCT FROM p_retention_class
+       OR v_existing.transformation_kind IS DISTINCT FROM p_transformation_kind
+       OR v_existing.created_at IS DISTINCT FROM p_created_at THEN
+        RAISE EXCEPTION 'evidence digest is already registered with different immutable metadata';
+    END IF;
+    RETURN false;
+END;
+$$;
+
 -- These methods keep claims and cursor advancement short, fenced, and
 -- idempotent. Network fetches and parsing stay outside the transaction.
 CREATE FUNCTION rh_claim_next_job(

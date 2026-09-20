@@ -15,8 +15,11 @@ with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_
 complete or successful-empty collection page through `rh_commit_collection_page`,
 or commits normalized event rows, page metadata, and cursor advancement together
 through `rh_commit_collection_page_events`; it also performs fenced job claim,
-heartbeat, and finish. Event rows reference existing subject and evidence-object
-rows. It binds values through
+heartbeat, and finish. The `register_evidence` operation reads a blob from the
+configured `RH_EVIDENCE_ROOT`, verifies its FNV-1a content-addressed name,
+computes SHA-256 metadata, and idempotently registers that metadata through
+`rh_register_evidence_object`; the blob remains in the evidence directory.
+Event rows reference existing subject and evidence-object rows. It binds values through
 `PQexecParams`, applies a five-second connection timeout, and reports separate
 committed/duplicate, claimed/empty, and applied/fenced outcomes; transport or
 query failures exit without writing a result. Supply
@@ -85,9 +88,10 @@ The CLI command contract and failure gates are covered by
 - There is no automatic migration runner; migrations are operator-led using
   the runbooks.
 - The active `rh_cli ingest` path still uses the filesystem store. PostgreSQL
-  can commit normalized event pages and job leases through `rh_cli postgres`,
-  while evidence-object/blob registration and transactional ingestion wiring
-  remain open. Filesystem fencing continues to govern the active ingest runtime.
+  can register evidence metadata and commit normalized event pages and job
+  leases through `rh_cli postgres`; shared-blob distribution and transactional
+  ingestion wiring remain open. Filesystem fencing continues to govern the
+  active ingest runtime.
 - No migration has been performed across a format change in this repository
   yet; the rules above are the contract, and the first real migration must
   add a rehearsal to `tests/`.

@@ -40,12 +40,14 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_commit_collection_page", "rh_commit_collection_page_events"} <= functions
+assert {"rh_register_evidence_object", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_commit_collection_page", "rh_commit_collection_page_events"} <= functions
 assert clean.lstrip().startswith("BEGIN;") and clean.rstrip().endswith("COMMIT;")
 assert "FOR UPDATE SKIP LOCKED" in clean
 assert "fencing_token" in clean and "lease_expires_at" in clean
 assert "ON CONFLICT (collection_run_id, page_number) DO NOTHING" in clean
 assert "jsonb_array_elements(p_events)" in clean
+assert "evidence digest must be a lowercase SHA-256 value" in clean
+assert "evidence digest is already registered with different immutable metadata" in clean
 assert "page event count does not match the declared bounded record count" in clean
 assert "ON CONFLICT (" in clean and "DO NOTHING" in clean
 assert "a partial page cannot advance a durable cursor" in clean

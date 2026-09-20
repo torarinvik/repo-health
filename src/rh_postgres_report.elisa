@@ -3,10 +3,12 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_postgres.elisa"
+include "./rh_sha256.elisa"
 
 module PostgresReport:
     private:
         const RH_PG_REPORT_MAX_BYTES: usize = 1048576
+        const RH_PG_REPORT_MAX_EVIDENCE_BYTES: i64 = 67108864
 
         def rh_pg_report_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, start, end, literal)
@@ -40,6 +42,26 @@ module PostgresReport:
             Base::rh_json_escape(out, texts, start.usize(), end.usize())
             out.push(34)
 
+        def rh_pg_report_hex16(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != 16
+            while i < end |i: i64 = start, texts|:
+                b: u8 = texts[i.usize()]
+                return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
+                i <- i + 1
+            true
+
+        def rh_pg_report_visibility_ok(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            if PostgresReport::rh_pg_report_eq(texts, start, end, "public"):
+                true
+            elif PostgresReport::rh_pg_report_eq(texts, start, end, "tenant-private"):
+                true
+            elif PostgresReport::rh_pg_report_eq(texts, start, end, "restricted-personal"):
+                true
+            elif PostgresReport::rh_pg_report_eq(texts, start, end, "embargoed-security"):
+                true
+            else:
+                PostgresReport::rh_pg_report_eq(texts, start, end, "suppressed")
+
         def rh_pg_report_emit_cstr(out: mutable darray[u8]&, bytes: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             raw: mutable darray[u8] = []
             while i + 1 < bytes.count |i: usize = 0, bytes, raw|:
@@ -52,7 +74,7 @@ module PostgresReport:
     public:
         # Commands contain no connection settings. RH_DATABASE_URL is read by
         # the CLI and is never copied into the result or diagnostics.
-        def rh_postgres_command(raw: darray[u8]&, conninfo: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_postgres_command(raw: darray[u8]&, conninfo: cstr, evidence_root: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if raw.count == 0 or raw.count > RH_PG_REPORT_MAX_BYTES or Base::rh_cstr_len_c(conninfo) == 0 or Base::rh_cstr_len_c(conninfo) > 4096
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
@@ -66,6 +88,85 @@ module PostgresReport:
             operation_s: mutable i64 = 0
             operation_e: mutable i64 = 0
             return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "operation", &operation_s, &operation_e, false)
+
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "register_evidence"):
+                return -1 if Base::rh_cstr_len_c(evidence_root) == 0 or Base::rh_cstr_len_c(evidence_root) > 4096
+                evidence_id_s: mutable i64 = 0
+                evidence_id_e: mutable i64 = 0
+                visibility_s: mutable i64 = 0
+                visibility_e: mutable i64 = 0
+                blob_name_s: mutable i64 = 0
+                blob_name_e: mutable i64 = 0
+                media_s: mutable i64 = 0
+                media_e: mutable i64 = 0
+                retention_s: mutable i64 = 0
+                retention_e: mutable i64 = 0
+                transform_s: mutable i64 = 0
+                transform_e: mutable i64 = 0
+                created_s: mutable i64 = 0
+                created_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "evidence_id", &evidence_id_s, &evidence_id_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "visibility_scope", &visibility_s, &visibility_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "blob_name", &blob_name_s, &blob_name_e, false) or not PostgresReport::rh_pg_report_hex16(texts, blob_name_s, blob_name_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "media_type", &media_s, &media_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "retention_class", &retention_s, &retention_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "transformation_kind", &transform_s, &transform_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "created_at", &created_s, &created_e, false)
+                return -1 if not PostgresReport::rh_pg_report_visibility_ok(texts, visibility_s, visibility_e)
+
+                blob_path: mutable darray[u8] = []
+                Base::rh_push_cstr(blob_path, evidence_root)
+                blob_path.push(47)
+                while i < blob_name_e |i: i64 = blob_name_s, blob_path, texts, blob_name_e|:
+                    blob_path.push(texts[i.usize()])
+                    i <- i + 1
+                blob_path.push(0)
+                blob_path_ptr: cstr = (&blob_path[0]).cast[cstr] can Unsafe.PointerCast
+                byte_length: i64 = Base::rh_file_size(blob_path_ptr)
+                return -1 if byte_length < 0 or byte_length > RH_PG_REPORT_MAX_EVIDENCE_BYTES
+                blob: mutable darray[u8] = []
+                return -1 if Base::rh_io_read(blob_path_ptr, blob) < 0 or blob.count.i64() != byte_length
+                stored_name: mutable darray[u8] = []
+                Base::rh_push_hex_u64(stored_name, hash_sview(bytes_view(blob)))
+                return -1 if not Base::rh_bytes_equal_span(stored_name, 0, stored_name.count.i64(), texts, blob_name_s, blob_name_e)
+                digest_value: mutable darray[u8] = []
+                Sha256::rh_sha256(blob, digest_value)
+                digest_value.push(0)
+                digest_ptr: cstr = (&digest_value[0]).cast[cstr] can Unsafe.PointerCast
+
+                evidence_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, evidence_id_s, evidence_id_e)
+                visibility: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, visibility_s, visibility_e)
+                media: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, media_s, media_e)
+                retention: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, retention_s, retention_e)
+                transform: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, transform_s, transform_e)
+                created_at: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, created_s, created_e)
+                storage_key: mutable darray[u8] = []
+                Base::rh_push_text(storage_key, "fnv1a64:")
+                while i < blob_name_e |i: i64 = blob_name_s, storage_key, texts, blob_name_e|:
+                    storage_key.push(texts[i.usize()])
+                    i <- i + 1
+                storage_key.push(0)
+                evidence_ptr: cstr = (&evidence_id[0]).cast[cstr] can Unsafe.PointerCast
+                visibility_ptr: cstr = (&visibility[0]).cast[cstr] can Unsafe.PointerCast
+                media_ptr: cstr = (&media[0]).cast[cstr] can Unsafe.PointerCast
+                storage_ptr: cstr = (&storage_key[0]).cast[cstr] can Unsafe.PointerCast
+                retention_ptr: cstr = (&retention[0]).cast[cstr] can Unsafe.PointerCast
+                transform_ptr: cstr = (&transform[0]).cast[cstr] can Unsafe.PointerCast
+                created_ptr: cstr = (&created_at[0]).cast[cstr] can Unsafe.PointerCast
+                registered: i64 = Postgres::rh_pg_register_evidence_object(conninfo, evidence_ptr, visibility_ptr, digest_ptr, byte_length, media_ptr, storage_ptr, retention_ptr, transform_ptr, created_ptr)
+                return -1 if registered < 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"register_evidence\",\"status\":\"")
+                Base::rh_push_text(out, "registered" if registered == 1 else "duplicate")
+                Base::rh_push_text(out, "\",\"evidence_id\":")
+                PostgresReport::rh_pg_report_emit_text(out, texts, evidence_id_s, evidence_id_e)
+                Base::rh_push_text(out, ",\"digest_algorithm\":\"sha256\",\"digest_value\":")
+                PostgresReport::rh_pg_report_emit_cstr(out, digest_value)
+                Base::rh_push_text(out, ",\"byte_length\":")
+                Base::rh_push_decimal_i64(out, byte_length)
+                Base::rh_push_text(out, ",\"storage_key\":")
+                PostgresReport::rh_pg_report_emit_cstr(out, storage_key)
+                Base::rh_push_text(out, "}")
+                return 0
 
             commit_events: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "page_commit_events")
             if commit_events or PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "page_commit"):

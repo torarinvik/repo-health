@@ -37,6 +37,12 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "scope ' ; SELECT pg_sleep(60); --", "", "{\"page\":8}", "complete",
         "0", "", "[]", "2026-01-01T00:01:00Z"
     };
+    static const char *evidence_values[9] = {
+        "00000000-0000-0000-0000-000000000006", "public",
+        "fe482b5e524c67728f4f2b4f430cd10d9a25659641f995ae537b282ccd181e0b", "15",
+        "text/plain", "fnv1a64:f5e19178d3ff184e", "standard", "captured",
+        "2026-01-01T00:00:00Z"
+    };
     static const char *heartbeat_values[4] = {
         "00000000-0000-0000-0000-000000000002", "4", "2026-01-01T00:01:00Z", "60"
     };
@@ -67,6 +73,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = page_events_values;
         expected_count = 10;
         prefix = "SELECT public.rh_commit_collection_page_events(";
+    } else if (operation != NULL && strcmp(operation, "evidence") == 0) {
+        expected = evidence_values;
+        expected_count = 9;
+        prefix = "SELECT public.rh_register_evidence_object(";
     }
     if (handle != &connection || query == NULL || strncmp(query, prefix, strlen(prefix)) != 0 ||
         count != expected_count || types != NULL || values == NULL || lengths != NULL || formats != NULL || result_format != 0)

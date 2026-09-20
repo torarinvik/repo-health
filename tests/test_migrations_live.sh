@@ -64,8 +64,23 @@ INSERT INTO collection_run (id, source_instance_id, capability, connector_name, 
 VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-01T00:00:00Z', 'running', 'unknown');
 INSERT INTO entity (id, entity_kind, visibility_scope, created_at)
 VALUES ('00000000-0000-0000-0000-000000000005', 'issue', 'public', '2026-01-01T00:00:00Z');
-INSERT INTO evidence_object (id, visibility_scope, digest_algorithm, digest_value, media_type, byte_length, storage_key, retention_class, transformation_kind, created_at)
-VALUES ('00000000-0000-0000-0000-000000000006', 'public', 'sha256', repeat('a', 64), 'application/json', 18, 'sha256/aaaaaaaa', 'standard', 'captured', '2026-01-01T00:00:00Z');
+DO $$
+BEGIN
+  IF NOT rh_register_evidence_object('00000000-0000-0000-0000-000000000006', 'public', repeat('a', 64), 18, 'application/json', 'fnv1a64:aaaaaaaaaaaaaaaa', 'standard', 'captured', '2026-01-01T00:00:00Z') THEN
+    RAISE EXCEPTION 'new evidence object was not registered';
+  END IF;
+  IF rh_register_evidence_object('00000000-0000-0000-0000-000000000006', 'public', repeat('a', 64), 18, 'application/json', 'fnv1a64:aaaaaaaaaaaaaaaa', 'standard', 'captured', '2026-01-01T00:00:00Z') THEN
+    RAISE EXCEPTION 'exact evidence replay was not absorbed';
+  END IF;
+  BEGIN
+    PERFORM rh_register_evidence_object('00000000-0000-0000-0000-000000000006', 'public', repeat('a', 64), 19, 'application/json', 'fnv1a64:aaaaaaaaaaaaaaaa', 'standard', 'captured', '2026-01-01T00:00:00Z');
+    RAISE EXCEPTION 'conflicting evidence metadata was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('different immutable metadata' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+END $$;
 DO $$
 BEGIN
   BEGIN
