@@ -204,6 +204,49 @@ def check_semver_hardening(fails: mutable i64&) -> void can[Memory.Allocate, Abo
     try_bad_semver(b5, "sem-reject-trailing-dot", fails)
     return
 
+def check_semver_fuzz_case(data: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    valid_result: bool =
+        version: mutable Package::RhSemver = Package::RhSemver{0, 0, 0, -1, -1}
+        parsed: bool = Package::rh_semver_parse(data, 0, data.count, &version)
+        span_valid: bool = (version.pre_s == -1 and version.pre_e == -1) or (version.pre_s >= 0 and version.pre_s < version.pre_e and version.pre_e <= data.count.i64())
+        shape_valid: bool = version.major >= 0 and version.minor >= 0 and version.patch >= 0 and span_valid
+        not parsed or shape_valid
+    t7check(valid_result, "semver-fuzz-success-shape", fails)
+    return
+
+def check_semver_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    corpus: mutable darray[u8] = []
+    Base::rh_push_text(corpus, "v1.2.3-alpha.1+build.7")
+    while trial < 96 |trial: i64 = 0, rng: i64 = 20260920, corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < corpus.count |copied: usize = 0, corpus, fuzzed|:
+            fuzzed.push(corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 4
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_semver_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+
+    alphabet: mutable darray[u8] = [118, 48, 49, 50, 51, 46, 45, 43, 97, 98, 99, 120, 121, 122, 48, 57]
+    while trial < 128 |trial: i64 = 0, rng: i64 = 8675309, alphabet, fails|:
+        rng <- (rng * 48271) % 2147483647
+        byte_count: usize = (1 + rng % 96).usize()
+        fuzzed: mutable darray[u8] = []
+        while pos < byte_count |pos: usize = 0, rng, alphabet, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            choice: usize = (rng % alphabet.count.i64()).usize()
+            fuzzed.push(alphabet[choice])
+            pos <- pos + 1
+        check_semver_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+    return
+
 def check_lock_hardening(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     garbage: mutable darray[u8] = [91, 91, 112, 97, 99, 107]
     pkgs: mutable darray[Package::RhPkgNode] = []
@@ -406,6 +449,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_json_hardening(&fails)
     check_json_fuzz(&fails)
     check_semver_hardening(&fails)
+    check_semver_fuzz(&fails)
     check_lock_hardening(&fails)
     check_monitoring(&fails)
     check_quota(&fails)
