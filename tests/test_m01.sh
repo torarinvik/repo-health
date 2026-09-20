@@ -79,7 +79,7 @@ assert m["documentation.contributing_guide_present"]["value"] is False, m
 assert m["licensing.license_declaration_present"]["value"] is False, m
 assert m["activity.weekly_count_slope"]["status"] in ("observed", "not_applicable"), m
 assert m["activity.weekly_count_variance"]["status"] in ("observed", "not_applicable"), m
-assert len(d["metrics"]) == 60, d
+assert len(d["metrics"]) == 61, d
 coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "coverage.window_completeness"}
 assert coverage[("coverage.window_completeness", "1.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "1.0.0")]["value"]["den"], coverage
 assert coverage[("coverage.window_completeness", "2.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "2.0.0")]["value"]["den"], coverage
@@ -134,6 +134,7 @@ assert m["code.source_file_count"]["value"] == 2, m
 assert m["build.ci_configuration_present"]["value"] is True, m
 assert m["testing.test_files_observed"]["value"] == 1, m
 assert m["code.source_bytes"]["value"] == 10, m
+assert m["history.missing_object_count"] == {"key":"history.missing_object_count","version":"1.0.0","status":"observed","value":0,"evidence":["evidence/git-files.txt"]}, m
 assert b"\tREADME.md\0" in open(sys.argv[2], "rb").read(), "retained long-tree evidence missing README"
 print("[m01] snapshot file classification OK")
 PY
@@ -293,6 +294,26 @@ assert caps["blob_metrics"] == "partial-missing-blobs", caps
 md = open(sys.argv[2]).read()
 assert "blob-derived metrics | partial" in md, md
 print("[m01] F004 partial-clone blob-partial OK")
+EOF
+echo "[m01] retained tree marks unavailable blob sizes as partial missing objects"
+REAL_GIT="$(command -v git)"
+mkdir -p "$T/git-shim"
+cat > "$T/git-shim/git" <<EOF
+#!/usr/bin/env sh
+case "\$*" in
+  *"ls-tree -r -l -z HEAD"*) printf '100644 blob 0123456789012345678901234567890123456789       -\\tmissing.c\\0' ;;
+  *) exec "$REAL_GIT" "\$@" ;;
+esac
+EOF
+chmod +x "$T/git-shim/git"
+PATH="$T/git-shim:$PATH" "$CLI" scan --repo "$T/partial" --out "$T/rep-missing-object" --window-days 36500 >/dev/null || fail "missing object scan"
+python3 - "$T/rep-missing-object/report.json" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+assert m["history.missing_object_count"]["status"] == "partial", m
+assert m["history.missing_object_count"]["value"] == 1, m
+print("[m01] missing-object partial state OK")
 EOF
 "$CLI" scan --repo "$T/fix2" --out "$T/rep-nopart" --window-days 36500 >/dev/null || fail "nopart scan"
 python3 - "$T/rep-nopart/report.json" <<'EOF'

@@ -28,10 +28,12 @@ module Files:
             ci_configuration: mutable i64
             test_files: mutable i64
             source_bytes: mutable i64
+            missing_objects: mutable i64
 
         def rh_file_metrics(files: darray[u8]&) -> RhFileMetrics can[Memory.Allocate, Abort.Panic]:
             paths: mutable darray[u8] = []
-            source_bytes: i64 = Files::rh_normalize_snapshot(files, paths)
+            missing_objects: mutable i64 = 0
+            source_bytes: i64 = Files::rh_normalize_snapshot(files, paths, &missing_objects)
             license_files: mutable i64 = Files::rh_root_count(paths, 2)
             examples: mutable i64 = Files::rh_path_count(paths, "examples/")
             source_files: mutable i64 = Files::rh_source_file_count(paths)
@@ -54,12 +56,14 @@ module Files:
                 ci_configuration: Files::rh_ci_configuration_present(paths),
                 test_files: Files::rh_test_file_count(paths),
                 source_bytes: source_bytes,
+                missing_objects: missing_objects if missing_objects > 0 or source_bytes >= 0 else -1,
             }
 
     private:
-        def rh_normalize_snapshot(files: darray[u8]&, paths: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_normalize_snapshot(files: darray[u8]&, paths: mutable darray[u8]&, missing_objects_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             source_bytes: mutable i64 = 0
             complete: mutable bool = true
+            missing_objects_out[0] <- 0
             while start < files.count |start: usize = 0, files, paths, source_bytes, complete|:
                 stop: i64 = Base::rh_find_byte(files, start, 0)
                 finish: usize = stop.usize() if stop >= 0 else files.count
@@ -78,7 +82,9 @@ module Files:
                         cursor2 <- cursor2 + 1
                     size_ok: mutable i64 = 0
                     size: i64 = Base::rh_parse_i64(files, size_start, tab.usize(), &size_ok)
-                    complete <- false if size_ok == 0 or size < 0
+                    missing_size: bool = Base::rh_bytes_equal_literal(files, size_start.i64(), tab, "-")
+                    missing_objects_out[0] <- missing_objects_out[0] + 1 if missing_size
+                    complete <- false if missing_size or size_ok == 0 or size < 0
                     source_bytes <- source_bytes + size if size_ok == 1 and size >= 0 and Files::rh_source_suffix(files, path_start, finish)
                 while copy < finish |copy: usize = path_start, files, paths, finish|:
                     paths.push(files[copy])
