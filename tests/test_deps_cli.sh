@@ -327,7 +327,7 @@ echo "[deps] go.mod resolves exact pins, keeps pseudo/directives unresolved (M08
 mkdir -p "$T/gosrc"
 cp "$ROOT/fixtures/packages/go.mod.txt" "$T/gosrc/go.mod"
 printf 'github.com/pkg/errors v0.9.1 h1:%s=\ngithub.com/pkg/errors v0.9.1/go.mod h1:%s=\ngithub.com/unknown/module v1.0.0 h1:%s=\n' \
-  "$(printf 'A%.0s' {1..43})" "$(printf 'B%.0s' {1..43})" "$(printf 'C%.0s' {1..43})" > "$T/gosrc/go.sum"
+  "$(printf 'A%.0s' {1..43})" "$(printf 'B%.0s' {1..42})A" "$(printf 'C%.0s' {1..42})A" > "$T/gosrc/go.sum"
 "$ROOT/build/rh_cli" deps --repo "$T/gosrc" --out "$T/goout" --osv "$T/src/osv-response.json" \
   | grep -q "ecosystems=1 go=4/6 unresolved=4 unsupported=0" || fail "go deps summary"
 [[ -f "$T/goout/deps-go-graph.json" ]] || fail "missing go graph"
@@ -535,6 +535,17 @@ rc_bad_sum=$?
 set -e
 [[ "$rc_bad_sum" -eq 4 ]] || fail "malformed go.sum must exit 4 (got $rc_bad_sum)"
 [[ ! -f "$T/bad-go-out/deps-go-graph.json" ]] || fail "partial graph written on malformed go.sum"
+
+echo "[deps] non-canonical go.sum SHA-256 Base64 padding fails closed"
+mkdir -p "$T/bad-go-base64"
+cp "$ROOT/fixtures/packages/go.mod.txt" "$T/bad-go-base64/go.mod"
+printf 'github.com/pkg/errors v0.9.1 h1:%sB=\n' "$(printf 'A%.0s' {1..42})" > "$T/bad-go-base64/go.sum"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/bad-go-base64" --out "$T/bad-go-base64-out" >/dev/null 2>&1
+rc_bad_sum_base64=$?
+set -e
+[[ "$rc_bad_sum_base64" -eq 4 ]] || fail "non-canonical go.sum SHA-256 Base64 must exit 4 (got $rc_bad_sum_base64)"
+[[ ! -f "$T/bad-go-base64-out/deps-go-graph.json" ]] || fail "partial graph written on non-canonical go.sum digest"
 
 echo "[deps] Cargo lock resolution distinguishes registry and exact version"
 mkdir -p "$T/cargo-source-collision"

@@ -259,8 +259,9 @@ the declared repository link labelled an assertion, and exact
 declared/optional/dev dependency counts; `tests/test_registry_meta_cli.sh`
 covers canonical and PyPI project shapes plus the fail-closed negatives.
 `go.sum` module checksums now attach exact `h1:` artifact evidence to matching
-Go nodes while `/go.mod` metadata checksums stay separate; malformed checksum
-records fail closed. Registry metadata now also has a bounded `https`/`file`
+Go nodes while `/go.mod` metadata checksums stay separate; `h1` values are
+checked as canonical Base64 SHA-256 and malformed checksum records fail closed.
+Go module-content `dirhash` verification remains open. Registry metadata now also has a bounded `https`/`file`
 capture path with retained body/status/error evidence, and the optional
 deps.dev adapter emits a separate origin/coverage record without changing the
 local graph. PyPI project JSON now has a provider-shaped adapter at the

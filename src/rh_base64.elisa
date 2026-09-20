@@ -1,7 +1,44 @@
-# rh_base64.elisa — bounded RFC 4648 Base64 encoding for byte digests.
+# rh_base64.elisa — bounded RFC 4648 Base64 encoding and digest validation.
 
 module Base64:
+    private:
+        def rh_base64_value(value: u8) -> i64:
+            return value.i64() - 65 if value >= 65 and value <= 90
+            return value.i64() - 97 + 26 if value >= 97 and value <= 122
+            return value.i64() - 48 + 52 if value >= 48 and value <= 57
+            return 62 if value == 43
+            return 63 if value == 47
+            -1
+
+        def rh_base64_digest_valid(data: darray[u8]&, start: i64, end: i64, digest_bytes: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or end < start or end > data.count.i64() or digest_bytes <= 0
+            return false if end - start != ((digest_bytes + 2) / 3) * 4
+            padding: i64 = (3 - (digest_bytes % 3)) % 3
+            content_end: i64 = end - padding
+            while i < content_end |i: i64 = start, data, content_end|:
+                return false if rh_base64_value(data[i.usize()]) < 0
+                i <- i + 1
+            while i < end |i: i64 = content_end, data, end|:
+                return false if data[i.usize()] != 61
+                i <- i + 1
+            return true if padding == 0
+            final_value: i64 = rh_base64_value(data[(content_end - 1).usize()])
+            return final_value % 4 == 0 if padding == 1
+            final_value % 16 == 0
+
     public:
+        # Validate canonical Base64 encodings of the supported SHA-2 digest
+        # lengths. Callers pass only the encoded digest span, without an SRI or
+        # Go checksum prefix.
+        def rh_base64_sha256_valid(data: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_base64_digest_valid(data, start, end, 32)
+
+        def rh_base64_sha384_valid(data: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_base64_digest_valid(data, start, end, 48)
+
+        def rh_base64_sha512_valid(data: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_base64_digest_valid(data, start, end, 64)
+
         def rh_base64(data: darray[u8]&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             alphabet: u8& = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
             while index < data.count |index: usize = 0, data, out, alphabet|:
