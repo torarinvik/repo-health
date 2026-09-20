@@ -38,6 +38,11 @@ module GitMetrics:
             actors_6_to_20: i64
             actors_over_20: i64
             first_observed_actors: i64
+            weekly_slope_num: i64
+            weekly_slope_den: i64
+            weekly_variance_num: i64
+            weekly_variance_den: i64
+            complete_weeks: i64
 
         def rh_activity_init(activity: mutable RhActivity&) -> void:
             activity.author_times <- []
@@ -79,6 +84,12 @@ module GitMetrics:
                     j <- j - 1
                 values[j] <- value
                 i <- i + 1
+
+        def rh_gcd_i64(a: i64, b: i64) -> i64:
+            while y != 0 |x: i64 = a, y: i64 = b| -> x:
+                r: i64 = x % y
+                x <- y
+                y <- r
 
         def rh_metrics(activity: RhActivity&, window_start: i64, now: i64, shallow: i64, full_history: bool) -> RhMetrics can[Memory.Allocate, Abort.Panic]:
             window_times: mutable darray[i64] = []
@@ -157,6 +168,50 @@ module GitMetrics:
                 median_gap <- latest_author - first_author
 
             active_days: i64 = GitMetrics::rh_unique_i64(days)
+            weekly_slope_num: mutable i64 = -1
+            weekly_slope_den: mutable i64 = -1
+            weekly_variance_num: mutable i64 = -1
+            weekly_variance_den: mutable i64 = -1
+            complete_weeks: mutable i64 = 0
+            first_complete_week: i64 = (window_start + 604799) / 604800
+            last_complete_week: i64 = (now - 604800) / 604800
+            if last_complete_week >= first_complete_week:
+                complete_weeks <- last_complete_week - first_complete_week + 1
+                weekly_counts: mutable darray[i64] = []
+                while week < complete_weeks |week: i64 = 0, complete_weeks, first_complete_week, window_times, weekly_counts|:
+                    week_start: i64 = first_complete_week + week
+                    count: mutable i64 = 0
+                    while event < window_times.count.i64() |event: i64 = 0, window_times, week_start, count|:
+                        event_week: i64 = window_times[event.usize()] / 604800
+                        count <- count + 1 if event_week == week_start
+                        event <- event + 1
+                    weekly_counts.push(count)
+                    week <- week + 1
+                sum_y: mutable i64 = 0
+                sum_y2: mutable i64 = 0
+                sum_i: mutable i64 = 0
+                sum_i2: mutable i64 = 0
+                sum_iy: mutable i64 = 0
+                while i < weekly_counts.count |i: i64 = 0, weekly_counts, sum_y, sum_y2, sum_i, sum_i2, sum_iy|:
+                    idx: i64 = i
+                    y: i64 = weekly_counts[i.usize()]
+                    sum_y <- sum_y + y
+                    sum_y2 <- sum_y2 + y * y
+                    sum_i <- sum_i + idx
+                    sum_i2 <- sum_i2 + idx * idx
+                    sum_iy <- sum_iy + idx * y
+                    i <- i + 1
+                variance_num: i64 = complete_weeks * sum_y2 - sum_y * sum_y
+                variance_den: i64 = complete_weeks * complete_weeks
+                vg: i64 = rh_gcd_i64(variance_num, variance_den)
+                weekly_variance_num <- variance_num / vg
+                weekly_variance_den <- variance_den / vg
+                slope_num: i64 = complete_weeks * sum_iy - sum_i * sum_y
+                slope_den: i64 = complete_weeks * sum_i2 - sum_i * sum_i
+                if slope_den > 0:
+                    sg: i64 = rh_gcd_i64(GitMetrics::rh_abs_i64(slope_num), slope_den)
+                    weekly_slope_num <- slope_num / sg
+                    weekly_slope_den <- slope_den / sg
             known_bots: mutable i64 = 0
             while i < actor_bots.count |i: usize = 0, actor_bots, known_bots|:
                 known_bots <- known_bots + actor_bots[i]
@@ -217,5 +272,10 @@ module GitMetrics:
                 actors_2_to_5: two_to_five,
                 actors_6_to_20: six_to_twenty,
                 actors_over_20: over_twenty,
-                first_observed_actors: first_observed
+                first_observed_actors: first_observed,
+                weekly_slope_num: weekly_slope_num,
+                weekly_slope_den: weekly_slope_den,
+                weekly_variance_num: weekly_variance_num,
+                weekly_variance_den: weekly_variance_den,
+                complete_weeks: complete_weeks
             }
