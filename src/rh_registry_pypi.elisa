@@ -82,14 +82,17 @@ module RegistryPypi:
         # expose it under `project_urls`. Preserve the first provider assertion and
         # leave identity verification to the mapping workflow.
         # (private to this module)
-        def rh_regmeta_pypi_repo(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, info: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_regmeta_pypi_repo(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, info: i64, start_out: mutable i64&, end_out: mutable i64&, kind_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            kind_out[0] <- 0
             if rh_regmeta_pypi_string(nodes, texts, info, "home_page", &start_out[0], &end_out[0]) and end_out[0] > start_out[0]:
+                kind_out[0] <- 2
                 return true
             urls: i64 = Json::rh_json_obj_get(nodes, texts, info, "project_urls")
             return false if urls < 0 or nodes[urls.usize()].kind != Json::RH_JSON_OBJ
             while child >= 0 |child: i64 = nodes[urls.usize()].first_child, nodes, texts, start_out, end_out|:
                 value: i64 = nodes[child.usize()].next_sibling
                 if value >= 0 and Json::rh_json_str_span(nodes, value, &start_out[0], &end_out[0]) and end_out[0] > start_out[0]:
+                    kind_out[0] <- 3
                     return true
                 child <- -1 if value < 0 else nodes[value.usize()].next_sibling
             false
@@ -111,17 +114,18 @@ module RegistryPypi:
             info_version_e: mutable i64 = -1
             repo_s: mutable i64 = -1
             repo_e: mutable i64 = -1
+            repo_kind: mutable i64 = 0
             requires: mutable i64 = -1
             if info >= 0:
                 rh_regmeta_pypi_string(nodes, texts, info, "version", &info_version_s, &info_version_e)
-                rh_regmeta_pypi_repo(nodes, texts, info, &repo_s, &repo_e)
+                rh_regmeta_pypi_repo(nodes, texts, info, &repo_s, &repo_e, &repo_kind)
                 requires <- Json::rh_json_obj_get(nodes, texts, info, "requires_dist")
                 if requires >= 0 and nodes[requires.usize()].kind != Json::RH_JSON_ARR and nodes[requires.usize()].kind != Json::RH_JSON_NULL:
                     return -1
             Base::rh_push_text(out, "{\"versions\":[")
             emitted: mutable i64 = 0
             rel: Json::RhJsonNode = nodes[releases.usize()]
-            while child >= 0 |child: i64 = rel.first_child, nodes, texts, raw, out, emitted, info_version_s, info_version_e, repo_s, repo_e, requires|:
+            while child >= 0 |child: i64 = rel.first_child, nodes, texts, raw, out, emitted, info_version_s, info_version_e, repo_s, repo_e, repo_kind, requires|:
                 key: Json::RhJsonNode = nodes[child.usize()]
                 value: i64 = key.next_sibling
                 return -1 if key.kind != Json::RH_JSON_STR or value < 0
@@ -157,6 +161,13 @@ module RegistryPypi:
                     out.push(34)
                     Base::rh_json_escape(out, texts, repo_s.usize(), repo_e.usize())
                     out.push(34)
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"source_link_kind\":")
+                if repo_kind == 2:
+                    Base::rh_push_text(out, "\"homepage\"")
+                elif repo_kind == 3:
+                    Base::rh_push_text(out, "\"project_url\"")
                 else:
                     Base::rh_push_text(out, "null")
                 Base::rh_push_text(out, ",\"deps\":[")

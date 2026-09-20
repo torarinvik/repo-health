@@ -57,6 +57,12 @@ module RegistryMeta:
             start + (e - s)
 
     public:
+        const RH_REGMETA_LINK_NONE: i64 = 0
+        const RH_REGMETA_LINK_REPOSITORY: i64 = 1
+        const RH_REGMETA_LINK_HOMEPAGE: i64 = 2
+        const RH_REGMETA_LINK_PROJECT_URL: i64 = 3
+        const RH_REGMETA_LINK_SOURCE_CODE: i64 = 4
+
         struct RhRegVersion:
             ver_s: i64
             ver_e: i64
@@ -68,6 +74,7 @@ module RegistryMeta:
             published_epoch: i64
             published_s: i64
             published_e: i64
+            source_link_kind: i64
             has_repo: i64
             repo_s: i64
             repo_e: i64
@@ -84,6 +91,7 @@ module RegistryMeta:
             not_deprecated_count: mutable i64
             unknown_deprecation_count: mutable i64
             with_repo: mutable i64
+            with_source_link: mutable i64
             declared_deps: mutable i64
             optional_deps: mutable i64
             dev_deps: mutable i64
@@ -92,7 +100,7 @@ module RegistryMeta:
         # not parseable, lacks a versions array, or contains a version without a
         # non-empty label.
         def rh_regmeta_parse(raw: darray[u8]&, pool: mutable darray[u8]&, out: mutable darray[RhRegVersion]&, meta_out: mutable RhRegMeta&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            meta_out[0] <- RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, deprecated_count: 0, not_deprecated_count: 0, unknown_deprecation_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+            meta_out[0] <- RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, deprecated_count: 0, not_deprecated_count: 0, unknown_deprecation_count: 0, with_repo: 0, with_source_link: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             arr: i64 = |nodes, texts|
@@ -105,7 +113,7 @@ module RegistryMeta:
             return -1 if arr < 0
             an: Json::RhJsonNode = nodes[arr.usize()]
             return -1 if an.kind != Json::RH_JSON_ARR
-            m: RhRegMeta = RhRegMeta{ok: 1, versions: 0, yanked_count: 0, unknown_yank_count: 0, deprecated_count: 0, not_deprecated_count: 0, unknown_deprecation_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+            m: RhRegMeta = RhRegMeta{ok: 1, versions: 0, yanked_count: 0, unknown_yank_count: 0, deprecated_count: 0, not_deprecated_count: 0, unknown_deprecation_count: 0, with_repo: 0, with_source_link: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
             while child >= 0 |child: i64 = an.first_child, nodes, texts, pool, out, m|:
                 nxt: i64 = nodes[child.usize()].next_sibling
                 return -1 if out.count.i64() >= RH_REGMETA_MAX_VERSIONS
@@ -165,10 +173,32 @@ module RegistryMeta:
                 rs: mutable i64 = -1
                 re: i64 = -1
                 has_repo: mutable i64 = 0
-                if Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "repository"), &rs, &re):
+                repo_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "repository")
+                if repo_idx >= 0 and nodes[repo_idx.usize()].kind != Json::RH_JSON_NULL:
+                    return -1 if not Json::rh_json_str_span(nodes, repo_idx, &rs, &re)
                     if re > rs:
                         has_repo <- 1
                         m.with_repo <- m.with_repo + 1
+                        m.with_source_link <- m.with_source_link + 1
+                link_kind: mutable i64 = RH_REGMETA_LINK_NONE
+                link_kind_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "source_link_kind")
+                if link_kind_idx >= 0 and nodes[link_kind_idx.usize()].kind != Json::RH_JSON_NULL:
+                    link_kind_s: mutable i64 = -1
+                    link_kind_e: mutable i64 = -1
+                    return -1 if not Json::rh_json_str_span(nodes, link_kind_idx, &link_kind_s, &link_kind_e) or link_kind_e <= link_kind_s
+                    if Base::rh_bytes_equal_literal(texts, link_kind_s, link_kind_e, "repository"):
+                        link_kind <- RH_REGMETA_LINK_REPOSITORY
+                    elif Base::rh_bytes_equal_literal(texts, link_kind_s, link_kind_e, "homepage"):
+                        link_kind <- RH_REGMETA_LINK_HOMEPAGE
+                    elif Base::rh_bytes_equal_literal(texts, link_kind_s, link_kind_e, "project_url"):
+                        link_kind <- RH_REGMETA_LINK_PROJECT_URL
+                    elif Base::rh_bytes_equal_literal(texts, link_kind_s, link_kind_e, "source_code"):
+                        link_kind <- RH_REGMETA_LINK_SOURCE_CODE
+                    else:
+                        return -1
+                    return -1 if has_repo == 0
+                elif has_repo == 1:
+                    link_kind <- RH_REGMETA_LINK_REPOSITORY
                 dt: mutable i64 = 0
                 do_: mutable i64 = 0
                 dd: mutable i64 = 0
@@ -180,7 +210,7 @@ module RegistryMeta:
                 notice2: i64 = rh_regmeta_copy(pool, texts, deprecation_notice_s, deprecation_notice_e)
                 r2: i64 = rh_regmeta_copy(pool, texts, rs, re)
                 p2: i64 = rh_regmeta_copy(pool, texts, ps, pe)
-                out.push(RhRegVersion{ver_s: v2, ver_e: rh_regmeta_end(v2, vs, ve), yanked: yank, deprecated: deprecated, deprecation_notice_s: notice2, deprecation_notice_e: rh_regmeta_end(notice2, deprecation_notice_s, deprecation_notice_e), has_published: has_pub, published_epoch: pub, published_s: p2, published_e: rh_regmeta_end(p2, ps, pe), has_repo: has_repo, repo_s: r2, repo_e: rh_regmeta_end(r2, rs, re), dep_count: dt, optional_dep_count: do_, dev_dep_count: dd})
+                out.push(RhRegVersion{ver_s: v2, ver_e: rh_regmeta_end(v2, vs, ve), yanked: yank, deprecated: deprecated, deprecation_notice_s: notice2, deprecation_notice_e: rh_regmeta_end(notice2, deprecation_notice_s, deprecation_notice_e), has_published: has_pub, published_epoch: pub, published_s: p2, published_e: rh_regmeta_end(p2, ps, pe), source_link_kind: link_kind, has_repo: has_repo, repo_s: r2, repo_e: rh_regmeta_end(r2, rs, re), dep_count: dt, optional_dep_count: do_, dev_dep_count: dd})
                 child <- nxt
             meta_out[0] <- m
             0
