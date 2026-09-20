@@ -236,6 +236,83 @@ assert result["identity_state"] == "changed", result
 assert result["observed_digest"] != result["expected_digest"], result
 PY
 
+echo "[artifact-observe] Go ZIP h1 verification emits rh-go-zip-observation-result/1"
+"$ROOT/build/rh_cli" artifact-observe \
+  --graph "$ROOT/fixtures/packages/go-zip-observation-graph.json" \
+  --artifact 0 \
+  --file "$ROOT/fixtures/packages/go-module-observation.zip" \
+  --out "$T/go-zip-observation.json" >/dev/null
+cmp "$T/go-zip-observation.json" "$ROOT/fixtures/packages/go-zip-observation-result.json"
+python3 - "$T" <<'PY'
+import base64, hashlib, pathlib, struct, warnings, zipfile, sys
+t = pathlib.Path(sys.argv[1])
+files = {
+    "example.com/demo@v1.2.3/pkg/z.go": b"package pkg\n",
+    "example.com/demo@v1.2.3/go.mod": b"module example.com/demo\n",
+    "example.com/demo@v1.2.3/LICENSE": b"license\n",
+}
+def make_zip(path, compression, contents, order, timestamp):
+    with zipfile.ZipFile(path, "w", compression=compression) as archive:
+        for name in order:
+            info = zipfile.ZipInfo(name, date_time=timestamp)
+            info.compress_type = compression
+            archive.writestr(info, contents[name])
+make_zip(t / "go-stored.zip", zipfile.ZIP_STORED, files, list(reversed(files)), (2021, 5, 6, 7, 8, 10))
+changed = dict(files)
+changed["example.com/demo@v1.2.3/pkg/z.go"] = b"package changed\n"
+make_zip(t / "go-changed.zip", zipfile.ZIP_DEFLATED, changed, list(files), (2022, 6, 7, 8, 9, 10))
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    with zipfile.ZipFile(t / "go-duplicate.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("duplicate", b"one")
+        archive.writestr("duplicate", b"two")
+raw = bytearray((t / "go-stored.zip").read_bytes())
+central = raw.find(b"PK\x01\x02")
+local = raw.find(b"PK\x03\x04")
+struct.pack_into("<I", raw, central + 16, 0)
+struct.pack_into("<I", raw, local + 14, 0)
+(t / "go-bad-crc.zip").write_bytes(raw)
+raw = bytearray((t / "go-stored.zip").read_bytes())
+central = raw.find(b"PK\x01\x02")
+local = raw.find(b"PK\x03\x04")
+struct.pack_into("<I", raw, central + 24, 64 * 1024 * 1024 + 1)
+struct.pack_into("<I", raw, local + 22, 64 * 1024 * 1024 + 1)
+(t / "go-over-expansion-cap.zip").write_bytes(raw)
+summary = b"".join(
+    hashlib.sha256(files[name]).hexdigest().encode() + b"  " + name.encode() + b"\n"
+    for name in sorted(files)
+)
+h1 = "h1:" + base64.b64encode(hashlib.sha256(summary).digest()).decode()
+(t / "go-expected-h1.txt").write_text(h1)
+PY
+"$ROOT/build/rh_cli" artifact-observe \
+  --graph "$ROOT/fixtures/packages/go-zip-observation-graph.json" \
+  --artifact 0 --file "$T/go-stored.zip" --out "$T/go-stored-result.json" >/dev/null
+"$ROOT/build/rh_cli" artifact-observe \
+  --graph "$ROOT/fixtures/packages/go-zip-observation-graph.json" \
+  --artifact 0 --file "$T/go-changed.zip" --out "$T/go-changed-result.json" >/dev/null
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+t = pathlib.Path(sys.argv[1])
+expected = (t / "go-expected-h1.txt").read_text()
+stored = json.loads((t / "go-stored-result.json").read_text())
+changed = json.loads((t / "go-changed-result.json").read_text())
+assert stored["observed_digest"] == expected and stored["identity_state"] == "match", stored
+assert stored["verification_basis"] == "go_h1_zip_contents", stored
+assert changed["identity_state"] == "changed" and changed["observed_digest"] != changed["expected_digest"], changed
+for name in ("duplicate", "bad-crc", "over-expansion-cap"):
+    assert not (t / f"go-{name}-result.json").exists(), name
+PY
+for bad_zip in go-duplicate go-bad-crc go-over-expansion-cap; do
+  if "$ROOT/build/rh_cli" artifact-observe \
+    --graph "$ROOT/fixtures/packages/go-zip-observation-graph.json" \
+    --artifact 0 --file "$T/$bad_zip.zip" --out "$T/$bad_zip-result.json" >/dev/null 2>&1; then
+    echo "invalid Go ZIP unexpectedly accepted: $bad_zip" >&2
+    exit 1
+  fi
+  test ! -e "$T/$bad_zip-result.json"
+done
+
 echo "[artifact-observe] unsupported and out-of-range evidence fails closed"
 python3 - "$T/oversized-graph.json" <<'PY'
 import pathlib, sys

@@ -86,3 +86,11 @@ beyond public APIs.
 Bounded default scan (plan §M01-03): `--full-history` required for unbounded
 log walks; output caps on log bytes; child-process exit + timeout checked.
 Over-limit input is a bounded error, never a bypass of isolation.
+
+Go module ZIP observation is also bounded: the compressed archive and total
+expanded contents are each capped at 64 MiB, entry count at 10,000, and total
+filename bytes at 8 MiB. ZIP metadata parsing, Go `h1` ordering, graph binding,
+and error handling run in Elisa. The OS-provided zlib library is limited to raw
+DEFLATE decoding and CRC32; no archive paths are created and no content is
+extracted to the filesystem. ZIP64, split, encrypted, duplicate-name, malformed,
+CRC-invalid, and over-limit archives fail closed.

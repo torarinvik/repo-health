@@ -5,6 +5,7 @@ include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_sha256.elisa"
 include "./rh_sha512.elisa"
+include "./rh_go_zip.elisa"
 
 module ArtifactObservation:
     private:
@@ -14,6 +15,7 @@ module ArtifactObservation:
         const RH_ARTIFACT_OBSERVATION_NPM_SHA256: i64 = 2
         const RH_ARTIFACT_OBSERVATION_NPM_SHA384: i64 = 3
         const RH_ARTIFACT_OBSERVATION_GO_H1_MOD: i64 = 4
+        const RH_ARTIFACT_OBSERVATION_GO_H1_ZIP: i64 = 5
         def rh_artifact_observation_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if obj < 0 or nodes[obj.usize()].kind != Json::RH_JSON_OBJ
             width: usize = strlen(key)
@@ -243,12 +245,14 @@ module ArtifactObservation:
             return -1 if not Json::rh_json_str_span(nodes, kind, &kind_s, &kind_e)
             archive_kind: bool = Base::rh_bytes_equal_literal(texts_out, kind_s, kind_e, "archive")
             go_mod_kind: bool = Base::rh_bytes_equal_literal(texts_out, kind_s, kind_e, "go_mod")
+            go_module_kind: bool = Base::rh_bytes_equal_literal(texts_out, kind_s, kind_e, "module")
             return -1 if cargo_graph and not archive_kind
             return -1 if npm_graph and not archive_kind
-            return -1 if go_graph and not go_mod_kind
+            return -1 if go_graph and not go_mod_kind and not go_module_kind
             return -1 if not Json::rh_json_str_span(nodes, expected, expected_start_out, expected_end_out)
             if go_graph:
-                digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_GO_H1_MOD
+                digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_GO_H1_MOD if go_mod_kind
+                digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_GO_H1_ZIP if go_module_kind
                 return -1 if not rh_artifact_observation_go_h1_valid(texts_out, expected_start_out[0], expected_end_out[0])
             elif cargo_graph:
                 digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_CARGO_SHA256
@@ -271,12 +275,12 @@ module ArtifactObservation:
         const RH_ARTIFACT_OBSERVATION_MAX_GRAPH_BYTES: i64 = 8388608
         const RH_ARTIFACT_OBSERVATION_MAX_BYTES: i64 = 67108864
 
-        # Verify raw bytes for a Cargo archive, npm tarball, or Go go.mod file.
+        # Verify raw bytes for a Cargo archive, npm tarball, or Go module artifact.
         # Unsupported digest algorithms, ecosystems, and artifact kinds fail
         # closed; no archive is extracted or executed. The result binds the
         # observation to graph bytes and the graph-local artifact ID instead of
         # mutating the source graph.
-        def rh_artifact_observation(graph: darray[u8]&, artifact_bytes: darray[u8]&, artifact_id: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_artifact_observation(graph: darray[u8]&, artifact_bytes: darray[u8]&, artifact_id: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.RawExtern, Unsafe.PointerCast]:
             return -1 if artifact_bytes.count.i64() > RH_ARTIFACT_OBSERVATION_MAX_BYTES
             graph_texts: mutable darray[u8] = []
             package_node: mutable i64 = -1
@@ -290,6 +294,9 @@ module ArtifactObservation:
                     Sha256::rh_sha256(artifact_bytes, observed)
                 elif digest_algorithm == RH_ARTIFACT_OBSERVATION_GO_H1_MOD:
                     ArtifactObservation::rh_artifact_observation_go_h1_mod_file(artifact_bytes, observed)
+                elif digest_algorithm == RH_ARTIFACT_OBSERVATION_GO_H1_ZIP:
+                    Base::rh_push_text(observed, "")
+                    return -1 if GoZip::rh_go_zip_h1(artifact_bytes, observed) != 0
                 elif digest_algorithm == RH_ARTIFACT_OBSERVATION_NPM_SHA512:
                     Base::rh_push_text(observed, "sha512-")
                     Sha512::rh_sha512_base64(artifact_bytes, observed)
@@ -306,6 +313,8 @@ module ArtifactObservation:
                 if digest_algorithm == RH_ARTIFACT_OBSERVATION_CARGO_SHA256:
                     ArtifactObservation::rh_artifact_observation_hex_equal(graph_texts, expected_s, observed)
                 elif digest_algorithm == RH_ARTIFACT_OBSERVATION_GO_H1_MOD:
+                    Base::rh_bytes_equal_span(graph_texts, expected_s, expected_e, observed, 0, observed.count.i64())
+                elif digest_algorithm == RH_ARTIFACT_OBSERVATION_GO_H1_ZIP:
                     Base::rh_bytes_equal_span(graph_texts, expected_s, expected_e, observed, 0, observed.count.i64())
                 elif digest_algorithm == RH_ARTIFACT_OBSERVATION_NPM_SHA512:
                     ArtifactObservation::rh_artifact_observation_sri_matches(graph_texts, expected_s, expected_e, observed, "sha512-")
@@ -328,6 +337,22 @@ module ArtifactObservation:
                 Base::rh_push_text(out, "match") if matches
                 Base::rh_push_text(out, "changed") if not matches
                 Base::rh_push_text(out, "\",\"digest_algorithm\":\"h1\",\"verification_basis\":\"go_h1_mod_file\",\"file_size_bytes\":")
+                Base::rh_push_decimal_i64(out, artifact_bytes.count.i64())
+            elif digest_algorithm == RH_ARTIFACT_OBSERVATION_GO_H1_ZIP:
+                Base::rh_push_text(out, "{\"schema\":\"rh-go-zip-observation-result/1\",\"graph_sha256\":\"")
+                out.extend(bytes_view(graph_digest))
+                Base::rh_push_text(out, "\",\"artifact_id\":")
+                Base::rh_push_decimal_i64(out, artifact_id)
+                Base::rh_push_text(out, ",\"package_node\":")
+                Base::rh_push_decimal_i64(out, package_node)
+                Base::rh_push_text(out, ",\"expected_digest\":\"")
+                Base::rh_json_escape(out, graph_texts, expected_s.usize(), expected_e.usize())
+                Base::rh_push_text(out, "\",\"observed_digest\":\"")
+                out.extend(bytes_view(observed))
+                Base::rh_push_text(out, "\",\"identity_state\":\"")
+                Base::rh_push_text(out, "match") if matches
+                Base::rh_push_text(out, "changed") if not matches
+                Base::rh_push_text(out, "\",\"digest_algorithm\":\"h1\",\"verification_basis\":\"go_h1_zip_contents\",\"archive_size_bytes\":")
                 Base::rh_push_decimal_i64(out, artifact_bytes.count.i64())
             else:
                 Base::rh_push_text(out, "{\"schema\":\"rh-artifact-observation-result/1\",\"graph_sha256\":\"")

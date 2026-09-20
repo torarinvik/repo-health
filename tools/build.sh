@@ -32,6 +32,16 @@ compile() {
     return 0
   fi
   echo "compile $src -> build/$name"
+  if [[ "$name" == "rh_cli" ]]; then
+    local link_flags="${ELISA_STAGE1_LINK:-}"
+    link_flags="${link_flags:+$link_flags }-lz"
+    if [[ "$COMPILER" == *.sh ]]; then
+      ELISA_STAGE1_LINK="$link_flags" bash "$COMPILER" -emit exe -o "$out" "$src"
+    else
+      ELISA_STAGE1_LINK="$link_flags" "$COMPILER" -emit exe -o "$out" "$src"
+    fi
+    return 0
+  fi
   if [[ "$COMPILER" == *.sh ]]; then
     bash "$COMPILER" -emit exe -o "$out" "$src"
   else
