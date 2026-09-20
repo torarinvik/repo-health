@@ -45,4 +45,26 @@ fi
 rm -f "$ROOT/connectors/manifests/_bad_negative.json"
 echo "[schemas] negative control OK"
 
+echo "[schemas] publisher-specific attestation fields must stay strings"
+pylock_fixture="$ROOT/fixtures/packages/pylock-audit-result.json"
+pylock_backup="$tmp/pylock-audit-result.json"
+cp "$pylock_fixture" "$pylock_backup"
+restore_pylock_fixture() { cp "$pylock_backup" "$pylock_fixture"; }
+trap restore_pylock_fixture EXIT
+python3 - "$pylock_fixture" <<'PY'
+import json, sys
+path = sys.argv[1]
+report = json.load(open(path))
+report["packages"][0]["attestation_identities"][0]["repository"] = 42
+json.dump(report, open(path, "w"), separators=(",", ":"))
+PY
+if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+  restore_pylock_fixture
+  trap - EXIT
+  fail "checker accepted a non-string publisher-specific attestation field"
+fi
+restore_pylock_fixture
+trap - EXIT
+echo "[schemas] dynamic attestation field type check OK"
+
 echo "test_schemas OK"

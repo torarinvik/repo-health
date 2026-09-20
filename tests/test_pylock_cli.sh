@@ -54,6 +54,18 @@ size = +50
 [packages.sdist.hashes]
 sha256 = 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
 
+[[packages.attestation-identities]]
+environment = 'release-pypi'
+kind = 'GitHub'
+repository = 'python-attrs/attrs'
+workflow = 'pypi-package.yml'
+'publisher-claim' = 'trusted-release'
+
+[[packages.attestation-identities]]
+kind = 'Sigstore'
+issuer = 'https://token.actions.githubusercontent.com'
+subject = 'repo:python-attrs/attrs:ref:refs/tags/25.1.0'
+
 [[packages]]
 name = 'attrs'
 version = '24.1.0'
@@ -233,6 +245,11 @@ assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-cons
 assert pkgs[0]["marker"] == "sys_platform == 'linux' # retained inside string", pkgs[0]
 assert pkgs[0]["index_sha256"] == hashlib.sha256(b"https://index.example.invalid/simple/").hexdigest(), pkgs[0]
 assert pkgs[1]["index_sha256"] is None, pkgs[1]
+assert pkgs[0]["attestation_identities"] == [
+    {"environment": "release-pypi", "kind": "GitHub", "repository": "python-attrs/attrs", "workflow": "pypi-package.yml", "publisher-claim": "trusted-release"},
+    {"kind": "Sigstore", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:python-attrs/attrs:ref:refs/tags/25.1.0"},
+], pkgs[0]
+assert all(package["attestation_identities"] == [] for package in pkgs[1:]), pkgs
 assert pkgs[2]["dependencies"] == [{"name": "attrs", "version": "25.1.0", "target": 0, "resolution": "resolved"}], pkgs[2]
 assert pkgs[3]["dependencies"][0]["resolution"] == "ambiguous", pkgs[3]
 assert pkgs[4]["dependencies"][0]["resolution"] == "resolved" and pkgs[4]["dependencies"][0]["target"] == 12, pkgs[4]
@@ -331,12 +348,29 @@ name = 'x'
 name = 'x.whl'
 hashes = {sha256 = 'aa', sha256 = 'bb'}
 EOF
-for input in "$T/missing-artifact-hash.toml" "$T/duplicate-artifact-hash.toml"; do
+cat > "$T/missing-attestation-kind.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[[packages.attestation-identities]]
+repository = 'owner/project'
+EOF
+cat > "$T/duplicate-attestation-field.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[[packages.attestation-identities]]
+kind = 'GitHub'
+kind = 'GitLab'
+EOF
+for input in "$T/missing-artifact-hash.toml" "$T/duplicate-artifact-hash.toml" "$T/missing-attestation-kind.toml" "$T/duplicate-attestation-field.toml"; do
   set +e
   "$ROOT/build/rh_cli" pylock --input "$input" --out "$T/bad-artifact.json" >/dev/null 2>&1
   rc=$?
   set -e
-  [[ "$rc" -eq 4 ]] || fail "missing or duplicate artifact hashes must fail closed (got $rc)"
+  [[ "$rc" -eq 4 ]] || fail "invalid PEP 751 artifact or attestation record must fail closed (got $rc)"
 done
 
 cat > "$T/missing-vcs-commit.toml" <<'EOF'

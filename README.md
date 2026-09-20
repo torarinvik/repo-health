@@ -86,7 +86,9 @@ revision, and subdirectory; directory sources retain their editable flag and
 subdirectory. VCS and directory locators appear only as SHA-256 fingerprints.
 VCS, directory, and archive dependency selectors narrow package candidates
 using the source fields they provide; unknown selector fields remain
-`context`. It counts
+`context`. Package `attestation-identities` retain the required `kind` and
+publisher-specific string fields as recorded; the audit reports identity data
+and does not verify attestations. It counts
 lock fields it does not project and does not create a
 `rh-dep-graph/1` or OSV input.
 `rh_cli pylock-observe` verifies caller-supplied bytes against expected

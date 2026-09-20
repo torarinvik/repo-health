@@ -17,6 +17,8 @@ module Pylock:
         const RH_PYLOCK_MAX_HASHES: i64 = 200000
         const RH_PYLOCK_MAX_HASHES_PER_ARTIFACT: i64 = 64
         const RH_PYLOCK_MAX_CONTEXT_VALUES: i64 = 10000
+        const RH_PYLOCK_MAX_ATTESTATION_IDENTITIES: i64 = 10000
+        const RH_PYLOCK_MAX_ATTESTATION_FIELDS: i64 = 100000
 
         struct RhPylockText:
             start: mutable i64
@@ -104,6 +106,19 @@ module Pylock:
             value_s: mutable i64
             value_e: mutable i64
 
+        struct RhPylockAttestationIdentity:
+            owner: mutable i64
+            first_field: mutable i64
+            field_count: mutable i64
+            kind_seen: mutable bool
+
+        struct RhPylockAttestationField:
+            identity: mutable i64
+            name_s: mutable i64
+            name_e: mutable i64
+            value_s: mutable i64
+            value_e: mutable i64
+
         def rh_pylock_copy(pool: mutable darray[u8]&, data: darray[u8]&, s: usize, e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
             start: i64 = pool.count.i64()
             for i in s..<e |pool, data|:
@@ -119,6 +134,53 @@ module Pylock:
             for index in 0..<artifacts.count |index, artifacts, owner, kind|:
                 return true if artifacts[index].owner == owner and artifacts[index].kind == kind
             false
+
+        def rh_pylock_attestation_push(identities: mutable darray[RhPylockAttestationIdentity]&, fields: darray[RhPylockAttestationField]&, owner: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if identities.count.i64() >= RH_PYLOCK_MAX_ATTESTATION_IDENTITIES
+            identities.push(RhPylockAttestationIdentity{owner: owner, first_field: fields.count.i64(), field_count: 0, kind_seen: false})
+            identities.count.i64() - 1
+
+        def rh_pylock_attestation_key(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, name_s: mutable i64&, name_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= end
+            if data[start] == 34 or data[start] == 39:
+                next: mutable usize = 0
+                return false if not rh_pylock_string(data, pool, start, end, &name_s[0], &name_e[0], &next) or next != end
+                return name_s[0] != name_e[0]
+            for index in start..<end |index, data|:
+                byte: u8 = data[index]
+                return false if not ((byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or byte == 45 or byte == 95)
+            name_s[0] <- rh_pylock_copy(pool, data, start, end)
+            name_e[0] <- name_s[0] + (end - start).i64()
+            true
+
+        def rh_pylock_attestation_field(data: mutable darray[u8]&, pool: mutable darray[u8]&, identities: mutable darray[RhPylockAttestationIdentity]&, fields: mutable darray[RhPylockAttestationField]&, identity_index: i64, start: usize, end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if identity_index < 0 or fields.count.i64() >= RH_PYLOCK_MAX_ATTESTATION_FIELDS
+            key_s: mutable usize = start
+            key_e: mutable usize = end
+            value_s: mutable usize = start
+            return false if not rh_pylock_assignment(data, start, end, &key_s, &key_e, &value_s)
+            rh_pylock_trim(data, &key_s, &key_e)
+            value_e: usize = rh_pylock_comment_end(data, value_s, end)
+            value_end: mutable usize = value_e
+            rh_pylock_trim(data, &value_s, &value_end)
+            name_s: mutable i64 = -1
+            name_e: mutable i64 = -1
+            return false if not rh_pylock_attestation_key(data, pool, key_s, key_e, &name_s, &name_e)
+            identity: mutable RhPylockAttestationIdentity = identities[identity_index.usize()]
+            return false if identity.field_count >= RH_PYLOCK_MAX_CONTEXT_VALUES
+            for prior in identity.first_field.usize() ..< fields.count |prior, fields, pool, identity_index, name_s, name_e|:
+                prior_field: RhPylockAttestationField = fields[prior]
+                return false if prior_field.identity == identity_index and rh_pylock_equal(pool, prior_field.name_s, prior_field.name_e, name_s, name_e)
+            value_start: mutable i64 = -1
+            value_stop: mutable i64 = -1
+            return false if not rh_pylock_scalar_string(data, pool, value_s, value_end, &value_start, &value_stop)
+            if Base::rh_bytes_equal_literal(pool, name_s, name_e, "kind"):
+                return false if identity.kind_seen or value_start == value_stop
+                identity.kind_seen <- true
+            fields.push(RhPylockAttestationField{identity: identity_index, name_s: name_s, name_e: name_e, value_s: value_start, value_e: value_stop})
+            identity.field_count <- identity.field_count + 1
+            identities[identity_index.usize()] <- identity
+            true
 
         def rh_pylock_package_has_artifact(artifacts: darray[RhPylockArtifact]&, owner: i64) -> bool:
             for index in 0..<artifacts.count |index, artifacts, owner|:
@@ -785,16 +847,17 @@ module Pylock:
                 cursor <- cursor + 1
             square_depth == 0 and quote == 0
 
-        def rh_pylock_parse(data: mutable darray[u8]&, pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, refs: mutable darray[RhPylockReference]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, metadata: mutable RhPylockMetadata&, created_s: mutable i64&, created_e: mutable i64&, python_s: mutable i64&, python_e: mutable i64&, unknown_top: mutable i64&, unknown_package: mutable i64&, unknown_dependency: mutable i64&, unknown_artifact: mutable i64&, unknown_tables: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_pylock_parse(data: mutable darray[u8]&, pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, refs: mutable darray[RhPylockReference]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, identities: mutable darray[RhPylockAttestationIdentity]&, identity_fields: mutable darray[RhPylockAttestationField]&, metadata: mutable RhPylockMetadata&, created_s: mutable i64&, created_e: mutable i64&, python_s: mutable i64&, python_e: mutable i64&, unknown_top: mutable i64&, unknown_package: mutable i64&, unknown_dependency: mutable i64&, unknown_artifact: mutable i64&, unknown_tables: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if data.count == 0 or data.count > RH_PYLOCK_MAX_BYTES
             section: mutable i64 = 0
             package_index: mutable i64 = -1
             reference_index: mutable i64 = -1
             artifact_index: mutable i64 = -1
+            identity_index: mutable i64 = -1
             packages_seen: mutable bool = false
             lock_version_ok: mutable bool = false
             line_start: mutable usize = 0
-            while line_start <= data.count |line_start, data, pool, packages, refs, artifacts, hashes, metadata, created_s, created_e, python_s, python_e, unknown_top, unknown_package, unknown_dependency, unknown_artifact, unknown_tables, section, package_index, reference_index, artifact_index, packages_seen, lock_version_ok|:
+            while line_start <= data.count |line_start, data, pool, packages, refs, artifacts, hashes, identities, identity_fields, metadata, created_s, created_e, python_s, python_e, unknown_top, unknown_package, unknown_dependency, unknown_artifact, unknown_tables, section, package_index, reference_index, artifact_index, identity_index, packages_seen, lock_version_ok|:
                 line_end: mutable usize =
                     while i < data.count and data[i] != 10 |i: usize = line_start, data| -> i:
                         i <- i + 1
@@ -835,6 +898,7 @@ module Pylock:
                         package_index <- packages.count.i64() - 1
                         reference_index <- -1
                         artifact_index <- -1
+                        identity_index <- -1
                         section <- 1
                         packages_seen <- true
                     elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[[packages.wheels]]"):
@@ -877,6 +941,13 @@ module Pylock:
                         reference_index <- -1
                         artifact_index <- -1
                         section <- 11
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[[packages.attestation-identities]]"):
+                        return -1 if package_index < 0
+                        identity_index <- rh_pylock_attestation_push(identities, identity_fields, package_index)
+                        return -1 if identity_index < 0
+                        reference_index <- -1
+                        artifact_index <- -1
+                        section <- 15
                     elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.wheels.hashes]"):
                         return -1 if artifact_index < 0 or artifacts[artifact_index.usize()].kind != 1
                         reference_index <- -1
@@ -926,7 +997,7 @@ module Pylock:
                         reference_index <- -1
                         artifact_index <- -1
                         unknown_tables[0] <- unknown_tables[0] + 1
-                    elif section == 0 or section == 1 or section == 2 or section == 3 or section == 4 or section == 5 or section == 6 or section == 7 or section == 8 or section == 10 or section == 11 or section == 12 or section == 13 or section == 14:
+                    elif section == 0 or section == 1 or section == 2 or section == 3 or section == 4 or section == 5 or section == 6 or section == 7 or section == 8 or section == 10 or section == 11 or section == 12 or section == 13 or section == 14 or section == 15:
                         key_s: mutable usize = trimmed_start
                         key_e: mutable usize = trimmed_end
                         value_s: mutable usize = trimmed_start
@@ -1069,6 +1140,8 @@ module Pylock:
                                 else:
                                     unknown_package[0] <- unknown_package[0] + 1
                                 packages[package_index.usize()] <- source
+                            elif section == 15 and identity_index >= 0:
+                                return -1 if not rh_pylock_attestation_field(data, pool, identities, identity_fields, identity_index, trimmed_start, trimmed_end)
                             elif section == 3 or section == 5 or section == 7:
                                 return -1 if artifact_index < 0 or not rh_pylock_artifact_field(data, pool, artifacts, hashes, artifact_index, trimmed_start, trimmed_end, unknown_artifact)
                             elif section == 4 or section == 6 or section == 8:
@@ -1092,6 +1165,8 @@ module Pylock:
                 return -1 if pkg5.source_kind == 1 and (pkg5.source_type_s < 0 or pkg5.source_type_s == pkg5.source_type_e or pkg5.source_commit_s < 0 or pkg5.source_commit_s == pkg5.source_commit_e or pkg5.source_locator_kind == 0)
                 return -1 if pkg5.source_kind == 2 and (pkg5.source_locator_kind != 2 or pkg5.source_locator_s < 0)
                 return -1 if pkg5.source_kind == 0 and (pkg5.source_type_s >= 0 or pkg5.source_locator_s >= 0 or pkg5.source_commit_s >= 0 or pkg5.source_revision_s >= 0 or pkg5.source_subdirectory_s >= 0 or pkg5.source_editable_seen)
+            for identity_id in 0..<identities.count |identity_id, identities|:
+                return -1 if not identities[identity_id].kind_seen or identities[identity_id].field_count == 0
             for reference_id in 0..<refs.count |reference_id, refs|:
                 reference: RhPylockReference = refs[reference_id]
                 return -1 if reference.name_s < 0 or reference.name_s == reference.name_e
@@ -1235,6 +1310,8 @@ module Pylock:
             references: mutable darray[RhPylockReference] = []
             artifacts: mutable darray[RhPylockArtifact] = []
             hashes: mutable darray[RhPylockArtifactHash] = []
+            identities: mutable darray[RhPylockAttestationIdentity] = []
+            identity_fields: mutable darray[RhPylockAttestationField] = []
             metadata: mutable RhPylockMetadata = RhPylockMetadata{environments: [], extras: [], dependency_groups: [], default_groups: [], environments_seen: false, extras_seen: false, dependency_groups_seen: false, default_groups_seen: false}
             created_s: mutable i64 = -1
             created_e: mutable i64 = -1
@@ -1245,7 +1322,7 @@ module Pylock:
             unknown_dependency: mutable i64 = 0
             unknown_artifact: mutable i64 = 0
             unknown_tables: mutable i64 = 0
-            return -1 if rh_pylock_parse(data, pool, packages, references, artifacts, hashes, metadata, &created_s, &created_e, &python_s, &python_e, &unknown_top, &unknown_package, &unknown_dependency, &unknown_artifact, &unknown_tables) != 0
+            return -1 if rh_pylock_parse(data, pool, packages, references, artifacts, hashes, identities, identity_fields, metadata, &created_s, &created_e, &python_s, &python_e, &unknown_top, &unknown_package, &unknown_dependency, &unknown_artifact, &unknown_tables) != 0
             input_hash: mutable darray[u8] = []
             Sha256::rh_sha256(data, input_hash)
             Base::rh_push_text(out, "{\"schema\":\"rh-pylock-audit/1\",\"format\":\"PEP 751\",\"parser\":\"bounded-core-projection\",\"lock_version\":\"1.0\",\"created_by\":")
@@ -1267,7 +1344,8 @@ module Pylock:
             Base::rh_push_text(out, ",\"root_relationship\":\"not_recorded\",\"dependency_semantics\":\"informational_only\",\"packages\":[")
             artifact_cursor: mutable usize = 0
             hash_cursor: mutable usize = 0
-            for package_id in 0..<packages.count |package_id, packages, pool, references, out, artifact_cursor, hash_cursor|:
+            identity_cursor: mutable usize = 0
+            for package_id in 0..<packages.count |package_id, packages, pool, references, identities, identity_fields, out, artifact_cursor, hash_cursor, identity_cursor|:
                 pkg: RhPylockPackage = packages[package_id]
                 if package_id > 0:
                     out.push(44)
@@ -1285,6 +1363,25 @@ module Pylock:
                 rh_pylock_emit_fingerprint(out, pool, pkg.index_s, pkg.index_e)
                 Base::rh_push_text(out, ",\"source\":")
                 rh_pylock_emit_source(out, pool, pkg)
+                Base::rh_push_text(out, ",\"attestation_identities\":[")
+                first_identity: mutable bool = true
+                while identity_cursor < identities.count and identities[identity_cursor].owner == package_id.i64() |identity_cursor, identities, identity_fields, pool, out, package_id, first_identity|:
+                    identity_id: usize = identity_cursor
+                    identity: RhPylockAttestationIdentity = identities[identity_id]
+                    identity_cursor <- identity_cursor + 1
+                    if not first_identity:
+                        out.push(44)
+                    first_identity <- false
+                    out.push(123)
+                    for field_index in identity.first_field.usize() ..< (identity.first_field + identity.field_count).usize() |field_index, identity_fields, pool, out|:
+                        field: RhPylockAttestationField = identity_fields[field_index]
+                        if field_index > identity.first_field.usize():
+                            out.push(44)
+                        rh_pylock_emit_string(out, pool, field.name_s, field.name_e)
+                        out.push(58)
+                        rh_pylock_emit_string(out, pool, field.value_s, field.value_e)
+                    out.push(125)
+                out.push(93)
                 Base::rh_push_text(out, ",\"dependencies\":[")
                 first: mutable bool = true
                 for reference_id in 0..<references.count |reference_id, references, pool, packages, out, package_id, first|:
