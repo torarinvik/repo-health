@@ -43,9 +43,11 @@ assert ng["schema"] == "rh-dep-graph/1" and ng["ecosystem"] == "npm"
 assert len(cg["nodes"]) == 7, cg["nodes"]
 assert len(cg["edges"]) == 3, cg["edges"]
 assert len(cg["unresolved"]) == 2, cg["unresolved"]
-cargo_digests = {node["version"]: node["expected_digest"] for node in cg["nodes"] if node["name"] == "shared"}
-assert cargo_digests == {"1.0.0": "1111111111111111111111111111111111111111111111111111111111111111", "2.0.0": "2222222222222222222222222222222222222222222222222222222222222222"}, cargo_digests
-assert all(node["observed_digest"] is None for node in cg["nodes"]), cg["nodes"]
+cargo_artifacts = {artifact["package_node"]: artifact for artifact in cg["artifacts"]}
+assert len(cargo_artifacts) == 2, cg["artifacts"]
+assert cargo_artifacts[3]["expected_digest"] == "1111111111111111111111111111111111111111111111111111111111111111", cargo_artifacts
+assert cargo_artifacts[4]["expected_digest"] == "2222222222222222222222222222222222222222222222222222222222222222", cargo_artifacts
+assert all(artifact["observed_digest"] is None and artifact["identity_state"] == "unknown" for artifact in cg["artifacts"]), cg["artifacts"]
 # every unresolved carries a reason and is NOT an edge (no guessed edge)
 reasons = sorted(u["reason"] for u in cg["unresolved"])
 assert reasons == ["ambiguous", "missing"], reasons
@@ -57,8 +59,8 @@ assert adv["advisory"], adv
 # witness, not a fabricated path. Advisory presence != affected reachability.
 assert adv["witness"] == [], adv
 assert len(ng["nodes"]) == 7, ng["nodes"]
-hashed_npm = [node for node in ng["nodes"] if node["name"] == "shared" and node["version"] == "2.0.0"]
-assert len(hashed_npm) == 1 and hashed_npm[0]["expected_digest"] == "sha512-zzz" and hashed_npm[0]["observed_digest"] is None, hashed_npm
+npm_artifacts = [artifact for artifact in ng["artifacts"] if artifact["package_node"] == 6]
+assert len(npm_artifacts) == 1 and npm_artifacts[0]["expected_digest"] == "sha512-zzz" and npm_artifacts[0]["observed_digest"] is None, npm_artifacts
 assert len(ng["edges"]) >= 6, ng["edges"]
 assert len(ng["unresolved"]) == 1, ng["unresolved"]
 assert ng["unresolved"][0]["reason"] == "context", ng["unresolved"]

@@ -46,6 +46,8 @@ module Package:
         const RH_ART_UNKNOWN: i64 = 0
         const RH_ART_MATCH: i64 = 1
         const RH_ART_CHANGED: i64 = 2
+        const RH_ART_KIND_ARCHIVE: u8 = 0
+        const RH_ART_KIND_MODULE: u8 = 1
 
         # Compare an expected digest against an observed digest for one version
         # label. Either side missing => UNKNOWN (never a match). known flags are
@@ -378,6 +380,14 @@ module Package:
             reason: mutable u8
             optional: mutable u8
 
+        struct RhArtifact:
+            package_node: mutable i64
+            kind: mutable u8
+            expected_s: mutable i64
+            expected_e: mutable i64
+            observed_s: mutable i64
+            observed_e: mutable i64
+
         struct RhRequire:
             from: mutable i64
             name_s: mutable i64
@@ -408,6 +418,37 @@ module Package:
             return -1 if pkgs.count.i64() > 100000
             pkgs.push(RhPkgNode{eco: eco, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, origin_s: -1, origin_e: -1, src_kind: 3, has_digest: 0, dig_s: -1, dig_e: -1, dev: 0, optional: 0})
             pkgs.count.i64() - 1
+
+        def rh_artifact_add_expected(artifacts: mutable darray[RhArtifact]&, package_node: i64, kind: u8, expected_s: i64, expected_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if package_node < 0 or expected_s < 0 or expected_e <= expected_s
+            return -1 if artifacts.count.i64() >= 200000
+            artifacts.push(RhArtifact{package_node: package_node, kind: kind, expected_s: expected_s, expected_e: expected_e, observed_s: -1, observed_e: -1})
+            (artifacts.count - 1).i64()
+
+        def rh_artifacts_from_packages(pkgs: darray[RhPkgNode]&, artifacts: mutable darray[RhArtifact]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < pkgs.count.i64() |made: i64 = 0, i: i64 = 0, artifacts| -> made:
+                package: RhPkgNode = pkgs[i.usize()]
+                if package.has_digest != 0:
+                    kind: u8 = RH_ART_KIND_MODULE if package.eco == RH_ECO_GO else RH_ART_KIND_ARCHIVE
+                    return -1 if rh_artifact_add_expected(artifacts, i, kind, package.dig_s, package.dig_e) < 0
+                    made <- made + 1
+                i <- i + 1
+
+        def rh_artifact_set_observed(artifacts: mutable darray[RhArtifact]&, pool: darray[u8]&, artifact_id: i64, observed_s: i64, observed_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if artifact_id < 0 or artifact_id >= artifacts.count.i64()
+            return false if observed_s < 0 or observed_e <= observed_s or observed_e > pool.count.i64()
+            artifact: mutable RhArtifact = artifacts[artifact_id.usize()]
+            artifact.observed_s <- observed_s
+            artifact.observed_e <- observed_e
+            artifacts[artifact_id.usize()] <- artifact
+            true
+
+        def rh_artifact_identity_state(artifacts: darray[RhArtifact]&, pool: darray[u8]&, artifact_id: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return RH_ART_UNKNOWN if artifact_id < 0 or artifact_id >= artifacts.count.i64()
+            artifact: RhArtifact = artifacts[artifact_id.usize()]
+            return RH_ART_UNKNOWN if artifact.expected_s < 0 or artifact.observed_s < 0
+            return RH_ART_MATCH if rh_span_eq2(pool, artifact.expected_s.usize(), artifact.expected_e.usize(), pool, artifact.observed_s.usize(), artifact.observed_e.usize())
+            RH_ART_CHANGED
 
         # Exact node match (all coordinates incl. source kind).
         def rh_node_find(pkgs: darray[RhPkgNode]&, pool: darray[u8]&, eco: u8, ns: usize, ne: usize, vs: usize, ve: usize, skind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -736,6 +777,15 @@ module Package:
         # verbatim in req_s/req_e and never treated as resolved versions (R009).
 
     private:
+        def rh_artifact_kind_label(kind: u8) -> u8&:
+            return "module" if kind == RH_ART_KIND_MODULE
+            "archive"
+
+        def rh_artifact_state_label(state: i64) -> u8&:
+            return "match" if state == RH_ART_MATCH
+            return "changed" if state == RH_ART_CHANGED
+            "unknown"
+
         def rh_npm_entry_name(pool: mutable darray[u8]&, ps: usize, pe: usize, ns: mutable i64&, ne: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if pe <= ps
             last: usize =
@@ -3045,7 +3095,7 @@ module Package:
 
         # Canonical dependency graph JSON (rh-dep-graph/1) for goldens, bundles,
         # and the deps command. Witnesses computed from root (bounded).
-        def rh_graph_write_json(out: mutable darray[u8]&, eco: u8, pkgs: darray[RhPkgNode]&, pool: darray[u8]&, edges: darray[RhDepEdge]&, unresolved: darray[RhUnresolved]&, findings: darray[RhAdvisory]&, advtexts: darray[u8]&, root: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_graph_write_json(out: mutable darray[u8]&, eco: u8, pkgs: darray[RhPkgNode]&, pool: darray[u8]&, artifacts: darray[RhArtifact]&, edges: darray[RhDepEdge]&, unresolved: darray[RhUnresolved]&, findings: darray[RhAdvisory]&, advtexts: darray[u8]&, root: i64) -> void can[Memory.Allocate, Abort.Panic]:
             if eco == 0:
                 Base::rh_push_text(out, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"cargo\",\"nodes\":[")
             elif eco == 2:
@@ -3096,20 +3146,41 @@ module Package:
                     out.push(34)
                 Base::rh_push_text(out, ",\"digest\":")
                 rh_emit_bool(out, n.has_digest != 0)
-                Base::rh_push_text(out, ",\"expected_digest\":")
-                if n.has_digest != 0:
-                    Base::rh_push_text(out, "\"")
-                    Base::rh_json_escape(out, pool, n.dig_s.usize(), n.dig_e.usize())
-                    Base::rh_push_text(out, "\"")
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, ",\"observed_digest\":null")
                 Base::rh_push_text(out, ",\"dev\":")
                 rh_emit_bool(out, n.dev != 0)
                 Base::rh_push_text(out, ",\"optional\":")
                 rh_emit_bool(out, n.optional != 0)
                 Base::rh_push_text(out, "}")
                 i <- i + 1
+            Base::rh_push_text(out, "],\"artifacts\":[")
+            while a < artifacts.count.i64() |a: i64 = 0, artifacts, pool, out|:
+                artifact: RhArtifact = artifacts[a.usize()]
+                if a > 0:
+                    out.push(44)
+                Base::rh_push_text(out, "{\"id\":")
+                Base::rh_push_decimal_i64(out, a)
+                Base::rh_push_text(out, ",\"package_node\":")
+                Base::rh_push_decimal_i64(out, artifact.package_node)
+                Base::rh_push_text(out, ",\"kind\":\"")
+                Base::rh_push_text(out, rh_artifact_kind_label(artifact.kind))
+                Base::rh_push_text(out, "\",\"expected_digest\":")
+                if artifact.expected_s < 0:
+                    Base::rh_push_text(out, "null")
+                else:
+                    Base::rh_push_text(out, "\"")
+                    Base::rh_json_escape(out, pool, artifact.expected_s.usize(), artifact.expected_e.usize())
+                    Base::rh_push_text(out, "\"")
+                Base::rh_push_text(out, ",\"observed_digest\":")
+                if artifact.observed_s < 0:
+                    Base::rh_push_text(out, "null")
+                else:
+                    Base::rh_push_text(out, "\"")
+                    Base::rh_json_escape(out, pool, artifact.observed_s.usize(), artifact.observed_e.usize())
+                    Base::rh_push_text(out, "\"")
+                Base::rh_push_text(out, ",\"identity_state\":\"")
+                Base::rh_push_text(out, rh_artifact_state_label(rh_artifact_identity_state(artifacts, pool, a)))
+                Base::rh_push_text(out, "\"}")
+                a <- a + 1
             Base::rh_push_text(out, "],\"edges\":[")
             while e < edges.count.i64() |e: i64 = 0, edges, out|:
                 ed: RhDepEdge = edges[e.usize()]

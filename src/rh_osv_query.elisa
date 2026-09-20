@@ -71,6 +71,41 @@ module OsvQuery:
             end_out[0] <- node.text_end
             true
 
+        # Artifact evidence is additive to the graph-node queries, but validate
+        # its references before accepting the canonical graph document.
+        def rh_osv_query_artifacts_valid(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, artifacts: i64, graph_node_count: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if artifacts < 0
+            return false if nodes[artifacts.usize()].kind != Json::RH_JSON_ARR
+            while item >= 0 |item: i64 = nodes[artifacts.usize()].first_child, item_index: i64 = 0, nodes, texts, raw, artifacts, graph_node_count|:
+                return false if not rh_osv_query_fields(nodes, item, 6)
+                id: i64 = rh_osv_query_member(nodes, texts, item, "id")
+                package_node: i64 = rh_osv_query_member(nodes, texts, item, "package_node")
+                kind: i64 = rh_osv_query_member(nodes, texts, item, "kind")
+                expected_digest: i64 = rh_osv_query_member(nodes, texts, item, "expected_digest")
+                observed_digest: i64 = rh_osv_query_member(nodes, texts, item, "observed_digest")
+                identity_state: i64 = rh_osv_query_member(nodes, texts, item, "identity_state")
+                return false if id < 0 or package_node < 0 or kind < 0 or expected_digest < 0 or observed_digest < 0 or identity_state < 0
+                return false if nodes[id.usize()].kind != Json::RH_JSON_NUM or nodes[package_node.usize()].kind != Json::RH_JSON_NUM
+                id_ok: mutable i64 = 0
+                id_value: i64 = Json::rh_json_int(nodes, raw, id, &id_ok)
+                return false if id_ok != 1 or id_value != item_index
+                package_node_ok: mutable i64 = 0
+                package_node_value: i64 = Json::rh_json_int(nodes, raw, package_node, &package_node_ok)
+                return false if package_node_ok != 1 or package_node_value < 0 or package_node_value >= graph_node_count
+                kind_s: mutable i64 = -1
+                kind_e: mutable i64 = -1
+                state_s: mutable i64 = -1
+                state_e: mutable i64 = -1
+                return false if not rh_osv_query_span(nodes, kind, &kind_s, &kind_e)
+                return false if not rh_osv_query_span(nodes, identity_state, &state_s, &state_e)
+                return false if not rh_osv_query_eq(texts, kind_s, kind_e, "archive") and not rh_osv_query_eq(texts, kind_s, kind_e, "module")
+                return false if not rh_osv_query_eq(texts, state_s, state_e, "match") and not rh_osv_query_eq(texts, state_s, state_e, "changed") and not rh_osv_query_eq(texts, state_s, state_e, "unknown")
+                return false if nodes[expected_digest.usize()].kind != Json::RH_JSON_NULL and nodes[expected_digest.usize()].kind != Json::RH_JSON_STR
+                return false if nodes[observed_digest.usize()].kind != Json::RH_JSON_NULL and nodes[observed_digest.usize()].kind != Json::RH_JSON_STR
+                item <- nodes[item.usize()].next_sibling
+                item_index <- item_index + 1
+            true
+
         def rh_osv_query_commit_valid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             width: i64 = end - start
             return false if width != 40 and width != 64
@@ -222,7 +257,11 @@ module OsvQuery:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
-            return -1 if root < 0 or not rh_osv_query_fields(nodes, root, 6)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            artifacts: i64 = rh_osv_query_member(nodes, texts, root, "artifacts")
+            return -1 if artifacts == -2
+            return -1 if artifacts < 0 and not rh_osv_query_fields(nodes, root, 6)
+            return -1 if artifacts >= 0 and not rh_osv_query_fields(nodes, root, 7)
             schema: i64 = rh_osv_query_member(nodes, texts, root, "schema")
             ecosystem: i64 = rh_osv_query_member(nodes, texts, root, "ecosystem")
             graph_nodes: i64 = rh_osv_query_member(nodes, texts, root, "nodes")
@@ -240,6 +279,7 @@ module OsvQuery:
             return -1 if eco < 0 or graph_nodes < 0 or edges < 0 or unresolved < 0 or advisories < 0
             return -1 if nodes[graph_nodes.usize()].kind != Json::RH_JSON_ARR or nodes[edges.usize()].kind != Json::RH_JSON_ARR
             return -1 if nodes[unresolved.usize()].kind != Json::RH_JSON_ARR or nodes[advisories.usize()].kind != Json::RH_JSON_ARR
+            return -1 if not rh_osv_query_artifacts_valid(nodes, texts, raw, artifacts, nodes[graph_nodes.usize()].child_count.i64())
             Base::rh_push_text(out, "{\"queries\":[")
             query_nodes_out.push(91)
             while node >= 0 |node: i64 = nodes[graph_nodes.usize()].first_child, graph_node_index: i64 = 0, nodes, texts, raw, out, query_nodes_out, eco, query_count_out, skipped_out, omitted_out|:

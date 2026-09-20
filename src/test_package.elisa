@@ -66,6 +66,8 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
     cunk: mutable i64 = 0
     cn: i64 = Package::rh_cargo_parse(clock, cnodes, cpool, creqs, &cunk)
     return pfail("cargo-nodes") if cn != 7
+    cartifacts: mutable darray[Package::RhArtifact] = []
+    fails <- fails + pcheck(Package::rh_artifacts_from_packages(cnodes, cartifacts) == 2, "cargo-artifact-records")
     fails <- fails + pcheck(cunk == 0, "cargo-unknown")
     fails <- fails + pcheck(creqs.count.i64() == 5, "cargo-reqs")
     cedges: mutable darray[Package::RhDepEdge] = []
@@ -98,6 +100,8 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
     nreqs: mutable darray[Package::RhRequire] = []
     nroot: i64 = Package::rh_npm_lock_parse(nlock, npkg, nnodes, npool, npaths, nreqs)
     fails <- fails + pcheck(nroot == 0, "npm-root")
+    nartifacts: mutable darray[Package::RhArtifact] = []
+    fails <- fails + pcheck(Package::rh_artifacts_from_packages(nnodes, nartifacts) == 1, "npm-artifact-records")
     fails <- fails + pcheck(nnodes.count.i64() == 7, "npm-nodes")
     fails <- fails + pcheck(nnodes[3].optional == 1, "npm-optional-node")
     fails <- fails + pcheck(nreqs.count.i64() == 8, "npm-reqs")
@@ -195,6 +199,40 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
     fails <- fails + pcheck(Package::rh_artifact_is_distinct(Package::RH_ART_CHANGED), "artifact-changed-is-distinct")
     fails <- fails + pcheck(not Package::rh_artifact_is_distinct(Package::RH_ART_MATCH), "artifact-match-not-distinct")
     fails <- fails + pcheck(not Package::rh_artifact_is_distinct(Package::RH_ART_UNKNOWN), "artifact-unknown-not-distinct")
+    cargo_artifact: Package::RhArtifact = cartifacts[0]
+    multi_artifacts: mutable darray[Package::RhArtifact] =
+        while a < cartifacts.count |multi_artifacts: mutable darray[Package::RhArtifact] = [], a: usize = 0, cartifacts| -> multi_artifacts:
+            multi_artifacts.push(cartifacts[a])
+            a <- a + 1
+    fails <- fails + pcheck(Package::rh_artifact_identity_state(multi_artifacts, cpool, 0) == Package::RH_ART_UNKNOWN, "artifact-unobserved-unknown")
+    fails <- fails + pcheck(Package::rh_artifact_set_observed(multi_artifacts, cpool, 0, cargo_artifact.expected_s, cargo_artifact.expected_e), "artifact-observation-retained")
+    fails <- fails + pcheck(Package::rh_artifact_identity_state(multi_artifacts, cpool, 0) == Package::RH_ART_MATCH, "artifact-observation-match")
+    second_expected_s: mutable i64 = cpool.count.i64()
+    Base::rh_push_text(cpool, "sha256-second-artifact")
+    second_expected_e: i64 = cpool.count.i64()
+    second_artifact: i64 = Package::rh_artifact_add_expected(multi_artifacts, cargo_artifact.package_node, cargo_artifact.kind, second_expected_s, second_expected_e)
+    fails <- fails + pcheck(second_artifact >= 0 and multi_artifacts.count.i64() == 3, "multiple-artifacts-share-package-node")
+    changed_observed_s: mutable i64 = cpool.count.i64()
+    Base::rh_push_text(cpool, "sha256-changed-bytes")
+    changed_observed_e: i64 = cpool.count.i64()
+    fails <- fails + pcheck(Package::rh_artifact_set_observed(multi_artifacts, cpool, second_artifact, changed_observed_s, changed_observed_e), "artifact-changed-observation-retained")
+    fails <- fails + pcheck(Package::rh_artifact_identity_state(multi_artifacts, cpool, second_artifact) == Package::RH_ART_CHANGED, "artifact-changed-bytes-distinct")
+    artifact_graph: mutable darray[u8] = []
+    no_artifact_findings: mutable darray[Package::RhAdvisory] = []
+    Package::rh_graph_write_json(artifact_graph, 0, cnodes, cpool, multi_artifacts, cedges, cunres, no_artifact_findings, otexts, 1)
+    artifact_nodes: mutable darray[Json::RhJsonNode] = []
+    artifact_texts: mutable darray[u8] = []
+    artifact_root: i64 = Json::rh_json_parse(artifact_graph, artifact_nodes, artifact_texts)
+    artifact_list: i64 = Json::rh_json_obj_get(artifact_nodes, artifact_texts, artifact_root, "artifacts")
+    artifact_list_node: Json::RhJsonNode = artifact_nodes[artifact_list.usize()]
+    fails <- fails + pcheck(artifact_list_node.child_count == 3, "multiple-artifact-graph-records")
+    changed_record: i64 = Json::rh_json_arr_get(artifact_nodes, artifact_list, second_artifact)
+    changed_state_idx: i64 = Json::rh_json_obj_get(artifact_nodes, artifact_texts, changed_record, "identity_state")
+    changed_state: Json::RhJsonNode = artifact_nodes[changed_state_idx.usize()]
+    fails <- fails + pcheck(Base::rh_bytes_equal_literal(artifact_texts, changed_state.text_start.usize(), changed_state.text_end.usize(), "changed"), "changed-artifact-state-serialized")
+    changed_digest_idx: i64 = Json::rh_json_obj_get(artifact_nodes, artifact_texts, changed_record, "observed_digest")
+    changed_digest: Json::RhJsonNode = artifact_nodes[changed_digest_idx.usize()]
+    fails <- fails + pcheck(Base::rh_bytes_equal_literal(artifact_texts, changed_digest.text_start.usize(), changed_digest.text_end.usize(), "sha256-changed-bytes"), "observed-artifact-digest-serialized")
 
     # --- F023: a false/unverified repo claim is never identity ---
     fails <- fails + pcheck(Package::rh_repo_claim_state(true, false, false) == Package::RH_CLAIM_UNVERIFIED, "claim-unverified")
@@ -387,14 +425,18 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
     fails <- fails + pcheck(ctxs == 2, "go-directives-context")
 
     # --- serialization + goldens ---
+    pary: mutable darray[Package::RhArtifact] = []
+    gary: mutable darray[Package::RhArtifact] = []
+    _ = Package::rh_artifacts_from_packages(pnodes, pary)
+    _ = Package::rh_artifacts_from_packages(gnodes, gary)
     cg: mutable darray[u8] = []
-    Package::rh_graph_write_json(cg, 0, cnodes, cpool, cedges, cunres, cfind, otexts, 1)
+    Package::rh_graph_write_json(cg, 0, cnodes, cpool, cartifacts, cedges, cunres, cfind, otexts, 1)
     ng: mutable darray[u8] = []
-    Package::rh_graph_write_json(ng, 1, nnodes, npool, nedges, nunres, nfind, otexts, 0)
+    Package::rh_graph_write_json(ng, 1, nnodes, npool, nartifacts, nedges, nunres, nfind, otexts, 0)
     pg: mutable darray[u8] = []
-    Package::rh_graph_write_json(pg, 2, pnodes, ppool, pedges, punres, nfind, otexts, proot)
+    Package::rh_graph_write_json(pg, 2, pnodes, ppool, pary, pedges, punres, nfind, otexts, proot)
     gg: mutable darray[u8] = []
-    Package::rh_graph_write_json(gg, 3, gnodes, gpool, gedges, gunres, nfind, otexts, groot)
+    Package::rh_graph_write_json(gg, 3, gnodes, gpool, gary, gedges, gunres, nfind, otexts, groot)
     if dump:
         return pfail("dump-cargo") if not pwrite(workdir, "cargo-graph.golden.json", cg)
         return pfail("dump-npm") if not pwrite(workdir, "npm-graph.golden.json", ng)

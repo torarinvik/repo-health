@@ -38,6 +38,8 @@ for p in sorted(glob.glob(sys.argv[1] + "/*.json")):
         assert ids == list(range(len(ids))), ("node ids must be dense", p)
         for e in d["edges"]:
             assert 0 <= e["from"] < len(ids) and 0 <= e["to"] < len(ids), p
+        for artifact in d.get("artifacts", []):
+            assert 0 <= artifact["package_node"] < len(ids), (p, artifact)
         for a in d["advisories"]:
             assert 0 <= a["node"] < len(ids), p
             assert a["witness"], ("witness must not be empty", p)

@@ -129,7 +129,7 @@ tables, unversioned legacy plus versions 3/4, source kind/source fingerprint
 and expected checksums, unknown keys counted; unsupported versions rejected) and
 npm (`lockfileVersion` 2/3 `packages` with Node walk-up nested-version
 preference, version-1 legacy `dependencies` trees, dev/optional/peer scopes,
-integrity values retained as `expected_digest` (observed bytes remain null),
+integrity values retained as graph-level artifact records (observed bytes remain null),
 and `peerDependenciesMeta` optional-peer conditions on both
 resolved and unresolved graph entries; unsupported or mismatched revisions rejected), explicit
 unresolved reasons (`missing` / `ambiguous` /
@@ -1053,7 +1053,7 @@ paper's Appendix D helper results are not claimed as locally rerun evidence.
 | dependency.optional_direct_count | 1.0.0 | `implemented` (F022, F023, F024; direct requirements explicitly optional or conditionally activated) |
 | dependency.unknown_scope_count | 1.0.0 | `implemented` (F022, F023, F024; requirements whose captured purpose or scope could not be established) |
 | dependency.unpinned_requirement_count | 1.0.0 | `implemented` (F022, F023, F024; requirements that do not bind one literal version or artifact) |
-| dependency.artifact_digest_coverage | 1.0.0 | `implemented` (F022, F023, F024; resolved destination nodes with observed artifact digests over resolved destination nodes) |
+| dependency.artifact_digest_coverage | 1.0.0 | `implemented` (F022, F023, F024; resolved destination nodes with expected artifact digests over resolved destination nodes; not observed-byte verification) |
 | dependency.maximum_observed_depth | 1.0.0 | `implemented` (F022, F023, F024; maximum shortest-path depth reached from the selected graph root) |
 | dependency.resolution_complete | 1.0.0 | `implemented` (F022, F023, F024; no unresolved requirement attached to a reachable graph node) |
 | graph.node_count | 1.0.0 | `implemented` (F022, F023, F024; visible nodes in the selected dependency graph projection) |
