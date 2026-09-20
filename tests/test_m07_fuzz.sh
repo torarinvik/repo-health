@@ -13,7 +13,7 @@ trap 'rm -rf "$WORK_ROOT"' EXIT
 output="$(ELISA_M07_FUZZ_WORK="$WORK_ROOT" bash "$ROOT/tools/fuzz-m07.sh" "$RUNS" 2>&1)" \
   || fail "coverage-guided parser campaign failed: $output"
 [[ "$output" == *"Loaded "*"inline 8-bit counters"* ]] || fail "sanitizer coverage counters were not loaded"
-[[ "$output" == *"19 files found"* ]] || fail "checked-in parser seed corpus was not loaded"
+[[ "$output" == *"22 files found"* ]] || fail "checked-in parser seed corpus was not loaded"
 [[ "$output" == *"Done $RUNS runs"* ]] || fail "libFuzzer did not complete $RUNS runs"
 [[ "$output" == *"cov:"* ]] || fail "libFuzzer coverage summary missing"
 initial_cov="$(sed -n 's/.*INITED cov: \([0-9][0-9]*\).*/\1/p' <<<"$output" | head -n 1)"

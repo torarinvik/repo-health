@@ -651,7 +651,7 @@ safety (S011). NOT yet: M07-01 independent threat-model review (an internal
 and the opt-in pilot. A real Elisa libFuzzer target (`src/fuzz_m07.elisa`)
 now covers the M07 JSON, lockfile, package, XML, archive, version, and native
 VCS parsers; `tests/test_m07_fuzz.sh` passes a bounded 1,000-run campaign
-from 19 checked-in seeds with sanitizer coverage counters loaded. The runner
+from 22 checked-in seeds with sanitizer coverage counters loaded. The runner
 uses ASan and UBSan and disables LeakSanitizer only for this fuzz process
 because macOS libFuzzer's process-lifetime RSS monitor is reported as a leak;
 the deterministic sanitizer harness remains separately enabled. A sustained

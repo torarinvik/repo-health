@@ -4659,11 +4659,12 @@ module Package:
                                 j <- j + 1
                             return false if j >= e or (line[j] != 34 and line[j] != 39)
                             quote: u8 = line[j]
-                            start_out[0] <- (j + 1).i64()
-                            k: mutable usize = j + 1
-                            while k < e and line[k] != quote |k, e, line, quote|:
-                                k <- k + 1
+                            value_start: usize = j + 1
+                            k: usize =
+                                while k < e and line[k] != quote |k: usize = value_start| -> k:
+                                    k <- k + 1
                             return false if k >= e
+                            start_out[0] <- value_start.i64()
                             end_out[0] <- k.i64()
                             return true
                 i <- i + 1
@@ -4678,6 +4679,17 @@ module Package:
                 digits <- 1 if b >= 48 and b <= 57
                 i <- i + 1
             digits == 1
+
+        # Attribute scanning can find a quote belonging to the next attribute
+        # when hostile XML omits a closing quote. Reject malformed package IDs
+        # before copying their spans into the graph pool.
+        def rh_nuget_id_valid(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e <= s or e > data.count.i64()
+            while i < e |i: i64 = s, e, data|:
+                b: u8 = data[i.usize()]
+                return false if b <= 32 or b == 34 or b == 39 or b == 60 or b == 61 or b == 62
+                i <- i + 1
+            true
 
         # Parse the bounded NuGet `packages.config` format. Exact package versions
         # become resolved edges; range expressions and missing versions remain
@@ -4721,6 +4733,7 @@ module Package:
                     if not rh_nuget_attr(xml, s, e, "id", &name_s, &name_e):
                         return -1 if not rh_nuget_attr(xml, s, e, "Include", &name_s, &name_e)
                     return -1 if name_e <= name_s
+                    return -1 if not rh_nuget_id_valid(xml, name_s, name_e)
                     ver_s: mutable i64 = -1
                     ver_e: mutable i64 = -1
                     _ = rh_nuget_attr(xml, s, e, "version", &ver_s, &ver_e)
