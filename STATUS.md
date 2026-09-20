@@ -120,7 +120,15 @@ attempts from successful acquisition, and retains typed `rate_limit`,
 fencing token, malformed failure kind, failed page, or partial page cannot
 publish a cursor. The path is exercised by
 `tests/test_ingest_conformance_cli.sh` and contributes to the RP-F01–F09
-crosswalk.
+crosswalk. Once page processing finishes under the lease, it appends an
+aggregate capability state to
+`<root>/sources/<source>/coverage/<capability>.interval`; the result exposes
+that state and `refresh_last_success`. Only a declared collection-complete run
+with clean committed acquisition is `observed`; mixed, undeclared, or
+unresolved-crash work is `partial`, and failure-only
+authorization, unsupported, and transport cases retain their typed states.
+A repeated page retry clears its pending commit marker before coverage can be
+reported as observed.
 
 **M02-06 scoped snapshot reconciliation:** `rh_cli snapshot-reconcile
 --input <rh-snapshot-reconcile-input/1> --out <file>` emits a deterministic

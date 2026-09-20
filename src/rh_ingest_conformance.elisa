@@ -8,6 +8,7 @@
 
 include "./rh_base.elisa"
 include "./rh_json.elisa"
+include "./rh_observation.elisa"
 include "./rh_store.elisa"
 
 const RH_IC_COMPLETE: u8 = 0
@@ -114,9 +115,18 @@ module IngestConformance:
             return -1 if now_ok == 0 or ttl_ok == 0 or now < 0 or ttl <= 0
             watermark_ok: mutable i64 = 0
             collection_start: i64 = IngestConformance::rh_ic_int(nodes, raw, texts, root_idx, "collection_start", &watermark_ok)
-            return -1 if watermark_ok == 0 or collection_start < 0
+            return -1 if watermark_ok == 0 or collection_start < 0 or now < collection_start
             pages_idx: i64 = IngestConformance::rh_ic_get(nodes, texts, root_idx, "pages")
-            return -1 if pages_idx < 0 or nodes[pages_idx.usize()].kind != Json::RH_JSON_ARR
+            return -1 if pages_idx < 0 or nodes[pages_idx.usize()].kind != Json::RH_JSON_ARR or nodes[pages_idx.usize()].child_count == 0
+            collection_complete, collection_complete_valid =
+                complete_idx: i64 = IngestConformance::rh_ic_get(nodes, texts, root_idx, "collection_complete")
+                if complete_idx < 0:
+                    false, true
+                else:
+                    complete_ok: mutable i64 = 0
+                    complete_value: bool = IngestConformance::rh_ic_bool(nodes, raw, texts, root_idx, "collection_complete", &complete_ok)
+                    complete_value, complete_ok != 0
+            return -1 if not collection_complete_valid
             owner: mutable darray[u8] = []
             IngestConformance::rh_ic_copy(texts, os, oe, owner)
             ownerp: u8& = (&owner[0]).cast[u8&] can Unsafe.PointerCast
@@ -155,6 +165,19 @@ module IngestConformance:
             Base::rh_push_text(cursors_dir, "/cursors")
             cursors_dir.push(0)
             return -1 if Git::rh_ensure_dir((&cursors_dir[0]).cast[cstr] can Unsafe.PointerCast) != 0
+            coverage_dir: mutable darray[u8] = []
+            Base::rh_push_cstr(coverage_dir, (&source_dir[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(coverage_dir, "/coverage")
+            coverage_dir.push(0)
+            return -1 if Git::rh_ensure_dir((&coverage_dir[0]).cast[cstr] can Unsafe.PointerCast) != 0
+            coverage_path: mutable darray[u8] = []
+            Base::rh_push_cstr(coverage_path, (&coverage_dir[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(coverage_path, "/")
+            while i < ce - cs |i: i64 = 0, texts, cs, coverage_path|:
+                coverage_path.push(texts[(cs + i).usize()])
+                i <- i + 1
+            Base::rh_push_text(coverage_path, ".interval")
+            coverage_path.push(0)
             events_path: mutable darray[u8] = []
             index_path: mutable darray[u8] = []
             cursor_path: mutable darray[u8] = []
@@ -190,17 +213,19 @@ module IngestConformance:
             unsupported_failures: mutable i64 = 0
             transient_failures: mutable i64 = 0
             stale_replacements: mutable i64 = 0
+            pending_page: mutable i64 = -1
             Base::rh_push_text(out, "{\"schema\":\"rh-ingest-result/1\",\"source\":")
             IngestConformance::rh_ic_emit_span(out, texts, ss, se)
             Base::rh_push_text(out, ",\"capability\":")
             IngestConformance::rh_ic_emit_span(out, texts, cs, ce)
             Base::rh_push_text(out, ",\"pages\":[")
-            while page >= 0 |page: i64 = nodes[pages_idx.usize()].first_child, nodes, texts, raw, out, token, leasep, logp, ownerp, eventp, indexp, cursorp, cursor_page, cursor_count, appended, duplicates, committed_pages, empty_pages, failed_pages, partial_pages, crash_replays, stale_rejected, attempted_pages, successful_pages, backdated_events, updates_after_start, rate_limit_failures, authorization_failures, unsupported_failures, transient_failures|:
+            while page >= 0 |page: i64 = nodes[pages_idx.usize()].first_child, nodes, texts, raw, out, token, leasep, logp, ownerp, eventp, indexp, cursorp, cursor_page, cursor_count, appended, duplicates, committed_pages, empty_pages, failed_pages, partial_pages, crash_replays, stale_rejected, attempted_pages, successful_pages, backdated_events, updates_after_start, rate_limit_failures, authorization_failures, unsupported_failures, transient_failures, pending_page|:
                 attempted_pages <- attempted_pages + 1
                 return -1 if nodes[page.usize()].kind != Json::RH_JSON_OBJ
                 page_ok: mutable i64 = 0
                 page_no: i64 = IngestConformance::rh_ic_int(nodes, raw, texts, page, "page", &page_ok)
                 return -1 if page_ok == 0 or page_no < 0
+                return -1 if pending_page >= 0 and page_no != pending_page
                 pss: mutable i64 = 0
                 pse: mutable i64 = 0
                 return -1 if not IngestConformance::rh_ic_str(nodes, texts, page, "status", &pss, &pse)
@@ -294,8 +319,10 @@ module IngestConformance:
                         cursor_count <- stored_count
                         committed_pages <- committed_pages + 1
                         successful_pages <- successful_pages + 1 if status == RH_IC_COMPLETE or status == RH_IC_EMPTY
+                        pending_page <- -1 if pending_page == page_no
                     else:
                         crash_replays <- crash_replays + 1
+                        pending_page <- page_no
                     appended <- appended + page_appended
                     duplicates <- duplicates + page_duplicates
                 if page != nodes[pages_idx.usize()].first_child:
@@ -320,9 +347,27 @@ module IngestConformance:
                 Base::rh_push_text(out, "null") if replacement_ok == 0
                 Base::rh_push_text(out, "}")
                 page <- nodes[page.usize()].next_sibling
-            return -1 if not Store::rh_lease_release(leasep, logp, token, ownerp, now + 1, 3)
-            total_events: i64 = Store::rh_count_file_lines(eventp)
+            total_events: i64 = 0 if not file_exists(eventp) else Store::rh_count_file_lines(eventp)
             return -1 if total_events < 0
+            failure_kinds: i64 = (1 if rate_limit_failures > 0 else 0) + (1 if authorization_failures > 0 else 0) + (1 if unsupported_failures > 0 else 0) + (1 if transient_failures > 0 else 0)
+            return -1 if collection_complete and (successful_pages == 0 or failed_pages > 0 or partial_pages > 0 or stale_rejected > 0 or pending_page >= 0)
+            coverage_state: u8 =
+                if successful_pages > 0:
+                    Observation::RH_ST_OBSERVED if collection_complete else Observation::RH_ST_PARTIAL
+                elif partial_pages > 0 or stale_rejected > 0 or pending_page >= 0 or failure_kinds > 1:
+                    Observation::RH_ST_PARTIAL
+                elif authorization_failures > 0:
+                    Observation::RH_ST_UNAUTHORIZED
+                elif unsupported_failures > 0:
+                    Observation::RH_ST_UNSUPPORTED
+                elif rate_limit_failures > 0 or transient_failures > 0:
+                    Observation::RH_ST_UNAVAILABLE
+                else:
+                    Observation::RH_ST_ERROR
+            coveragep: cstr = (&coverage_path[0]).cast[cstr] can Unsafe.PointerCast
+            coverage_written: bool = Store::rh_coverage_mark(coveragep, collection_start, now, coverage_state)
+            lease_released: bool = Store::rh_lease_release(leasep, logp, token, ownerp, now + 1, 3)
+            return -1 if not coverage_written or not lease_released
             Base::rh_push_text(out, "],\"cursor\":{\"page\":")
             Base::rh_push_decimal_i64(out, cursor_page)
             Base::rh_push_text(out, ",\"event_count\":")
@@ -359,6 +404,9 @@ module IngestConformance:
             Base::rh_push_decimal_i64(out, stale_rejected)
             Base::rh_push_text(out, ",\"stale_replacements\":")
             Base::rh_push_decimal_i64(out, stale_replacements)
+            Base::rh_push_text(out, ",\"pending_commit_page\":")
+            Base::rh_push_decimal_i64(out, pending_page) if pending_page >= 0
+            Base::rh_push_text(out, "null") if pending_page < 0
             Base::rh_push_text(out, ",\"failure_kinds\":{\"rate_limit\":")
             Base::rh_push_decimal_i64(out, rate_limit_failures)
             Base::rh_push_text(out, ",\"authorization\":")
@@ -368,5 +416,11 @@ module IngestConformance:
             Base::rh_push_text(out, ",\"transient\":")
             Base::rh_push_decimal_i64(out, transient_failures)
             Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, "},\"note\":\"collection start watermark is pinned before acquisition; events persist before cursor advancement; duplicate retries converge through the immutable id index; late or backdated events require reconciliation; only complete or successful-empty pages advance the cursor; failed and partial acquisition preserve prior evidence; lease fencing rejects stale publication\"}")
+            Base::rh_push_text(out, "},\"coverage\":{\"state\":\"")
+            Base::rh_push_text(out, Observation::rh_status_label(coverage_state))
+            Base::rh_push_text(out, "\",\"collection_complete\":")
+            Base::rh_push_text(out, "true" if collection_complete else "false")
+            Base::rh_push_text(out, ",\"refresh_last_success\":")
+            Base::rh_push_text(out, "true" if coverage_state == Observation::RH_ST_OBSERVED else "false")
+            Base::rh_push_text(out, ",\"persisted\":true},\"note\":\"collection start watermark is pinned before acquisition; events persist before cursor advancement; duplicate retries converge through the immutable id index; late or backdated events require reconciliation; only complete or successful-empty pages advance the cursor; failed and partial acquisition preserve prior evidence; capability coverage status is appended for the collection interval; lease fencing rejects stale publication\"}")
             0
