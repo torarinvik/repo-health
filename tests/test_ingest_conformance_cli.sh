@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/test_ingest_conformance_cli.sh — RP-03 product-path ingestion replay.
+# tests/test_ingest_conformance_cli.sh — rh-ingest-input/1 and rh-ingest-result/1.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="/tmp/rh-ingest-conformance"
@@ -12,25 +12,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T-root" "$T-root-2" "$T-root-overlap" "$T-root-bad" "$T-root-bad2" "$T-root-bad3" "$T-root-bad4" "$T-root-bad5" "$T-root-future" "$T-root-empty-pages" "$T-root-observed" "$T-root-unauthorized" "$T-root-unsupported" "$T-root-unavailable" "$T-root-undeclared" "$T-root-recovered" "$T-root-pending" "$T-input.json" "$T-out.json" "$T-out-2.json" "$T-bad.json" "$T-bad-status.json" "$T-x"
 mkdir -p "$T"
-python3 - "$T-input.json" <<'PY'
-import json, sys
-event = lambda ident, state: {"id": ident, "line": json.dumps({"id": ident, "state": state, "occurred_at": 999 if ident == "issue:1" else 1001, "observed_at": 1000 if ident == "issue:1" else 1002}, separators=(",", ":"))}
-d = {
-    "schema": "rh-ingest-input/1", "source": "github", "capability": "issues",
-    "owner": "worker-a", "lease_now": 1000, "lease_ttl": 100, "collection_start": 1000,
-    "collection_complete": False,
-    "pages": [
-        {"page": 1, "status": "complete", "commit": False, "events": [event("issue:1", "open")]},
-        {"page": 1, "status": "complete", "commit": True, "events": [event("issue:1", "open"), event("issue:2", "closed")]},
-        {"page": 2, "status": "empty", "commit": True, "events": []},
-        {"page": 3, "status": "failed", "failure_kind": "rate_limit", "replaces_page": 2, "commit": True, "events": []},
-        {"page": 4, "status": "partial", "commit": True, "events": [event("issue:4", "open")]},
-        {"page": 5, "status": "complete", "commit": True, "token": 999, "events": [event("issue:5", "open")]},
-        {"page": 6, "status": "failed", "failure_kind": "authorization", "commit": True, "events": []},
-    ],
-}
-json.dump(d, open(sys.argv[1], "w"), separators=(",", ":"))
-PY
+cp "$ROOT/fixtures/ingest/conformance-input.json" "$T-input.json"
 "$ROOT/build/rh_cli" ingest --root "$T-root" --input "$T-input.json" --out "$T-out.json" >/dev/null || fail "ingest run"
 python3 - "$T-out.json" <<'PY'
 import json, sys

@@ -118,7 +118,8 @@ admission work.
 <rh-ingest-input/1> --out <file>` pins `collection_start`, writes immutable
 events before cursor advancement, reports updates arriving after the start
 watermark and backdated observations requiring reconciliation, separates page
-attempts from successful acquisition, and retains typed `rate_limit`,
+attempts from successful acquisition, validates its checked-in input shape in
+`schemas/ingest-input.schema.json`, and retains typed `rate_limit`,
 `authorization`, `unsupported`, and `transient` failure counts. A stale
 fencing token, malformed failure kind, failed page, or partial page cannot
 publish a cursor. The path is exercised by
