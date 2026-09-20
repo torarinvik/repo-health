@@ -584,6 +584,52 @@ def check_fossil_reject(fails: mutable i64&) -> void can[Memory.Allocate, Abort.
     t8check(Fossil::rh_fossil_parse(empty, 0, p5, o5, &r5) == -1, "fossil-empty-fails", fails)
     return
 
+def check_fossil_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    pool: mutable darray[u8] = []
+    entries: mutable darray[Fossil::RhFossilEntry] = []
+    rejected: mutable i64 = 0
+    status: i64 = Fossil::rh_fossil_parse(raw, 0, pool, entries, &rejected)
+    spans_valid: bool =
+        while i < entries.count |valid: bool = true, i: usize = 0, pool, entries| -> valid:
+            entry: Fossil::RhFossilEntry = entries[i]
+            valid <- false if entry.hash_s < 0 or entry.hash_e < entry.hash_s or entry.hash_e > pool.count.i64()
+            valid <- false if entry.author_s >= 0 and (entry.author_e < entry.author_s or entry.author_e > pool.count.i64())
+            valid <- false if entry.date_s >= 0 and (entry.date_e < entry.date_s or entry.date_e > pool.count.i64())
+            valid <- false if entry.branch_s >= 0 and (entry.branch_e < entry.branch_s or entry.branch_e > pool.count.i64())
+            valid <- false if entry.comment_s >= 0 and (entry.comment_e < entry.comment_s or entry.comment_e > pool.count.i64())
+            i <- i + 1
+    bounded_result: bool = (status == -1 or status == 0) and entries.count <= raw.count and pool.count <= raw.count and rejected >= 0 and rejected <= raw.count.i64()
+    t8check(spans_valid and bounded_result, "fossil-fuzz-bounds-and-spans", fails)
+    return
+
+def check_fossil_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    corpus: darray[u8] = fossil_fixture()
+    while trial < 96 |trial: i64 = 0, rng: i64 = 223607, corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < corpus.count |copied: usize = 0, corpus, fuzzed|:
+            fuzzed.push(corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_fossil_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+
+    while trial < 96 |trial: i64 = 0, corpus, fails|:
+        prefix: usize = (trial * corpus.count.i64() / 96).usize()
+        truncated: mutable darray[u8] = []
+        while copied < prefix |copied: usize = 0, corpus, truncated|:
+            truncated.push(corpus[copied])
+            copied <- copied + 1
+        check_fossil_fuzz_case(truncated, fails)
+        trial <- trial + 1
+    return
+
 def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     fails: mutable i64 = 0
     check_hg_parse(&fails)
@@ -603,6 +649,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_fossil_parse(&fails)
     check_fossil_native_form(&fails)
     check_fossil_reject(&fails)
+    check_fossil_fuzz(&fails)
     if fails == 0:
         b: mutable darray[u8] =
             b: mutable darray[u8] = []
