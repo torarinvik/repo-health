@@ -33,12 +33,14 @@ cat > "$RESOLVE_BIN/python3" <<'SH'
 set -eu
 [ "$1" = "-I" ] || exit 90
 shift
-[ "$1" = "-c" ] || exit 91
+[ "$1" = "-S" ] || exit 91
+shift
+[ "$1" = "-c" ] || exit 92
 shift
 resolver="$1"
 shift
 host="$1"
-exec "$RH_TEST_SYSTEM_PYTHON" -I -c '
+exec "$RH_TEST_SYSTEM_PYTHON" -I -S -c '
 import ipaddress, socket, sys
 _, resolver, host, raw = sys.argv
 def getaddrinfo(name, port, family=0, type=0, proto=0, flags=0):

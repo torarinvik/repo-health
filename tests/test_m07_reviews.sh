@@ -54,6 +54,11 @@ for dep in d["dependencies"]:
     ids.add(dep["id"])
 for want in ("elisa-stage1", "libc", "git-cli"):
     assert want in ids, ("missing dependency", want)
+python3_dep = next(dep for dep in d["dependencies"] if dep["id"] == "python3")
+assert python3_dep["kind"] == "runtime_tool", python3_dep
+assert "-I -S" in python3_dep["isolation"] and "rh_addr_guard" in python3_dep["isolation"], python3_dep
+curl_dep = next(dep for dep in d["dependencies"] if dep["id"] == "curl")
+assert "--resolve" in curl_dep["isolation"] and "proxies bypassed" in curl_dep["isolation"], curl_dep
 # native surfaces must be called out
 assert any(dep["kind"] == "native_surface" for dep in d["dependencies"]), "libc native surface must be named"
 assert d["rules"], "dependency rules must be stated"
