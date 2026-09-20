@@ -13,6 +13,9 @@ module OsvQuery:
     private:
         const RH_OSV_QUERY_MAX_INPUT: i64 = 8192
         const RH_OSV_QUERY_MAX_TEXT: i64 = 256
+        const RH_OSV_QUERY_MAX_TOKEN: i64 = 512
+        const RH_OSV_QUERY_MAX_VULNS: i64 = 5000
+        const RH_OSV_QUERY_MAX_RESPONSE: i64 = 8388608
 
         # Return a unique object member, -1 when absent, or -2 when duplicated.
         def rh_osv_query_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -78,6 +81,136 @@ module OsvQuery:
                 i <- i + 1
             true
 
+        def rh_osv_query_ws(raw: darray[u8]&, pos: usize) -> usize can[Memory.Allocate, Abort.Panic]:
+            raw_loop: mutable darray[u8]& = raw
+            while i < raw_loop.count |i: usize = pos, raw_loop| -> i:
+                b: u8 = raw_loop[i]
+                break if b != 32 and b != 9 and b != 10 and b != 13
+                i <- i + 1
+
+        # Return the closing quote for a raw JSON string, skipping escaped bytes.
+        def rh_osv_query_string_end(raw: darray[u8]&, quote: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            raw_loop: mutable darray[u8]& = raw
+            while i < raw_loop.count |i: usize = quote + 1, raw_loop|:
+                if raw_loop[i] == 92:
+                    i <- i + 2
+                    continue
+                return i.i64() if raw_loop[i] == 34
+                i <- i + 1
+            -1
+
+        # Locate the raw contents of the unique top-level `vulns` array. The
+        # JSON DOM validates shape/uniqueness first; this scanner preserves each
+        # advisory object's original bytes while concatenating bounded pages.
+        def rh_osv_query_raw_vulns_inner(raw: darray[u8]&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            raw_loop: mutable darray[u8]& = raw
+            depth: mutable i64 = 0
+            while i < raw_loop.count |i: usize = 0, raw_loop, depth, start_out, end_out|:
+                b: u8 = raw_loop[i]
+                if b == 34 and depth == 1:
+                    close: i64 = rh_osv_query_string_end(raw_loop, i)
+                    return false if close < 0
+                    key: bool = close - i.i64() == 6 and raw_loop[i + 1] == 118 and raw_loop[i + 2] == 117 and raw_loop[i + 3] == 108 and raw_loop[i + 4] == 110 and raw_loop[i + 5] == 115
+                    if key:
+                        colon: usize = rh_osv_query_ws(raw_loop, (close + 1).usize())
+                        if colon < raw_loop.count and raw_loop[colon] == 58:
+                            array: usize = rh_osv_query_ws(raw_loop, colon + 1)
+                            return false if array >= raw_loop.count or raw_loop[array] != 91
+                            bracket_depth: mutable i64 = 1
+                            inner_start: usize = array + 1
+                            while j < raw_loop.count |j: usize = inner_start, raw_loop, bracket_depth|:
+                                if raw_loop[j] == 34:
+                                    string_close: i64 = rh_osv_query_string_end(raw_loop, j)
+                                    return false if string_close < 0
+                                    j <- (string_close + 1).usize()
+                                    continue
+                                if raw_loop[j] == 91:
+                                    bracket_depth <- bracket_depth + 1
+                                elif raw_loop[j] == 93:
+                                    bracket_depth <- bracket_depth - 1
+                                    if bracket_depth == 0:
+                                        start_out[0] <- inner_start.i64()
+                                        end_out[0] <- j.i64()
+                                        return true
+                                j <- j + 1
+                            return false
+                    i <- (close + 1).usize()
+                    continue
+                if b == 123:
+                    depth <- depth + 1
+                elif b == 125:
+                    depth <- depth - 1
+                i <- i + 1
+            false
+
+        def rh_osv_query_append_page(raw: darray[u8]&, combined: mutable darray[u8]&, token_out: mutable darray[u8]&, has_next_out: mutable i64&, total_vulns_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            has_next_out[0] <- 0
+            return -1 if raw.count.i64() > RH_OSV_QUERY_MAX_RESPONSE
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            vulns: i64 = rh_osv_query_member(nodes, texts, root, "vulns")
+            token: i64 = rh_osv_query_member(nodes, texts, root, "next_page_token")
+            return -1 if vulns == -2 or token == -2
+            if token >= 0:
+                return -1 if nodes[token.usize()].kind != Json::RH_JSON_STR
+                token_node: Json::RhJsonNode = nodes[token.usize()]
+                return -1 if token_node.text_end <= token_node.text_start
+                return -1 if token_node.text_end - token_node.text_start > RH_OSV_QUERY_MAX_TOKEN
+                while t < token_node.text_end |t: i64 = token_node.text_start, texts, token_out|:
+                    return -1 if texts[t.usize()] < 33 or texts[t.usize()] > 126
+                    token_out.push(texts[t.usize()])
+                    t <- t + 1
+                has_next_out[0] <- 1
+            if vulns >= 0:
+                array: Json::RhJsonNode = nodes[vulns.usize()]
+                return -1 if array.kind != Json::RH_JSON_ARR
+                return -1 if total_vulns_out[0] + array.child_count > RH_OSV_QUERY_MAX_VULNS
+                child: mutable i64 = array.first_child
+                while child >= 0 |child, nodes|:
+                    return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                    child <- nodes[child.usize()].next_sibling
+                if array.child_count > 0:
+                    start: mutable i64 = -1
+                    end: mutable i64 = -1
+                    return -1 if not rh_osv_query_raw_vulns_inner(raw, &start, &end)
+                    extra: mutable i64 = end - start
+                    extra <- extra + 1 if total_vulns_out[0] > 0
+                    return -1 if combined.count.i64() + extra > RH_OSV_QUERY_MAX_RESPONSE
+                    combined.push(44) if total_vulns_out[0] > 0
+                    while p < end |p: i64 = start, end, raw, combined|:
+                        combined.push(raw[p.usize()])
+                        p <- p + 1
+                total_vulns_out[0] <- total_vulns_out[0] + array.child_count
+            0
+
+        def rh_osv_query_page_request(base: darray[u8]&, token: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            base_loop: mutable darray[u8]& = base
+            return -1 if base_loop.count < 2 or base_loop[base_loop.count - 1] != 125
+            return -1 if token.count == 0 or token.count.i64() > RH_OSV_QUERY_MAX_TOKEN
+            while i < base_loop.count - 1 |i: usize = 0, base_loop, out|:
+                out.push(base_loop[i])
+                i <- i + 1
+            Base::rh_push_text(out, ",\"page_token\":\"")
+            Base::rh_json_escape(out, token, 0, token.count)
+            Base::rh_push_text(out, "\"}")
+            return -1 if out.count.i64() > RH_OSV_QUERY_MAX_INPUT
+            0
+
+        # Remember every token in one flat bounded buffer; repeated tokens fail
+        # closed rather than being followed or reported as complete.
+        def rh_osv_query_remember_token(token: darray[u8]&, seen: mutable darray[u8]&, starts: mutable darray[i64]&, lengths: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < starts.count.i64() |i: i64 = 0, token, seen, starts, lengths|:
+                return false if lengths[i.usize()] == token.count.i64() and Base::rh_bytes_equal_span(token, 0, token.count.i64(), seen, starts[i.usize()], starts[i.usize()] + lengths[i.usize()])
+                i <- i + 1
+            starts.push(seen.count.i64())
+            lengths.push(token.count.i64())
+            while j < token.count |j: usize = 0, token, seen|:
+                seen.push(token[j])
+                j <- j + 1
+            true
+
         def rh_osv_query_make_request(texts: darray[u8]&, name_s: i64, name_e: i64, version_s: i64, version_e: i64, ecosystem: u8, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"package\":{\"ecosystem\":\"")
             Base::rh_push_text(out, Package::rh_osv_ecosystem(ecosystem))
@@ -88,6 +221,20 @@ module OsvQuery:
             Base::rh_push_text(out, "\"}")
 
     public:
+        # Shared transport/aggregation policy: the CLI never follows page five.
+        const RH_OSV_QUERY_MAX_PAGES: i64 = 4
+
+        # CLI-facing bounded pagination primitives. JSON scanning, span tracking,
+        # and token storage remain private to this module.
+        def rh_osv_query_collect_page(raw: darray[u8]&, combined: mutable darray[u8]&, token_out: mutable darray[u8]&, has_next_out: mutable i64&, total_vulns_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_osv_query_append_page(raw, combined, token_out, has_next_out, total_vulns_out)
+
+        def rh_osv_query_next_request(base: darray[u8]&, token: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_osv_query_page_request(base, token, out)
+
+        def rh_osv_query_remember_page_token(token: darray[u8]&, seen: mutable darray[u8]&, starts: mutable darray[i64]&, lengths: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_osv_query_remember_token(token, seen, starts, lengths)
+
         # Read a versioned query contract and build OSV's v1/query body.
         # Query kind is 0 for a package/version request and 1 for a commit hash.
         # Returns 0 on success; malformed/unknown/ambiguous input is -1.

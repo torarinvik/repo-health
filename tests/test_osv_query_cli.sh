@@ -29,7 +29,7 @@ SH
 cat > "$T/bin/curl" <<'SH'
 #!/bin/sh
 set -eu
-printf '%s\n' "$@" > "$OSV_QUERY_CAPTURE"
+printf '%s\n' "$@" >> "$OSV_QUERY_CAPTURE"
 payload=''
 body=''
 url=''
@@ -54,9 +54,17 @@ done
 [ "$proto" = '=https' ] || exit 90
 [ "$redirects" = '0' ] || exit 91
 [ "$content_type" = 'Content-Type: application/json' ] || exit 92
-case "$payload" in @*) request_path="$(printf '%s' "$payload" | cut -c2-)"; cat "$request_path" > "$OSV_QUERY_REQUEST_CAPTURE" ;; *) exit 93 ;; esac
-cp "$OSV_QUERY_FAKE_RESPONSE" "$body"
-printf '%s' "$OSV_QUERY_FAKE_HTTP"
+case "$payload" in @*) request_path="$(printf '%s' "$payload" | cut -c2-)"; cat "$request_path" >> "$OSV_QUERY_REQUEST_CAPTURE"; printf '\n' >> "$OSV_QUERY_REQUEST_CAPTURE" ;; *) exit 93 ;; esac
+request_body="$(cat "$request_path")"
+response="$OSV_QUERY_FAKE_RESPONSE"
+http="$OSV_QUERY_FAKE_HTTP"
+case "$request_body" in
+  *'"page_token":"page-2"'*) response="${OSV_QUERY_FAKE_PAGE2_RESPONSE:-$response}"; http="${OSV_QUERY_FAKE_PAGE2_HTTP:-$http}" ;;
+  *'"page_token":"page-3"'*) response="${OSV_QUERY_FAKE_PAGE3_RESPONSE:-$response}"; http="${OSV_QUERY_FAKE_PAGE3_HTTP:-$http}" ;;
+  *'"page_token":"page-4"'*) response="${OSV_QUERY_FAKE_PAGE4_RESPONSE:-$response}"; http="${OSV_QUERY_FAKE_PAGE4_HTTP:-$http}" ;;
+esac
+cp "$response" "$body"
+printf '%s' "$http"
 exit 0
 SH
 chmod +x "$T/bin/python3" "$T/bin/curl"
@@ -133,9 +141,94 @@ import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 r = json.load(open(p / "osv-query-result.json"))
 body = json.load(open(p / "osv-query-response.json"))
+assert r["schema"] == "rh-osv-query-result/1" and r["state"] == "collected", r
 assert r["pagination"] == "more_available" and body["next_page_token"] == "page-2", (r, body)
 assert body["vulns"][0]["id"] == "CVE-TEST"
 PY
+
+echo "[osv-query] bounded continuation collects pages and retains evidence"
+cat > "$T/page1.json" <<'JSON'
+{"vulns":[{"id":"CVE-PAGE-1"}],"next_page_token":"page-2"}
+JSON
+cat > "$T/page2.json" <<'JSON'
+{"vulns":[{"id":"CVE-PAGE-2"}],"next_page_token":"page-3"}
+JSON
+cat > "$T/page3.json" <<'JSON'
+{"vulns":[{"id":"CVE-PAGE-3"}]}
+JSON
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_RESPONSE="$T/page1.json" \
+OSV_QUERY_FAKE_PAGE2_RESPONSE="$T/page2.json" \
+OSV_QUERY_FAKE_PAGE3_RESPONSE="$T/page3.json" \
+OSV_QUERY_FAKE_HTTP=200 OSV_QUERY_CAPTURE="$T/pages.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/pages.requests.jsonl" \
+  "$ROOT/build/rh_cli" osv-query --input "$T/query.json" --out "$T/pages-out" --continue-pagination >/dev/null
+python3 - "$T/pages-out" "$T/pages.args" "$T/pages.requests.jsonl" <<'PY'
+import hashlib, json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+r = json.load(open(p / "osv-query-result.json"))
+merged = json.load(open(p / "osv-query-response.json"))
+args = open(sys.argv[2]).read().splitlines()
+requests = [json.loads(line) for line in open(sys.argv[3]) if line.strip()]
+assert r["schema"] == "rh-osv-query-result/2" and r["state"] == "collected", r
+assert r["pagination"] == "complete" and r["page_count"] == 3 and r["page_limit"] == 4, r
+assert r["advisory_count"] == 3 and len(r["page_evidence"]) == 3, r
+assert [v["id"] for v in merged["vulns"]] == ["CVE-PAGE-1", "CVE-PAGE-2", "CVE-PAGE-3"], merged
+assert "next_page_token" not in merged and not (p / "osv-query-next-page-token.txt").exists()
+assert requests[1]["page_token"] == "page-2" and requests[2]["page_token"] == "page-3", requests
+assert len(requests) == 3 and args.count("--data-binary") == 3, (requests, args)
+for i, entry in enumerate(r["page_evidence"], 1):
+    raw = (p / entry["raw_response_file"]).read_bytes()
+    assert entry["page"] == i and entry["raw_response_sha256"] == hashlib.sha256(raw).hexdigest(), entry
+    assert (p / entry["request_file"]).exists() and (p / entry["http_status_file"]).read_text() == "200"
+print("[osv-query] three-page collection and evidence OK")
+PY
+
+echo "[osv-query] four-page cap remains explicit and never calls page five"
+cat > "$T/page3-more.json" <<'JSON'
+{"vulns":[{"id":"CVE-PAGE-3"}],"next_page_token":"page-4"}
+JSON
+cat > "$T/page4-more.json" <<'JSON'
+{"vulns":[{"id":"CVE-PAGE-4"}],"next_page_token":"page-5"}
+JSON
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_RESPONSE="$T/page1.json" \
+OSV_QUERY_FAKE_PAGE2_RESPONSE="$T/page2.json" \
+OSV_QUERY_FAKE_PAGE3_RESPONSE="$T/page3-more.json" \
+OSV_QUERY_FAKE_PAGE4_RESPONSE="$T/page4-more.json" \
+OSV_QUERY_FAKE_HTTP=200 OSV_QUERY_CAPTURE="$T/cap.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/cap.requests.jsonl" \
+  "$ROOT/build/rh_cli" osv-query --input "$T/query.json" --out "$T/cap-out" --continue-pagination >/dev/null
+python3 - "$T/cap-out" "$T/cap.args" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); r = json.load(open(p / "osv-query-result.json"))
+assert r["state"] == "partial" and r["pagination"] == "more_available", r
+assert r["page_count"] == r["page_limit"] == 4, r
+assert (p / r["next_page_token_file"]).read_text() == "page-5"
+assert open(sys.argv[2]).read().splitlines().count("--data-binary") == 4
+print("[osv-query] pagination cap and continuation token retained")
+PY
+
+echo "[osv-query] repeated tokens and later-page transport failures fail closed"
+cat > "$T/repeated.json" <<'JSON'
+{"vulns":[{"id":"CVE-PAGE-2"}],"next_page_token":"page-2"}
+JSON
+expect 4 env PATH="$T/bin:$PATH" \
+  OSV_QUERY_FAKE_RESPONSE="$T/page1.json" OSV_QUERY_FAKE_PAGE2_RESPONSE="$T/repeated.json" \
+  OSV_QUERY_FAKE_HTTP=200 OSV_QUERY_CAPTURE="$T/repeat.args" \
+  OSV_QUERY_REQUEST_CAPTURE="$T/repeat.requests.jsonl" \
+  "$ROOT/build/rh_cli" osv-query --input "$T/query.json" --out "$T/repeat-out" --continue-pagination
+[[ -f "$T/repeat-out/osv-query-page-2-response.raw.json" ]] || fail "repeated-token page raw evidence missing"
+[[ ! -f "$T/repeat-out/osv-query-result.json" ]] || fail "repeated token emitted success"
+expect 4 env PATH="$T/bin:$PATH" \
+  OSV_QUERY_FAKE_RESPONSE="$T/page1.json" OSV_QUERY_FAKE_PAGE2_RESPONSE="$T/page2.json" \
+  OSV_QUERY_FAKE_PAGE2_HTTP=503 OSV_QUERY_FAKE_HTTP=200 OSV_QUERY_CAPTURE="$T/page-error.args" \
+  OSV_QUERY_REQUEST_CAPTURE="$T/page-error.requests.jsonl" \
+  "$ROOT/build/rh_cli" osv-query --input "$T/query.json" --out "$T/page-error-out" --continue-pagination
+[[ -f "$T/page-error-out/osv-query-page-2-response.raw.json" ]] || fail "later-page error body not retained"
+[[ "$(cat "$T/page-error-out/osv-query-page-2-http-status.txt")" == "503" ]] || fail "later-page HTTP status not retained"
+[[ ! -f "$T/page-error-out/osv-query-result.json" ]] || fail "later-page error emitted success"
+
 printf '{}\n' > "$T/empty.json"
 PATH="$T/bin:$PATH" \
 OSV_QUERY_FAKE_RESPONSE="$T/empty.json" \
@@ -165,5 +258,6 @@ expect 3 env PATH="$T/bin:$PATH" \
   "$ROOT/build/rh_cli" osv-query --input "$T/invalid.json" --out "$T/out"
 [[ ! -f "$T/out/osv-query-result.json" ]] || fail "invalid input left stale result"
 [[ ! -f "$T/out/osv-query-response.json" ]] || fail "invalid input left stale response"
+[[ ! -f "$T/out/osv-query-response.raw.json" ]] || fail "invalid input left stale raw page evidence"
 
 echo "test_osv_query_cli OK"

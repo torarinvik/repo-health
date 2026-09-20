@@ -40,6 +40,9 @@ the default checks use local data, while HTTPS fetches need network access.
 # Query OSV for one package/version (the server version match is fuzzy)
 ./build/rh_cli osv-query --input ./fixtures/packages/osv-query-cargo.json --out ./osv-query/
 
+# Optionally follow at most four pages; a remaining token stays explicit
+./build/rh_cli osv-query --input ./fixtures/packages/osv-query-cargo.json --out ./osv-query-pages/ --continue-pagination
+
 # Query OSV for one full Git commit hash
 ./build/rh_cli osv-query --input ./fixtures/packages/osv-query-commit.json --out ./osv-commit-query/
 ```
@@ -53,8 +56,15 @@ the request, raw response, HTTP status, capture time, and response digest, and
 writes a normalized OSV response. Package/version responses can be supplied to
 `rh_cli deps --osv`; commit-query results remain separate context evidence and
 are not automatically matched against a package graph.
-When OSV returns a `next_page_token`, the result is marked `more_available`;
-automatic pagination and queries over every lockfile node are still pending.
+Without `--continue-pagination`, the command keeps its one-page
+`rh-osv-query-result/1` behavior and marks a returned `next_page_token` as
+`more_available`. The opt-in continuation mode emits
+`rh-osv-query-result/2`, follows at most four pages, keeps raw request/response,
+status, stderr, and a digest for each page, and combines the returned
+advisories for the offline matcher. If page four still returns a token, the
+result is `partial` and the token is retained in
+`osv-query-next-page-token.txt`. Queries over every lockfile node remain
+pending.
 
 ## Repository layout
 

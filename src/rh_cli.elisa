@@ -107,7 +107,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli continuity --bundle <manifest> --out <dir>")
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
-    rh_cli_err("       rh_cli osv-query --input <rh-osv-query-input/1> --out <dir>")
+    rh_cli_err("       rh_cli osv-query --input <rh-osv-query-input/1|2> --out <dir> [--continue-pagination]")
     rh_cli_err("       rh_cli depsdev (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli ecosystem lookup --input <captured-lookup.json> --out <file>")
     rh_cli_err("       rh_cli adapter-manifest --input <file> --out <file>")
@@ -791,12 +791,17 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dou_idx], true) if dou_idx >= 0
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dr_idx], false)
     if Base::rh_streq(cmd, "osv-query"):
-        return rh_cli_usage(2) if argc != 6
+        return rh_cli_usage(2) if argc != 6 and argc != 7
         osv_input_flag: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
         osv_out_flag: u8& = slots[4].cast[u8&] can Unsafe.PointerCast
         return rh_cli_usage(2) if not Base::rh_streq(osv_input_flag, "--input")
         return rh_cli_usage(2) if not Base::rh_streq(osv_out_flag, "--out")
-        return rh_do_osv_query(slots[3], slots[5])
+        continue_pages: mutable bool = false
+        if argc == 7:
+            page_flag: u8& = slots[6].cast[u8&] can Unsafe.PointerCast
+            return rh_cli_usage(2) if not Base::rh_streq(page_flag, "--continue-pagination")
+            continue_pages <- true
+        return OsvQueryCli::rh_do_osv_query(slots[3], slots[5], continue_pages)
     if Base::rh_streq(cmd, "depsdev"):
         dvi_idx, dvu_idx, dvo_idx =
             while ddv < argc |dvi_idx: i64 = -1, dvu_idx: i64 = -1, dvo_idx: i64 = -1, ddv: i64 = 2, slots| -> dvi_idx, dvu_idx, dvo_idx:
@@ -3388,113 +3393,309 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
     Base::rh_write_stdout(done)
     0
 
-# --- M03-08 OSV package/version and commit query adapter. ---
-# The query body is constrained by a versioned OSV input contract and POSTed only to
-# the fixed api.osv.dev/v1/query endpoint. Raw response, HTTP code, stderr, and
-# a normalized OSV response are retained; only package results feed `deps --osv`.
-def rh_do_osv_query(input_path: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out):
-        rh_cli_err("osv-query: rejected path argument (allowlist)")
-        return 3
-    if Git::rh_ensure_dir(out) != 0:
-        rh_cli_err("osv-query: cannot create output directory")
-        return 4
-    request_path: mutable darray[u8] = []
-    raw_path: mutable darray[u8] = []
-    response_path: mutable darray[u8] = []
-    code_path: mutable darray[u8] = []
-    err_path: mutable darray[u8] = []
-    result_path: mutable darray[u8] = []
-    return 4 if not rh_out_path(out, "osv-query-request.json", request_path)
-    return 4 if not rh_out_path(out, "osv-query-response.raw.json", raw_path)
-    return 4 if not rh_out_path(out, "osv-query-response.json", response_path)
-    return 4 if not rh_out_path(out, "osv-query-http-status.txt", code_path)
-    return 4 if not rh_out_path(out, "osv-query.err", err_path)
-    return 4 if not rh_out_path(out, "osv-query-result.json", result_path)
-    request_path.push(0)
-    raw_path.push(0)
-    response_path.push(0)
-    code_path.push(0)
-    err_path.push(0)
-    result_path.push(0)
-    request_ptr: cstr = (&request_path[0]).cast[cstr] can Unsafe.PointerCast
-    raw_ptr: cstr = (&raw_path[0]).cast[cstr] can Unsafe.PointerCast
-    response_ptr: cstr = (&response_path[0]).cast[cstr] can Unsafe.PointerCast
-    code_ptr: cstr = (&code_path[0]).cast[cstr] can Unsafe.PointerCast
-    err_ptr: cstr = (&err_path[0]).cast[cstr] can Unsafe.PointerCast
-    result_ptr: cstr = (&result_path[0]).cast[cstr] can Unsafe.PointerCast
-    _ = remove_file(request_ptr)
-    _ = remove_file(raw_ptr)
-    _ = remove_file(response_ptr)
-    _ = remove_file(code_ptr)
-    _ = remove_file(err_ptr)
-    _ = remove_file(result_ptr)
-    input_size: i64 = Base::rh_file_size(input_path)
-    if input_size <= 0 or input_size > 8192:
-        rh_cli_err("osv-query: input is empty or exceeds the 8192-byte contract bound")
-        return 3
-    raw: mutable darray[u8] = []
-    if Base::rh_io_read(input_path, raw) != input_size:
-        rh_cli_err("osv-query: cannot read bounded query input")
-        return 4
-    request: mutable darray[u8] = []
-    query_kind: mutable i64 = -1
-    if OsvQuery::rh_osv_query_build(raw, request, &query_kind) != 0:
-        rh_cli_err("osv-query: malformed or unsupported versioned OSV query input")
-        return 3
+module OsvQueryCli:
+    private:
+        def rh_osv_page_name(page: i64, kind: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if page < 1 or page > OsvQuery::RH_OSV_QUERY_MAX_PAGES or kind < 0 or kind > 3
+            if page == 1:
+                Base::rh_push_text(out, "osv-query-request.json") if kind == 0
+                Base::rh_push_text(out, "osv-query-response.raw.json") if kind == 1
+                Base::rh_push_text(out, "osv-query-http-status.txt") if kind == 2
+                Base::rh_push_text(out, "osv-query.err") if kind == 3
+                return true
+            Base::rh_push_text(out, "osv-query-page-")
+            Base::rh_push_decimal_i64(out, page)
+            if kind == 0:
+                Base::rh_push_text(out, "-request.json")
+            elif kind == 1:
+                Base::rh_push_text(out, "-response.raw.json")
+            elif kind == 2:
+                Base::rh_push_text(out, "-http-status.txt")
+            else:
+                Base::rh_push_text(out, ".err")
+            true
 
-    request.push(10)
-    if not Base::rh_io_write(request_ptr, request):
-        rh_cli_err("osv-query: cannot retain request evidence")
-        return 4
-    fetch_rc: i64 = Git::rh_run_osv_query(request_ptr, raw_ptr, code_ptr, err_ptr)
-    if fetch_rc != 0:
-        rh_cli_err("osv-query: bounded transport failed; inspect raw transport evidence")
-        return 4
-    code: mutable darray[u8] = []
-    if Base::rh_io_read(code_ptr, code) < 0 or code.count != 3:
-        rh_cli_err("osv-query: HTTP status is missing or malformed")
-        return 4
-    if code[0] != 50 or code[1] != 48 or code[2] != 48:
-        rh_cli_err("osv-query: OSV returned non-200; inspect retained HTTP evidence")
-        return 4
-    response_raw: mutable darray[u8] = []
-    if Base::rh_io_read(raw_ptr, response_raw) < 0 or response_raw.count.i64() > Git::RH_FETCH_MAX_BYTES:
-        rh_cli_err("osv-query: cannot read bounded response evidence")
-        return 4
-    response: mutable darray[u8] = []
-    page: mutable i64 = 0
-    if OsvQuery::rh_osv_query_normalize_response(response_raw, response, &page) != 0:
-        rh_cli_err("osv-query: malformed OSV response; raw response retained")
-        return 4
-    if not Base::rh_io_write(response_ptr, response):
-        rh_cli_err("osv-query: cannot write normalized OSV response")
-        return 4
-    response_hash: mutable darray[u8] = []
-    Sha256::rh_sha256(response_raw, response_hash)
-    return 4 if response_hash.count != 64
-    response_hash_bytes: u8& = (&response_hash[0]).cast[u8&] can Unsafe.PointerCast
-    captured_at: i64 = Base::rh_now()
-    result: mutable darray[u8] =
-        result: mutable darray[u8] = []
-        Base::rh_push_text(result, "{\"schema\":\"rh-osv-query-result/1\",\"query_kind\":\"")
-        Base::rh_push_text(result, "commit" if query_kind == 1 else "package_version")
-        Base::rh_push_text(result, "\",\"endpoint\":\"https://api.osv.dev/v1/query\",\"captured_at_epoch\":")
-        if captured_at >= 0:
-            Base::rh_push_decimal_i64(result, captured_at)
-        else:
-            Base::rh_push_text(result, "null")
-        Base::rh_push_text(result, ",\"http_status\":200,\"state\":\"collected\",\"pagination\":\"")
-        Base::rh_push_text(result, "more_available" if page == 1 else "complete")
-        Base::rh_push_text(result, "\",\"request_file\":\"osv-query-request.json\",\"response_file\":\"osv-query-response.json\",\"raw_response_file\":\"osv-query-response.raw.json\",\"raw_response_sha256\":\"")
-        Base::rh_push_raw(result, response_hash_bytes, response_hash.count)
-        Base::rh_push_text(result, "\"}\n")
-        result
-    if not Base::rh_io_write(result_ptr, result):
-        rh_cli_err("osv-query: cannot write result envelope")
-        return 4
-    rh_cli_out("osv-query: captured response for the supplied query")
-    0
+        def rh_osv_page_path(dir: cstr, name: darray[u8]&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return false if Base::rh_cstr_len_c(dir) == 0 or name.count == 0
+            Base::rh_push_cstr(out, dir)
+            out.push(47)
+            out.extend(bytes_view(name))
+            out.push(0)
+            true
+        def rh_osv_output_path(dir: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if Base::rh_cstr_len_c(dir) == 0
+            Base::rh_push_cstr(out, dir)
+            out.push(47)
+            Base::rh_push_text(out, name)
+            out.push(0)
+            true
+
+        def rh_osv_query_err(message: u8&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+            buffer: mutable darray[u8] =
+                buffer: mutable darray[u8] = []
+                Base::rh_push_text(buffer, "rh_cli: ")
+                Base::rh_push_text(buffer, message)
+                buffer.push(10)
+                buffer
+            Base::rh_write_stderr(buffer)
+
+        def rh_osv_query_out(message: u8&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+            buffer: mutable darray[u8] =
+                buffer: mutable darray[u8] = []
+                Base::rh_push_text(buffer, message)
+                buffer.push(10)
+                buffer
+            Base::rh_write_stdout(buffer)
+        # --- M03-08 OSV package/version and commit query adapter. ---
+        # Page continuation is opt-in, retains per-page transport evidence, and stops
+        # after four pages or fails closed on repeated tokens and aggregate overflow.
+        def rh_osv_query_capture_page(base_request: darray[u8]&, page_number: i64, continue_pages: bool, out: cstr, response_ptr: cstr, next_token_ptr: cstr, combined: mutable darray[u8]&, total_vulns: mutable i64&, hash_out: mutable darray[u8]&, token_out: mutable darray[u8]&, has_next_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            request_name: mutable darray[u8] = []
+            raw_name: mutable darray[u8] = []
+            code_name: mutable darray[u8] = []
+            err_name: mutable darray[u8] = []
+            return -1 if not rh_osv_page_name(page_number, 0, request_name)
+            return -1 if not rh_osv_page_name(page_number, 1, raw_name)
+            return -1 if not rh_osv_page_name(page_number, 2, code_name)
+            return -1 if not rh_osv_page_name(page_number, 3, err_name)
+            request_page_path: mutable darray[u8] = []
+            raw_page_path: mutable darray[u8] = []
+            code_page_path: mutable darray[u8] = []
+            err_page_path: mutable darray[u8] = []
+            return -1 if not rh_osv_page_path(out, request_name, request_page_path)
+            return -1 if not rh_osv_page_path(out, raw_name, raw_page_path)
+            return -1 if not rh_osv_page_path(out, code_name, code_page_path)
+            return -1 if not rh_osv_page_path(out, err_name, err_page_path)
+            request_page_ptr: cstr = (&request_page_path[0]).cast[cstr] can Unsafe.PointerCast
+            raw_page_ptr: cstr = (&raw_page_path[0]).cast[cstr] can Unsafe.PointerCast
+            code_page_ptr: cstr = (&code_page_path[0]).cast[cstr] can Unsafe.PointerCast
+            err_page_ptr: cstr = (&err_page_path[0]).cast[cstr] can Unsafe.PointerCast
+            page_request: mutable darray[u8] = []
+            if page_number == 1:
+                page_request.extend(bytes_view(base_request))
+            else:
+                page_token: mutable darray[u8] = []
+                if Base::rh_io_read(next_token_ptr, page_token) <= 0:
+                    rh_osv_query_err("osv-query: retained page token is missing")
+                    return -1
+                if OsvQuery::rh_osv_query_next_request(base_request, page_token, page_request) != 0:
+                    rh_osv_query_err("osv-query: cannot construct bounded continuation request")
+                    return -1
+            page_request.push(10)
+            if not Base::rh_io_write(request_page_ptr, page_request):
+                rh_osv_query_err("osv-query: cannot retain page request evidence")
+                return -1
+            if Git::rh_run_osv_query(request_page_ptr, raw_page_ptr, code_page_ptr, err_page_ptr) != 0:
+                rh_osv_query_err("osv-query: bounded transport failed; inspect retained page evidence")
+                return -1
+            code: mutable darray[u8] = []
+            if Base::rh_io_read(code_page_ptr, code) < 0 or code.count != 3:
+                rh_osv_query_err("osv-query: HTTP status is missing or malformed")
+                return -1
+            if code[0] != 50 or code[1] != 48 or code[2] != 48:
+                rh_osv_query_err("osv-query: OSV returned non-200; inspect retained page evidence")
+                return -1
+            response_raw: mutable darray[u8] = []
+            if Base::rh_io_read(raw_page_ptr, response_raw) < 0 or response_raw.count.i64() > Git::RH_FETCH_MAX_BYTES:
+                rh_osv_query_err("osv-query: cannot read bounded response evidence")
+                return -1
+            Sha256::rh_sha256(response_raw, hash_out)
+            if hash_out.count != 64:
+                rh_osv_query_err("osv-query: could not digest raw page evidence")
+                return -1
+            if continue_pages:
+                if OsvQuery::rh_osv_query_collect_page(response_raw, combined, token_out, has_next_out, total_vulns) != 0:
+                    rh_osv_query_err("osv-query: malformed page or four-page aggregation bound exceeded")
+                    return -1
+            else:
+                normalized: mutable darray[u8] = []
+                page_state: mutable i64 = 0
+                if OsvQuery::rh_osv_query_normalize_response(response_raw, normalized, &page_state) != 0:
+                    rh_osv_query_err("osv-query: malformed OSV response; raw response retained")
+                    return -1
+                if not Base::rh_io_write(response_ptr, normalized):
+                    rh_osv_query_err("osv-query: cannot write normalized OSV response")
+                    return -1
+                has_next_out[0] <- page_state
+            0
+
+        def rh_osv_query_append_page_evidence(page_number: i64, page_hash: darray[u8]&, evidence: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            request_name: mutable darray[u8] = []
+            raw_name: mutable darray[u8] = []
+            code_name: mutable darray[u8] = []
+            err_name: mutable darray[u8] = []
+            return false if not rh_osv_page_name(page_number, 0, request_name)
+            return false if not rh_osv_page_name(page_number, 1, raw_name)
+            return false if not rh_osv_page_name(page_number, 2, code_name)
+            return false if not rh_osv_page_name(page_number, 3, err_name)
+            evidence.push(44) if page_number > 1
+            Base::rh_push_text(evidence, "{\"page\":")
+            Base::rh_push_decimal_i64(evidence, page_number)
+            Base::rh_push_text(evidence, ",\"request_file\":\"")
+            evidence.extend(bytes_view(request_name))
+            Base::rh_push_text(evidence, "\",\"raw_response_file\":\"")
+            evidence.extend(bytes_view(raw_name))
+            Base::rh_push_text(evidence, "\",\"http_status_file\":\"")
+            evidence.extend(bytes_view(code_name))
+            Base::rh_push_text(evidence, "\",\"stderr_file\":\"")
+            evidence.extend(bytes_view(err_name))
+            Base::rh_push_text(evidence, "\",\"raw_response_sha256\":\"")
+            evidence.extend(bytes_view(page_hash))
+            Base::rh_push_text(evidence, "\"}")
+            true
+    public:
+        def rh_do_osv_query(input_path: cstr, out: cstr, continue_pages: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out):
+                rh_osv_query_err("osv-query: rejected path argument (allowlist)")
+                return 3
+            if Git::rh_ensure_dir(out) != 0:
+                rh_osv_query_err("osv-query: cannot create output directory")
+                return 4
+            response_path: mutable darray[u8] = []
+            result_path: mutable darray[u8] = []
+            next_token_path: mutable darray[u8] = []
+            return 4 if not rh_osv_output_path(out, "osv-query-response.json", response_path)
+            return 4 if not rh_osv_output_path(out, "osv-query-result.json", result_path)
+            return 4 if not rh_osv_output_path(out, "osv-query-next-page-token.txt", next_token_path)
+            response_path.push(0)
+            result_path.push(0)
+            next_token_path.push(0)
+            response_ptr: cstr = (&response_path[0]).cast[cstr] can Unsafe.PointerCast
+            result_ptr: cstr = (&result_path[0]).cast[cstr] can Unsafe.PointerCast
+            next_token_ptr: cstr = (&next_token_path[0]).cast[cstr] can Unsafe.PointerCast
+            _ = remove_file(response_ptr)
+            _ = remove_file(result_ptr)
+            _ = remove_file(next_token_ptr)
+            stale_page: mutable i64 = 1
+            while stale_page <= OsvQuery::RH_OSV_QUERY_MAX_PAGES |stale_page|:
+                stale_kind: mutable i64 = 0
+                while stale_kind < 4 |stale_kind, stale_page|:
+                    stale_name: mutable darray[u8] = []
+                    return 4 if not rh_osv_page_name(stale_page, stale_kind, stale_name)
+                    stale_path: mutable darray[u8] = []
+                    return 4 if not rh_osv_page_path(out, stale_name, stale_path)
+                    stale_ptr: cstr = (&stale_path[0]).cast[cstr] can Unsafe.PointerCast
+                    _ = remove_file(stale_ptr)
+                    stale_kind <- stale_kind + 1
+                stale_page <- stale_page + 1
+
+            input_size: i64 = Base::rh_file_size(input_path)
+            if input_size <= 0 or input_size > 8192:
+                rh_osv_query_err("osv-query: input is empty or exceeds the 8192-byte contract bound")
+                return 3
+            input_raw: mutable darray[u8] = []
+            if Base::rh_io_read(input_path, input_raw) != input_size:
+                rh_osv_query_err("osv-query: cannot read bounded query input")
+                return 4
+            request: mutable darray[u8] = []
+            query_kind: mutable i64 = -1
+            if OsvQuery::rh_osv_query_build(input_raw, request, &query_kind) != 0:
+                rh_osv_query_err("osv-query: malformed or unsupported versioned OSV query input")
+                return 3
+
+            combined: mutable darray[u8] = []
+            page_evidence: mutable darray[u8] = []
+            if continue_pages:
+                Base::rh_push_text(combined, "{\"vulns\":[")
+                Base::rh_push_text(page_evidence, "[")
+            seen_tokens: mutable darray[u8] = []
+            seen_starts: mutable darray[i64] = []
+            seen_lengths: mutable darray[i64] = []
+            first_response_hash: mutable darray[u8] = []
+            total_vulns: mutable i64 = 0
+            page_count: mutable i64 = 0
+            more_available: mutable bool = false
+            done: mutable bool = false
+            page_limit: i64 = OsvQuery::RH_OSV_QUERY_MAX_PAGES if continue_pages else 1
+            while not done |page_number: i64 = 1, page_count, page_limit, continue_pages, request, out, response_ptr, next_token_ptr, combined, page_evidence, seen_tokens, seen_starts, seen_lengths, first_response_hash, total_vulns, more_available, done|:
+                page_hash: mutable darray[u8] = []
+                token: mutable darray[u8] = []
+                has_next: mutable i64 = 0
+                if rh_osv_query_capture_page(request, page_number, continue_pages, out, response_ptr, next_token_ptr, combined, &total_vulns, page_hash, token, &has_next) != 0:
+                    return 4
+                if page_number == 1:
+                    first_response_hash.extend(bytes_view(page_hash))
+                if continue_pages:
+                    if has_next == 1:
+                        if not OsvQuery::rh_osv_query_remember_page_token(token, seen_tokens, seen_starts, seen_lengths):
+                            rh_osv_query_err("osv-query: repeated pagination token; refusing a false complete result")
+                            return 4
+                        if not Base::rh_io_write(next_token_ptr, token):
+                            rh_osv_query_err("osv-query: cannot retain continuation token")
+                            return 4
+                        if page_number == page_limit:
+                            more_available <- true
+                            done <- true
+                    else:
+                        _ = remove_file(next_token_ptr)
+                        done <- true
+                else:
+                    more_available <- has_next == 1
+                    done <- true
+                if continue_pages:
+                    return 4 if not rh_osv_query_append_page_evidence(page_number, page_hash, page_evidence)
+                page_count <- page_number
+                if not done:
+                    page_number <- page_number + 1
+            if continue_pages:
+                page_evidence.push(93)
+
+            if continue_pages:
+                Base::rh_push_text(combined, "]")
+                if more_available:
+                    final_token: mutable darray[u8] = []
+                    if Base::rh_io_read(next_token_ptr, final_token) <= 0:
+                        rh_osv_query_err("osv-query: final continuation token is missing")
+                        return 4
+                    Base::rh_push_text(combined, ",\"next_page_token\":\"")
+                    Base::rh_json_escape(combined, final_token, 0, final_token.count)
+                combined.push(125)
+                if combined.count.i64() > Git::RH_FETCH_MAX_BYTES:
+                    rh_osv_query_err("osv-query: combined matcher response exceeds the response bound")
+                    return 4
+                if not Base::rh_io_write(response_ptr, combined):
+                    rh_osv_query_err("osv-query: cannot write combined paginated response")
+                    return 4
+
+            response_hash_bytes: u8& = (&first_response_hash[0]).cast[u8&] can Unsafe.PointerCast
+            captured_at: i64 = Base::rh_now()
+            result: mutable darray[u8] =
+                result: mutable darray[u8] = []
+                if continue_pages:
+                    Base::rh_push_text(result, "{\"schema\":\"rh-osv-query-result/2\",\"query_kind\":\"")
+                else:
+                    Base::rh_push_text(result, "{\"schema\":\"rh-osv-query-result/1\",\"query_kind\":\"")
+                Base::rh_push_text(result, "commit" if query_kind == 1 else "package_version")
+                Base::rh_push_text(result, "\",\"endpoint\":\"https://api.osv.dev/v1/query\",\"captured_at_epoch\":")
+                if captured_at >= 0:
+                    Base::rh_push_decimal_i64(result, captured_at)
+                else:
+                    Base::rh_push_text(result, "null")
+                Base::rh_push_text(result, ",\"http_status\":200,\"state\":\"")
+                Base::rh_push_text(result, "partial" if continue_pages and more_available else "collected")
+                Base::rh_push_text(result, "\",\"pagination\":\"")
+                Base::rh_push_text(result, "more_available" if more_available else "complete")
+                Base::rh_push_text(result, "\",\"request_file\":\"osv-query-request.json\",\"response_file\":\"osv-query-response.json\",\"raw_response_file\":\"osv-query-response.raw.json\",\"raw_response_sha256\":\"")
+                Base::rh_push_raw(result, response_hash_bytes, first_response_hash.count)
+                Base::rh_push_text(result, "\"")
+                if continue_pages:
+                    Base::rh_push_text(result, ",\"page_count\":")
+                    Base::rh_push_decimal_i64(result, page_count)
+                    Base::rh_push_text(result, ",\"page_limit\":")
+                    Base::rh_push_decimal_i64(result, page_limit)
+                    Base::rh_push_text(result, ",\"advisory_count\":")
+                    Base::rh_push_decimal_i64(result, total_vulns)
+                    Base::rh_push_text(result, ",\"page_evidence\":")
+                    result.extend(bytes_view(page_evidence))
+                    if more_available:
+                        Base::rh_push_text(result, ",\"next_page_token_file\":\"osv-query-next-page-token.txt\"")
+                Base::rh_push_text(result, "}\n")
+                result
+            if not Base::rh_io_write(result_ptr, result):
+                rh_osv_query_err("osv-query: cannot write result envelope")
+                return 4
+            rh_osv_query_out("osv-query: captured bounded paginated response" if continue_pages and not more_available else "osv-query: pagination bound reached; result is partial" if more_available else "osv-query: captured response for the supplied query")
+            0
 
 # --- M03-09 deps.dev enrichment adapter. ---
 # Captures one provider version response with bounded transport evidence and

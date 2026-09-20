@@ -108,12 +108,61 @@ def oq_check_commit(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Pani
     oq_check(oq_commit_query_is("{\"schema\":\"rh-osv-query-input/2\",\"commit\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}", "{\"commit\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}"), "sha256-commit-query", fails)
     return
 
+def oq_check_pagination(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    combined: mutable darray[u8] = []
+    Base::rh_push_text(combined, "{\"vulns\":[")
+    total: mutable i64 = 0
+    first: mutable darray[u8] = []
+    Base::rh_push_text(first, "{\"vulns\":[{\"id\":\"ONE\",\"txt\":\"[]{}\"}],\"next_page_token\":\"page-2\"}")
+    token: mutable darray[u8] = []
+    has_next: mutable i64 = 0
+    first_rc: i64 = OsvQuery::rh_osv_query_collect_page(first, combined, token, &has_next, &total)
+    oq_check(first_rc == 0 and has_next == 1 and total == 1 and Base::rh_bytes_equal_literal(token, 0, token.count.i64(), "page-2"), "page-one-collect", fails)
+
+    base_request: mutable darray[u8] = []
+    Base::rh_push_text(base_request, "{\"commit\":\"6879efc2c1596d11a6a6ad296f80063b558d5e0f\"}")
+    page_request: mutable darray[u8] = []
+    request_rc: i64 = OsvQuery::rh_osv_query_next_request(base_request, token, page_request)
+    oq_check(request_rc == 0 and Base::rh_bytes_equal_literal(page_request, 0, page_request.count.i64(), "{\"commit\":\"6879efc2c1596d11a6a6ad296f80063b558d5e0f\",\"page_token\":\"page-2\"}"), "page-token-request", fails)
+
+    escaped_token: mutable darray[u8] = []
+    Base::rh_push_text(escaped_token, "page\"two")
+    escaped_request: mutable darray[u8] = []
+    escaped_rc: i64 = OsvQuery::rh_osv_query_next_request(base_request, escaped_token, escaped_request)
+    oq_check(escaped_rc == 0 and Base::rh_bytes_equal_literal(escaped_request, 0, escaped_request.count.i64(), "{\"commit\":\"6879efc2c1596d11a6a6ad296f80063b558d5e0f\",\"page_token\":\"page\\\"two\"}"), "page-token-json-escape", fails)
+
+    seen: mutable darray[u8] = []
+    starts: mutable darray[i64] = []
+    lengths: mutable darray[i64] = []
+    oq_check(OsvQuery::rh_osv_query_remember_page_token(token, seen, starts, lengths), "remember-page-token", fails)
+    oq_check(not OsvQuery::rh_osv_query_remember_page_token(token, seen, starts, lengths), "reject-repeated-page-token", fails)
+
+    second: mutable darray[u8] = []
+    Base::rh_push_text(second, "{\"vulns\" : [ {\"id\":\"TWO\",\"nested\":[{\"txt\":\"[]\"}]} ] }")
+    second_token: mutable darray[u8] = []
+    second_has_next: mutable i64 = 1
+    second_rc: i64 = OsvQuery::rh_osv_query_collect_page(second, combined, second_token, &second_has_next, &total)
+    combined.push(93)
+    combined.push(125)
+    oq_check(second_rc == 0 and second_has_next == 0 and total == 2, "page-two-collect", fails)
+    oq_check(Base::rh_bytes_equal_literal(combined, 0, combined.count.i64(), "{\"vulns\":[{\"id\":\"ONE\",\"txt\":\"[]{}\"}, {\"id\":\"TWO\",\"nested\":[{\"txt\":\"[]\"}]} ]}"), "pages-joined-with-string-brackets", fails)
+
+    malformed: mutable darray[u8] = []
+    Base::rh_push_text(malformed, "{\"vulns\":[true]}")
+    bad_out: mutable darray[u8] = []
+    bad_total: mutable i64 = 0
+    bad_token: mutable darray[u8] = []
+    bad_page: mutable i64 = 0
+    oq_check(OsvQuery::rh_osv_query_collect_page(malformed, bad_out, bad_token, &bad_page, &bad_total) != 0, "reject-non-object-vulnerability", fails)
+    return
+
 def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     fails: mutable i64 = 0
     oq_check_requests(&fails)
     oq_check_rejections(&fails)
     oq_check_responses(&fails)
     oq_check_commit(&fails)
+    oq_check_pagination(&fails)
     if fails == 0:
         message: mutable darray[u8] =
             message: mutable darray[u8] = []
