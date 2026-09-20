@@ -1,40 +1,209 @@
 # bench_runner.elisa — deterministic benchmark workload generator (M10).
 #
 # Workload structure is reproducible; timing is measured by the shell harness.
-# Stages are graph, query, metrics, and all (the default). Distributions are
-# uniform, long_tail, central_hubs, and cycle. Usage:
+# Stages are graph, query, metrics, ecosystem, and all (the default).
+# Distributions are uniform, long_tail, central_hubs, cycle, and ecosystem.
+# Usage:
 #   bench_runner <nodes> <seed> [stage] [distribution]
 include "./rh_base.elisa"
 include "./rh_graph.elisa"
 include "./rh_metrics.elisa"
 include "./rh_continuity.elisa"
+include "./rh_downstream.elisa"
+include "./rh_correction.elisa"
 
 module Bench:
     private:
         struct BenchLcg:
             state: mutable u64
 
+        struct RhBenchMirrorSummary:
+            group_count: mutable i64
+            family_count: mutable i64
+
+        struct RhBenchCoverageSummary:
+            project_count: mutable i64
+            history_count: mutable i64
+            review_count: mutable i64
+
+        struct RhBenchTemporalSummary:
+            historical_edge_count: mutable i64
+            current_edge_count: mutable i64
+            runtime_linux_edge_count: mutable i64
+
+        struct RhBenchCorrectionSummary:
+            correction_count: mutable i64
+            superseded_count: mutable i64
+            replay_sum: mutable i64
+
         const RH_BENCH_UNIFORM: i64 = 0
         const RH_BENCH_LONG_TAIL: i64 = 1
         const RH_BENCH_CENTRAL_HUBS: i64 = 2
         const RH_BENCH_CYCLE: i64 = 3
+        const RH_BENCH_ECOSYSTEM: i64 = 4
+        const RH_BENCH_EPOCH: i64 = 1704067200
 
         def rh_bench_next(s: mutable BenchLcg&) -> u64:
             n: u64 = s.state * 6364136223846793005 + 1442695040888963407
             s.state <- n
             n
 
-        # FNV-1a over each edge (from, dst) as low/high 32-bit halves.
+        def rh_bench_hash_word(initial_hash: u64, initial_word: u64) -> u64 can[Memory.Allocate, Abort.Panic]:
+            hash: mutable u64 = initial_hash
+            word: mutable u64 = initial_word
+            while k < 8 |k: i64 = 0, hash, word|:
+                b: u64 = (word >> (k * 8).u64()) & 255
+                hash <- (hash ^ b) * 1099511628211
+                k <- k + 1
+            hash
+
+        # FNV-1a over every edge field, including projection metadata.
         def rh_bench_digest(edges: darray[Graph::RhGraphEdge]&) -> u64 can[Memory.Allocate, Abort.Panic]:
             while i < edges.count |h: u64 = 14695981039346656037, i: usize = 0| -> h:
-                v: u64 =
-                    e: Graph::RhGraphEdge = edges[i]
-                    e.from.u64() ^ (e.dst.u64() << 32)
-                while k < 8 |k: i64 = 0, h, v|:
-                    b: u64 = (v >> (k * 8).u64()) & 255
-                    h <- (h ^ b) * 1099511628211
-                    k <- k + 1
+                e: Graph::RhGraphEdge = edges[i]
+                h <- rh_bench_hash_word(h, e.from.u64())
+                h <- rh_bench_hash_word(h, e.dst.u64())
+                h <- rh_bench_hash_word(h, e.scope.u64())
+                h <- rh_bench_hash_word(h, e.platform.u64())
+                h <- rh_bench_hash_word(h, e.introduced.u64())
+                h <- rh_bench_hash_word(h, e.removed.u64())
+                h <- rh_bench_hash_word(h, e.first_seen.u64())
                 i <- i + 1
+
+        def rh_bench_push_ecosystem_edge(edges: mutable darray[Graph::RhGraphEdge]&, source: u64, destination: u64, ordinal: i64) can[Memory.Allocate, Abort.Panic]:
+            return if source == destination
+            introduced: i64 = RH_BENCH_EPOCH + (ordinal % 120) * 86400
+            removed: mutable i64 = 0
+            if ordinal % 5 == 0:
+                removed <- introduced + 60 * 86400
+            seen: i64 = introduced + (ordinal % 20) * 86400
+            scope_value: u8 = (ordinal % 4 + 1).u8()
+            platform: i64 = ordinal % 3
+            edges.push(Graph::RhGraphEdge{from: source.i64(), dst: destination.i64(), scope: scope_value, platform: platform, introduced: introduced, removed: removed, first_seen: seen})
+
+        def rh_bench_visible_edges(edges: darray[Graph::RhGraphEdge]&, vis: darray[u8]&, projection: Graph::RhProjection&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            count: mutable i64 = 0
+            while i < edges.count |i: usize = 0, edges, vis, projection, count|:
+                edge: Graph::RhGraphEdge = edges[i]
+                if Graph::rh_edge_visible(edge, projection, vis):
+                    count <- count + 1
+                i <- i + 1
+            count
+
+        def rh_bench_mirror_summary(projects: i64) -> RhBenchMirrorSummary can[Memory.Allocate, Abort.Panic]:
+            summary: RhBenchMirrorSummary =
+                members: mutable darray[i64] = []
+                assertions: mutable darray[Graph::RhAssertion] = []
+                while project < projects |project: i64 = 0, members, assertions|:
+                    members.push(project)
+                    if project % 2 == 1:
+                        assertions.push(Graph::RhAssertion{a: project - 1, b: project, state: Graph::RH_ASSERT_ACCEPTED})
+                    project <- project + 1
+                family_roots: mutable darray[i64] = []
+                family_count: i64 = Graph::rh_family_dedup(members, assertions, family_roots)
+                RhBenchMirrorSummary{group_count: assertions.count.i64(), family_count: family_count}
+            summary
+
+        def rh_bench_coverage_summary(projects: i64) -> RhBenchCoverageSummary can[Memory.Allocate, Abort.Panic]:
+            summary: RhBenchCoverageSummary =
+                dependents: mutable darray[i64] = []
+                masks: mutable darray[u64] = []
+                while project_id < projects |project_id: i64 = 0, dependents, masks|:
+                    dependents.push(project_id)
+                    mask: u64 =
+                        if project_id % 4 == 1:
+                            1
+                        elif project_id % 4 == 2:
+                            2
+                        elif project_id % 4 == 3:
+                            3
+                        else:
+                            0
+                    masks.push(mask)
+                    project_id <- project_id + 1
+                covered: mutable darray[i64] = []
+                covered_total: mutable i64 = 0
+                Downstream::rh_downstream_coverage(dependents, masks, 2, covered, &covered_total)
+                RhBenchCoverageSummary{project_count: covered_total, history_count: covered[0], review_count: covered[1]}
+            summary
+
+        def rh_bench_temporal_summary(edges: darray[Graph::RhGraphEdge]&, node_count: i64) -> RhBenchTemporalSummary can[Memory.Allocate, Abort.Panic]:
+            summary: RhBenchTemporalSummary =
+                vis: mutable darray[u8] = []
+                while node < node_count |node: i64 = 0, vis|:
+                    vis.push(Graph::RH_VIS_PUBLIC)
+                    node <- node + 1
+                historical_projection: Graph::RhProjection = Graph::rh_projection_make(1, Graph::RH_SCOPE_ALL, 0, RH_BENCH_EPOCH + 90 * 86400, RH_BENCH_EPOCH + 130 * 86400, 0, 0, false, node_count, 32)
+                current_projection: Graph::RhProjection = Graph::rh_projection_make(2, Graph::RH_SCOPE_ALL, 0, RH_BENCH_EPOCH + 240 * 86400, RH_BENCH_EPOCH + 300 * 86400, 0, 0, false, node_count, 32)
+                runtime_linux_projection: Graph::RhProjection = Graph::rh_projection_make(3, 1, 1, RH_BENCH_EPOCH + 240 * 86400, RH_BENCH_EPOCH + 300 * 86400, 0, 0, false, node_count, 32)
+                historical_edges: i64 = rh_bench_visible_edges(edges, vis, historical_projection)
+                current_edges: i64 = rh_bench_visible_edges(edges, vis, current_projection)
+                runtime_linux_edges: i64 = rh_bench_visible_edges(edges, vis, runtime_linux_projection)
+                RhBenchTemporalSummary{historical_edge_count: historical_edges, current_edge_count: current_edges, runtime_linux_edge_count: runtime_linux_edges}
+            summary
+
+        def rh_bench_correction_summary(projects: i64) -> RhBenchCorrectionSummary can[Memory.Allocate, Abort.Panic]:
+            summary: RhBenchCorrectionSummary =
+                derived: mutable darray[Correction::RhDerived] = []
+                while project_id < projects |project_id: i64 = 0, derived|:
+                    derived.push(Correction::RhDerived{subject_id: project_id, revision_used: 1, superseded: false})
+                    derived.push(Correction::RhDerived{subject_id: project_id, revision_used: 1, superseded: false})
+                    project_id <- project_id + 1
+                corrections: mutable darray[Correction::RhCorrection] = []
+                while project_id < projects |project_id: i64 = 0, corrections|:
+                    if project_id % 16 == 0:
+                        corrections.push(Correction::RhCorrection{kind: Correction::RH_CORR_IDENTITY, target_id: project_id, state: Correction::RH_CORR_ACCEPTED})
+                    project_id <- project_id + 1
+                superseded_subjects: mutable darray[i64] = []
+                replay_sum: i64 =
+                    replayed: mutable i64 = 0
+                    while correction < corrections.count |correction: usize = 0, corrections, derived, superseded_subjects, replayed|:
+                        entry: Correction::RhCorrection = corrections[correction]
+                        revision: i64 = Correction::rh_correction_apply(entry, 1)
+                        Correction::rh_invalidate_derived(derived, entry, revision, superseded_subjects)
+                        replayed <- replayed + Correction::rh_replay_value(entry.target_id, revision, 0)
+                        correction <- correction + 1
+                    replayed
+                RhBenchCorrectionSummary{correction_count: corrections.count.i64(), superseded_count: superseded_subjects.count.i64(), replay_sum: replay_sum}
+            summary
+
+        def rh_bench_push_ecosystem_fields(out: mutable darray[u8]&, edges: darray[Graph::RhGraphEdge]&, node_count: i64) can[Memory.Allocate, Abort.Panic]:
+            package_versions: i64 = node_count
+            packages: i64 = (package_versions + 1) / 2
+            projects: i64 = packages
+            mirrors: RhBenchMirrorSummary = rh_bench_mirror_summary(projects)
+            coverage: RhBenchCoverageSummary = rh_bench_coverage_summary(projects)
+            temporal: RhBenchTemporalSummary = rh_bench_temporal_summary(edges, node_count)
+            corrections: RhBenchCorrectionSummary = rh_bench_correction_summary(projects)
+
+            Base::rh_push_text(out, " versions=")
+            Base::rh_push_decimal_i64(out, package_versions)
+            Base::rh_push_text(out, " packages=")
+            Base::rh_push_decimal_i64(out, packages)
+            Base::rh_push_text(out, " projects=")
+            Base::rh_push_decimal_i64(out, projects)
+            Base::rh_push_text(out, " mirror_groups=")
+            Base::rh_push_decimal_i64(out, mirrors.group_count)
+            Base::rh_push_text(out, " mirror_families=")
+            Base::rh_push_decimal_i64(out, mirrors.family_count)
+            Base::rh_push_text(out, " coverage_projects=")
+            Base::rh_push_decimal_i64(out, coverage.project_count)
+            Base::rh_push_text(out, " history_covered=")
+            Base::rh_push_decimal_i64(out, coverage.history_count)
+            Base::rh_push_text(out, " review_covered=")
+            Base::rh_push_decimal_i64(out, coverage.review_count)
+            Base::rh_push_text(out, " historical_edges=")
+            Base::rh_push_decimal_i64(out, temporal.historical_edge_count)
+            Base::rh_push_text(out, " current_edges=")
+            Base::rh_push_decimal_i64(out, temporal.current_edge_count)
+            Base::rh_push_text(out, " runtime_linux_edges=")
+            Base::rh_push_decimal_i64(out, temporal.runtime_linux_edge_count)
+            Base::rh_push_text(out, " corrections=")
+            Base::rh_push_decimal_i64(out, corrections.correction_count)
+            Base::rh_push_text(out, " superseded=")
+            Base::rh_push_decimal_i64(out, corrections.superseded_count)
+            Base::rh_push_text(out, " replay_sum=")
+            Base::rh_push_decimal_i64(out, corrections.replay_sum)
 
         # Integer argv parse (argv is cstr). Returns fallback when absent/invalid.
         def rh_bench_arg(argc: i64, argv: mutable cstr&&, idx: i64, fallback: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
@@ -53,6 +222,7 @@ module Bench:
             return 1 if Base::rh_streq(stage, "graph")
             return 2 if Base::rh_streq(stage, "query")
             return 3 if Base::rh_streq(stage, "metrics")
+            return 4 if Base::rh_streq(stage, "ecosystem")
             return 0 if Base::rh_streq(stage, "all")
             -1
 
@@ -63,6 +233,7 @@ module Bench:
             return RH_BENCH_LONG_TAIL if Base::rh_streq(distribution, "long_tail")
             return RH_BENCH_CENTRAL_HUBS if Base::rh_streq(distribution, "central_hubs")
             return RH_BENCH_CYCLE if Base::rh_streq(distribution, "cycle")
+            return RH_BENCH_ECOSYSTEM if Base::rh_streq(distribution, "ecosystem")
             -1
 
         def rh_bench_push_distribution(out: mutable darray[u8]&, distribution: i64) can[Memory.Allocate, Abort.Panic]:
@@ -72,6 +243,8 @@ module Bench:
                 Base::rh_push_text(out, "long_tail")
             elif distribution == RH_BENCH_CENTRAL_HUBS:
                 Base::rh_push_text(out, "central_hubs")
+            elif distribution == RH_BENCH_ECOSYSTEM:
+                Base::rh_push_text(out, "ecosystem")
             else:
                 Base::rh_push_text(out, "cycle")
 
@@ -86,6 +259,7 @@ module Bench:
             return 2 if stage < 0
             distribution: mutable i64 = rh_bench_distribution(argc, argv)
             return 2 if distribution < 0
+            return 2 if stage == 4 and distribution != RH_BENCH_ECOSYSTEM
             lcg: mutable BenchLcg =
                 seed: i64 = rh_bench_arg(argc, argv, 2, 42)
                 BenchLcg{state: seed.u64() ^ 88172645463325252}
@@ -108,6 +282,10 @@ module Bench:
                         hub_count <- n.u64()
                     destination: u64 = rh_bench_next(lcg) % hub_count
                     rh_bench_push_edge(edges, source, destination)
+                elif distribution == RH_BENCH_ECOSYSTEM:
+                    source: u64 = rh_bench_next(lcg) % n.u64()
+                    destination: u64 = (source + 1 + rh_bench_next(lcg) % (n.u64() - 1)) % n.u64()
+                    rh_bench_push_ecosystem_edge(edges, source, destination, edge_i)
                 else:
                     destination: u64 = edge_i.u64() % n.u64()
                     source: u64 = (destination + 1 + (edge_i.u64() / n.u64())) % n.u64()
@@ -176,6 +354,21 @@ module Bench:
                 while ci < counts.count |csum: u64 = 0, ci: usize = 0, counts| -> csum:
                     csum <- csum + counts[ci]
                     ci <- ci + 1
+            if stage == 4:
+                return |edges, n, dig, distribution|
+                    out: mutable darray[u8] = []
+                    Base::rh_push_text(out, "stage=ecosystem nodes=")
+                    Base::rh_push_decimal_i64(out, n)
+                    Base::rh_push_text(out, " edges=")
+                    Base::rh_push_decimal_i64(out, edges.count.i64())
+                    Base::rh_push_text(out, " distribution=")
+                    rh_bench_push_distribution(out, distribution)
+                    Base::rh_push_text(out, " digest=")
+                    Base::rh_push_hex_u64(out, dig)
+                    rh_bench_push_ecosystem_fields(out, edges, n)
+                    out.push(10)
+                    Base::rh_write_stdout(out)
+                    0
             if stage == 3:
                 return |edges, n, dig, k50, csum, distribution|
                     out: mutable darray[u8] = []
@@ -214,6 +407,8 @@ module Bench:
                 Base::rh_push_decimal_i64(out, k50)
                 Base::rh_push_text(out, " indegree_sum=")
                 Base::rh_push_decimal_i64(out, csum.i64())
+                if distribution == RH_BENCH_ECOSYSTEM:
+                    rh_bench_push_ecosystem_fields(out, edges, n)
                 out.push(10)
                 out
             Base::rh_write_stdout(out)

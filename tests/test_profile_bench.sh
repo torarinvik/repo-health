@@ -19,7 +19,7 @@ import json, sys
 a = json.load(open(sys.argv[1]))
 b = json.load(open(sys.argv[2]))
 assert a["profile"] == b["profile"] == "rh-profile/3", a
-assert a["stages"] == ["graph", "query", "metrics"], a
+assert a["stages"] == ["graph", "query", "metrics", "ecosystem"], a
 assert a["note"] and "machine-specific" in a["note"], a
 assert a["cache_state"] == "fresh process per sample; operating-system caches uncontrolled", a
 assert a["reps"] == 10 and a["warmup_runs_per_workload"] == 1, a
@@ -37,6 +37,7 @@ expected_workloads = [
     {"nodes": 1000, "seed": 17, "distribution": "long_tail", "stages": ["graph", "metrics"]},
     {"nodes": 1000, "seed": 23, "distribution": "central_hubs", "stages": ["graph", "query"]},
     {"nodes": 1000, "seed": 29, "distribution": "cycle", "stages": ["graph", "query"]},
+    {"nodes": 1000, "seed": 31, "distribution": "ecosystem", "stages": ["ecosystem"]},
 ]
 assert a["workloads"] == expected_workloads, a
 assert len(a["runs"]) == sum(len(w["stages"]) for w in expected_workloads), a
@@ -54,6 +55,11 @@ for workload in expected_workloads:
     assert len(ds) == 1, (nodes, seed, ds)
     assert all("process wall clock" in r["scope"] for r in a["runs"] if r["nodes"] == nodes and r["seed"] == seed and r["distribution"] == distribution)
 assert any(r["nodes"] == 10000 and r["stage"] == "metrics" for r in a["runs"]), a
+ecosystem = [r for r in a["runs"] if r["stage"] == "ecosystem"]
+assert len(ecosystem) == 1, a
+fields = dict(token.split("=", 1) for token in ecosystem[0]["output"].split() if "=" in token)
+assert fields["versions"] == "1000" and fields["packages"] == "500", fields
+assert fields["corrections"] == "32" and fields["superseded"] == "64", fields
 print("[profile-bench] stage manifest + deterministic digests OK")
 PY
 

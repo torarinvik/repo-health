@@ -42,9 +42,10 @@ expected = {
     (1000, 17, "graph", "long_tail"),
     (1000, 23, "graph", "central_hubs"),
     (1000, 29, "graph", "cycle"),
+    (1000, 31, "ecosystem", "ecosystem"),
 }
 assert {(r["nodes"], r["seed"], r["stage"], r["distribution"]) for r in a["runs"]} == expected, a
-assert len({r["digest"] for r in a["runs"] if r["nodes"] == 1000}) == 4, a
+assert len({r["digest"] for r in a["runs"] if r["nodes"] == 1000}) == 5, a
 for r in a["runs"]:
     assert len(r["digest"]) == 16, r
     assert "nodes=" in r["output"] and "digest=" in r["output"], r
@@ -64,6 +65,17 @@ for r in a["runs"]:
     else:
         assert r["outcomes"]["query_repetitions"] == 0
         assert r["outcomes"]["transitive_truncation_rate"] is None
+    if r["stage"] == "ecosystem":
+        fields = dict(token.split("=", 1) for token in r["output"].split() if "=" in token)
+        assert fields["versions"] == "1000" and fields["packages"] == "500", fields
+        assert fields["mirror_groups"] == "250" and fields["mirror_families"] == "250", fields
+        assert fields["coverage_projects"] == "500", fields
+        assert fields["history_covered"] == "250" and fields["review_covered"] == "250", fields
+        assert 0 < int(fields["historical_edges"]) <= int(fields["edges"]), fields
+        assert 0 < int(fields["current_edges"]) <= int(fields["edges"]), fields
+        assert 0 < int(fields["runtime_linux_edges"]) <= int(fields["current_edges"]), fields
+        assert fields["corrections"] == "32" and fields["superseded"] == "64", fields
+        assert int(fields["replay_sum"]) > 0, fields
 print("[bench] manifest OK:", len(a["runs"]), "runs")
 PY
 
@@ -73,5 +85,12 @@ y="$("$ROOT/build/bench_runner" 300 9)"
 [[ "$x" == "$y" ]] || fail "binary output not deterministic"
 [[ "$x" == *"digest="* ]] || fail "digest missing from output"
 echo "[bench] sample: $x"
+
+echo "[bench] ecosystem stage rejects mismatched workload"
+set +e
+"$ROOT/build/bench_runner" 100 1 ecosystem uniform >/dev/null 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 2 ]] || fail "ecosystem stage must reject a non-ecosystem distribution (got $rc)"
 
 echo "test_bench OK"

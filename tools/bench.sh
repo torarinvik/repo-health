@@ -32,6 +32,7 @@ workloads = [
     (1000, 17, "graph", "long_tail"),
     (1000, 23, "graph", "central_hubs"),
     (1000, 29, "graph", "cycle"),
+    (1000, 31, "ecosystem", "ecosystem"),
 ]
 runs = []
 for nodes, seed, stage, distribution in workloads:

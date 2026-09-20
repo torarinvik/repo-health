@@ -32,6 +32,7 @@ workloads = [
     (1000, 17, "long_tail", ("graph", "metrics")),
     (1000, 23, "central_hubs", ("graph", "query")),
     (1000, 29, "cycle", ("graph", "query")),
+    (1000, 31, "ecosystem", ("ecosystem",)),
 ]
 runs = []
 for nodes, seed, distribution, stages in workloads:
@@ -67,7 +68,7 @@ manifest = {
     "profile": "rh-profile/3",
     "note": "timings and peak RSS are machine-specific; distribution, stage output, and dataset digests are deterministic",
     "reps": reps,
-    "stages": ["graph", "query", "metrics"],
+    "stages": ["graph", "query", "metrics", "ecosystem"],
     "workloads": [
         {"nodes": nodes, "seed": seed, "distribution": distribution, "stages": list(stages)}
         for nodes, seed, distribution, stages in workloads
