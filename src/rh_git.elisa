@@ -303,9 +303,9 @@ module Git:
         # the caller names the fixture). No userinfo ('@'), no percent-escapes in
         # the host, no ports, no IPv6 brackets, no bare "localhost", no IPv4
         # loopback/private/link-local literals. Public IPv4 literals pass.
-        # DNS rebinding is NOT solved here (M07 follow-up, recorded in
-        # docs/THREAT_MODEL.md); the M02 slice fetches only public APIs and
-        # caller-named fixture files.
+        # DNS is checked by rh_prepare_https_pin before an HTTPS request: the
+        # complete resolver answer set is vetted and passed to curl --resolve.
+        # This URL-only guard remains side-effect free.
         # (2) rh_fetch_arg_safe: shell safety for the system() runner. Single
         # quotes wrap the URL, so only the quote itself plus backtick, dollar,
         # backslash, controls, and DEL can break out — all rejected.
@@ -367,7 +367,7 @@ module Git:
             true
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_v4_blocked(a: i64, b: i64) -> bool:
+        def rh_v4_blocked(a: i64, b: i64, c: i64) -> bool:
             return true if a == 127
             return true if a == 10
             return true if a == 172 and b >= 16 and b <= 31
@@ -376,15 +376,17 @@ module Git:
             if a == 0:
                 return true
             # Shared/CGNAT (100.64/10), benchmark (198.18/15), IETF protocol
-            # assignments (192.0.0/24), multicast/reserved (>=224). Same policy:
-            # a public crawler has no business reaching these (S002).
+            # assignments and documentation/retired special-purpose blocks.
+            # A public crawler has no business reaching these (S002).
             return true if a == 100 and b >= 64 and b <= 127
             if a == 198 and (b == 18 or b == 19):
                 return true
-            # Conservative: 192.0.0.0/24 is IETF-assignment space; blocking the
-            # enclosing /16 is harmless for a public crawler and avoids an octet
-            # we do not carry here.
+            # Conservative: block the enclosing 192.0.0.0/16 rather than rely
+            # on the special-purpose exceptions within the IETF assignment.
             return true if a == 192 and b == 0
+            return true if a == 192 and b == 88 and c == 99
+            return true if a == 198 and b == 51 and c == 100
+            return true if a == 203 and b == 0 and c == 113
             return true if a >= 224
             false
 
@@ -453,7 +455,7 @@ module Git:
                 a2: mutable i64 = 0
                 a3: mutable i64 = 0
                 return false if not rh_parse_v4(url, base, hend, &a0, &a1, &a2, &a3)
-                return false if rh_v4_blocked(a0, a1)
+                return false if rh_v4_blocked(a0, a1, a2)
                 return true
             return false if not rh_host_chars_ok(base, hend, url)
             return false if rh_host_obfuscated(base, hend, url)
@@ -462,28 +464,74 @@ module Git:
                     dotted <- true
                 dj <- dj + 1
 
-        # ASCII lower-case fold for address comparison.
-        # (private to this file)
-        def rh_lower_u8(b: u8) -> u8:
-            return b + 32 if b >= 65 and b <= 90
-            b
+    private:
+        # Parse colon-delimited IPv6 hextets into a bounded word list. Empty
+        # parts, non-hex bytes, overlong hextets, and more than eight words fail.
+        def rh_v6_parse_groups(ip: cstr, start: usize, end: usize, words: mutable InlineVec[i64, 8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if start == end
+            value: mutable i64 = 0
+            digits: mutable i64 = 0
+            while i < end |i: usize = start, ip, end, words, value, digits|:
+                b: u8 = ip[i]
+                if b == 58:
+                    return false if digits == 0 or words.len >= 8
+                    inline_vec_push[i64, 8](words, value)
+                    value <- 0
+                    digits <- 0
+                else:
+                    if b >= 48 and b <= 57:
+                        value <- value * 16 + (b - 48).i64()
+                    elif b >= 65 and b <= 70:
+                        value <- value * 16 + (b - 55).i64()
+                    elif b >= 97 and b <= 102:
+                        value <- value * 16 + (b - 87).i64()
+                    else:
+                        return false
+                    digits <- digits + 1
+                    return false if digits > 4
+                i <- i + 1
+            return false if digits == 0 or words.len >= 8
+            inline_vec_push[i64, 8](words, value)
+            true
 
-        # Case-insensitive prefix test on cstr.
-        # (private to this file)
-        def rh_starts_ci(s: cstr, prefix: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-            n: usize = strlen(prefix)
-            while i < n |i: usize = 0, s, prefix|:
-                return false if rh_lower_u8(s[i]) != rh_lower_u8(prefix[i])
+        # Validate both compressed and full IPv6 forms. The input bound and
+        # eight-word output cap keep parsing constant-sized for attacker input.
+        def rh_v6_parse(ip: cstr, length: usize, words: mutable InlineVec[i64, 8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if length < 2 or length > 39
+            compression: mutable i64 = -1
+            while i + 1 < length |i: usize = 0, ip, length, compression|:
+                if ip[i] == 58 and ip[i + 1] == 58:
+                    return false if compression >= 0
+                    compression <- i.i64()
+                    i <- i + 2
+                else:
+                    i <- i + 1
+            if compression < 0:
+                return false if not rh_v6_parse_groups(ip, 0, length, words)
+                return words.len == 8
+            left: mutable InlineVec[i64, 8] = inline_vec[i64, 8](&perm_arena)
+            right: mutable InlineVec[i64, 8] = inline_vec[i64, 8](&perm_arena)
+            left_end: usize = compression.usize()
+            right_start: usize = left_end + 2
+            return false if not rh_v6_parse_groups(ip, 0, left_end, left)
+            return false if not rh_v6_parse_groups(ip, right_start, length, right)
+            return false if left.len + right.len >= 8
+            while i < left.len |i: usize = 0, left, words|:
+                inline_vec_push[i64, 8](words, inline_vec_get[i64, 8](left, i))
+                i <- i + 1
+            zero_count: usize = 8 - left.len - right.len
+            while i < zero_count |i: usize = 0, words|:
+                inline_vec_push[i64, 8](words, 0)
+                i <- i + 1
+            while i < right.len |i: usize = 0, right, words|:
+                inline_vec_push[i64, 8](words, inline_vec_get[i64, 8](right, i))
                 i <- i + 1
             true
 
+    public:
         # Second phase of transport policy (M07-02): a resolved address, checked
-        # AFTER DNS, so the answer that is actually connected to is vetted. The
-        # string guard cannot see rebinding (e.g. loopback.nip.io); the connector
-        # must resolve and then call this before any bytes leave. Rejects
-        # loopback/private/link-local/CGNAT/benchmark/multicast v4 and
-        # unspecified/loopback/link-local/ULA/multicast/v4-mapped v6. Unknown
-        # textual forms fail closed (false).
+        # before connecting. It rejects private, scoped,
+        # mapped, malformed, documentation, and other non-global address forms.
         def rh_addr_guard(ip: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
             n: usize = Base::rh_cstr_len_c(ip)
             return false if n == 0
@@ -498,32 +546,170 @@ module Git:
                 a2: mutable i64 = 0
                 a3: mutable i64 = 0
                 return false if not rh_parse_v4(ip, 0, n, &a0, &a1, &a2, &a3)
-                return false if rh_v4_blocked(a0, a1)
+                return false if rh_v4_blocked(a0, a1, a2)
                 return true
-            # v6 literal: exact loopback/unspecified, then scoped/ULA/multicast
-            # prefixes, then v4-mapped tail (recurse on the dotted part).
-            return false if n == 2 and ip[0] == 58 and ip[1] == 58
-            return false if rh_starts_ci(ip, "::1")
-            if rh_starts_ci(ip, "::ffff:"):
-                a0: mutable i64 = 0
-                a1: mutable i64 = 0
-                a2: mutable i64 = 0
-                a3: mutable i64 = 0
-                return false if not rh_parse_v4(ip, 7, n, &a0, &a1, &a2, &a3)
-                return false if rh_v4_blocked(a0, a1)
-                return true
-            return false if rh_starts_ci(ip, "fe80:")
-            return false if rh_starts_ci(ip, "fec0:")
-            return false if rh_starts_ci(ip, "fc") or rh_starts_ci(ip, "fd")
-            return false if rh_starts_ci(ip, "ff")
+            words: mutable InlineVec[i64, 8] = inline_vec[i64, 8](&perm_arena)
+            return false if not rh_v6_parse(ip, n, words)
+            w0: i64 = inline_vec_get[i64, 8](words, 0)
+            w1: i64 = inline_vec_get[i64, 8](words, 1)
+            w5: i64 = inline_vec_get[i64, 8](words, 5)
+            w7: i64 = inline_vec_get[i64, 8](words, 7)
+            zero_prefix: bool =
+                while i < 7 |zero: bool = true, i: usize = 0, words| -> zero:
+                    if inline_vec_get[i64, 8](words, i) != 0:
+                        zero <- false
+                    i <- i + 1
+            return false if zero_prefix and (w7 == 0 or w7 == 1)
+            mapped_prefix: bool =
+                while i < 5 |mapped: bool = true, i: usize = 0, words| -> mapped:
+                    if inline_vec_get[i64, 8](words, i) != 0:
+                        mapped <- false
+                    i <- i + 1
+            return false if mapped_prefix and w5 == 0xffff
+            return false if w0 >= 0xfe80 and w0 <= 0xfebf
+            return false if w0 >= 0xfec0 and w0 <= 0xfeff
+            return false if w0 >= 0xfc00 and w0 <= 0xfdff
+            return false if w0 >= 0xff00
+            return false if (w0 & 0xe000) != 0x2000
+            # IANA's 2001::/23 protocol-assignment block contains individual
+            # exceptions; reject the enclosing range conservatively for SSRF.
+            return false if w0 == 0x2001 and w1 < 0x0200
+            return false if w0 == 0x2001 and w1 == 0x0db8
+            return false if w0 == 0x3fff and (w1 & 0xf000) == 0
+            return false if w0 == 0x2002
             true
 
+    private:
+        # Read and validate one bounded resolver result, then render the
+        # address set in cURL's host:port:address-list form.
+        def rh_append_resolved_addresses(resolved_file: cstr, host: cstr, pin: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            file_size: i64 = Base::rh_file_size(resolved_file)
+            return false if file_size <= 0 or file_size > 2048
+            addresses: mutable darray[u8] = []
+            return false if Base::rh_io_read(resolved_file, addresses) != file_size
+            Base::rh_push_cstr(pin, host)
+            Base::rh_push_text(pin, ":443:")
+            address_count: mutable i64 = 0
+            while start < addresses.count |start: usize = 0, addresses, pin, address_count|:
+                newline: i64 = Base::rh_find_byte(addresses, start, 10)
+                line_end: mutable usize = newline.usize() if newline >= 0 else addresses.count
+                return false if line_end <= start or address_count >= 32
+                ip: mutable darray[u8] = []
+                has_colon: mutable bool = false
+                while i < line_end |i: usize = start, addresses, line_end, ip, has_colon|:
+                    b: u8 = addresses[i]
+                    return false if b == 0
+                    has_colon <- true if b == 58
+                    ip.push(b)
+                    i <- i + 1
+                ip.push(0)
+                ip_ptr: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+                return false if not rh_addr_guard(ip_ptr)
+                pin.push(44) if address_count > 0
+                pin.push(91) if has_colon
+                Base::rh_push_cstr(pin, ip_ptr)
+                pin.push(93) if has_colon
+                address_count <- address_count + 1
+                if newline < 0:
+                    start <- addresses.count
+                else:
+                    start <- newline.usize() + 1
+            return false if address_count == 0
+            pin.push(0)
+            true
+
+        # Build a bounded cURL --resolve value from the resolver's complete
+        # address set. Rejecting the whole set prevents a public answer from
+        # hiding a private answer that cURL might otherwise select.
+        def rh_prepare_https_pin(url: cstr, err_file: cstr, pin: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            n: usize = Base::rh_cstr_len_c(url)
+            host_end: mutable usize = 8
+            while host_end < n |host_end, url, n|:
+                c: u8 = url[host_end]
+                break if c == 47 or c == 63 or c == 35
+                host_end <- host_end + 1
+            return false if host_end <= 8
+            host: mutable darray[u8] =
+                host: mutable darray[u8] = []
+                while i < host_end |i: usize = 8, host, url, host_end|:
+                    host.push(url[i])
+                    i <- i + 1
+                host.push(0)
+                host
+            host_ptr: cstr = (&host[0]).cast[cstr] can Unsafe.PointerCast
+            resolved_file: mutable darray[u8] =
+                resolved_file: mutable darray[u8] = []
+                Base::rh_push_cstr(resolved_file, err_file)
+                Base::rh_push_text(resolved_file, ".resolved")
+                resolved_file.push(0)
+                resolved_file
+            resolved_ptr: cstr = (&resolved_file[0]).cast[cstr] can Unsafe.PointerCast
+            _ = remove_file(resolved_ptr)
+
+            resolve_status: i64 =
+                cmd: mutable darray[u8] =
+                    cmd: mutable darray[u8] = []
+                    Base::rh_push_text(cmd, "python3 -I -c '")
+                    Base::rh_push_text(cmd, "import socket, sys, threading\n")
+                    Base::rh_push_text(cmd, "answers = []; failures = []\n")
+                    Base::rh_push_text(cmd, "def resolve():\n")
+                    Base::rh_push_text(cmd, "    try: answers.extend(socket.getaddrinfo(sys.argv[1], 443, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP))\n")
+                    Base::rh_push_text(cmd, "    except Exception as error: failures.append(error)\n")
+                    Base::rh_push_text(cmd, "worker = threading.Thread(target=resolve, daemon=True)\n")
+                    Base::rh_push_text(cmd, "worker.start(); worker.join(10)\n")
+                    Base::rh_push_text(cmd, "if worker.is_alive() or failures: raise SystemExit(1)\n")
+                    Base::rh_push_text(cmd, "addresses = list(dict.fromkeys(answer[4][0] for answer in answers))\n")
+                    Base::rh_push_text(cmd, "if not addresses or len(addresses) > 32: raise SystemExit(1)\n")
+                    Base::rh_push_text(cmd, "sys.stdout.write(\"\\n\".join(addresses) + \"\\n\")\n")
+                    Base::rh_push_text(cmd, "' ")
+                    rh_push_quoted(cmd, host_ptr)
+                    Base::rh_push_text(cmd, " > ")
+                    rh_push_quoted(cmd, resolved_ptr)
+                    Base::rh_push_text(cmd, " 2> ")
+                    rh_push_quoted(cmd, err_file)
+                    cmd.push(0)
+                    cmd
+                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+                block_result
+            if resolve_status != 0:
+                _ = remove_file(resolved_ptr)
+                return false
+
+            pin_valid: bool = rh_append_resolved_addresses(resolved_ptr, host_ptr, pin)
+            _ = remove_file(resolved_ptr)
+            pin_valid
+
+        # Assemble the fixed transport policy in one private helper so the
+        # public operation only validates, prepares the pin, and runs it.
+        def rh_https_get_command(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            cmd: mutable darray[u8] = []
+            Base::rh_push_text(cmd, "curl --disable -sS --noproxy '*' --proto '=https,file' --max-redirs 0")
+            if pin.count > 0:
+                Base::rh_push_text(cmd, " --resolve ")
+                rh_push_quoted(cmd, (&pin[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(cmd, " --max-time ")
+            Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_SECS)
+            Base::rh_push_text(cmd, " --max-filesize ")
+            Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_BYTES)
+            Base::rh_push_text(cmd, " -H 'User-Agent: repo-health-m02' -o ")
+            rh_push_quoted(cmd, body_file)
+            Base::rh_push_text(cmd, " -w '%{http_code}' > ")
+            rh_push_quoted(cmd, code_file)
+            Base::rh_push_text(cmd, " 2> ")
+            rh_push_quoted(cmd, err_file)
+            Base::rh_push_text(cmd, " ")
+            rh_push_quoted(cmd, url)
+            cmd.push(0)
+            cmd
+
+    public:
         # Run a bounded HTTPS/file fetch for forge APIs (M02-05 transport).
         # Policy, all enforced before and during the call (S002/S003/S012):
         # rh_fetch_guard (scheme/host/credential rules) + rh_fetch_arg_safe
-        # (shell quoting safety); curl --proto restricts to https+file, redirects
-        # disabled (fail closed, no credential re-send surface), wall-clock and
-        # byte caps bound the transfer. No Authorization header is ever sent in
+        # (shell quoting safety); HTTPS DNS answers are validated as a complete
+        # set and pinned with curl --resolve, proxy and user config are disabled,
+        # redirects disabled (fail closed, no credential re-send surface), and
+        # wall-clock and byte caps bound the transfer. No Authorization header is ever sent in
         # the M02 slice: authed endpoints report unauthorized honestly instead.
         # Returns the curl process status (0 = transfer ran; the caller MUST read
         # the code file: 200 = body usable, 000 = file-fixture transport with no
@@ -532,29 +718,17 @@ module Git:
         const RH_FETCH_MAX_BYTES: i64 = 8388608
         const RH_FETCH_MAX_SECS: i64 = 60
 
-        def rh_run_https_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def rh_run_https_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if not rh_fetch_guard(url)
             return -1 if not rh_fetch_arg_safe(url)
             return -1 if not rh_arg_safe(body_file)
             return -1 if not rh_arg_safe(code_file)
             return -1 if not rh_arg_safe(err_file)
+            pin: mutable darray[u8] = []
+            if Base::rh_cstr_starts_with(url, "https://"):
+                return -1 if not rh_prepare_https_pin(url, err_file, pin)
             transport: i64 =
-                cmd: mutable darray[u8] =
-                    cmd: mutable darray[u8] = []
-                    Base::rh_push_text(cmd, "curl -sS --proto '=https,file' --max-redirs 0 --max-time ")
-                    Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_SECS)
-                    Base::rh_push_text(cmd, " --max-filesize ")
-                    Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_BYTES)
-                    Base::rh_push_text(cmd, " -H 'User-Agent: repo-health-m02' -o ")
-                    rh_push_quoted(cmd, body_file)
-                    Base::rh_push_text(cmd, " -w '%{http_code}' > ")
-                    rh_push_quoted(cmd, code_file)
-                    Base::rh_push_text(cmd, " 2> ")
-                    rh_push_quoted(cmd, err_file)
-                    Base::rh_push_text(cmd, " ")
-                    rh_push_quoted(cmd, url)
-                    cmd.push(0)
-                    cmd
+                cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin)
                 block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
                 block_result
             transport

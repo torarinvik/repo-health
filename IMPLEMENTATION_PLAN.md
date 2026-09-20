@@ -728,7 +728,7 @@ Validate that the useful product can be operated without endangering its users, 
 
 **M07-01: Independent threat-model review.** Have a reviewer not responsible for the collector implementation inspect URL handling, subprocess isolation, archive parsing, credentials, plugin boundaries, and public/private graph flows.
 
-**M07-02: Adversarial transport tests.** Exercise loopback/private/link-local addresses, IPv6 variants, encoded addresses, redirects, DNS rebinding, unexpected ports, internal submodule URLs, and credential-forwarding attempts. The public crawler must reject them according to policy. [P05]
+**M07-02: Adversarial transport tests.** Exercise loopback/private/link-local addresses, IPv6 variants, encoded addresses, redirects, DNS rebinding, unexpected ports, internal submodule URLs, and credential-forwarding attempts. The public crawler must reject them according to policy. HTTPS fetches resolve names with a bounded resolver, reject the complete answer set if any address is non-public, and pin every accepted address in cURL's DNS cache; proxies and user cURL configuration are disabled. Address policy conservatively excludes IANA special-purpose ranges. Tests inject mixed public/private A/AAAA answers to prove the request never reaches cURL, and safe mixed-family answers to prove every accepted address is pinned. [P05]
 
 **M07-03: Source-parser hardening.** Fuzz supported schemas, VCS object parsers, archive readers, lockfile parsers, and version expressions. Verify bounded resource consumption and structured failure.
 

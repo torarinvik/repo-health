@@ -59,16 +59,27 @@ remotes are rejected as `unsupported` in the M01 slice.
 M02 forge fetch (`rh_run_https_get`, `rh_fetch_guard` + `rh_fetch_arg_safe`):
 https or caller-named `file://` fixtures only; no ports, no userinfo, no
 percent-escapes or brackets in the host, no bare `localhost`, no IPv4
-loopback/private/link-local literals (public IPv4 literals pass); curl is
-pinned to `--proto`=https/file with redirects disabled and wall-clock/byte
-caps, so a redirect can neither downgrade the scheme nor re-send anything
-(there are no credentials to re-send: the M02 slice sends no Authorization
-header, and authed endpoints report `unauthorized` honestly). Shell safety
-is separate from URL semantics: single-quote wrapping plus rejection of
-quote/backtick/dollar/backslash/controls. DNS rebinding is NOT mitigated
-at this layer (a name that resolves safe then flips is outside URL policy);
-follow-up in M07: per-connection resolution pinning and an approval-gated
-instance allowlist before any non-test fetching beyond public APIs.
+loopback/private/link-local literals (public IPv4 literals pass). Before an
+HTTPS request, Python 3's standard resolver runs in a worker thread with a
+10-second join bound; the
+complete, deduplicated result set is capped at 32 addresses, and every IPv4 or
+IPv6 address must pass `rh_addr_guard`, which conservatively excludes special
+purpose ranges such as TEST-NET, Teredo, and the IPv6 documentation blocks in
+the [IANA IPv4](https://www.iana.org/assignments/iana-ipv4-special-registry)
+and [IPv6](https://www.iana.org/assignments/iana-ipv6-special-registry)
+registries. The bounded result is supplied to cURL
+with `--resolve`, so the connection uses only those checked addresses even if
+DNS changes after lookup. cURL user config and proxies are disabled, and its
+protocol is restricted to HTTPS or caller-named file fixtures; redirects stay
+disabled and wall-clock/byte caps bound the transfer. A redirect therefore
+cannot downgrade the scheme or re-send anything (the M02 slice sends no
+Authorization header, and authed endpoints report `unauthorized` honestly).
+Shell safety is separate from URL semantics: single-quote wrapping plus
+rejection of quote/backtick/dollar/backslash/controls. The deterministic M07
+transport test injects mixed public/private answers and proves cURL is not run,
+then verifies the complete safe IPv4/IPv6 set appears in `--resolve`. An
+approval-gated instance allowlist is still required before non-test fetching
+beyond public APIs.
 
 ## Resource bounds (S012)
 

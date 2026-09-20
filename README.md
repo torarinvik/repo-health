@@ -19,8 +19,9 @@ infrastructure. Reference implementation written in
 
 ## Quick start
 
-Requirements: the pinned Elisa toolchain (see `TOOLCHAIN.md`). No
-credentials needed — everything below runs locally.
+Requirements: the pinned Elisa toolchain (see `TOOLCHAIN.md`). HTTPS fetches
+also require Python 3 and cURL. No credentials are needed; local scans and
+the default checks use local data, while HTTPS fetches need network access.
 
 ```sh
 ./tools/check.sh   # verify toolchain

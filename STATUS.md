@@ -494,7 +494,9 @@ Adversarial
 transport policy hardened (`src/rh_git.elisa`: loopback/private/link-local/
 CGNAT/benchmark/multicast/unspecified v4, IPv6 brackets/ULA/link-local,
 userinfo/credentials, percent-encoding, non-standard ports, decimal/hex/
-octal-obfuscated hosts, and a post-DNS `rh_addr_guard` for rebinding),
+octal-obfuscated hosts, strict IPv4/IPv6 parsing with conservative IANA
+special-purpose range rejection, and bounded DNS answer validation with cURL
+`--resolve` pinning; proxies and user cURL config are disabled),
 parser hardening tests (bounded JSON depth, malformed JSON/semver/lockfile
 fail structured, no trap), monitoring with **separate service and project
 series** and an unknown-rate that reports -1 rather than 0 when there is no
