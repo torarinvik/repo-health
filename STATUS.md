@@ -190,7 +190,8 @@ it reads a local project's `Cargo.lock`, `package.json` +
 `package-lock.json` or `npm-shrinkwrap.json` (npm precedence),
 `requirements.txt`, bounded PEP 621 `pyproject.toml`,
 `go.mod`, `Gemfile.lock`, `composer.lock`, `packages.config`, and/or bounded
-`packages.lock.json`, and/or bounded `pom.xml`, writes one
+`packages.lock.json` (up to 64 target frameworks retained on framework-specific
+nodes and kept in separate graph closures), and/or bounded `pom.xml`, writes one
 `rh-dep-graph/1` report per ecosystem, and
 publishes `dependencies.unsupported_range_count` in `deps-metrics.json`
 (`rh-deps-metrics/1`) with per-ecosystem components against a **declared**
@@ -308,11 +309,12 @@ preserves exact and optional declared requirements. The bounded NuGet
 `packages.config` parser preserves exact package IDs and versions,
 development dependency scope, and explicit unresolved version ranges;
 malformed package entries fail closed without a partial graph. A dedicated
-`src/rh_nuget_lock.elisa` module parses NuGet lock format version 1 for one
-target framework, retains that framework on the graph root, resolves direct
-and transitive edges by package ID and exact version, and records validated
+`src/rh_nuget_lock.elisa` module parses NuGet lock format version 1 for up to
+64 target frameworks and 10,000 package entries, retains framework identity
+on package nodes, resolves each framework's direct and transitive closure
+separately by package ID and exact version, and records validated
 `contentHash` values as expected `nuget-sha512` artifacts without claiming
-raw `.nupkg` verification. Unsupported versions, multiple targets, duplicate
+raw `.nupkg` verification. Unsupported versions, duplicate target names or
 package IDs, malformed dependencies, and simultaneous `packages.config` plus
 `packages.lock.json` fail closed; `tests/test_deps_cli.sh` covers these cases.
 The bounded

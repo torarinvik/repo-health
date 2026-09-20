@@ -437,7 +437,7 @@ assert by["nuget"]["development_resolved_edges"] == 1, by
 print("[deps] NuGet graph + development scope OK")
 PY
 
-echo "[deps] NuGet packages.lock.json preserves one target, transitive edges, and content hashes"
+echo "[deps] NuGet packages.lock.json preserves target context, transitive edges, and content hashes"
 mkdir -p "$T/nuget-lock-src"
 cp "$ROOT/fixtures/packages/nuget-packages.lock.json" "$T/nuget-lock-src/packages.lock.json"
 "$ROOT/build/rh_cli" deps --repo "$T/nuget-lock-src" --out "$T/nuget-lock-out" \
@@ -450,16 +450,43 @@ g = json.load(open(out + "/deps-nuget-graph.json"))
 m = json.load(open(out + "/deps-metrics.json"))
 assert g["nodes"][0]["target_framework"] == "net8.0", g["nodes"][0]
 assert [n["name"] for n in g["nodes"]] == ["root", "Newtonsoft.Json", "System.Memory"], g["nodes"]
+assert [n["target_framework"] for n in g["nodes"]] == ["net8.0"] * 3, g["nodes"]
 assert [(e["from"], e["to"]) for e in g["edges"]] == [(0, 1), (1, 2)], g["edges"]
 assert [a["kind"] for a in g["artifacts"]] == ["nuget_content", "nuget_content"], g["artifacts"]
 assert all(a["identity_state"] == "unknown" and a["expected_digest"].startswith("nuget-sha512:") for a in g["artifacts"]), g["artifacts"]
 by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
 assert by["nuget"]["evidence"] == "packages.lock.json", by
 assert by["nuget"]["artifact_digest_coverage"] == {"num": 2, "den": 2}, by
-print("[deps] NuGet lock graph + target + expected content hashes OK")
+print("[deps] NuGet lock graph + target context + expected content hashes OK")
 PY
 
-echo "[deps] NuGet lock rejects unsupported versions/fields, multiple targets, malformed dependencies, bad hashes, and ambiguous dual inputs"
+echo "[deps] NuGet lock keeps multiple target-framework closures separate"
+python3 - "$ROOT/fixtures/packages/nuget-packages.lock.json" "$T/nuget-lock-multi-target" <<'PY'
+import copy, json, os, sys
+source, directory = sys.argv[1:]
+document = json.load(open(source))
+net9 = copy.deepcopy(document["dependencies"]["net8.0"])
+net9["Newtonsoft.Json"]["requested"] = "[14.0.1, )"
+net9["Newtonsoft.Json"]["resolved"] = "14.0.1"
+net9["Newtonsoft.Json"]["dependencies"]["System.Memory"] = "6.0.0"
+net9["System.Memory"]["resolved"] = "6.0.0"
+document["dependencies"]["net9.0"] = net9
+os.makedirs(directory, exist_ok=True)
+json.dump(document, open(os.path.join(directory, "packages.lock.json"), "w"))
+PY
+"$ROOT/build/rh_cli" deps --repo "$T/nuget-lock-multi-target" --out "$T/nuget-lock-multi-target-out" \
+  | grep -q "ecosystems=1 nuget=4/4 unresolved=0 unsupported=2" || fail "NuGet multi-target lock summary"
+python3 - "$T/nuget-lock-multi-target-out/deps-nuget-graph.json" <<'PY'
+import json, sys
+g = json.load(open(sys.argv[1]))
+assert [n["name"] for n in g["nodes"]] == ["root", "Newtonsoft.Json", "System.Memory", "Newtonsoft.Json", "System.Memory"], g["nodes"]
+assert [n.get("target_framework") for n in g["nodes"]] == [None, "net8.0", "net8.0", "net9.0", "net9.0"], g["nodes"]
+assert [(e["from"], e["to"]) for e in g["edges"]] == [(0, 1), (1, 2), (0, 3), (3, 4)], g["edges"]
+assert [n["version"] for n in g["nodes"]] == [None, "13.0.1", "4.5.5", "14.0.1", "6.0.0"], g["nodes"]
+print("[deps] multi-target lock graph keeps each framework's closure separate")
+PY
+
+echo "[deps] NuGet lock rejects unsupported versions/fields, duplicate target names, malformed dependencies, bad hashes, and ambiguous dual inputs"
 python3 - "$ROOT/fixtures/packages/nuget-packages.lock.json" "$T" <<'PY'
 import copy, json, os, sys
 source, root = sys.argv[1:]
@@ -467,15 +494,12 @@ base = json.load(open(source))
 cases = {
     "nuget-lock-bad-version": copy.deepcopy(base),
     "nuget-lock-unknown-field": copy.deepcopy(base),
-    "nuget-lock-multi-target": copy.deepcopy(base),
     "nuget-lock-malformed-dependencies": copy.deepcopy(base),
     "nuget-lock-bad-hash": copy.deepcopy(base),
     "nuget-lock-duplicate-id": copy.deepcopy(base),
 }
 cases["nuget-lock-bad-version"]["version"] = 2
 cases["nuget-lock-unknown-field"]["futureNuGetField"] = True
-framework = cases["nuget-lock-multi-target"]["dependencies"]["net8.0"]
-cases["nuget-lock-multi-target"]["dependencies"]["net9.0"] = copy.deepcopy(framework)
 cases["nuget-lock-malformed-dependencies"]["dependencies"]["net8.0"]["Newtonsoft.Json"]["dependencies"] = []
 cases["nuget-lock-bad-hash"]["dependencies"]["net8.0"]["Newtonsoft.Json"]["contentHash"] = "not-a-sha512"
 framework = cases["nuget-lock-duplicate-id"]["dependencies"]["net8.0"]
@@ -485,7 +509,7 @@ for name, document in cases.items():
     os.makedirs(directory, exist_ok=True)
     json.dump(document, open(os.path.join(directory, "packages.lock.json"), "w"))
 PY
-for name in nuget-lock-bad-version nuget-lock-unknown-field nuget-lock-multi-target nuget-lock-malformed-dependencies nuget-lock-bad-hash nuget-lock-duplicate-id; do
+for name in nuget-lock-bad-version nuget-lock-unknown-field nuget-lock-malformed-dependencies nuget-lock-bad-hash nuget-lock-duplicate-id; do
   set +e
   "$ROOT/build/rh_cli" deps --repo "$T/$name" --out "$T/$name-out" >/dev/null 2>&1
   rc=$?
@@ -493,6 +517,16 @@ for name in nuget-lock-bad-version nuget-lock-unknown-field nuget-lock-multi-tar
   [[ "$rc" -eq 4 ]] || fail "$name must fail closed (got $rc)"
   [[ ! -f "$T/$name-out/deps-nuget-graph.json" ]] || fail "$name wrote a partial graph"
 done
+mkdir -p "$T/nuget-lock-duplicate-framework"
+cat > "$T/nuget-lock-duplicate-framework/packages.lock.json" <<'EOF'
+{"version":1,"dependencies":{"net8.0":{},"NET8.0":{}}}
+EOF
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/nuget-lock-duplicate-framework" --out "$T/nuget-lock-duplicate-framework-out" >/dev/null 2>&1
+rc_duplicate_framework=$?
+set -e
+[[ "$rc_duplicate_framework" -eq 4 ]] || fail "duplicate NuGet target framework names must fail closed (got $rc_duplicate_framework)"
+[[ ! -f "$T/nuget-lock-duplicate-framework-out/deps-nuget-graph.json" ]] || fail "duplicate NuGet target frameworks wrote a partial graph"
 cp "$T/nugetsrc/packages.config" "$T/nuget-lock-src/packages.config"
 set +e
 "$ROOT/build/rh_cli" deps --repo "$T/nuget-lock-src" --out "$T/nuget-dual-out" >/dev/null 2>&1

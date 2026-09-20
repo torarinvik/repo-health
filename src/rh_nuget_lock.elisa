@@ -5,9 +5,10 @@ include "./rh_package.elisa"
 
 module NugetLock:
     public:
-        # Bounded NuGet packages.lock.json reader. Version 1 and one target
-        # framework are accepted; all package identities, versions, and edge
-        # targets come from the lock file, never from a restore operation.
+        # Bounded NuGet packages.lock.json reader. Version 1 and up to 64
+        # target frameworks are accepted as independent graph closures; package
+        # nodes retain their target framework and cross-framework edges are not
+        # introduced. All identities and targets come from the lock file.
         def rh_nuget_lock_parse(lock_bytes: darray[u8]&, pkgs: mutable darray[Package::RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[Package::RhRequire]&, edges: mutable darray[Package::RhDepEdge]&, unresolved: mutable darray[Package::RhUnresolved]&, artifacts: mutable darray[Package::RhArtifact]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
@@ -24,18 +25,10 @@ module NugetLock:
             frameworks_idx: i64 = rh_json_field(nodes, texts, root_json, "dependencies")
             return -1 if frameworks_idx < 0 or nodes[frameworks_idx.usize()].kind != Json::RH_JSON_OBJ
             frameworks: Json::RhJsonNode = nodes[frameworks_idx.usize()]
-            return -1 if frameworks.child_count % 2 != 0 or frameworks.child_count > 2
-            framework_name: i64 = frameworks.first_child
-            return -1 if framework_name < 0
-            framework_value: i64 = nodes[framework_name.usize()].next_sibling
-            return -1 if framework_value < 0
-            return -1 if nodes[framework_name.usize()].kind != Json::RH_JSON_STR
-            return -1 if nodes[framework_value.usize()].kind != Json::RH_JSON_OBJ
-
-            package_count: i64 = nodes[framework_value.usize()].child_count / 2
-            return -1 if package_count > 10000
-            name_table: mutable darray[i64] =
-                while i < package_count * 2 + 1 |table: mutable darray[i64] = [], i: i64 = 0| -> table:
+            return -1 if frameworks.child_count % 2 != 0 or frameworks.child_count < 2 or frameworks.child_count > 128
+            framework_count: i64 = frameworks.child_count / 2
+            framework_key_table: mutable darray[i64] =
+                while i < framework_count * 2 + 1 |table: mutable darray[i64] = [], i: i64 = 0| -> table:
                     table.push(-1)
                     i <- i + 1
 
@@ -48,9 +41,41 @@ module NugetLock:
             root_node.name_s <- root_name_s
             root_node.name_e <- root_name_s + root_name.count.i64()
             root_node.src_kind <- Package::RH_PSRC_UNKNOWN
-            root_node.framework_s <- Package::rh_pool_copy(pool, texts, nodes[framework_name.usize()].text_start.usize(), nodes[framework_name.usize()].text_end.usize())
-            root_node.framework_e <- pool.count.i64()
             pkgs[0] <- root_node
+
+            while framework_key >= 0 |framework_key: mutable i64 = frameworks.first_child, total_packages: mutable i64 = 0, nodes, texts, lock_bytes, framework_key_table, framework_count, pkgs, pool, reqs, edges, unresolved, artifacts, root|:
+                framework_name: i64 = framework_key
+                framework_value: i64 = nodes[framework_name.usize()].next_sibling
+                return -1 if framework_value < 0 or nodes[framework_name.usize()].kind != Json::RH_JSON_STR
+                return -1 if nodes[framework_value.usize()].kind != Json::RH_JSON_OBJ
+                return -1 if nodes[framework_value.usize()].child_count % 2 != 0
+                return -1 if nodes[framework_name.usize()].text_end <= nodes[framework_name.usize()].text_start
+                return -1 if not rh_json_seen_name(framework_key_table, nodes, texts, framework_name)
+
+                package_count: i64 = nodes[framework_value.usize()].child_count / 2
+                total_packages <- total_packages + package_count
+                return -1 if total_packages > 10000
+                framework_s: i64 = Package::rh_pool_copy(pool, texts, nodes[framework_name.usize()].text_start.usize(), nodes[framework_name.usize()].text_end.usize())
+                framework_e: i64 = pool.count.i64()
+                if framework_count == 1:
+                    root_node: mutable Package::RhPkgNode = pkgs[0]
+                    root_node.framework_s <- framework_s
+                    root_node.framework_e <- framework_e
+                    pkgs[0] <- root_node
+
+                return -1 if rh_nuget_framework_parse(nodes, texts, framework_value, framework_s, framework_e, pkgs, pool, reqs, edges, unresolved, artifacts, root) < 0
+                framework_key <- nodes[framework_value.usize()].next_sibling
+            0
+
+
+    private:
+        def rh_nuget_framework_parse(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, framework_value: i64, framework_s: i64, framework_e: i64, pkgs: mutable darray[Package::RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[Package::RhRequire]&, edges: mutable darray[Package::RhDepEdge]&, unresolved: mutable darray[Package::RhUnresolved]&, artifacts: mutable darray[Package::RhArtifact]&, root: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            package_count: i64 = nodes[framework_value.usize()].child_count / 2
+            return -1 if package_count > 10000
+            name_table: mutable darray[i64] =
+                while i < package_count * 2 + 1 |table: mutable darray[i64] = [], i: i64 = 0| -> table:
+                    table.push(-1)
+                    i <- i + 1
 
             while member >= 0 |member: i64 = nodes[framework_value.usize()].first_child, pkgs, pool, reqs, edges, artifacts, name_table|:
                 key_idx: i64 = member
@@ -104,6 +129,8 @@ module NugetLock:
                 package_node.ver_s <- version_s
                 package_node.ver_e <- version_e
                 package_node.src_kind <- Package::RH_PSRC_REGISTRY
+                package_node.framework_s <- framework_s
+                package_node.framework_e <- framework_e
                 pkgs[package.usize()] <- package_node
                 name_table[slot.usize()] <- package
 
@@ -181,7 +208,6 @@ module NugetLock:
                 member <- nodes[nodes[key_idx.usize()].next_sibling.usize()].next_sibling
             0
 
-    private:
         def rh_span_literal(data: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if start < 0 or end < start
             Base::rh_bytes_equal_literal(data, start, end, literal)
