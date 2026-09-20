@@ -46,9 +46,9 @@ assert metrics["release.latest_stable_age_days"]["value"] == 0, metrics
 assert metrics["release.interrelease_median_days"]["status"] == "not_applicable", metrics
 assert metrics["release.interrelease_variance"]["status"] == "not_applicable", metrics
 assert r[0] == {"tag": "v1.0.0", "published_at": 1700000000, "first_seen": 1700000123,
-                "prerelease": False, "withdrawn": True, "supported_line": "1.x", "source_mapped": True, "asset_count": 2, "digest_known_count": 1}, r[0]
+                "target": None, "prerelease": False, "withdrawn": True, "supported_line": "1.x", "source_mapped": True, "asset_count": 2, "digest_known_count": 1}, r[0]
 # missing published time stays unknown (null), never replaced by first-seen
-assert r[1]["published_at"] is None and r[1]["prerelease"] is True and r[1]["withdrawn"] is None and r[1]["supported_line"] == "1.x" and r[1]["source_mapped"] is False and r[1]["first_seen"] == 1700000123, r[1]
+assert r[1]["published_at"] is None and r[1]["target"] is None and r[1]["prerelease"] is True and r[1]["withdrawn"] is None and r[1]["supported_line"] == "1.x" and r[1]["source_mapped"] is False and r[1]["first_seen"] == 1700000123, r[1]
 assert d["source"] == {"history_supported": False, "identity_supported": False}, d["source"]
 assert "no history or author identity is derived" in d["note"], d["note"]
 print("[release-feed] fields + validity/known time OK")
@@ -66,6 +66,21 @@ assert m["release.latest_stable_age_days"]["value"] == 1, m
 assert m["release.interrelease_median_days"]["value"] == 3, m
 assert m["release.interrelease_variance"]["value"] == 1, m
 print("[release-feed] cadence metrics OK")
+PY
+
+echo "[release-feed] explicit tag target changes remain observable"
+cat > "$T/targets.json" <<'JSON'
+{"schema":"rh-release-feed-input/1","first_seen":1700000123,"releases":[{"tag":"v1.0.0","target":"abc"},{"tag":"v1.0.0","target":"def"},{"tag":"v1.1.0","target":"xyz"}]}
+JSON
+"$ROOT/build/rh_cli" release-feed --input "$T/targets.json" --out "$T/targets.out" >/dev/null || fail "targets"
+python3 - "$T/targets.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+assert m["release.tag_target_changes"]["status"] == "observed", m
+assert m["release.tag_target_changes"]["value"] == 1, m
+assert d["releases"][0]["target"] == "abc" and d["releases"][1]["target"] == "def", d
+print("[release-feed] tag target changes OK")
 PY
 
 echo "[release-feed] bounded --url capture retains source/status/error evidence"
