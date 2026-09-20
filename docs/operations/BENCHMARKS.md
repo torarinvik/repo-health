@@ -9,8 +9,12 @@ processes in each batch; the default is 1. The measured interval includes
 process startup and deterministic dataset construction, but excludes compiler
 startup. Every process in a batch must produce byte-identical structural output.
 Manifests retain every batch latency and the largest individual child peak-RSS
-sample (not aggregate concurrent memory), and report median, p95, maximum, and
-latency variance. They also report aggregate batch node/edge throughput,
+sample. They also record the sum of child peak RSS values per batch as a
+conservative upper bound on concurrent process memory. That sum may overstate
+the simultaneous peak because each child's high-water mark can occur at a
+different time; it is not a sampled aggregate-memory measurement. Both RSS
+series report median, p95, maximum, and samples. Manifests also report
+latency variance and aggregate batch node/edge throughput,
 successful and failed repetition counts, and transitive-query truncation rate
 when the selected stage runs a query. A failed sample aborts manifest
 publication. Tests validate sample counts and outcomes without asserting
@@ -65,10 +69,11 @@ ecosystem distributions or a production correction history.
 These workloads measure graph construction, reverse traversal on bounded
 cases, indegree concentration, and the ecosystem projection operations listed
 above. They do not yet represent real project histories or replay corrections
-across arbitrary historical snapshots. The per-process peak RSS and latency
-samples cover only this synthetic graph runner. The harness does not measure
-workload disk consumption or aggregate concurrent memory, and it does not
-represent a deployed database or external request budget. Those
+across arbitrary historical snapshots. The per-process peak RSS, conservative
+concurrent memory upper bound, and latency samples cover only this synthetic
+graph runner. The harness does not sample simultaneous aggregate memory or
+measure workload disk consumption, and it does not represent a deployed
+database or external request budget. Those
 measurements remain required before using these results to publish capacity
 limits or claim the M10 exit gate.
 Concurrent processes exercise local CPU and memory contention only; they do not

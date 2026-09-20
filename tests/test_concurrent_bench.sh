@@ -19,10 +19,16 @@ assert manifest["reps"] == 2, manifest
 for run in manifest["runs"]:
     assert len(run["latency"]["samples_ms"]) == 2, run
     assert len(run["peak_rss"]["samples_bytes"]) == 2, run
+    upper = run["concurrent_peak_rss_upper_bound"]
+    assert len(upper["samples_bytes"]) == 2, run
+    assert upper["max_bytes"] == max(upper["samples_bytes"]), upper
+    assert all(total >= individual for total, individual in zip(upper["samples_bytes"], run["peak_rss"]["samples_bytes"])), run
+    assert "sum of each child peak RSS" in upper["basis"], upper
+    assert "not simultaneous aggregate memory" in upper["basis"], upper
     assert run["outcomes"]["concurrent_processes_per_repetition"] == 2, run
     assert "per concurrent batch" in run["throughput"]["basis"], run
     assert "not aggregate batch memory" in run["peak_rss"]["basis"], run
-print("[concurrent-bench] two-process batches + honest resource basis OK")
+print("[concurrent-bench] two-process batches + concurrent RSS upper bounds OK")
 PY
 
 echo "[concurrent-bench] concurrency bound fails closed"

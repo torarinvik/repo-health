@@ -68,27 +68,30 @@ def measure(command: Sequence[str], reps: int, concurrent_jobs: int = 1) -> dict
     if not 1 <= concurrent_jobs <= 32:
         raise ValueError("concurrent_jobs must be from 1 to 32")
 
-    def run_batch(executor: ThreadPoolExecutor | None) -> tuple[str, float, int]:
+    def run_batch(executor: ThreadPoolExecutor | None) -> tuple[str, float, list[int]]:
         if executor is None:
-            return run_process(command)
+            output, elapsed_ms, rss_bytes = run_process(command)
+            return output, elapsed_ms, [rss_bytes]
         started = time.perf_counter()
         results = list(executor.map(run_process, [command] * concurrent_jobs))
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         outputs = {result[0] for result in results}
         if len(outputs) != 1:
             raise RuntimeError("concurrent workload output changed within a batch")
-        return outputs.pop(), elapsed_ms, max(result[2] for result in results)
+        return outputs.pop(), elapsed_ms, [result[2] for result in results]
 
     elapsed_samples = []
     rss_samples = []
+    rss_sum_bounds = []
     with ThreadPoolExecutor(max_workers=concurrent_jobs) if concurrent_jobs > 1 else _NullExecutor() as executor:
         expected, _, _ = run_batch(executor)
         for _ in range(reps):
-            output, elapsed_ms, rss_bytes = run_batch(executor)
+            output, elapsed_ms, process_rss = run_batch(executor)
             if output != expected:
                 raise RuntimeError("workload output changed between repetitions")
             elapsed_samples.append(round(elapsed_ms, 3))
-            rss_samples.append(rss_bytes)
+            rss_samples.append(max(process_rss))
+            rss_sum_bounds.append(sum(process_rss))
     latency = {
         "min_ms": min(elapsed_samples),
         "median_ms": round(statistics.median(elapsed_samples), 3),
@@ -104,10 +107,18 @@ def measure(command: Sequence[str], reps: int, concurrent_jobs: int = 1) -> dict
         "samples_bytes": rss_samples,
         "basis": "largest individual child peak RSS per concurrent batch; not aggregate batch memory",
     }
+    concurrent_memory_bound = {
+        "median_bytes": int(statistics.median(rss_sum_bounds)),
+        "p95_bytes": int(percentile(rss_sum_bounds, 0.95)),
+        "max_bytes": max(rss_sum_bounds),
+        "samples_bytes": rss_sum_bounds,
+        "basis": "sum of each child peak RSS within a concurrent batch; conservative upper bound, not simultaneous aggregate memory",
+    }
     return {
         "output": expected,
         "latency": latency,
         "peak_rss": memory,
+        "concurrent_peak_rss_upper_bound": concurrent_memory_bound,
         "successful_repetitions": reps,
         "failed_repetitions": 0,
         "concurrent_processes_per_repetition": concurrent_jobs,

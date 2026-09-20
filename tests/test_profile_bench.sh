@@ -45,6 +45,7 @@ assert len(a["runs"]) == sum(len(w["stages"]) for w in expected_workloads), a
 assert all(len(r["latency"]["samples_ms"]) == 10 for r in a["runs"]), a
 assert all(0 <= r["latency"]["median_ms"] <= r["latency"]["p95_ms"] <= r["latency"]["max_ms"] for r in a["runs"]), a
 assert all(len(r["peak_rss"]["samples_bytes"]) == 10 and r["peak_rss"]["max_bytes"] > 0 for r in a["runs"]), a
+assert all(r["concurrent_peak_rss_upper_bound"]["samples_bytes"] == r["peak_rss"]["samples_bytes"] for r in a["runs"]), a
 assert all(r["throughput"]["nodes_per_second"] > 0 for r in a["runs"]), a
 assert all(r["outcomes"]["successful_repetitions"] == 10 and r["outcomes"]["failed_repetitions"] == 0 for r in a["runs"]), a
 assert all(r["outcomes"]["error_rate"] == 0 for r in a["runs"]), a

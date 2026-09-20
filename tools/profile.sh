@@ -56,6 +56,7 @@ for nodes, seed, distribution, stages in workloads:
             "elapsed_ms": sample["latency"]["median_ms"],
             "latency": sample["latency"],
             "peak_rss": sample["peak_rss"],
+            "concurrent_peak_rss_upper_bound": sample["concurrent_peak_rss_upper_bound"],
             **throughput_and_outcomes(sample, fields),
             "dataset_digest": digest,
             "output": out1,
@@ -67,7 +68,7 @@ for nodes, seed, distribution, stages in workloads:
 manifest = {
     **metadata,
     "profile": "rh-profile/3",
-    "note": "timings and peak RSS are machine-specific; distribution, stage output, and dataset digests are deterministic",
+    "note": "timings, peak RSS, and concurrent RSS upper bounds are machine-specific; distribution, stage output, and dataset digests are deterministic",
     "reps": reps,
     "stages": ["graph", "query", "metrics", "ecosystem"],
     "workloads": [
