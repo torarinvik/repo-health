@@ -81,6 +81,7 @@ assert args[args.index("--data-binary") + 1].startswith("@"), args
 assert "-L" not in args and not any(x.startswith("Authorization:") for x in args)
 result = json.load(open(out / "osv-query-result.json"))
 assert result["schema"] == "rh-osv-query-result/1" and result["state"] == "collected", result
+assert result["query_kind"] == "package_version", result
 assert result["http_status"] == 200 and result["pagination"] == "complete", result
 raw = (out / "osv-query-response.raw.json").read_bytes()
 assert result["raw_response_sha256"] == hashlib.sha256(raw).hexdigest(), result
@@ -88,6 +89,26 @@ assert json.load(open(out / "osv-query-response.json"))["vulns"], "normalized re
 assert (out / "osv-query-http-status.txt").read_text() == "200"
 assert (out / "osv-query.err").exists()
 print("[osv-query] pinned POST evidence OK")
+PY
+
+echo "[osv-query] full commit-hash query uses the same guarded endpoint"
+cp "$ROOT/fixtures/packages/osv-query-commit.json" "$T/commit-query.json"
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_RESPONSE="$ROOT/fixtures/packages/osv-response.json" \
+OSV_QUERY_FAKE_HTTP=200 \
+OSV_QUERY_CAPTURE="$T/commit.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/commit.sent.json" \
+  "$ROOT/build/rh_cli" osv-query --input "$T/commit-query.json" --out "$T/commit-out" >/dev/null
+python3 - "$T/commit-out" "$ROOT/fixtures/packages/osv-query-commit.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+commit_input = json.load(open(sys.argv[2]))
+assert commit_input["schema"] == "rh-osv-query-input/2", commit_input
+expected = {"commit": "6879efc2c1596d11a6a6ad296f80063b558d5e0f"}
+assert json.load(open(p / "osv-query-request.json")) == expected
+assert json.load(open(p / "osv-query-result.json"))["query_kind"] == "commit"
+assert json.load(open(pathlib.Path(sys.argv[1]).parent / "commit.sent.json")) == expected
+print("[osv-query] commit request and query kind retained")
 PY
 "$ROOT/build/rh_cli" deps --repo "$T/repo" --out "$T/deps" --osv "$T/out/osv-query-response.json" >/dev/null
 python3 - "$T/deps/deps-cargo-graph.json" <<'PY'

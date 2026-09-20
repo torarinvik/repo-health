@@ -19,14 +19,24 @@ def oq_query_is(input: u8&, expected: u8&) -> bool can[Memory.Allocate, Abort.Pa
     raw: mutable darray[u8] = []
     Base::rh_push_text(raw, input)
     body: mutable darray[u8] = []
-    return false if OsvQuery::rh_osv_query_build(raw, body) != 0
+    kind: mutable i64 = -1
+    return false if OsvQuery::rh_osv_query_build(raw, body, &kind) != 0
     Base::rh_bytes_equal_literal(body, 0, body.count.i64(), expected)
 
 def oq_query_reject(input: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
     raw: mutable darray[u8] = []
     Base::rh_push_text(raw, input)
     body: mutable darray[u8] = []
-    OsvQuery::rh_osv_query_build(raw, body) != 0
+    kind: mutable i64 = -1
+    OsvQuery::rh_osv_query_build(raw, body, &kind) != 0
+
+def oq_commit_query_is(input: u8&, expected: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    raw: mutable darray[u8] = []
+    Base::rh_push_text(raw, input)
+    body: mutable darray[u8] = []
+    kind: mutable i64 = -1
+    return false if OsvQuery::rh_osv_query_build(raw, body, &kind) != 0
+    kind == 1 and Base::rh_bytes_equal_literal(body, 0, body.count.i64(), expected)
 
 def oq_check_requests(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     oq_check(oq_query_is("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"cargo\",\"name\":\"serde\"},\"version\":\"1.0.0\"}", "{\"package\":{\"ecosystem\":\"crates.io\",\"name\":\"serde\"},\"version\":\"1.0.0\"}"), "map-cargo", fails)
@@ -47,11 +57,15 @@ def oq_check_rejections(fails: mutable i64&) -> void can[Memory.Allocate, Abort.
     oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"unknown\",\"name\":\"x\"},\"version\":\"1\"}"), "reject-ecosystem", fails)
     oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"npm\",\"name\":\"x\"},\"version\":\"\"}"), "reject-empty-version", fails)
     oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"npm\",\"name\":\"x\u0001\"},\"version\":\"1\"}"), "reject-control", fails)
+    oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/2\",\"commit\":\"1234\"}"), "reject-short-commit", fails)
+    oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/2\",\"commit\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}"), "reject-nonhex-commit", fails)
+    oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/2\",\"commit\":\"6879efc2c1596d11a6a6ad296f80063b558d5e0f\",\"extra\":true}"), "reject-extra-commit-field", fails)
     oversized: mutable darray[u8] = []
     while oversized.count < 8193 |oversized|:
         oversized.push(32)
     body: mutable darray[u8] = []
-    oq_check(OsvQuery::rh_osv_query_build(oversized, body) != 0, "reject-oversized", fails)
+    kind: mutable i64 = -1
+    oq_check(OsvQuery::rh_osv_query_build(oversized, body, &kind) != 0, "reject-oversized", fails)
     return
 
 def oq_check_responses(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
@@ -89,11 +103,17 @@ def oq_check_responses(fails: mutable i64&) -> void can[Memory.Allocate, Abort.P
     oq_check(OsvQuery::rh_osv_query_normalize_response(duplicate, duplicate_out, &duplicate_page) != 0, "reject-duplicate-vulns", fails)
     return
 
+def oq_check_commit(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    oq_check(oq_commit_query_is("{\"schema\":\"rh-osv-query-input/2\",\"commit\":\"6879efc2c1596d11a6a6ad296f80063b558d5e0f\"}", "{\"commit\":\"6879efc2c1596d11a6a6ad296f80063b558d5e0f\"}"), "commit-query", fails)
+    oq_check(oq_commit_query_is("{\"schema\":\"rh-osv-query-input/2\",\"commit\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}", "{\"commit\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}"), "sha256-commit-query", fails)
+    return
+
 def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     fails: mutable i64 = 0
     oq_check_requests(&fails)
     oq_check_rejections(&fails)
     oq_check_responses(&fails)
+    oq_check_commit(&fails)
     if fails == 0:
         message: mutable darray[u8] =
             message: mutable darray[u8] = []

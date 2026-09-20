@@ -44,7 +44,7 @@ assert dd["lifecycle"] == "not_enabled", dd
 assert "not enabled here" in dd["failure_mode"], dd
 osv = by["osv-data"]
 assert osv["lifecycle"] == "active", osv
-assert any("exact package/version" in u for u in osv["used_for"]), osv
+assert any("full commit-hash" in u for u in osv["used_for"]), osv
 assert "more_available" in osv["failure_mode"] and "unknown" in osv["failure_mode"], osv
 assert "bulk lockfile" in osv["assumption"] and "pagination continuation" in osv["assumption"], osv
 assert "fuzzi" in osv["assumption"] and "feed freshness" in osv["assumption"], osv
@@ -60,7 +60,7 @@ source = json.load(open(sys.argv[2]))
 osv = {x["id"]: x for x in provider["dependencies"]}["osv-data"]
 src = {x["id"]: x for x in source["sources"]}["osv-data"]
 assert src["base_url"] == "https://api.osv.dev/v1/query", src
-assert src["capabilities"] == ["exact_package_version_query"], src
+assert set(src["capabilities"]) == {"package_version_string_query", "full_commit_hash_query"}, src
 assert "bulk_lockfile_queries" in src["unauthorized"], src
 assert "pagination_continuation" in src["unauthorized"], src
 assert "uniform_underlying_data_license" in src["unsupported"], src

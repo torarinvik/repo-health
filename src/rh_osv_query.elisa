@@ -68,6 +68,16 @@ module OsvQuery:
             end_out[0] <- node.text_end
             true
 
+        def rh_osv_query_commit_valid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            width: i64 = end - start
+            return false if width != 40 and width != 64
+            while i < end |i: i64 = start, texts, end|:
+                b: u8 = texts[i.usize()]
+                valid: bool = (b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102)
+                return false if not valid
+                i <- i + 1
+            true
+
         def rh_osv_query_make_request(texts: darray[u8]&, name_s: i64, name_e: i64, version_s: i64, version_e: i64, ecosystem: u8, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"package\":{\"ecosystem\":\"")
             Base::rh_push_text(out, Package::rh_osv_ecosystem(ecosystem))
@@ -78,40 +88,63 @@ module OsvQuery:
             Base::rh_push_text(out, "\"}")
 
     public:
-        # Read the public rh-osv-query-input/1 contract and build OSV's v1/query
-        # body. Returns 0 on success; malformed/unknown/ambiguous input is -1.
-        def rh_osv_query_build(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        # Read a versioned query contract and build OSV's v1/query body.
+        # Query kind is 0 for a package/version request and 1 for a commit hash.
+        # Returns 0 on success; malformed/unknown/ambiguous input is -1.
+        def rh_osv_query_build(raw: darray[u8]&, out: mutable darray[u8]&, kind_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            kind_out[0] <- -1
             return -1 if raw.count.i64() > RH_OSV_QUERY_MAX_INPUT
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
-            return -1 if root < 0 or not rh_osv_query_fields(nodes, root, 3)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
             schema: i64 = rh_osv_query_member(nodes, texts, root, "schema")
-            package: i64 = rh_osv_query_member(nodes, texts, root, "package")
-            version: i64 = rh_osv_query_member(nodes, texts, root, "version")
-            return -1 if schema < 0 or package < 0 or version < 0
+            return -1 if schema < 0
             schema_s: mutable i64 = -1
             schema_e: mutable i64 = -1
             return -1 if not rh_osv_query_span(nodes, schema, &schema_s, &schema_e)
-            return -1 if not rh_osv_query_eq(texts, schema_s, schema_e, "rh-osv-query-input/1")
-            return -1 if not rh_osv_query_fields(nodes, package, 2)
-            name: i64 = rh_osv_query_member(nodes, texts, package, "name")
-            ecosystem: i64 = rh_osv_query_member(nodes, texts, package, "ecosystem")
-            return -1 if name < 0 or ecosystem < 0
-            name_s: mutable i64 = -1
-            name_e: mutable i64 = -1
-            ecosystem_s: mutable i64 = -1
-            ecosystem_e: mutable i64 = -1
-            version_s: mutable i64 = -1
-            version_e: mutable i64 = -1
-            return -1 if not rh_osv_query_span(nodes, name, &name_s, &name_e)
-            return -1 if not rh_osv_query_span(nodes, ecosystem, &ecosystem_s, &ecosystem_e)
-            return -1 if not rh_osv_query_span(nodes, version, &version_s, &version_e)
-            return -1 if not rh_osv_query_clean_text(texts, name_s, name_e)
-            return -1 if not rh_osv_query_clean_text(texts, version_s, version_e)
-            eco: i64 = rh_osv_query_ecosystem(texts, ecosystem_s, ecosystem_e)
-            return -1 if eco < 0
-            rh_osv_query_make_request(texts, name_s, name_e, version_s, version_e, eco.u8(), out)
+
+            if rh_osv_query_eq(texts, schema_s, schema_e, "rh-osv-query-input/1"):
+                return -1 if not rh_osv_query_fields(nodes, root, 3)
+                package: i64 = rh_osv_query_member(nodes, texts, root, "package")
+                version: i64 = rh_osv_query_member(nodes, texts, root, "version")
+                return -1 if package < 0 or version < 0
+                return -1 if not rh_osv_query_fields(nodes, package, 2)
+                name: i64 = rh_osv_query_member(nodes, texts, package, "name")
+                ecosystem: i64 = rh_osv_query_member(nodes, texts, package, "ecosystem")
+                return -1 if name < 0 or ecosystem < 0
+                name_s: mutable i64 = -1
+                name_e: mutable i64 = -1
+                ecosystem_s: mutable i64 = -1
+                ecosystem_e: mutable i64 = -1
+                version_s: mutable i64 = -1
+                version_e: mutable i64 = -1
+                return -1 if not rh_osv_query_span(nodes, name, &name_s, &name_e)
+                return -1 if not rh_osv_query_span(nodes, ecosystem, &ecosystem_s, &ecosystem_e)
+                return -1 if not rh_osv_query_span(nodes, version, &version_s, &version_e)
+                return -1 if not rh_osv_query_clean_text(texts, name_s, name_e)
+                return -1 if not rh_osv_query_clean_text(texts, version_s, version_e)
+                eco: i64 = rh_osv_query_ecosystem(texts, ecosystem_s, ecosystem_e)
+                return -1 if eco < 0
+                rh_osv_query_make_request(texts, name_s, name_e, version_s, version_e, eco.u8(), out)
+                kind_out[0] <- 0
+                return 0
+
+            return -1 if not rh_osv_query_eq(texts, schema_s, schema_e, "rh-osv-query-input/2")
+            return -1 if not rh_osv_query_fields(nodes, root, 2)
+            commit: i64 = rh_osv_query_member(nodes, texts, root, "commit")
+            return -1 if commit < 0
+            commit_s: mutable i64 = -1
+            commit_e: mutable i64 = -1
+            return -1 if not rh_osv_query_span(nodes, commit, &commit_s, &commit_e)
+            return -1 if not rh_osv_query_commit_valid(texts, commit_s, commit_e)
+            Base::rh_push_text(out, "{\"commit\":\"")
+            while i < commit_e |i: i64 = commit_s, texts, commit_e, out|:
+                out.push(texts[i.usize()])
+                i <- i + 1
+            out.push(34)
+            out.push(125)
+            kind_out[0] <- 1
             0
 
         # Validate an API response and produce a response usable by the existing

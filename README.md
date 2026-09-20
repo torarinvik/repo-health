@@ -37,16 +37,22 @@ the default checks use local data, while HTTPS fetches need network access.
 # Show implemented metrics (explicit subset — never "all 360")
 ./build/rh_cli registry
 
-# Query OSV for one exact package version (this sends those coordinates to OSV)
+# Query OSV for one package/version (the server version match is fuzzy)
 ./build/rh_cli osv-query --input ./fixtures/packages/osv-query-cargo.json --out ./osv-query/
+
+# Query OSV for one full Git commit hash
+./build/rh_cli osv-query --input ./fixtures/packages/osv-query-commit.json --out ./osv-commit-query/
 ```
 
 `osv-query` accepts `rh-osv-query-input/1` for one supported ecosystem, package
-name, and exact supplied version string. OSV describes its server-side version
-matching as fuzzy, so the request does not guarantee an exact server-side match.
-It contacts only `https://api.osv.dev/v1/query`, retains
+name, and supplied version string, or `rh-osv-query-input/2` for one full
+40- or 64-hex Git commit hash. OSV describes package-version matching as fuzzy,
+so the request does not guarantee an exact server-side match. It contacts only
+`https://api.osv.dev/v1/query`, retains
 the request, raw response, HTTP status, capture time, and response digest, and
-writes a normalized response that can be supplied to `rh_cli deps --osv`.
+writes a normalized OSV response. Package/version responses can be supplied to
+`rh_cli deps --osv`; commit-query results remain separate context evidence and
+are not automatically matched against a package graph.
 When OSV returns a `next_page_token`, the result is marked `more_available`;
 automatic pagination and queries over every lockfile node are still pending.
 
