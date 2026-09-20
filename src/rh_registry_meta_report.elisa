@@ -17,6 +17,7 @@ include "./rh_registry_npm.elisa"
 include "./rh_registry_crates.elisa"
 include "./rh_registry_rubygems.elisa"
 include "./rh_registry_nuget.elisa"
+include "./rh_sha256.elisa"
 
 module RegistryMetaReport:
     private:
@@ -25,8 +26,27 @@ module RegistryMetaReport:
             if s >= 0 and e >= s and e <= pool.count.i64():
                 Base::rh_json_escape(out, pool, s.usize(), e.usize())
 
+        def rh_rmr_provenance(raw: darray[u8]&, source_url: cstr, has_url: bool, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, ",\"provenance\":{\"input_sha256\":\"")
+            Sha256::rh_sha256(raw, out)
+            Base::rh_push_text(out, "\",\"origin\":\"")
+            Base::rh_push_text(out, "captured_url" if has_url else "local_input")
+            Base::rh_push_text(out, "\",\"locator_sha256\":")
+            if has_url:
+                locator: mutable darray[u8] = []
+                Base::rh_push_cstr(locator, source_url)
+                Base::rh_push_text(out, "\"")
+                Sha256::rh_sha256(locator, out)
+                out.push(34)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, "}")
+
     public:
-        def rh_registry_meta_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        const RH_REGISTRY_META_MAX_BYTES: i64 = 4194304
+
+        def rh_registry_meta_report(raw: darray[u8]&, source_url: cstr, has_url: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count.i64() > RH_REGISTRY_META_MAX_BYTES
             pool: mutable darray[u8] = []
             versions: mutable darray[RegistryMeta::RhRegVersion] = []
             meta: mutable RegistryMeta::RhRegMeta = RegistryMeta::RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, deprecated_count: 0, not_deprecated_count: 0, unknown_deprecation_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
@@ -64,7 +84,9 @@ module RegistryMetaReport:
                 pool <- []
                 versions <- []
                 return -1 if RegistryMeta::rh_regmeta_parse(normalized, pool, versions, &meta) != 0
-            Base::rh_push_text(out, "{\"schema\":\"rh-registry-meta-result/1\",\"counts\":{\"versions\":")
+            Base::rh_push_text(out, "{\"schema\":\"rh-registry-meta-result/1\"")
+            rh_rmr_provenance(raw, source_url, has_url, out)
+            Base::rh_push_text(out, ",\"counts\":{\"versions\":")
             Base::rh_push_decimal_i64(out, meta.versions)
             Base::rh_push_text(out, ",\"yanked\":")
             Base::rh_push_decimal_i64(out, meta.yanked_count)

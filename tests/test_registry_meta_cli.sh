@@ -19,10 +19,14 @@ bash "$ROOT/tools/build.sh" >/dev/null
 rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/packages/registry-meta.json" "$T/in.json"
 "$ROOT/build/rh_cli" registry-meta --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/in.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
+raw = open(sys.argv[2], "rb").read()
 assert d["schema"] == "rh-registry-meta-result/1", d
+assert d["provenance"] == {"input_sha256": hashlib.sha256(raw).hexdigest(),
+                            "origin": "local_input", "locator_sha256": None}, d["provenance"]
+assert sys.argv[2] not in json.dumps(d), "local path leaked into report"
 assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1,
                        "deprecated": 1, "not_deprecated": 1, "unknown_deprecation": 1, "with_repo": 1,
                        "declared_deps": 3, "optional_deps": 1, "dev_deps": 1}, d["counts"]
@@ -235,7 +239,18 @@ PY
 echo "[registry-meta] bounded file transport capture"
 URL="file://$T/in.json"
 "$ROOT/build/rh_cli" registry-meta --url "$URL" --out "$T/fetched.json" >/dev/null || fail "file fetch"
-cmp -s "$T/out.json" "$T/fetched.json" || fail "fetched result differs"
+python3 - "$T/out.json" "$T/fetched.json" "$T/in.json" "$URL" <<'PY'
+import hashlib, json, sys
+local, fetched = (json.load(open(path)) for path in sys.argv[1:3])
+raw = open(sys.argv[3], "rb").read()
+url = sys.argv[4]
+assert local["counts"] == fetched["counts"] and local["versions"] == fetched["versions"], fetched
+assert fetched["provenance"] == {"input_sha256": hashlib.sha256(raw).hexdigest(),
+                                 "origin": "captured_url",
+                                 "locator_sha256": hashlib.sha256(url.encode()).hexdigest()}, fetched["provenance"]
+assert url not in json.dumps(fetched), "raw URL leaked into report"
+print("[registry-meta] exact-byte digest + captured origin/locator OK")
+PY
 python3 - "$T/registry-meta-fetch-status.txt" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -253,6 +268,13 @@ cmp -s "$T/in.json" "$T/registry-meta-fetch-body.json" || fail "fetched body not
 
 echo "[registry-meta] malformed input fails closed"
 set +e
+python3 - "$T/oversized.json" <<'PY'
+import sys
+with open(sys.argv[1], "wb") as f:
+    f.seek(4 * 1024 * 1024)
+    f.write(b"x")
+PY
+"$ROOT/build/rh_cli" registry-meta --input "$T/oversized.json" --out "$T/oversized.out" >/dev/null 2>&1; rc_oversized=$?
 printf '{"versions":42}' > "$T/shape.json"
 "$ROOT/build/rh_cli" registry-meta --input "$T/shape.json" --out "$T/x" >/dev/null 2>&1; rc_shape=$?
 printf '[{"versions":[]}]' > "$T/arr.json"
@@ -279,8 +301,9 @@ json.dump({"versions": [{"num": "1", "deprecated": True, "deprecation_notice": "
 PY
 "$ROOT/build/rh_cli" registry-meta --input "$T/deprecated-large.json" --out "$T/x" >/dev/null 2>&1; rc_deprecated_large=$?
 set -e
-for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked" "$rc_npm" "$rc_crates" "$rc_rubygems" "$rc_nuget" "$rc_deprecated" "$rc_deprecated_large"; do
+for rc in "$rc_oversized" "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked" "$rc_npm" "$rc_crates" "$rc_rubygems" "$rc_nuget" "$rc_deprecated" "$rc_deprecated_large"; do
   [[ "$rc" -eq 4 ]] || fail "malformed registry-meta input must exit 4 (got $rc)"
 done
+[[ ! -e "$T/oversized.out" ]] || fail "oversized input produced a partial report"
 
 echo "test_registry_meta_cli OK"

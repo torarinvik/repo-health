@@ -6871,7 +6871,8 @@ def rh_do_release_feed(input_path: cstr, out_path: cstr, source_url: cstr, has_u
 # --- M03-05 registry enrichment execution path. ---
 # Reads an rh-registry-meta/1 document and writes rh-registry-meta-result/1.
 # Yanked versions are retained; absent yank/date fields stay null (unknown);
-# repository links are assertions, not identity; declared deps are counts.
+# repository links are assertions, not identity; declared deps are counts;
+# reports bind exact input bytes to origin without publishing raw locators.
 def rh_do_registry_meta(input_path: cstr, out_path: cstr, source_url: cstr, has_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected registry-meta argument (allowlist)")
@@ -6920,6 +6921,10 @@ def rh_do_registry_meta(input_path: cstr, out_path: cstr, source_url: cstr, has_
         if not Base::rh_io_write(code_ptr, status):
             rh_cli_err("registry-meta: cannot write fetch status")
             return 4
+        source_size: i64 = Base::rh_file_size(body_ptr)
+        if source_size <= 0 or source_size > RegistryMetaReport::RH_REGISTRY_META_MAX_BYTES:
+            rh_cli_err("registry-meta: fetched source is empty or exceeds the 4 MiB limit")
+            return 4
         if Base::rh_io_read(body_ptr, raw) < 0:
             rh_cli_err("registry-meta: cannot read fetched body")
             return 4
@@ -6931,11 +6936,15 @@ def rh_do_registry_meta(input_path: cstr, out_path: cstr, source_url: cstr, has_
             ip.push(0)
             ip
         ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+        input_size: i64 = Base::rh_file_size(ipp)
+        if input_size <= 0 or input_size > RegistryMetaReport::RH_REGISTRY_META_MAX_BYTES:
+            rh_cli_err("registry-meta: input is empty or exceeds the 4 MiB limit")
+            return 4
         if Base::rh_io_read(ipp, raw) < 0:
             rh_cli_err("registry-meta: cannot read --input")
             return 4
     body: mutable darray[u8] = []
-    if RegistryMetaReport::rh_registry_meta_report(raw, body) != 0:
+    if RegistryMetaReport::rh_registry_meta_report(raw, source_url, has_url, body) != 0:
         rh_cli_err("registry-meta: not a valid rh-registry-meta/1 document (fail closed)")
         return 4
     body.push(10)

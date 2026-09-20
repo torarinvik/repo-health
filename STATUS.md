@@ -271,9 +271,11 @@ with a yanked version retained (not deleted), an absent yank field as
 with explicit provider deprecation state, unknown deprecation kept separate
 for providers without that signal, numeric and ISO published times preserved,
 the declared repository link labelled an assertion, and exact
-declared/optional/dev dependency counts; `tests/test_registry_meta_cli.sh`
+declared/optional/dev dependency counts. Every report carries the exact source
+byte SHA-256, local/captured-URL origin, and a one-way URL locator digest;
+inputs are capped at 4 MiB before parsing. `tests/test_registry_meta_cli.sh`
 covers canonical, npm, NuGet, and PyPI project shapes, the 4096-byte notice
-bound, and fail-closed negatives.
+bound, source lineage, and fail-closed negatives.
 `go.sum` module checksums now attach exact `h1:` evidence as `module` artifacts
 to matching Go nodes, while `/go.mod` checksums are retained as separate
 `go_mod` artifacts; `h1` values are checked as canonical Base64 SHA-256 and
