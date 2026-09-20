@@ -19,6 +19,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/packages/registry-meta.json" "$T/in.json"
 "$ROOT/build/rh_cli" registry-meta --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
+cmp -s "$T/out.json" "$ROOT/fixtures/packages/registry-meta-result.json" || fail "output differs from the checked-in contract fixture"
 python3 - "$T/out.json" "$T/in.json" <<'PY'
 import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
