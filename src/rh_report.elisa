@@ -16,6 +16,7 @@ include "./rh_base.elisa"
 include "./rh_observation.elisa"
 include "./rh_scan.elisa"
 include "./rh_git_metrics.elisa"
+include "./rh_files.elisa"
 
 module Report:
     private:
@@ -108,6 +109,21 @@ module Report:
                 Base::rh_push_text(buffer, ",\"evidence/git-shallow.txt\"")
             Base::rh_push_text(buffer, "]}")
 
+        def rh_emit_bool(buffer: mutable darray[u8]&, key: u8&, value: i64, evidence: u8&) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(buffer, "{\"key\":\"")
+            Base::rh_push_text(buffer, key)
+            Base::rh_push_text(buffer, "\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+            Base::rh_push_text(buffer, "true" if value == 1 else "false")
+            Base::rh_push_text(buffer, ",\"evidence\":[\"")
+            Base::rh_push_text(buffer, evidence)
+            Base::rh_push_text(buffer, "\"]}")
+
+        def rh_emit_file_metric(buffer: mutable darray[u8]&, key: u8&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            if value < 0:
+                rh_emit_absent(buffer, key, 2, "snapshot-file-list-unavailable")
+            else:
+                rh_emit_bool(buffer, key, value, "evidence/git-files.txt")
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_coverage_label(state: i64) -> u8&:
             return "shallow" if state == 1
@@ -183,10 +199,11 @@ module Report:
             cutoff: i64
             partial_clone: i64
             default_revisions: i64
+            files: Files::RhFileMetrics
             git_metrics: GitMetrics::RhMetrics
 
-        def rh_report_ctx_make(identities: i64, bots: i64, months: i64, cov_num: i64, cov_den: i64, cov_v2_num: i64, cov_v2_den: i64, cov_state: i64, fresh_age: i64, window_days: i64, full_history: i64, repo_kind: i64, cutoff: i64, partial_clone: i64, default_revisions: i64, git_metrics: GitMetrics::RhMetrics) -> RhReportCtx:
-            RhReportCtx{identities: identities, bots: bots, months: months, cov_num: cov_num, cov_den: cov_den, cov_v2_num: cov_v2_num, cov_v2_den: cov_v2_den, cov_state: cov_state, fresh_age: fresh_age, window_days: window_days, full_history: full_history, repo_kind: repo_kind, cutoff: cutoff, partial_clone: partial_clone, default_revisions: default_revisions, git_metrics: git_metrics}
+        def rh_report_ctx_make(identities: i64, bots: i64, months: i64, cov_num: i64, cov_den: i64, cov_v2_num: i64, cov_v2_den: i64, cov_state: i64, fresh_age: i64, window_days: i64, full_history: i64, repo_kind: i64, cutoff: i64, partial_clone: i64, default_revisions: i64, files: Files::RhFileMetrics, git_metrics: GitMetrics::RhMetrics) -> RhReportCtx:
+            RhReportCtx{identities: identities, bots: bots, months: months, cov_num: cov_num, cov_den: cov_den, cov_v2_num: cov_v2_num, cov_v2_den: cov_v2_den, cov_state: cov_state, fresh_age: fresh_age, window_days: window_days, full_history: full_history, repo_kind: repo_kind, cutoff: cutoff, partial_clone: partial_clone, default_revisions: default_revisions, files: files, git_metrics: git_metrics}
 
         def rh_write_report_json(path: cstr, repo: cstr, snap: Scan::RhSnapshot&, ctx: RhReportCtx&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             out: mutable darray[u8] =
@@ -345,6 +362,12 @@ module Report:
             else:
                 rh_emit_enum(out, "source.manifest_presence", 0, snap.manifest, rh_manifest_label(snap.manifest), false)
             Base::rh_push_text(out, ",")
+            rh_emit_file_metric(out, "documentation.readme_present", ctx.files.readme)
+            Base::rh_push_text(out, ",")
+            rh_emit_file_metric(out, "documentation.contributing_guide_present", ctx.files.contributing)
+            Base::rh_push_text(out, ",")
+            rh_emit_file_metric(out, "licensing.license_declaration_present", ctx.files.license)
+            Base::rh_push_text(out, ",")
             rh_emit_ratio(out, "coverage.lineage_complete_share", 0, 1, 1)
             Base::rh_push_text(out, "],\"capabilities\":{\"git_log\":\"observed\",\"review_events\":\"unavailable-from-generic-git\",\"maintainer_permissions\":\"unavailable-from-generic-git\",\"clone_traffic\":\"unavailable-from-generic-git\",\"known_downstream\":\"not-collected-in-m01\",\"retention\":\"deferred-to-m04\",\"cross_source_identity\":\"not-configured\"")
             if ctx.partial_clone == 1:
@@ -459,7 +482,7 @@ module Report:
             Base::rh_push_hex_u64(out, snap.digest)
             Base::rh_push_text(out, "\ndefault-revisions: ")
             Base::rh_push_decimal_i64(out, ctx.default_revisions)
-            Base::rh_push_text(out, "\nfiles: evidence/git-log.bin evidence/git-default-count.txt evidence/git-shallow.txt evidence/git-version.txt evidence/emails.uniq\n")
+            Base::rh_push_text(out, "\nfiles: evidence/git-log.bin evidence/git-default-count.txt evidence/git-shallow.txt evidence/git-version.txt evidence/git-files.txt evidence/emails.uniq\n")
             Base::rh_io_write(path, out)
 
         # Parse "digest-fnv1a64: <16 hex>" back out of a manifest. False when absent

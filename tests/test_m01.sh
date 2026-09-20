@@ -74,9 +74,12 @@ assert m["activity.accepted_changes"]["value"] == 3, m
 assert m["activity.active_months"]["value"] == 3, m
 assert m["contributor.source_accounts"]["value"] == 2, m
 assert m["coverage.lineage_complete_share"]["value"] == {"num": 1, "den": 1}, m
+assert m["documentation.readme_present"]["value"] is False, m
+assert m["documentation.contributing_guide_present"]["value"] is False, m
+assert m["licensing.license_declaration_present"]["value"] is False, m
 assert m["activity.weekly_count_slope"]["status"] in ("observed", "not_applicable"), m
 assert m["activity.weekly_count_variance"]["status"] in ("observed", "not_applicable"), m
-assert len(d["metrics"]) == 42, d
+assert len(d["metrics"]) == 45, d
 coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "coverage.window_completeness"}
 assert coverage[("coverage.window_completeness", "1.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "1.0.0")]["value"]["den"], coverage
 assert coverage[("coverage.window_completeness", "2.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "2.0.0")]["value"]["den"], coverage
@@ -87,6 +90,27 @@ for x in d["metrics"]:
         assert "value" not in x, ("unknown carries value", x)
 print("[m01] F002 exact OK")
 EOF
+
+echo "[m01] snapshot file classification is evidence-backed"
+mkdir -p "$T/docs" && git init -q -b main "$T/docs" && (
+  cd "$T/docs" && git config user.name "Docs" && git config user.email "docs@example.com"
+  printf 'overview\n' > README.md
+  printf 'guide\n' > CONTRIBUTING.md
+  printf 'MIT\n' > LICENSE
+  git add README.md CONTRIBUTING.md LICENSE
+  GIT_AUTHOR_DATE="2024-05-01T00:00:00Z" GIT_COMMITTER_DATE="2024-05-01T00:00:00Z" git commit -qm "docs"
+)
+"$CLI" scan --repo "$T/docs" --out "$T/rep-docs" --window-days 36500 >/dev/null || fail "docs scan"
+python3 - "$T/rep-docs/report.json" "$T/rep-docs/evidence/git-files.txt" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+assert m["documentation.readme_present"] == {"key":"documentation.readme_present","version":"1.0.0","status":"observed","value":True,"evidence":["evidence/git-files.txt"]}, m
+assert m["documentation.contributing_guide_present"]["value"] is True, m
+assert m["licensing.license_declaration_present"]["value"] is True, m
+assert b"README.md\0" in open(sys.argv[2], "rb").read(), "retained file evidence missing README"
+print("[m01] snapshot file classification OK")
+PY
 "$CLI" replay --bundle "$T/rep-fix2/bundle.manifest" --out "$T/replay-fix2" >/dev/null || fail "replay"
 python3 -c "
 import json; d = json.load(open('$T/replay-fix2/replay.json'))
@@ -94,6 +118,10 @@ assert d['verified'] is True, d
 m = {x['key']: x for x in d['metrics']}
 assert m['coverage.replay_match_share']['value'] == {'num': 1, 'den': 1}, m
 print('[m01] replay verified OK')"
+mv "$T/rep-fix2/evidence/git-files.txt" "$T/rep-fix2/evidence/git-files.missing"
+expect 4 "$CLI" replay --bundle "$T/rep-fix2/bundle.manifest" --out "$T/replay-missing-files"
+mv "$T/rep-fix2/evidence/git-files.missing" "$T/rep-fix2/evidence/git-files.txt"
+echo "[m01] replay requires retained file evidence OK"
 # determinism: scan twice, same digest
 "$CLI" scan --repo "$T/fix2" --out "$T/rep-fix2b" --window-days 36500 >/dev/null || fail "rescan"
 a="$(grep digest-fnv1a64 "$T/rep-fix2/bundle.manifest")"; b="$(grep digest-fnv1a64 "$T/rep-fix2b/bundle.manifest")"

@@ -16,6 +16,7 @@ include "./rh_metrics.elisa"
 include "./rh_git.elisa"
 include "./rh_scan.elisa"
 include "./rh_report.elisa"
+include "./rh_files.elisa"
 include "./rh_http.elisa"
 include "./rh_sha256.elisa"
 include "./rh_json.elisa"
@@ -269,10 +270,12 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     logf: mutable darray[u8] = []
     defaultf: mutable darray[u8] = []
     shaf: mutable darray[u8] = []
+    filesf: mutable darray[u8] = []
     verf: mutable darray[u8] = []
     loge: mutable darray[u8] = []
     defaulte: mutable darray[u8] = []
     shae: mutable darray[u8] = []
+    fileserr: mutable darray[u8] = []
     vere: mutable darray[u8] = []
     if not rh_out_path(evc, "git-log.bin", logf):
         rh_cli_err("cannot stage log path")
@@ -282,6 +285,9 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
         return 4
     if not rh_out_path(evc, "git-shallow.txt", shaf):
         rh_cli_err("cannot stage shallow path")
+        return 4
+    if not rh_out_path(evc, "git-files.txt", filesf):
+        rh_cli_err("cannot stage file-list path")
         return 4
     if not rh_out_path(evc, "git-version.txt", verf):
         rh_cli_err("cannot stage version path")
@@ -303,14 +309,19 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if not rh_out_path(evc, "git-shallow.err", shae):
         rh_cli_err("cannot stage shallow error path")
         return 4
+    if not rh_out_path(evc, "git-files.err", fileserr):
+        rh_cli_err("cannot stage file-list error path")
+        return 4
     if not rh_out_path(evc, "git-version.err", vere):
         rh_cli_err("cannot stage version error path")
         return 4
     logp: cstr = (&logf[0]).cast[cstr] can Unsafe.PointerCast
     defaultp: cstr = (&defaultf[0]).cast[cstr] can Unsafe.PointerCast
     shap: cstr = (&shaf[0]).cast[cstr] can Unsafe.PointerCast
+    filesp: cstr = (&filesf[0]).cast[cstr] can Unsafe.PointerCast
     verp: cstr = (&verf[0]).cast[cstr] can Unsafe.PointerCast
     verep: cstr = (&vere[0]).cast[cstr] can Unsafe.PointerCast
+    fileserrp: cstr = (&fileserr[0]).cast[cstr] can Unsafe.PointerCast
     if Git::rh_run_git_version(verp, verep) != 0:
         rh_cli_err("git --version failed")
         return 4
@@ -321,6 +332,7 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if Git::rh_run_git_shallow(scan_repo, shap, shaep) != 0:
         rh_cli_err("rev-parse failed (not a repository?)")
         return 4
+    _ = Git::rh_run_git_files(scan_repo, filesp, fileserrp)
     logep: cstr = (&loge[0]).cast[cstr] can Unsafe.PointerCast
     if Git::rh_run_git_log(scan_repo, logp, logep, full) != 0:
         headerr: mutable darray[u8] = []
@@ -425,6 +437,12 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
         return 4
     identities: i64 = Base::rh_count_lines(uniqb)
     bots: i64 = Report::rh_count_bot_lines(uniqb)
+    filesb: mutable darray[u8] = []
+    files: Files::RhFileMetrics =
+        if Base::rh_io_read(filesp, filesb) >= 0 and snap.commits_all > 0:
+            Files::rh_file_metrics(filesb)
+        else:
+            Files::RhFileMetrics{readme: -1, contributing: -1, license: -1}
     snap.manifest <- Scan::rh_manifest_probe(repo, is_local)
     cov_n: mutable i64 = 0
     cov_d: mutable i64 = 0
@@ -442,7 +460,7 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
             fresh <- 0
     kind_num: i64 = 1 if kind == Git::RH_URL_HTTPS else 0
     full_num: i64 = 1 if full else 0
-    ctx: Report::RhReportCtx = Report::rh_report_ctx_make(identities, bots, months.count.i64(), cov_n, cov_d, cov_v2_n, cov_v2_d, cov_s, fresh, window_days, full_num, kind_num, cutoff, partial_clone, default_revisions, git_metrics)
+    ctx: Report::RhReportCtx = Report::rh_report_ctx_make(identities, bots, months.count.i64(), cov_n, cov_d, cov_v2_n, cov_v2_d, cov_s, fresh, window_days, full_num, kind_num, cutoff, partial_clone, default_revisions, files, git_metrics)
     repj: mutable darray[u8] = []
     repm: mutable darray[u8] = []
     manf: mutable darray[u8] = []
@@ -557,6 +575,17 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     default_revisions: i64 = Base::rh_parse_i64(defaultb, 0, default_stop, &default_ok)
     if default_ok == 0 or default_revisions != want_default:
         rh_cli_err("default revision evidence does not match manifest")
+        return 4
+    filespath: mutable darray[u8] = []
+    has_files_dir: bool = rh_dirname(bundle, filespath)
+    if has_files_dir:
+        filespath.push(47)
+    Base::rh_push_text(filespath, "evidence/git-files.txt")
+    filespath.push(0)
+    filesp: cstr = (&filespath[0]).cast[cstr] can Unsafe.PointerCast
+    retained_files: mutable darray[u8] = []
+    if Base::rh_io_read(filesp, retained_files) < 0:
+        rh_cli_err("cannot read retained snapshot file evidence")
         return 4
     window_start: i64 = cutoff - days * 86400 if not full else 0
     snap: mutable Scan::RhSnapshot = Scan::RhSnapshot{commits_all: 0, commits: 0, rejected: 0, merges: 0, future: 0, skew: 0, has_commits: 0, min_at: 0, max_at: 0, min_ct: 0, max_ct: 0, oldest_at: 0, email_lines: 0, shallow: 0, truncated: 0, manifest: 0, digest: 0}
