@@ -410,6 +410,67 @@ def check_xml_lock_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.
         trial <- trial + 1
     return
 
+def check_gem_composer_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    bounded_result: bool =
+        gem_packages: mutable darray[Package::RhPkgNode] = []
+        gem_pool: mutable darray[u8] = []
+        gem_requirements: mutable darray[Package::RhRequire] = []
+        gem_edges: mutable darray[Package::RhDepEdge] = []
+        gem_unresolved: mutable darray[Package::RhUnresolved] = []
+        gem_unknown: mutable i64 = 0
+        gem_status: i64 = Package::rh_gemfile_parse(raw, gem_packages, gem_pool, gem_requirements, gem_edges, gem_unresolved, &gem_unknown)
+        json_nodes: mutable darray[Json::RhJsonNode] = []
+        json_texts: mutable darray[u8] = []
+        _ = Json::rh_json_parse(raw, json_nodes, json_texts)
+        composer_packages: mutable darray[Package::RhPkgNode] = []
+        composer_pool: mutable darray[u8] = []
+        composer_requirements: mutable darray[Package::RhRequire] = []
+        composer_edges: mutable darray[Package::RhDepEdge] = []
+        composer_unresolved: mutable darray[Package::RhUnresolved] = []
+        composer_unknown: mutable i64 = 0
+        composer_status: i64 = Package::rh_composer_parse(raw, json_nodes, json_texts, composer_packages, composer_pool, composer_requirements, composer_edges, composer_unresolved, &composer_unknown)
+        (gem_status == -1 or gem_status == 0) and (composer_status == -1 or composer_status == 0) and gem_packages.count <= raw.count + 1 and composer_packages.count <= raw.count + 1 and gem_pool.count.i64() <= raw.count.i64() * 8 + 32 and composer_pool.count.i64() <= raw.count.i64() * 8 + 32 and gem_requirements.count <= raw.count and composer_requirements.count <= raw.count and gem_edges.count <= raw.count and composer_edges.count <= raw.count and gem_unresolved.count <= raw.count and composer_unresolved.count <= raw.count and gem_unknown >= 0 and gem_unknown <= raw.count.i64() + 1 and composer_unknown >= 0 and composer_unknown <= raw.count.i64() + 1
+    t7check(bounded_result, "gem-composer-fuzz-bounds", fails)
+    return
+
+def check_gem_composer_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    gem_corpus: mutable darray[u8] = []
+    Base::rh_push_text(gem_corpus, "GEM\n  remote: https://rubygems.org/\n  specs:\n    rack (3.1.0)\n      rackup (~> 2.0)\n\nPLATFORMS\n  ruby\nDEPENDENCIES\n  rack (= 3.1.0)\n")
+    while trial < 64 |trial: i64 = 0, rng: i64 = 7745966, gem_corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < gem_corpus.count |copied: usize = 0, gem_corpus, fuzzed|:
+            fuzzed.push(gem_corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_gem_composer_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+
+    composer_corpus: mutable darray[u8] = []
+    Base::rh_push_text(composer_corpus, "{\"packages\":[{\"name\":\"vendor/lib\",\"version\":\"1.2.3\",\"require\":{\"php\":\"^8.0\",\"ext-json\":\"*\"}}],\"packages-dev\":[]}")
+    while trial < 128 |trial: i64 = 0, rng: i64 = 8366600, composer_corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < composer_corpus.count |copied: usize = 0, composer_corpus, fuzzed|:
+            fuzzed.push(composer_corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_gem_composer_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+    return
+
 def try_bad_semver(data: darray[u8]&, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     ok: bool =
         vv: mutable Package::RhSemver = Package::RhSemver{0, 0, 0, 0, 0}
@@ -689,6 +750,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_npm_fuzz(&fails)
     check_go_fuzz(&fails)
     check_xml_lock_fuzz(&fails)
+    check_gem_composer_fuzz(&fails)
     check_semver_hardening(&fails)
     check_semver_fuzz(&fails)
     check_lock_hardening(&fails)
