@@ -143,9 +143,11 @@ canonical `rh-dep-graph/1` JSON with byte-checked goldens.
 <local-archive> --out <file>` verifies raw Cargo archive bytes with SHA-256 or
 npm tarball bytes with SHA-256/SHA-384/SHA-512 SRI Base64, then emits a sidecar
 bound to the exact graph digest and artifact ID; changed bytes under the same
-package/version are reported as `changed`. This bounded path does not extract
-or execute archives; Go module hashes, integrity strings without SHA-256/SHA-384/SHA-512,
-SRI options, and graph rewrites remain unsupported.
+package/version are reported as `changed`. SRI option expressions are retained
+verbatim and ignored during digest comparison after printable-ASCII syntax
+validation, following the [SRI grammar](https://www.w3.org/TR/sri-2/). This
+bounded path does not extract or execute archives; Go module hashes, integrity
+strings without SHA-256/SHA-384/SHA-512, and graph rewrites remain unsupported.
 Cargo lock resolution now filters by exact locked version and, when present,
 the exact registry/Git source locator, including sparse registry sources.
 Cargo and npm lock nodes retain source

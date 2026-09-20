@@ -71,6 +71,26 @@ module ArtifactObservation:
                 index <- index + 1
             true
 
+        # SRI associates each ?option with the hash expression before it.
+        # Options are reserved and ignored today, but their syntax is VCHAR.
+        # Return the digest end (the first '?', or the token end); reject
+        # non-printable option bytes instead of silently accepting malformed
+        # integrity metadata.
+        def rh_artifact_observation_sri_digest_end(texts: darray[u8]&, start: i64, end: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if start < 0 or end < start or end > texts.count.i64()
+            digest_end: mutable i64 = end
+            while i < end |i: i64 = start, texts, end, digest_end|:
+                if texts[i.usize()] == 63:
+                    digest_end <- i
+                    i <- end
+                else:
+                    i <- i + 1
+            return digest_end if digest_end == end
+            while i < end |i: i64 = digest_end + 1, texts, end|:
+                return -1 if texts[i.usize()] < 33 or texts[i.usize()] > 126
+                i <- i + 1
+            digest_end
+
         def rh_artifact_observation_sri_has_algorithm(texts: darray[u8]&, start: i64, end: i64, algorithm: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             found: mutable bool = false
             while token_start < end |token_start: i64 = start, token_end: i64 = start, texts, end, algorithm, found|:
@@ -84,13 +104,14 @@ module ArtifactObservation:
             found
 
         def rh_artifact_observation_sri_sha512_token(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            return false if end - start != 95 or not rh_artifact_observation_sri_algorithm_prefix(texts, start, end, "sha512-")
-            while i < end - 2 |i: i64 = start + 7, texts, end|:
+            digest_end: i64 = rh_artifact_observation_sri_digest_end(texts, start, end)
+            return false if digest_end < 0 or digest_end - start != 95 or not rh_artifact_observation_sri_algorithm_prefix(texts, start, digest_end, "sha512-")
+            while i < digest_end - 2 |i: i64 = start + 7, texts, digest_end|:
                 b: u8 = texts[i.usize()]
                 return false if rh_artifact_observation_base64_value(b) < 0
                 i <- i + 1
-            return false if texts[(end - 2).usize()] != 61 or texts[(end - 1).usize()] != 61
-            rh_artifact_observation_base64_value(texts[(end - 3).usize()]) % 16 == 0
+            return false if texts[(digest_end - 2).usize()] != 61 or texts[(digest_end - 1).usize()] != 61
+            rh_artifact_observation_base64_value(texts[(digest_end - 3).usize()]) % 16 == 0
 
         def rh_artifact_observation_sri_sha512_valid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             found: mutable bool = false
@@ -107,13 +128,14 @@ module ArtifactObservation:
             found
 
         def rh_artifact_observation_sri_sha256_token(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            return false if end - start != 51 or not rh_artifact_observation_sri_algorithm_prefix(texts, start, end, "sha256-")
-            while i < end - 1 |i: i64 = start + 7, texts, end|:
+            digest_end: i64 = rh_artifact_observation_sri_digest_end(texts, start, end)
+            return false if digest_end < 0 or digest_end - start != 51 or not rh_artifact_observation_sri_algorithm_prefix(texts, start, digest_end, "sha256-")
+            while i < digest_end - 1 |i: i64 = start + 7, texts, digest_end|:
                 b: u8 = texts[i.usize()]
                 return false if rh_artifact_observation_base64_value(b) < 0
                 i <- i + 1
-            return false if texts[(end - 1).usize()] != 61
-            rh_artifact_observation_base64_value(texts[(end - 2).usize()]) % 4 == 0
+            return false if texts[(digest_end - 1).usize()] != 61
+            rh_artifact_observation_base64_value(texts[(digest_end - 2).usize()]) % 4 == 0
 
         def rh_artifact_observation_sri_sha256_valid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             found: mutable bool = false
@@ -130,8 +152,9 @@ module ArtifactObservation:
             found
 
         def rh_artifact_observation_sri_sha384_token(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            return false if end - start != 71 or not rh_artifact_observation_sri_algorithm_prefix(texts, start, end, "sha384-")
-            while i < end |i: i64 = start + 7, texts, end|:
+            digest_end: i64 = rh_artifact_observation_sri_digest_end(texts, start, end)
+            return false if digest_end < 0 or digest_end - start != 71 or not rh_artifact_observation_sri_algorithm_prefix(texts, start, digest_end, "sha384-")
+            while i < digest_end |i: i64 = start + 7, texts, digest_end|:
                 return false if rh_artifact_observation_base64_value(texts[i.usize()]) < 0
                 i <- i + 1
             true
@@ -159,7 +182,8 @@ module ArtifactObservation:
                 while token_end < end and not rh_artifact_observation_sri_space(texts[token_end.usize()]) |token_end, texts, end|:
                     token_end <- token_end + 1
                 if rh_artifact_observation_sri_algorithm_prefix(texts, token_start, token_end, algorithm):
-                    if Base::rh_bytes_equal_span(texts, token_start + width.i64(), token_end, observed, width.i64(), observed.count.i64()):
+                    digest_end: i64 = rh_artifact_observation_sri_digest_end(texts, token_start, token_end)
+                    if digest_end >= 0 and Base::rh_bytes_equal_span(texts, token_start + width.i64(), digest_end, observed, width.i64(), observed.count.i64()):
                         return true
                 token_start <- token_end
             false
