@@ -290,9 +290,9 @@ the VCS type, exact commit ID, optional requested revision, and subdirectory;
 directory sources retain their path fingerprint, editable flag, and
 subdirectory. VCS, directory, and archive dependency selectors narrow
 candidates using the source fields supplied; unknown selector fields remain
-context-only. Package `attestation-identities` retain `kind` and publisher
-string fields as recorded, without claiming signature or provenance
-verification.
+context-only. Package `attestation-identities` retain `kind`, publisher string fields, and inline
+string-valued `claims` members as recorded, without claiming signature or
+provenance verification.
 `rh_cli pylock-observe` checks supplied local artifact bytes against
 SHA-256/SHA-384/SHA-512 values and any declared size, then emits the separate
 `rh-pylock-artifact-observation-result/1` sidecar bound to the audit digest and

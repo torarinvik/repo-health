@@ -41,8 +41,9 @@ on the real execution path.
   flag (defaulting to `false`), and source subdirectory. Locators remain private.
   VCS, directory, and archive dependency selectors narrow package candidates by
   their supplied source fields; unknown selector fields remain context-only.
-  Package attestation identities retain `kind` and publisher-specific string
-  fields as recorded, without claiming attestation verification.
+  Package attestation identities retain `kind`, publisher-specific string
+  fields, and inline string-valued `claims` members as recorded, without claiming
+  attestation verification. Other claim value types fail closed.
   Environment/group selection, complete artifact projection, and unsupported
   fields remain counted as gaps.
   `rh_cli pylock-observe` now verifies supplied local bytes against SHA-256,

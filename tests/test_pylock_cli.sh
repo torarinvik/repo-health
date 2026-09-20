@@ -60,6 +60,7 @@ kind = 'GitHub'
 repository = 'python-attrs/attrs'
 workflow = 'pypi-package.yml'
 'publisher-claim' = 'trusted-release'
+claims = { ref = 'refs/tags/v25.1.0', sha = 'd00df00d' }
 
 [[packages.attestation-identities]]
 kind = 'Sigstore'
@@ -246,7 +247,7 @@ assert pkgs[0]["marker"] == "sys_platform == 'linux' # retained inside string", 
 assert pkgs[0]["index_sha256"] == hashlib.sha256(b"https://index.example.invalid/simple/").hexdigest(), pkgs[0]
 assert pkgs[1]["index_sha256"] is None, pkgs[1]
 assert pkgs[0]["attestation_identities"] == [
-    {"environment": "release-pypi", "kind": "GitHub", "repository": "python-attrs/attrs", "workflow": "pypi-package.yml", "publisher-claim": "trusted-release"},
+    {"environment": "release-pypi", "kind": "GitHub", "repository": "python-attrs/attrs", "workflow": "pypi-package.yml", "publisher-claim": "trusted-release", "claims": {"ref": "refs/tags/v25.1.0", "sha": "d00df00d"}},
     {"kind": "Sigstore", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:python-attrs/attrs:ref:refs/tags/25.1.0"},
 ], pkgs[0]
 assert all(package["attestation_identities"] == [] for package in pkgs[1:]), pkgs
@@ -365,7 +366,21 @@ name = 'x'
 kind = 'GitHub'
 kind = 'GitLab'
 EOF
-for input in "$T/missing-artifact-hash.toml" "$T/duplicate-artifact-hash.toml" "$T/missing-attestation-kind.toml" "$T/duplicate-attestation-field.toml"; do
+cat > "$T/non-string-attestation-claim.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[[packages.attestation-identities]]
+kind = 'GitHub'
+claims = { repository_id = 123 }
+EOF
+python3 - "$T/too-many-attestation-claims.toml" <<'PY'
+import sys
+claims = ", ".join("claim_%d = 'value'" % index for index in range(257))
+open(sys.argv[1], "w").write("lock-version = '1.0'\ncreated-by = 'uv'\n[[packages]]\nname = 'x'\n[[packages.attestation-identities]]\nkind = 'GitHub'\nclaims = {" + claims + "}\n")
+PY
+for input in "$T/missing-artifact-hash.toml" "$T/duplicate-artifact-hash.toml" "$T/missing-attestation-kind.toml" "$T/duplicate-attestation-field.toml" "$T/non-string-attestation-claim.toml" "$T/too-many-attestation-claims.toml"; do
   set +e
   "$ROOT/build/rh_cli" pylock --input "$input" --out "$T/bad-artifact.json" >/dev/null 2>&1
   rc=$?
