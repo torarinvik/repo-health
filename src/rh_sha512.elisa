@@ -1,4 +1,4 @@
-# rh_sha512.elisa — SHA-512 and SRI-compatible Base64 digests (FIPS 180-4).
+# rh_sha512.elisa — SHA-384/SHA-512 and SRI-compatible Base64 digests (FIPS 180-4).
 
 include "./rh_base.elisa"
 include "./rh_base64.elisa"
@@ -17,6 +17,16 @@ module Sha512:
             return 0x9b05688c2b3e6c1f if index == 5
             return 0x1f83d9abfb41bd6b if index == 6
             0x5be0cd19137e2179
+
+        def rh_sha384_h(index: i64) -> u64:
+            return 0xcbbb9d5dc1059ed8 if index == 0
+            return 0x629a292a367cd507 if index == 1
+            return 0x9159015a3070dd17 if index == 2
+            return 0x152fecd8f70e5939 if index == 3
+            return 0x67332667ffc00b31 if index == 4
+            return 0x8eb44a8768581511 if index == 5
+            return 0xdb0c2e0d64f98fa7 if index == 6
+            0x47b5481dbefa4fa4
 
         def rh_sha512_k(index: i64) -> u64:
             return 0x428a2f98d728ae22 if index == 0
@@ -148,7 +158,7 @@ module Sha512:
             state[6] <- state[6] + g
             state[7] <- state[7] + h
 
-        def rh_sha512_digest(data: darray[u8]&, digest: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_sha512_digest(data: darray[u8]&, digest: mutable darray[u8]&, is_sha384: bool) -> void can[Memory.Allocate, Abort.Panic]:
             padded: mutable darray[u8] =
                 padded: mutable darray[u8] = []
                 padded.extend(bytes_view(data))
@@ -165,20 +175,21 @@ module Sha512:
                 padded.push(((bit_length >> shift) & 255).u8())
                 byte_index <- byte_index - 1
             state: mutable darray[u64] = []
-            while index < 8 |index: i64 = 0, state|:
-                state.push(rh_sha512_h(index))
+            while index < 8 |index: i64 = 0, state, is_sha384|:
+                if is_sha384:
+                    state.push(rh_sha384_h(index))
+                else:
+                    state.push(rh_sha512_h(index))
                 index <- index + 1
             while offset < padded.count |offset: usize = 0, padded, state|:
                 rh_sha512_block(padded, offset, state)
                 offset <- offset + 128
-            while index < 8 |index: i64 = 0, state, digest|:
+            word_count: i64 = 6 if is_sha384 else 8
+            while index < word_count |index: i64 = 0, state, digest, word_count|:
                 rh_sha512_push_be64(digest, state[index.usize()])
                 index <- index + 1
 
-    public:
-        def rh_sha512(data: darray[u8]&, out_hex: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-            digest: mutable darray[u8] = []
-            Sha512::rh_sha512_digest(data, digest)
+        def rh_sha512_push_hex(digest: darray[u8]&, out_hex: mutable darray[u8]&) -> void:
             while index < digest.count |index: usize = 0, digest, out_hex|:
                 byte: u8 = digest[index]
                 hi: u64 = (byte >> 4).u64()
@@ -189,7 +200,23 @@ module Sha512:
                 out_hex.push((87 + lo).u8()) if lo >= 10
                 index <- index + 1
 
+    public:
+        def rh_sha512(data: darray[u8]&, out_hex: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            digest: mutable darray[u8] = []
+            Sha512::rh_sha512_digest(data, digest, false)
+            Sha512::rh_sha512_push_hex(digest, out_hex)
+
+        def rh_sha384(data: darray[u8]&, out_hex: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            digest: mutable darray[u8] = []
+            Sha512::rh_sha512_digest(data, digest, true)
+            Sha512::rh_sha512_push_hex(digest, out_hex)
+
         def rh_sha512_base64(data: darray[u8]&, out_base64: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             digest: mutable darray[u8] = []
-            Sha512::rh_sha512_digest(data, digest)
+            Sha512::rh_sha512_digest(data, digest, false)
+            Base64::rh_base64(digest, out_base64)
+
+        def rh_sha384_base64(data: darray[u8]&, out_base64: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            digest: mutable darray[u8] = []
+            Sha512::rh_sha512_digest(data, digest, true)
             Base64::rh_base64(digest, out_base64)
