@@ -14,12 +14,15 @@ with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_
 `rh_cli postgres --input <rh-postgres-command/1> --out <file>` commits one
 complete or successful-empty collection page through `rh_commit_collection_page`,
 or commits normalized event rows, page metadata, and cursor advancement together
-through `rh_commit_collection_page_events`; it also performs fenced job claim,
-heartbeat, and finish. The `register_evidence` operation reads a blob from the
+through `rh_commit_collection_page_events`. A page may include bounded typed
+subject metadata; the transaction inserts new entities or checks exact immutable
+replays before inserting the event rows. A conflicting subject rolls back its
+page and cursor. The adapter also performs fenced job claim, heartbeat, and
+finish. The `register_evidence` operation reads a blob from the
 configured `RH_EVIDENCE_ROOT`, verifies its FNV-1a content-addressed name,
 computes SHA-256 metadata, and idempotently registers that metadata through
 `rh_register_evidence_object`; the blob remains in the evidence directory.
-Event rows reference existing subject and evidence-object rows. It binds values through
+Event rows reference registered subject and evidence-object rows. It binds values through
 `PQexecParams`, applies a five-second connection timeout, and reports separate
 committed/duplicate, claimed/empty, and applied/fenced outcomes; transport or
 query failures exit without writing a result. Supply

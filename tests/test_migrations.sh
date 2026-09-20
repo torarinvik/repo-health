@@ -46,6 +46,9 @@ assert "FOR UPDATE SKIP LOCKED" in clean
 assert "fencing_token" in clean and "lease_expires_at" in clean
 assert "ON CONFLICT (collection_run_id, page_number) DO NOTHING" in clean
 assert "jsonb_array_elements(p_events)" in clean
+assert "jsonb_array_elements(p_subjects)" in clean
+assert "page subjects must be a JSON array" in clean
+assert "page subject identity is already registered with different immutable metadata" in clean
 assert "evidence digest must be a lowercase SHA-256 value" in clean
 assert "evidence digest is already registered with different immutable metadata" in clean
 assert "page event count does not match the declared bounded record count" in clean

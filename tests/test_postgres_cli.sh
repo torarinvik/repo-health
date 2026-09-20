@@ -34,6 +34,8 @@ run_ok page committed page-commit
 run_ok page duplicate page-commit
 run_ok page_events committed page-events
 run_ok page_events duplicate page-events
+run_ok page_events_subjects committed page-events-evidence
+run_ok page_events_subjects duplicate page-events-evidence
 run_ok heartbeat committed heartbeat-job
 run_ok heartbeat duplicate heartbeat-job
 run_ok finish committed finish-job
@@ -66,6 +68,8 @@ assert read("page-commit-duplicate.json")["status"] == "duplicate"
 assert read("page-events-committed.json")["operation"] == "page_commit_events"
 assert read("page-events-committed.json")["status"] == "committed"
 assert read("page-events-duplicate.json")["status"] == "duplicate"
+assert read("page-events-evidence-committed.json")["status"] == "committed"
+assert read("page-events-evidence-duplicate.json")["status"] == "duplicate"
 assert read("heartbeat-job-committed.json")["status"] == "applied"
 assert read("heartbeat-job-duplicate.json")["status"] == "fenced"
 assert read("finish-job-committed.json")["status"] == "applied"

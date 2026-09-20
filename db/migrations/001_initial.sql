@@ -882,6 +882,7 @@ CREATE FUNCTION rh_commit_collection_page_events(
     p_record_count integer,
     p_evidence_id uuid,
     p_events jsonb,
+    p_subjects jsonb,
     p_now timestamptz
 ) RETURNS boolean
 LANGUAGE plpgsql
@@ -891,6 +892,13 @@ DECLARE
     v_capability text;
     v_event jsonb;
     v_event_count integer;
+    v_subject jsonb;
+    v_subject_count integer;
+    v_subject_id uuid;
+    v_subject_kind text;
+    v_subject_visibility rh_visibility_scope;
+    v_subject_created_at timestamptz;
+    v_existing_entity entity%ROWTYPE;
 BEGIN
     IF p_completeness IS NULL OR p_completeness NOT IN ('complete', 'empty') THEN
         RAISE EXCEPTION 'a partial page cannot advance a durable cursor';
@@ -904,6 +912,13 @@ BEGIN
     v_event_count := jsonb_array_length(p_events);
     IF v_event_count > 10000 OR v_event_count <> p_record_count THEN
         RAISE EXCEPTION 'page event count does not match the declared bounded record count';
+    END IF;
+    IF p_subjects IS NULL OR jsonb_typeof(p_subjects) <> 'array' THEN
+        RAISE EXCEPTION 'page subjects must be a JSON array';
+    END IF;
+    v_subject_count := jsonb_array_length(p_subjects);
+    IF v_subject_count > 10000 THEN
+        RAISE EXCEPTION 'page subject count exceeds the bounded record limit';
     END IF;
 
     SELECT source_instance_id, capability
@@ -932,6 +947,39 @@ BEGIN
         p_cursor_before, p_cursor_after, 'success', p_completeness,
         p_record_count, p_evidence_id, p_now, p_now
     );
+
+    FOR v_subject IN SELECT value FROM jsonb_array_elements(p_subjects) AS subjects(value) LOOP
+        IF jsonb_typeof(v_subject) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(v_subject->'id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_subject->'entity_kind') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_subject->'visibility_scope') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_subject->'created_at') IS DISTINCT FROM 'string' THEN
+            RAISE EXCEPTION 'page subject is missing a required typed field';
+        END IF;
+        IF COALESCE(v_subject->>'id', '') = '' OR COALESCE(v_subject->>'entity_kind', '') = '' THEN
+            RAISE EXCEPTION 'page subject identity and entity kind must be non-empty';
+        END IF;
+
+        v_subject_id := (v_subject->>'id')::uuid;
+        v_subject_kind := v_subject->>'entity_kind';
+        v_subject_visibility := (v_subject->>'visibility_scope')::rh_visibility_scope;
+        v_subject_created_at := (v_subject->>'created_at')::timestamptz;
+        INSERT INTO entity (id, entity_kind, visibility_scope, created_at)
+        VALUES (v_subject_id, v_subject_kind, v_subject_visibility, v_subject_created_at)
+        ON CONFLICT (id) DO NOTHING;
+
+        IF NOT FOUND THEN
+            SELECT * INTO v_existing_entity FROM entity WHERE id = v_subject_id;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'page subject identity conflict could not be read';
+            END IF;
+            IF v_existing_entity.entity_kind IS DISTINCT FROM v_subject_kind
+               OR v_existing_entity.visibility_scope IS DISTINCT FROM v_subject_visibility
+               OR v_existing_entity.created_at IS DISTINCT FROM v_subject_created_at THEN
+                RAISE EXCEPTION 'page subject identity is already registered with different immutable metadata';
+            END IF;
+        END IF;
+    END LOOP;
 
     FOR v_event IN SELECT value FROM jsonb_array_elements(p_events) AS events(value) LOOP
         IF jsonb_typeof(v_event) IS DISTINCT FROM 'object'
