@@ -90,6 +90,9 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["decision"] == "allow", d
 assert d["excepted_rule_ids"] == [1], d
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["policy.active_exceptions"]["value"] == 1, metrics
+assert metrics["policy.exception_expiry_days"]["value"] == 0, metrics
 print("[policy] exception OK")
 PY
 # expired -> deny; wrong subject -> deny; wrong artifact digest (TOCTOU) -> deny

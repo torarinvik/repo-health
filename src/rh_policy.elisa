@@ -119,6 +119,29 @@ module Policy:
                 return true
             false
 
+        # Smallest remaining whole-day lifetime of an exception that actually
+        # applied to this evaluation. The same subject/digest/state checks as
+        # rh_exception_applies are kept here so the metric cannot describe a
+        # different exception population than the decision.
+        def rh_exception_expiry_days(excs: darray[RhException]&, applied: darray[i64]&, subject_id: i64, digest_high: u64, digest_low: u64, now: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            excs_loop: mutable darray[RhException]& = excs
+            applied_loop: mutable darray[i64]& = applied
+            subject_loop: mutable i64 = subject_id
+            high_loop: mutable u64 = digest_high
+            low_loop: mutable u64 = digest_low
+            now_loop: mutable i64 = now
+            while i < excs_loop.count |best: i64 = -1, i: usize = 0, excs_loop, applied_loop, subject_loop, high_loop, low_loop, now_loop| -> best:
+                x: RhException = excs_loop[i]
+                i <- i + 1
+                continue if x.state != RH_EXC_APPROVED
+                continue if x.subject_id != subject_loop
+                continue if x.expires_at <= now_loop
+                continue if x.digest_high != high_loop or x.digest_low != low_loop
+                continue if not Graph::rh_contains(applied_loop, x.rule_id)
+                days: i64 = (x.expires_at - now_loop) / 86400
+                if best < 0 or days < best:
+                    best <- days
+
         # One rule's contribution. Returns a decision code; -1 marks "rule
         # skipped" (retired or excepted is handled by the caller).
         def rh_rule_verdict(r: RhRule&, inp: RhPolicyInput&) -> u8 can[Memory.Allocate, Abort.Panic]:
