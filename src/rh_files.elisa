@@ -27,32 +27,67 @@ module Files:
             source_files: mutable i64
             ci_configuration: mutable i64
             test_files: mutable i64
+            source_bytes: mutable i64
 
         def rh_file_metrics(files: darray[u8]&) -> RhFileMetrics can[Memory.Allocate, Abort.Panic]:
-            license_files: mutable i64 = Files::rh_root_count(files, 2)
-            examples: mutable i64 = Files::rh_path_count(files, "examples/")
-            source_files: mutable i64 = Files::rh_source_file_count(files)
+            paths: mutable darray[u8] = []
+            source_bytes: i64 = Files::rh_normalize_snapshot(files, paths)
+            license_files: mutable i64 = Files::rh_root_count(paths, 2)
+            examples: mutable i64 = Files::rh_path_count(paths, "examples/")
+            source_files: mutable i64 = Files::rh_source_file_count(paths)
             RhFileMetrics{
-                readme: Files::rh_root_name(files, 0),
-                contributing: Files::rh_root_name(files, 1),
+                readme: Files::rh_root_name(paths, 0),
+                contributing: Files::rh_root_name(paths, 1),
                 license: 1 if license_files > 0 else 0,
-                installation: Files::rh_root_name(files, 3),
-                api_reference: Files::rh_root_name(files, 4),
-                governance: Files::rh_root_name(files, 5),
-                code_ownership: Files::rh_root_name(files, 6),
-                notice: Files::rh_root_name(files, 7),
-                release_process: Files::rh_root_name(files, 8),
-                succession_process: Files::rh_root_name(files, 9),
+                installation: Files::rh_root_name(paths, 3),
+                api_reference: Files::rh_root_name(paths, 4),
+                governance: Files::rh_root_name(paths, 5),
+                code_ownership: Files::rh_root_name(paths, 6),
+                notice: Files::rh_root_name(paths, 7),
+                release_process: Files::rh_root_name(paths, 8),
+                succession_process: Files::rh_root_name(paths, 9),
                 license_files: license_files,
                 examples: examples,
-                security_policy: Files::rh_root_name(files, 10),
-                release_notes: Files::rh_root_name(files, 11),
+                security_policy: Files::rh_root_name(paths, 10),
+                release_notes: Files::rh_root_name(paths, 11),
                 source_files: source_files,
-                ci_configuration: Files::rh_ci_configuration_present(files),
-                test_files: Files::rh_test_file_count(files),
+                ci_configuration: Files::rh_ci_configuration_present(paths),
+                test_files: Files::rh_test_file_count(paths),
+                source_bytes: source_bytes,
             }
 
     private:
+        def rh_normalize_snapshot(files: darray[u8]&, paths: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            source_bytes: mutable i64 = 0
+            complete: mutable bool = true
+            while start < files.count |start: usize = 0, files, paths, source_bytes, complete|:
+                stop: i64 = Base::rh_find_byte(files, start, 0)
+                finish: usize = stop.usize() if stop >= 0 else files.count
+                tab: mutable i64 = -1
+                while cursor < finish |cursor: usize = start, files, finish, tab|:
+                    if files[cursor] == 9:
+                        tab <- cursor.i64()
+                        break
+                    cursor <- cursor + 1
+                path_start: usize = (tab + 1).usize() if tab >= 0 else start
+                complete <- false if tab < 0
+                if tab >= 0:
+                    size_start: mutable usize = start
+                    while cursor2 < tab.usize() |cursor2: usize = start, files, tab, size_start|:
+                        size_start <- cursor2 + 1 if files[cursor2] == 32
+                        cursor2 <- cursor2 + 1
+                    size_ok: mutable i64 = 0
+                    size: i64 = Base::rh_parse_i64(files, size_start, tab.usize(), &size_ok)
+                    complete <- false if size_ok == 0 or size < 0
+                    source_bytes <- source_bytes + size if size_ok == 1 and size >= 0 and Files::rh_source_suffix(files, path_start, finish)
+                while copy < finish |copy: usize = path_start, files, paths, finish|:
+                    paths.push(files[copy])
+                    copy <- copy + 1
+                paths.push(0)
+                start <- finish + 1
+            return -1 if not complete
+            source_bytes
+
         # kind: 0 README, 1 CONTRIBUTING, 2 license declaration.
         def rh_root_name(files: darray[u8]&, kind: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             return 1 if Files::rh_root_count(files, kind) > 0 else 0

@@ -79,7 +79,7 @@ assert m["documentation.contributing_guide_present"]["value"] is False, m
 assert m["licensing.license_declaration_present"]["value"] is False, m
 assert m["activity.weekly_count_slope"]["status"] in ("observed", "not_applicable"), m
 assert m["activity.weekly_count_variance"]["status"] in ("observed", "not_applicable"), m
-assert len(d["metrics"]) == 59, d
+assert len(d["metrics"]) == 60, d
 coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "coverage.window_completeness"}
 assert coverage[("coverage.window_completeness", "1.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "1.0.0")]["value"]["den"], coverage
 assert coverage[("coverage.window_completeness", "2.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "2.0.0")]["value"]["den"], coverage
@@ -133,7 +133,8 @@ assert m["release.release_note_presence"]["value"] is True, m
 assert m["code.source_file_count"]["value"] == 2, m
 assert m["build.ci_configuration_present"]["value"] is True, m
 assert m["testing.test_files_observed"]["value"] == 1, m
-assert b"README.md\0" in open(sys.argv[2], "rb").read(), "retained file evidence missing README"
+assert m["code.source_bytes"]["value"] == 10, m
+assert b"\tREADME.md\0" in open(sys.argv[2], "rb").read(), "retained long-tree evidence missing README"
 print("[m01] snapshot file classification OK")
 PY
 "$CLI" replay --bundle "$T/rep-fix2/bundle.manifest" --out "$T/replay-fix2" >/dev/null || fail "replay"
