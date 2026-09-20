@@ -79,7 +79,7 @@ assert m["documentation.contributing_guide_present"]["value"] is False, m
 assert m["licensing.license_declaration_present"]["value"] is False, m
 assert m["activity.weekly_count_slope"]["status"] in ("observed", "not_applicable"), m
 assert m["activity.weekly_count_variance"]["status"] in ("observed", "not_applicable"), m
-assert len(d["metrics"]) == 45, d
+assert len(d["metrics"]) == 50, d
 coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "coverage.window_completeness"}
 assert coverage[("coverage.window_completeness", "1.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "1.0.0")]["value"]["den"], coverage
 assert coverage[("coverage.window_completeness", "2.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "2.0.0")]["value"]["den"], coverage
@@ -97,7 +97,12 @@ mkdir -p "$T/docs" && git init -q -b main "$T/docs" && (
   printf 'overview\n' > README.md
   printf 'guide\n' > CONTRIBUTING.md
   printf 'MIT\n' > LICENSE
-  git add README.md CONTRIBUTING.md LICENSE
+  printf 'build\n' > INSTALL.md
+  printf 'api\n' > API.md
+  printf 'process\n' > GOVERNANCE.md
+  mkdir -p .github && printf '* @maintainers\n' > .github/CODEOWNERS
+  printf 'notice\n' > NOTICE
+  git add README.md CONTRIBUTING.md LICENSE INSTALL.md API.md GOVERNANCE.md .github/CODEOWNERS NOTICE
   GIT_AUTHOR_DATE="2024-05-01T00:00:00Z" GIT_COMMITTER_DATE="2024-05-01T00:00:00Z" git commit -qm "docs"
 )
 "$CLI" scan --repo "$T/docs" --out "$T/rep-docs" --window-days 36500 >/dev/null || fail "docs scan"
@@ -108,6 +113,11 @@ m = {x["key"]: x for x in d["metrics"]}
 assert m["documentation.readme_present"] == {"key":"documentation.readme_present","version":"1.0.0","status":"observed","value":True,"evidence":["evidence/git-files.txt"]}, m
 assert m["documentation.contributing_guide_present"]["value"] is True, m
 assert m["licensing.license_declaration_present"]["value"] is True, m
+assert m["documentation.installation_guide_present"]["value"] is True, m
+assert m["documentation.api_reference_present"]["value"] is True, m
+assert m["governance.governance_document_present"]["value"] is True, m
+assert m["governance.code_ownership_rules_present"]["value"] is True, m
+assert m["licensing.source_notice_presence"]["value"] is True, m
 assert b"README.md\0" in open(sys.argv[2], "rb").read(), "retained file evidence missing README"
 print("[m01] snapshot file classification OK")
 PY
