@@ -5110,11 +5110,12 @@ def rh_do_reconcile(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate
 
 # --- M02-03/M02-06 unattended worker pass. ---
 # Reads an `rh-worker-input/1` document (queue capacity, host quota policy,
-# the source table, and now) and writes `rh-worker-plan/1`: one decision per
+# the source table, and now) and writes `rh-worker-plan/2`: one decision per
 # source (full reconcile / incremental / skipped), the reconcile horizon and
 # overlap start, the schedule debt, and an aggregate service-health summary.
-# The pass is deterministic and bounded (no loop), so replaying it at the
-# same `now` yields the identical plan. Malformed/invalid input fails closed.
+# Due full reconciles use slots before incremental work; service order rotates
+# by `now` within each class. The pass is deterministic and bounded, so replaying
+# it at the same `now` yields the identical plan. Invalid input fails closed.
 def rh_do_worker_tick(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected worker argument (allowlist)")
@@ -5231,7 +5232,7 @@ def rh_do_worker_tick(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloca
         Worker::rh_worker_health(dec, enq)
     body: mutable darray[u8] =
         body: mutable darray[u8] = []
-        Base::rh_push_text(body, "{\"schema\":\"rh-worker-plan/1\",\"capacity\":")
+        Base::rh_push_text(body, "{\"schema\":\"rh-worker-plan/2\",\"capacity\":")
         Base::rh_push_decimal_i64(body, cap)
         Base::rh_push_text(body, ",\"now\":")
         Base::rh_push_decimal_i64(body, now)
@@ -5268,7 +5269,7 @@ def rh_do_worker_tick(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloca
     Base::rh_push_decimal_i64(body, hl.overdue)
     Base::rh_push_text(body, ",\"max_debt\":")
     Base::rh_push_decimal_i64(body, hl.max_debt)
-    Base::rh_push_text(body, "},\"note\":\"one bounded, deterministic scheduling pass; a due full reconcile takes priority over an incremental; a skipped source keeps its schedule debt visible so the next tick retries and never silently drops it\"}")
+    Base::rh_push_text(body, "},\"note\":\"one bounded deterministic pass; due full reconciles take slots before incremental work; source order rotates by now within each priority class; skipped sources keep visible debt for retry and are never silently dropped\"}")
     body.push(10)
     op: mutable darray[u8] =
         op: mutable darray[u8] = []

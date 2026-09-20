@@ -57,17 +57,18 @@ on the real execution path.
   negatives; the runtime registry gains entry 19 (18 implemented). Catalog
   state: 21 definitions = 18 `implemented`, 3 `prototype`, 0 `planned`.
 - M02 unattended worker pass: new `src/rh_worker.elisa` and `rh_cli worker
-  tick --input <file> --out <file>` (`rh-worker-plan/1`) run one bounded,
+  tick --input <file> --out <file>` (`rh-worker-plan/2`) run one bounded,
   deterministic scheduling pass over a source table: each source gets a
   full-reconcile, incremental, or skipped decision with its reconcile
-  horizon/overlap/debt, plus an aggregate service-health summary. A due full
-  reconcile takes priority over an incremental one; a bounded queue (or an
-  exhausted host quota) skips the overflow but keeps each skipped source's
-  schedule debt visible so the next tick retries — sources are never silently
-  dropped. The pass is a pure function of its inputs (no loop), so replaying
-  it at the same `now` yields the identical plan; malformed input fails
-  closed. `src/test_worker.elisa` (`WORKER OK`) and `tests/test_worker_cli.sh`
-  cover priority, boundedness, quota refusal, determinism, and negatives;
+  horizon/overlap/debt, plus an aggregate service-health summary. All due full
+  reconciles use queue slots before incremental work, and source order rotates
+  by `now` within each priority class. A bounded queue (or an exhausted host
+  quota) skips the overflow but keeps each skipped source's schedule debt
+  visible so the next tick retries — sources are never silently dropped. The
+  pass is deterministic for its inputs, so replaying it at the same `now`
+  yields the identical plan; malformed input fails closed.
+  `src/test_worker.elisa` (`WORKER OK`) and `tests/test_worker_cli.sh` cover
+  global priority, bounded rotation, quota refusal, determinism, and negatives;
   public contract `worker-plan` registered.
 - M02-06 reconciliation policy: new `src/rh_reconcile.elisa` and `rh_cli
   reconcile --input <file> --out <file>` (`rh-reconcile-result/1`) decide

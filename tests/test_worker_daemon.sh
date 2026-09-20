@@ -29,7 +29,7 @@ log="$("$ROOT/tools/worker-daemon.sh" --input "$T/next.json" --out "$T/out2.json
 python3 - "$T/out.json" "$T/out2.json" <<'PY'
 import json, sys
 a, b = (json.load(open(p)) for p in sys.argv[1:])
-assert a["schema"] == b["schema"] == "rh-worker-plan/1", (a, b)
+assert a["schema"] == b["schema"] == "rh-worker-plan/2", (a, b)
 assert a["decisions"] == b["decisions"], (a, b)
 print("[worker-daemon] refreshed plan remains schema-valid")
 PY

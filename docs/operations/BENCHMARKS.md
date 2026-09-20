@@ -87,4 +87,6 @@ a deployed database or external request budget. Those
 measurements remain required before using these results to publish capacity
 limits or claim the M10 exit gate.
 Concurrent processes exercise local CPU and memory contention only; they do not
-exercise the worker scheduler, source fairness, a database, or load shedding.
+measure scheduler throughput or load shedding. Worker unit and CLI tests cover
+bounded source rotation and full-reconcile priority, not fairness under deployed
+worker contention or database load.

@@ -72,6 +72,38 @@ def check_quota(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, C
     wcheck(dec[0].mode == 0 and dec[0].debt == 5, "quota-skipped-visible", fails)
     return
 
+def check_priority_and_rotation(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    # A later full reconcile must use the only slot before an earlier incremental.
+    priority_sources: mutable darray[Worker::RhSourceJob] = []
+    priority_sources.push(Worker::rh_worker_source(10, 1000, 2000, 2400, 0))
+    priority_sources.push(Worker::rh_worker_source(20, 1000, 1000, 2400, 0))
+    priority_host: mutable Job::RhHost = Job::rh_sched_host(10, 1, 1, 100)
+    priority_slots: mutable darray[Job::RhSlot] = Job::rh_sched_slots(1)
+    priority_decisions: mutable darray[Worker::RhWorkerDecision] = []
+    priority_enqueued: i64 = Worker::rh_worker_pass(priority_sources, &priority_host, priority_slots, 2500, priority_decisions)
+    wcheck(priority_enqueued == 1 and priority_decisions[0].source_id == 20 and priority_decisions[0].mode == 1, "priority-full-before-incremental", fails)
+    wcheck(priority_decisions[1].source_id == 10 and priority_decisions[1].mode == 0, "priority-incremental-skipped", fails)
+
+    # Each new second rotates the first bounded service opportunity through the
+    # input table; no source is permanently favored by its configured position.
+    sources: mutable darray[Worker::RhSourceJob] = []
+    sources.push(Worker::rh_worker_source(1, 10000, 0, 0, 0))
+    sources.push(Worker::rh_worker_source(2, 10000, 0, 0, 0))
+    sources.push(Worker::rh_worker_source(3, 10000, 0, 0, 0))
+    served_each_tick: bool =
+        while tick < 3 |served: bool = true, tick: i64 = 0, sources| -> served:
+            service_ok: bool =
+                h: mutable Job::RhHost = Job::rh_sched_host(10, 1, 1, 100)
+                slots: mutable darray[Job::RhSlot] = Job::rh_sched_slots(1)
+                decisions: mutable darray[Worker::RhWorkerDecision] = []
+                enqueued: i64 = Worker::rh_worker_pass(sources, &h, slots, tick, decisions)
+                enqueued == 1 and decisions[0].source_id == tick + 1
+            if not service_ok:
+                served <- false
+            tick <- tick + 1
+    wcheck(served_each_tick, "bounded-service-rotates", fails)
+    return
+
 def check_determinism(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     srcs: mutable darray[Worker::RhSourceJob] = []
     srcs.push(Worker::rh_worker_source(7, 500, 100, 400, 50))
@@ -97,6 +129,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_pass(&fails)
     check_bounded(&fails)
     check_quota(&fails)
+    check_priority_and_rotation(&fails)
     check_determinism(&fails)
     if fails == 0:
         b: mutable darray[u8] =
