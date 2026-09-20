@@ -13,6 +13,38 @@ include "./rh_base.elisa"
 include "./rh_json.elisa"
 
 module ReleaseFeed:
+    private:
+        # Helpers used only while normalizing one release feed. Keeping these
+        # private makes the public adapter boundary explicit and prevents
+        # parser scratch operations from becoming cross-module contracts.
+        def rh_rel_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if s < 0 or e < s
+            start: i64 = pool.count.i64()
+            while k < e |k: i64 = s, texts, pool, e|:
+                pool.push(texts[k.usize()])
+                k <- k + 1
+            start
+
+        def rh_rel_arr_count(nodes: darray[Json::RhJsonNode]&, arr: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if arr < 0
+            o: Json::RhJsonNode = nodes[arr.usize()]
+            return 0 if o.kind != Json::RH_JSON_ARR
+            o.child_count
+
+        # Count assets in an assets array that carry a non-empty "digest" string.
+        def rh_rel_digest_count(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, arr: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if arr < 0
+            o: Json::RhJsonNode = nodes[arr.usize()]
+            return 0 if o.kind != Json::RH_JSON_ARR
+            while child >= 0 |total: i64 = 0, child: i64 = o.first_child| -> total:
+                nxt: i64 = nodes[child.usize()].next_sibling
+                ds: mutable i64 = -1
+                de: mutable i64 = -1
+                if Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "digest"), &ds, &de):
+                    if de > ds:
+                        total <- total + 1
+                child <- nxt
+
     public:
         const RH_RELEASE_FEED_MAX: i64 = 5000
         const RH_RELEASE_FEED_VERSION: i64 = 1
@@ -42,38 +74,6 @@ module ReleaseFeed:
         # Explicit: no author/identity evidence is derived here.
         def rh_release_feed_identity_supported() -> i64:
             0
-
-        # Copy [s,e) of texts into pool; returns start, or -1.
-        # (private to this file)
-        def rh_rel_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            return -1 if s < 0 or e < s
-            start: i64 = pool.count.i64()
-            while k < e |k: i64 = s, texts, pool, e|:
-                pool.push(texts[k.usize()])
-                k <- k + 1
-            start
-
-        # (private to this file)
-        def rh_rel_arr_count(nodes: darray[Json::RhJsonNode]&, arr: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            return 0 if arr < 0
-            o: Json::RhJsonNode = nodes[arr.usize()]
-            return 0 if o.kind != Json::RH_JSON_ARR
-            o.child_count
-
-        # Count assets in an assets array that carry a non-empty "digest" string.
-        # (private to this file)
-        def rh_rel_digest_count(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, arr: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            return 0 if arr < 0
-            o: Json::RhJsonNode = nodes[arr.usize()]
-            return 0 if o.kind != Json::RH_JSON_ARR
-            while child >= 0 |total: i64 = 0, child: i64 = o.first_child| -> total:
-                nxt: i64 = nodes[child.usize()].next_sibling
-                ds: mutable i64 = -1
-                de: mutable i64 = -1
-                if Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "digest"), &ds, &de):
-                    if de > ds:
-                        total <- total + 1
-                child <- nxt
 
         # Parse a release feed. Accepts either a top-level array of release objects
         # or an object with a "releases" array. Each release needs a non-empty
