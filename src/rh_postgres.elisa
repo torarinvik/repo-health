@@ -17,6 +17,7 @@ module Postgres:
             fields: uintptr
             is_null: uintptr
             value: uintptr
+            length: uintptr
             clear: uintptr
             finish: uintptr
 
@@ -30,7 +31,7 @@ module Postgres:
         extern rh_pg_dlclose(library: void&) -> i32
 
         def rh_pg_empty_api() -> RhPgApi:
-            RhPgApi{library: null, connectdb_params: 0, status: 0, exec_params: 0, result_status: 0, tuples: 0, fields: 0, is_null: 0, value: 0, clear: 0, finish: 0}
+            RhPgApi{library: null, connectdb_params: 0, status: 0, exec_params: 0, result_status: 0, tuples: 0, fields: 0, is_null: 0, value: 0, length: 0, clear: 0, finish: 0}
 
         def rh_pg_load_symbol(library: void&, name: cstr) -> uintptr can[Unsafe.PointerCast]:
             symbol: void&? = rh_pg_dlsym(library, name)
@@ -73,10 +74,11 @@ module Postgres:
                 fields: rh_pg_load_symbol(handle, "PQnfields"),
                 is_null: rh_pg_load_symbol(handle, "PQgetisnull"),
                 value: rh_pg_load_symbol(handle, "PQgetvalue"),
+                length: rh_pg_load_symbol(handle, "PQgetlength"),
                 clear: rh_pg_load_symbol(handle, "PQclear"),
                 finish: rh_pg_load_symbol(handle, "PQfinish")
             }
-            ready: bool = api.connectdb_params != 0 and api.status != 0 and api.exec_params != 0 and api.result_status != 0 and api.tuples != 0 and api.fields != 0 and api.is_null != 0 and api.value != 0 and api.clear != 0 and api.finish != 0
+            ready: bool = api.connectdb_params != 0 and api.status != 0 and api.exec_params != 0 and api.result_status != 0 and api.tuples != 0 and api.fields != 0 and api.is_null != 0 and api.value != 0 and api.length != 0 and api.clear != 0 and api.finish != 0
             if not ready:
                 _ = rh_pg_dlclose(handle)
                 return rh_pg_empty_api()
@@ -197,3 +199,90 @@ module Postgres:
             params.push(outcome)
             params.push(error_kind)
             Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_finish_job($1::uuid, $2::bigint, $3::text, $4::timestamptz, NULLIF($5, '')::text, NULLIF($6, '')::text)", params)
+
+        # Claim at most one runnable job through SKIP LOCKED. Returns 1 with
+        # NUL-terminated id/expiry and a fencing token, 0 when the queue is empty,
+        # or -1 for a connection or result error.
+        def rh_pg_claim_next_job(conninfo: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, job_id_out: mutable darray[u8]&, fencing_token_out: mutable i64&, lease_expires_at_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            job_id_out <- []
+            fencing_token_out[0] <- 0
+            lease_expires_at_out <- []
+            return -1 if Base::rh_cstr_len_c(worker_id) == 0 or Base::rh_cstr_len_c(worker_id) > 256
+            return -1 if lease_seconds <= 0 or lease_seconds > 86400
+            api: RhPgApi = Postgres::rh_pg_load_api()
+            return -1 if api.library == null
+            library: void& = api.library
+            connectdb_params: fn(void&, void&, i32) -> void&? = api.connectdb_params.cast[fn(void&, void&, i32) -> void&?] can Unsafe.PointerCast
+            status: fn(void&) -> i32 = api.status.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            exec_params: fn(void&, cstr, i32, void&?, void&, void&?, void&?, i32) -> void&? = api.exec_params.cast[fn(void&, cstr, i32, void&?, void&, void&?, void&?, i32) -> void&?] can Unsafe.PointerCast
+            result_status: fn(void&) -> i32 = api.result_status.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            tuples: fn(void&) -> i32 = api.tuples.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            fields: fn(void&) -> i32 = api.fields.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            is_null: fn(void&, i32, i32) -> i32 = api.is_null.cast[fn(void&, i32, i32) -> i32] can Unsafe.PointerCast
+            value: fn(void&, i32, i32) -> cstr = api.value.cast[fn(void&, i32, i32) -> cstr] can Unsafe.PointerCast
+            length: fn(void&, i32, i32) -> i32 = api.length.cast[fn(void&, i32, i32) -> i32] can Unsafe.PointerCast
+            clear: fn(void&) -> void = api.clear.cast[fn(void&) -> void] can Unsafe.PointerCast
+            finish: fn(void&) -> void = api.finish.cast[fn(void&) -> void] can Unsafe.PointerCast
+            keywords: mutable darray[cstr?] = []
+            values: mutable darray[cstr?] = []
+            keywords.push("dbname")
+            values.push(conninfo)
+            keywords.push("connect_timeout")
+            values.push("5")
+            keywords.push(null)
+            values.push(null)
+            keyword_ptr: void& = (&keywords[0]).cast[void&] can Unsafe.PointerCast
+            value_ptr: void& = (&values[0]).cast[void&] can Unsafe.PointerCast
+            connection: void&? = connectdb_params(keyword_ptr, value_ptr, 1)
+            if connection == null:
+                _ = rh_pg_dlclose(library)
+                return -1
+            conn: void& = connection
+            if status(conn) != 0:
+                finish(conn)
+                _ = rh_pg_dlclose(library)
+                return -1
+            lease_text: mutable darray[u8] = Postgres::rh_pg_decimal(lease_seconds)
+            lease_ptr: cstr = (&lease_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(worker_id)
+            params.push(now)
+            params.push(lease_ptr)
+            param_values: void& = (&params[0]).cast[void&] can Unsafe.PointerCast
+            query_result: void&? = exec_params(conn, "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job($1::text, $2::timestamptz, $3::integer)", 3, null, param_values, null, null, 0)
+            result_code: mutable i64 = -1
+            if query_result != null:
+                result: void& = query_result
+                if result_status(result) == RH_PG_TUPLES_OK and fields(result) == 3:
+                    row_count: i32 = tuples(result)
+                    if row_count == 0:
+                        result_code <- 0
+                    elif row_count == 1 and is_null(result, 0, 0) == 0 and is_null(result, 0, 1) == 0 and is_null(result, 0, 2) == 0:
+                        id_length: i32 = length(result, 0, 0)
+                        token_length: i32 = length(result, 0, 1)
+                        expiry_length: i32 = length(result, 0, 2)
+                        if id_length > 0 and id_length <= 64 and token_length > 0 and token_length <= 20 and expiry_length > 0 and expiry_length <= 128:
+                            token_value: cstr = value(result, 0, 1)
+                            token_bytes: mutable darray[u8] = []
+                            while i < token_length.usize() |i: usize = 0, token_bytes, token_value, token_length|:
+                                token_bytes.push(token_value[i])
+                                i <- i + 1
+                            token_ok: mutable i64 = 0
+                            token: i64 = Base::rh_parse_i64(token_bytes, 0, token_bytes.count, &token_ok)
+                            if token_ok != 0 and token > 0:
+                                id_value: cstr = value(result, 0, 0)
+                                while i < id_length.usize() |i: usize = 0, job_id_out, id_value, id_length|:
+                                    job_id_out.push(id_value[i])
+                                    i <- i + 1
+                                job_id_out.push(0)
+                                expiry_value: cstr = value(result, 0, 2)
+                                while i < expiry_length.usize() |i: usize = 0, lease_expires_at_out, expiry_value, expiry_length|:
+                                    lease_expires_at_out.push(expiry_value[i])
+                                    i <- i + 1
+                                lease_expires_at_out.push(0)
+                                fencing_token_out[0] <- token
+                                result_code <- 1
+                clear(result)
+            finish(conn)
+            _ = rh_pg_dlclose(library)
+            result_code

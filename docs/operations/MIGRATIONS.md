@@ -12,7 +12,7 @@ evidence of a deployed database.
 The first application method is in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa).
 It dynamically loads `libpq` and commits one complete or successful-empty
 collection page through `rh_commit_collection_page`, and exposes fenced job
-heartbeat and finish methods. It binds values through `PQexecParams`, applies
+claim, heartbeat, and finish methods. It binds values through `PQexecParams`, applies
 a five-second connection timeout, and returns separate committed/duplicate or
 current/stale/failure outcomes. Set `RH_LIBPQ_PATH` when
 the library is outside the platform loader path; otherwise the adapter checks
@@ -76,8 +76,8 @@ against an ephemeral PostgreSQL instance with `tests/test_pg_adapter_live.sh`.
 - There is no automatic migration runner; migrations are operator-led using
   the runbooks.
 - The active CLI has no database transaction layer yet. Collection-page commit
-  and job heartbeat/finish have native methods; canonical event/evidence
-  persistence, job claiming, configuration, and `rh_cli ingest` wiring remain open.
+  and job claim/heartbeat/finish have native methods; canonical event/evidence
+  persistence, configuration, and `rh_cli ingest` wiring remain open.
   Filesystem fencing continues to govern the active runtime.
 - No migration has been performed across a format change in this repository
   yet; the rules above are the contract, and the first real migration must
