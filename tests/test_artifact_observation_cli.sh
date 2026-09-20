@@ -49,7 +49,7 @@ assert result["observed_digest"] == hashlib.sha256(archive).hexdigest(), result
 assert result["observed_digest"] != result["expected_digest"], result
 PY
 
-echo "[artifact-observe] npm SHA-512 SRI covers raw tarball bytes across blocks"
+echo "[artifact-observe] npm multi-token SRI selects SHA-512 across blocks"
 python3 - "$T" <<'PY'
 import base64, hashlib, json, pathlib, sys
 t = pathlib.Path(sys.argv[1])
@@ -63,7 +63,11 @@ graph = {
         "id": 0,
         "package_node": 0,
         "kind": "archive",
-        "expected_digest": "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(),
+        "expected_digest": " ".join([
+            "sha256-" + base64.b64encode(hashlib.sha256(archive).digest()).decode(),
+            "sha512-" + base64.b64encode(bytes([0xaa]) * 64).decode(),
+            "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(),
+        ]),
         "observed_digest": None,
         "identity_state": "unknown",
     }],
@@ -83,9 +87,14 @@ python3 - "$T/npm-observation.json" "$T/npm.tarball" <<'PY'
 import base64, hashlib, json, pathlib, sys
 result = json.load(open(sys.argv[1]))
 archive = pathlib.Path(sys.argv[2]).read_bytes()
-integrity = "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode()
+integrity = " ".join([
+    "sha256-" + base64.b64encode(hashlib.sha256(archive).digest()).decode(),
+    "sha512-" + base64.b64encode(bytes([0xaa]) * 64).decode(),
+    "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(),
+])
+sha512_integrity = "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode()
 assert result["expected_digest"] == integrity, result
-assert result["observed_digest"] == integrity, result
+assert result["observed_digest"] == sha512_integrity, result
 assert result["identity_state"] == "match", result
 assert result["digest_algorithm"] == "sha512", result
 assert result["verification_basis"] == "raw_npm_tarball_bytes", result
@@ -116,11 +125,16 @@ graph["ecosystem"] = "npm"
 graph["artifacts"][0]["expected_digest"] = "sha1-deadbeef"
 with open(t / "unsupported.json", "w") as out:
     json.dump(graph, out, separators=(",", ":"))
+graph["artifacts"][0]["expected_digest"] = "sha512-" + "A" * 85 + "B=="
+with open(t / "malformed-sri.json", "w") as out:
+    json.dump(graph, out, separators=(",", ":"))
 PY
-if "$ROOT/build/rh_cli" artifact-observe --graph "$T/unsupported.json" --artifact 0 --file "$ROOT/fixtures/packages/artifact-observation.archive" --out "$T/unsupported-out.json" >/dev/null 2>&1; then
-  echo "unsupported ecosystem unexpectedly accepted" >&2
-  exit 1
-fi
+for graph in unsupported malformed-sri; do
+  if "$ROOT/build/rh_cli" artifact-observe --graph "$T/$graph.json" --artifact 0 --file "$ROOT/fixtures/packages/artifact-observation.archive" --out "$T/$graph-out.json" >/dev/null 2>&1; then
+    echo "unsupported or malformed SRI unexpectedly accepted: $graph" >&2
+    exit 1
+  fi
+done
 if "$ROOT/build/rh_cli" artifact-observe --graph "$ROOT/fixtures/packages/artifact-observation-graph.json" --artifact 1 --file "$ROOT/fixtures/packages/artifact-observation.archive" --out "$T/out-of-range.json" >/dev/null 2>&1; then
   echo "out-of-range artifact unexpectedly accepted" >&2
   exit 1
