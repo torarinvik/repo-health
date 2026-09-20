@@ -49,12 +49,71 @@ assert result["observed_digest"] == hashlib.sha256(archive).hexdigest(), result
 assert result["observed_digest"] != result["expected_digest"], result
 PY
 
+echo "[artifact-observe] npm SHA-512 SRI covers raw tarball bytes across blocks"
+python3 - "$T" <<'PY'
+import base64, hashlib, json, pathlib, sys
+t = pathlib.Path(sys.argv[1])
+archive = bytes((i * 37 + 11) % 256 for i in range(4097))
+(t / "npm.tarball").write_bytes(archive)
+graph = {
+    "schema": "rh-dep-graph/1",
+    "ecosystem": "npm",
+    "nodes": [{"id": 0, "name": "demo", "version": "1.0.0", "source": "registry"}],
+    "artifacts": [{
+        "id": 0,
+        "package_node": 0,
+        "kind": "archive",
+        "expected_digest": "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode(),
+        "observed_digest": None,
+        "identity_state": "unknown",
+    }],
+    "edges": [],
+    "unresolved": [],
+    "advisories": [],
+}
+with open(t / "npm-graph.json", "w") as out:
+    json.dump(graph, out, separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" artifact-observe \
+  --graph "$T/npm-graph.json" \
+  --artifact 0 \
+  --file "$T/npm.tarball" \
+  --out "$T/npm-observation.json" >/dev/null
+python3 - "$T/npm-observation.json" "$T/npm.tarball" <<'PY'
+import base64, hashlib, json, pathlib, sys
+result = json.load(open(sys.argv[1]))
+archive = pathlib.Path(sys.argv[2]).read_bytes()
+integrity = "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode()
+assert result["expected_digest"] == integrity, result
+assert result["observed_digest"] == integrity, result
+assert result["identity_state"] == "match", result
+assert result["digest_algorithm"] == "sha512", result
+assert result["verification_basis"] == "raw_npm_tarball_bytes", result
+PY
+python3 - "$T/npm.tarball" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+path.write_bytes(path.read_bytes() + b"changed")
+PY
+"$ROOT/build/rh_cli" artifact-observe \
+  --graph "$T/npm-graph.json" \
+  --artifact 0 \
+  --file "$T/npm.tarball" \
+  --out "$T/npm-changed-observation.json" >/dev/null
+python3 - "$T/npm-changed-observation.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert result["identity_state"] == "changed", result
+assert result["observed_digest"] != result["expected_digest"], result
+PY
+
 echo "[artifact-observe] unsupported and out-of-range evidence fails closed"
 python3 - "$T" "$ROOT/fixtures/packages/artifact-observation-graph.json" <<'PY'
 import json, pathlib, sys
 t = pathlib.Path(sys.argv[1])
 graph = json.load(open(sys.argv[2]))
 graph["ecosystem"] = "npm"
+graph["artifacts"][0]["expected_digest"] = "sha1-deadbeef"
 with open(t / "unsupported.json", "w") as out:
     json.dump(graph, out, separators=(",", ":"))
 PY

@@ -4,10 +4,13 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_sha256.elisa"
+include "./rh_sha512.elisa"
 
 module ArtifactObservation:
     private:
         const RH_ARTIFACT_OBSERVATION_TARGET_OK: i64 = 0
+        const RH_ARTIFACT_OBSERVATION_SHA256: i64 = 0
+        const RH_ARTIFACT_OBSERVATION_SHA512: i64 = 1
         const RH_ARTIFACT_OBSERVATION_MAX_GRAPH_BYTES: i64 = 8388608
 
         def rh_artifact_observation_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -44,6 +47,15 @@ module ArtifactObservation:
                 i <- i + 1
             true
 
+        def rh_artifact_observation_sri_sha512(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != 95 or not Base::rh_bytes_equal_literal(texts, start, start + 7, "sha512-")
+            while i < end - 2 |i: i64 = start + 7, texts, end|:
+                b: u8 = texts[i.usize()]
+                valid: bool = (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 43 or b == 47
+                return false if not valid
+                i <- i + 1
+            texts[(end - 2).usize()] == 61 and texts[(end - 1).usize()] == 61
+
         def rh_artifact_observation_hex_equal(texts: darray[u8]&, start: i64, observed: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if start < 0 or observed.count != 64
             while i < observed.count |i: usize = 0, texts, observed, start|:
@@ -54,7 +66,7 @@ module ArtifactObservation:
                 i <- i + 1
             true
 
-        def rh_artifact_observation_target(graph: darray[u8]&, artifact_id: i64, package_node_out: mutable i64&, expected_start_out: mutable i64&, expected_end_out: mutable i64&, texts_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_artifact_observation_target(graph: darray[u8]&, artifact_id: i64, package_node_out: mutable i64&, expected_start_out: mutable i64&, expected_end_out: mutable i64&, digest_algorithm_out: mutable i64&, texts_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if graph.count.i64() > RH_ARTIFACT_OBSERVATION_MAX_GRAPH_BYTES or artifact_id < 0
             nodes: mutable darray[Json::RhJsonNode] = []
             root: i64 = Json::rh_json_parse(graph, nodes, texts_out)
@@ -74,7 +86,10 @@ module ArtifactObservation:
             ecosystem_s: mutable i64 = -1
             ecosystem_e: mutable i64 = -1
             return -1 if not Json::rh_json_str_span(nodes, schema, &schema_s, &schema_e) or not Base::rh_bytes_equal_literal(texts_out, schema_s, schema_e, "rh-dep-graph/1")
-            return -1 if not Json::rh_json_str_span(nodes, ecosystem, &ecosystem_s, &ecosystem_e) or not Base::rh_bytes_equal_literal(texts_out, ecosystem_s, ecosystem_e, "cargo")
+            return -1 if not Json::rh_json_str_span(nodes, ecosystem, &ecosystem_s, &ecosystem_e)
+            cargo_graph: bool = Base::rh_bytes_equal_literal(texts_out, ecosystem_s, ecosystem_e, "cargo")
+            npm_graph: bool = Base::rh_bytes_equal_literal(texts_out, ecosystem_s, ecosystem_e, "npm")
+            return -1 if not cargo_graph and not npm_graph
             return -1 if artifact_id >= nodes[artifacts.usize()].child_count.i64()
             item: mutable i64 = nodes[artifacts.usize()].first_child
             while i < artifact_id |i: i64 = 0, item, nodes|:
@@ -103,28 +118,45 @@ module ArtifactObservation:
             kind_e: mutable i64 = -1
             return -1 if not Json::rh_json_str_span(nodes, kind, &kind_s, &kind_e) or not Base::rh_bytes_equal_literal(texts_out, kind_s, kind_e, "archive")
             return -1 if not Json::rh_json_str_span(nodes, expected, expected_start_out, expected_end_out)
-            return -1 if not rh_artifact_observation_hex(texts_out, expected_start_out[0], expected_end_out[0])
+            if cargo_graph:
+                digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_SHA256
+                return -1 if not rh_artifact_observation_hex(texts_out, expected_start_out[0], expected_end_out[0])
+            else:
+                digest_algorithm_out[0] <- RH_ARTIFACT_OBSERVATION_SHA512
+                return -1 if not rh_artifact_observation_sri_sha512(texts_out, expected_start_out[0], expected_end_out[0])
             RH_ARTIFACT_OBSERVATION_TARGET_OK
 
     public:
         const RH_ARTIFACT_OBSERVATION_MAX_BYTES: i64 = 67108864
 
-        # Verify raw bytes for one Cargo archive artifact. Unsupported digest
-        # algorithms, ecosystems, and artifact kinds fail closed; no archive is
-        # extracted or executed. The result binds the observation to graph bytes
-        # and the graph-local artifact ID instead of mutating the source graph.
+        # Verify raw bytes for one Cargo archive or npm tarball artifact.
+        # Unsupported digest algorithms, ecosystems, and artifact kinds fail
+        # closed; no archive is extracted or executed. The result binds the
+        # observation to graph bytes and the graph-local artifact ID instead of
+        # mutating the source graph.
         def rh_artifact_observation(graph: darray[u8]&, archive: darray[u8]&, artifact_id: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if archive.count.i64() > RH_ARTIFACT_OBSERVATION_MAX_BYTES
             graph_texts: mutable darray[u8] = []
             package_node: mutable i64 = -1
             expected_s: mutable i64 = -1
             expected_e: mutable i64 = -1
-            return -1 if ArtifactObservation::rh_artifact_observation_target(graph, artifact_id, &package_node, &expected_s, &expected_e, graph_texts) != RH_ARTIFACT_OBSERVATION_TARGET_OK
-            observed: mutable darray[u8] = []
-            Sha256::rh_sha256(archive, observed)
+            digest_algorithm: mutable i64 = -1
+            return -1 if ArtifactObservation::rh_artifact_observation_target(graph, artifact_id, &package_node, &expected_s, &expected_e, &digest_algorithm, graph_texts) != RH_ARTIFACT_OBSERVATION_TARGET_OK
+            observed: mutable darray[u8] =
+                observed: mutable darray[u8] = []
+                if digest_algorithm == RH_ARTIFACT_OBSERVATION_SHA256:
+                    Sha256::rh_sha256(archive, observed)
+                else:
+                    Base::rh_push_text(observed, "sha512-")
+                    Sha512::rh_sha512_base64(archive, observed)
+                observed
             graph_digest: mutable darray[u8] = []
             Sha256::rh_sha256(graph, graph_digest)
-            matches: bool = ArtifactObservation::rh_artifact_observation_hex_equal(graph_texts, expected_s, observed)
+            matches: bool =
+                if digest_algorithm == RH_ARTIFACT_OBSERVATION_SHA256:
+                    ArtifactObservation::rh_artifact_observation_hex_equal(graph_texts, expected_s, observed)
+                else:
+                    Base::rh_bytes_equal_span(graph_texts, expected_s, expected_e, observed, 0, observed.count.i64())
             Base::rh_push_text(out, "{\"schema\":\"rh-artifact-observation-result/1\",\"graph_sha256\":\"")
             out.extend(bytes_view(graph_digest))
             Base::rh_push_text(out, "\",\"artifact_id\":")
@@ -138,7 +170,10 @@ module ArtifactObservation:
             Base::rh_push_text(out, "\",\"identity_state\":\"")
             Base::rh_push_text(out, "match") if matches
             Base::rh_push_text(out, "changed") if not matches
-            Base::rh_push_text(out, "\",\"digest_algorithm\":\"sha256\",\"verification_basis\":\"raw_cargo_archive_bytes\",\"archive_size_bytes\":")
+            if digest_algorithm == RH_ARTIFACT_OBSERVATION_SHA256:
+                Base::rh_push_text(out, "\",\"digest_algorithm\":\"sha256\",\"verification_basis\":\"raw_cargo_archive_bytes\",\"archive_size_bytes\":")
+            else:
+                Base::rh_push_text(out, "\",\"digest_algorithm\":\"sha512\",\"verification_basis\":\"raw_npm_tarball_bytes\",\"archive_size_bytes\":")
             Base::rh_push_decimal_i64(out, archive.count.i64())
             Base::rh_push_text(out, "}")
             0

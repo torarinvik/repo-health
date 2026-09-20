@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/test_m07_sha.sh — M07-04 publication integrity primitive.
-# 1) SHA-256 + HMAC-SHA256 checked against published vectors.
+# 1) SHA-256, SHA-512/SRI Base64, and HMAC-SHA256 checked against published vectors.
 # 2) CLI sign/verify round-trip on a real file.
 # 3) Negative controls: tampered subject, wrong key, empty key, malformed sig.
 set -euo pipefail
