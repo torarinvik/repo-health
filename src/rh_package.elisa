@@ -529,7 +529,7 @@ module Package:
 
         def rh_cargo_parse(lock: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             unknown_out[0] <- 0
-            while pos < lock.count |count: i64 = 0, cur: i64 = -1, in_deps: bool = false, top_level: bool = true, lock_version_seen: bool = false, pos: usize = 0, pkgs, pool, reqs, unknown_out| -> count:
+            parsed_count: i64 = while pos < lock.count |count: i64 = 0, cur: i64 = -1, in_deps: bool = false, top_level: bool = true, lock_version_seen: bool = false, root_seen: bool = false, pos: usize = 0, pkgs, pool, reqs, unknown_out| -> count:
                 lend: usize =
                     nl: i64 = Base::rh_find_byte(lock, pos, 10)
                     nl.usize() if nl >= 0 else lock.count
@@ -544,6 +544,12 @@ module Package:
                         top_level <- false
                         in_deps <- false
                         if rh_span_lit(lock, ts.usize(), te.usize(), "[[package]]"):
+                            cur <- rh_node_add(pkgs, 0)
+                            return -1 if cur < 0
+                            count <- count + 1
+                        elif rh_span_lit(lock, ts.usize(), te.usize(), "[root]"):
+                            return -1 if root_seen
+                            root_seen <- true
                             cur <- rh_node_add(pkgs, 0)
                             return -1 if cur < 0
                             count <- count + 1
@@ -614,6 +620,7 @@ module Package:
                         vs4: mutable i64 = 0
                         ve4: mutable i64 = 0
                         return -1 if rh_toml_qstring(lock, ke.usize(), te.usize(), pool, &vs4, &ve4) < 0
+                        return -1 if not rh_cargo_checksum_valid(pool, vs4, ve4)
                         node4: mutable RhPkgNode = pkgs[cur.usize()]
                         node4.has_digest <- 1
                         node4.dig_s <- vs4
@@ -635,6 +642,27 @@ module Package:
                     else:
                         unknown_out[0] <- unknown_out[0] + 1
                 pos <- lend + 1
+
+            return -1 if parsed_count < 0 or not rh_cargo_nodes_valid(pkgs)
+            parsed_count
+
+        def rh_cargo_nodes_valid(pkgs: darray[RhPkgNode]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < pkgs.count.i64() |i: i64 = 0, pkgs|:
+                node: RhPkgNode = pkgs[i.usize()]
+                return false if node.name_s < 0 or node.name_e <= node.name_s or node.ver_s < 0 or node.ver_e <= node.ver_s
+                i <- i + 1
+            true
+
+        def rh_cargo_checksum_valid(pool: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or end - start != 64 or end > pool.count.i64()
+            while i < 64 |i: i64 = 0, pool, start|:
+                b: u8 = pool[(start + i).usize()]
+                is_digit: bool = b >= 48 and b <= 57
+                is_lower_hex: bool = b >= 97 and b <= 102
+                is_upper_hex: bool = b >= 65 and b <= 70
+                return false if not is_digit and not is_lower_hex and not is_upper_hex
+                i <- i + 1
+            true
 
         # Parse dependency entries in [s, e). Returns 1 when the list stays open
         # (no ']' seen), 0 when closed, -1 malformed. in_deps echoes the mode

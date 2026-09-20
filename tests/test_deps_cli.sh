@@ -668,6 +668,36 @@ assert g["nodes"][4]["source_identity_sha256"] == hashlib.sha256(b"sparse+https:
 print("[deps] Cargo source identity and exact locked version OK")
 PY
 
+echo "[deps] unversioned Cargo v2 root table preserves direct dependencies"
+mkdir -p "$T/cargo-v2-root"
+cp "$ROOT/fixtures/packages/cargo-v2-root.lock" "$T/cargo-v2-root/Cargo.lock"
+"$ROOT/build/rh_cli" deps --repo "$T/cargo-v2-root" --out "$T/cargo-v2-root-out" \
+  | grep -q "ecosystems=1 cargo=1/1 unresolved=0 unsupported=0" || fail "Cargo v2 root summary"
+python3 - "$T/cargo-v2-root-out" <<'PY'
+import json, sys
+out = sys.argv[1]
+g = json.load(open(out + "/deps-cargo-graph.json"))
+m = json.load(open(out + "/deps-metrics.json"))
+assert [n["name"] for n in g["nodes"]] == ["legacy-app", "left"], g["nodes"]
+assert [n["version"] for n in g["nodes"]] == ["1.0.0", "1.0.0"], g["nodes"]
+assert [(e["from"], e["to"]) for e in g["edges"]] == [(0, 1)], g["edges"]
+assert len(g["artifacts"]) == 1 and g["artifacts"][0]["expected_digest"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", g["artifacts"]
+by = {item["ecosystem"]: item for item in m["by_ecosystem"]}
+assert by["cargo"]["requirements_direct"] == 1 and by["cargo"]["resolved_direct_versions"] == 1, by
+print("[deps] Cargo legacy root, exact source edge, and inline checksum OK")
+PY
+
+echo "[deps] malformed Cargo SHA-256 checksum fails closed"
+mkdir -p "$T/cargo-bad-checksum"
+sed 's/checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/checksum = "not-a-checksum"/' \
+  "$ROOT/fixtures/packages/cargo-v2-root.lock" > "$T/cargo-bad-checksum/Cargo.lock"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/cargo-bad-checksum" --out "$T/cargo-bad-checksum-out" >/dev/null 2>&1
+rc_bad_cargo_checksum=$?
+set -e
+[[ "$rc_bad_cargo_checksum" -eq 4 ]] || fail "malformed Cargo checksum must fail closed (got $rc_bad_cargo_checksum)"
+[[ ! -f "$T/cargo-bad-checksum-out/deps-cargo-graph.json" ]] || fail "malformed Cargo checksum wrote a partial graph"
+
 echo "[deps] npm lockfile v2 package map is supported"
 mkdir -p "$T/npm-v2"
 cp "$ROOT/fixtures/packages/npm-v2-lock.json" "$T/npm-v2/package-lock.json"
