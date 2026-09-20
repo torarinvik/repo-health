@@ -20,6 +20,7 @@ cp "$ROOT"/fixtures/inventory/*.json "$T"/
 
 echo "[inventory] CycloneDX 1.5 (supported) -> observed"
 "$ROOT/build/rh_cli" inventory --format cyclonedx --input "$T/cyclonedx-1.5.json" --out "$T/cdx.json" >/dev/null || fail "cyclonedx parse"
+cmp -s "$T/cdx.json" "$ROOT/fixtures/inventory-results/cyclonedx-1.5.json" || fail "CycloneDX result differs from golden"
 python3 - "$T/cdx.json" "$T/cyclonedx-1.5.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -69,6 +70,7 @@ PY
 
 echo "[inventory] SPDX-2.3 (supported) -> observed, unknown keys counted"
 "$ROOT/build/rh_cli" inventory --format spdx --input "$T/spdx-2.3.json" --out "$T/spdx.json" >/dev/null || fail "spdx parse"
+cmp -s "$T/spdx.json" "$ROOT/fixtures/inventory-results/spdx-2.3.json" || fail "SPDX result differs from golden"
 python3 - "$T/spdx.json" "$T/spdx-2.3.json" <<'PY'
 import hashlib
 import json, sys
@@ -120,6 +122,7 @@ set +e
 rc_unsup=$?
 set -e
 [[ "$rc_unsup" -eq 3 ]] || fail "unsupported spec must exit 3 (got $rc_unsup)"
+cmp -s "$T/badver.out" "$ROOT/fixtures/inventory-results/cyclonedx-unsupported.json" || fail "unsupported CycloneDX result differs from golden"
 python3 - "$T/badver.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
