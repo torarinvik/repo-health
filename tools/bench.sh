@@ -11,9 +11,20 @@ mkdir -p "$OUT_DIR"
 [[ -x "$ROOT/build/bench_runner" ]] || bash "$ROOT/tools/build.sh" >/dev/null
 
 python3 - "$ROOT" "$OUT_DIR" <<'PY'
-import json, os, subprocess, sys, time
+import json, os, shutil, sys
+root = sys.argv[1]
+sys.path.insert(0, os.path.join(root, "tools"))
+from bench_support import environment_metadata, measure, output_fields, throughput_and_outcomes
 root, out_dir = sys.argv[1], sys.argv[2]
 binp = os.path.join(root, "build", "bench_runner")
+reps = int(os.environ.get("RH_BENCH_REPS", "10"))
+if reps < 2:
+    raise SystemExit("RH_BENCH_REPS must be at least 2")
+compiler = os.environ.get("RH_COMPILER") or os.environ.get("ELISA_COMPILER_BIN") or shutil.which("elisac-stage1")
+if not compiler:
+    compiler_root = os.environ.get("ELISA_COMPILER_ROOT", os.path.join(root, "..", "Elisa-compiler"))
+    compiler = os.path.join(compiler_root, "scripts", "elisac_stage1.sh")
+metadata = environment_metadata(root, binp, compiler)
 workloads = [
     (100, 42, "all", "uniform"),
     (1000, 42, "all", "uniform"),
@@ -24,30 +35,29 @@ workloads = [
 ]
 runs = []
 for nodes, seed, stage, distribution in workloads:
-    t0 = time.perf_counter()
-    out1 = subprocess.check_output([binp, str(nodes), str(seed), stage, distribution], text=True).strip()
-    t1 = time.perf_counter()
-    out2 = subprocess.check_output([binp, str(nodes), str(seed), stage, distribution], text=True).strip()
-    if out1 != out2:
-        raise SystemExit("benchmark dataset not deterministic for %s/%s/%s" % (nodes, seed, distribution))
-    digest = ""
-    for tok in out1.split():
-        if tok.startswith("digest="):
-            digest = tok.split("=", 1)[1]
+    sample = measure([binp, str(nodes), str(seed), stage, distribution], reps)
+    out1 = sample["output"]
+    fields = output_fields(out1)
+    digest = fields.get("digest", "")
+    if not digest or "nodes" not in fields or "edges" not in fields:
+        raise SystemExit("benchmark output lacks structural fields for %s/%s/%s" % (nodes, seed, distribution))
     runs.append({
         "nodes": nodes,
         "seed": seed,
         "stage": stage,
         "distribution": distribution,
-        "elapsed_ms": round((t1 - t0) * 1000.0, 3),
+        "elapsed_ms": sample["latency"]["median_ms"],
+        "latency": sample["latency"],
+        "peak_rss": sample["peak_rss"],
+        **throughput_and_outcomes(sample, fields),
         "digest": digest,
         "output": out1,
     })
 manifest = {
-    "bench_version": "rh-bench/2",
-    "note": "elapsed_ms is machine-specific and noisy; graph distributions, stage output, dataset digests, and counts are deterministic",
-    "toolchain": "Elisa stage1 snapshot (see TOOLCHAIN.md)",
-    "reps": 1,
+    **metadata,
+    "bench_version": "rh-bench/3",
+    "note": "timings and peak RSS are machine-specific; graph distributions, stage output, dataset digests, and counts are deterministic",
+    "reps": reps,
     "runs": runs,
 }
 path = os.path.join(out_dir, "bench-manifest.json")
@@ -55,6 +65,6 @@ with open(path, "w", encoding="utf-8") as fh:
     json.dump(manifest, fh, indent=2, sort_keys=True)
     fh.write("\n")
 for r in runs:
-    print("bench %5d nodes seed=%d %-12s %-7s %8.3f ms %s" % (r["nodes"], r["seed"], r["distribution"], r["stage"], r["elapsed_ms"], r["digest"]))
+    print("bench %5d nodes seed=%d %-12s %-7s median=%8.3f ms p95=%8.3f ms nodes/s=%9.3f rss=%d %s" % (r["nodes"], r["seed"], r["distribution"], r["stage"], r["latency"]["median_ms"], r["latency"]["p95_ms"], r["throughput"]["nodes_per_second"], r["peak_rss"]["max_bytes"], r["digest"]))
 print("bench-manifest OK:", path)
 PY
