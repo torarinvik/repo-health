@@ -1,4 +1,4 @@
-
+include "./rh_sha256.elisa"
 
 module Package:
     public:
@@ -6,9 +6,9 @@ module Package:
         # matching (M03; Cargo + npm reference pair).
         #
         # Coordinates keep registry identity, namespace, normalized and raw names,
-        # and ecosystem-native versions distinct (M03-01); identical names in
-        # different registries never collide because the ecosystem is part of the
-        # key. Version labels and artifact digests are separate fields everywhere
+        # and ecosystem-native versions distinct (M03-01). Source identity remains
+        # separate from ecosystem and name, so equal name/version pairs from two
+        # registries remain distinct nodes. Version labels and artifact digests are separate fields everywhere
         # (a digest change under one label is a new artifact, M03-02). Dependency
         # REQUIREMENTS (manifest strings) never become exact edges without
         # resolution evidence; ambiguous Cargo name matches stay unresolved with
@@ -342,8 +342,10 @@ module Package:
             0
 
         # --- Package graph model (M03-01/02/06). Node identities are
-        # (ecosystem, registry, normalized name, version, source-kind); the pool
-        # owns every string so spans stay valid for the graph lifetime. Edges are
+        # (ecosystem, source kind + source locator, normalized name, version);
+        # the pool owns every string so spans stay valid for the graph lifetime.
+        # Cargo source locators are fingerprinted in output, never emitted raw.
+        # Edges are
         # RESOLVED (exact from/to indices); anything unresolvable is an
         # RhUnresolved with a reason, never a guessed edge (R009).
         struct RhPkgNode:
@@ -352,6 +354,8 @@ module Package:
             name_e: mutable i64
             ver_s: mutable i64
             ver_e: mutable i64
+            origin_s: mutable i64
+            origin_e: mutable i64
             src_kind: mutable u8
             has_digest: mutable u8
             dig_s: mutable i64
@@ -399,7 +403,7 @@ module Package:
 
         def rh_node_add(pkgs: mutable darray[RhPkgNode]&, eco: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if pkgs.count.i64() > 100000
-            pkgs.push(RhPkgNode{eco: eco, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, src_kind: 3, has_digest: 0, dig_s: -1, dig_e: -1, dev: 0, optional: 0})
+            pkgs.push(RhPkgNode{eco: eco, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, origin_s: -1, origin_e: -1, src_kind: 3, has_digest: 0, dig_s: -1, dig_e: -1, dev: 0, optional: 0})
             pkgs.count.i64() - 1
 
         # Exact node match (all coordinates incl. source kind).
@@ -533,6 +537,8 @@ module Package:
                         return -1 if rh_toml_qstring(lock, ke.usize(), te.usize(), pool, &vs3, &ve3) < 0
                         node3: mutable RhPkgNode = pkgs[cur.usize()]
                         node3.src_kind <- rh_cargo_src_kind(pool, vs3.usize(), ve3.usize())
+                        node3.origin_s <- vs3
+                        node3.origin_e <- ve3
                         pkgs[cur.usize()] <- node3
                     elif rh_span_lit(lock, ks.usize(), ke.usize(), "checksum"):
                         vs4: mutable i64 = 0
@@ -603,9 +609,13 @@ module Package:
                                 vend <- vend + 1
                         ver_s <- rest.i64()
                         ver_e <- vend.i64()
-                        if vend < ve.usize() and pool[vend] == 40:
+                        source_pos: usize =
+                            while source_pos < ve.usize() |source_pos: usize = vend, pool| -> source_pos:
+                                break if pool[source_pos] != 32
+                                source_pos <- source_pos + 1
+                        if source_pos < ve.usize() and pool[source_pos] == 40:
                             return -1 if pool[ve.usize() - 1] != 41
-                            src_s <- (vend + 1).i64()
+                            src_s <- (source_pos + 1).i64()
                             src_e <- (ve.usize() - 1).i64()
                 req: RhRequire = RhRequire{from: cur, name_s: vs, name_e: nm_e.i64(), ver_s: ver_s, ver_e: ver_e, src_s: src_s, src_e: src_e, req_s: -1, req_e: -1, depctx: 0}
                 reqs.push(req)
@@ -634,10 +644,10 @@ module Package:
             edges.push(RhDepEdge{from: from, dst: dst, depctx: depctx})
             true
 
-        # Resolve Cargo requirements to exact edges. Bare names with several
-        # same-name versions stay UNRESOLVED (reason 1): without the registry
-        # index there is no evidence which one applies (R009). A pinned
-        # "name version (source)" entry resolves by exact version match.
+        # Resolve Cargo requirements to exact edges. A package ID's version and
+        # source are both identity fields; omitting either can merge registry
+        # copies of the same crate. Bare names resolve only when one candidate
+        # remains (R009).
         def rh_cargo_resolve(pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             while r < reqs.count |made: i64 = 0, r: usize = 0, pkgs, pool, edges, unresolved| -> made:
                 q: RhRequire = reqs[r]
@@ -645,41 +655,20 @@ module Package:
                     while n < pkgs.count.i64() |first: i64 = -1, count: i64 = 0, n: i64 = 0, pkgs, pool| -> first, count:
                         nd: RhPkgNode = pkgs[n.usize()]
                         if nd.eco == 0 and rh_name_eq(0, pool, nd.name_s.usize(), nd.name_e.usize(), q.name_s.usize(), q.name_e.usize()):
-                            if first < 0:
-                                first <- n
-                            count <- count + 1
+                            version_matches: bool = q.ver_s < 0 or (nd.ver_s >= 0 and rh_span_eq2(pool, nd.ver_s.usize(), nd.ver_e.usize(), pool, q.ver_s.usize(), q.ver_e.usize()))
+                            source_matches: bool = q.src_s < 0 or (nd.origin_s >= 0 and rh_span_eq2(pool, nd.origin_s.usize(), nd.origin_e.usize(), pool, q.src_s.usize(), q.src_e.usize()))
+                            if version_matches and source_matches:
+                                if first < 0:
+                                    first <- n
+                                count <- count + 1
                         n <- n + 1
                 if count == 0:
-                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: -1, req_e: -1, reason: 0})
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 0})
                 elif count == 1:
                     if rh_edge_add(edges, q.from, first, 0):
                         made <- made + 1
                 else:
-                    if q.ver_s < 0:
-                        unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: -1, req_e: -1, reason: 1})
-                    else:
-                        rv: mutable RhSemver = RhSemver{major: 0, minor: 0, patch: 0, pre_s: 0, pre_e: 0}
-                        if not rh_semver_parse(pool, q.ver_s.usize(), q.ver_e.usize(), &rv):
-                            unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 0})
-                        else:
-                            hits, hit_idx =
-                                while m < pkgs.count.i64() |hits: i64 = 0, hit_idx: i64 = -1, m: i64 = 0, pkgs, pool, rv| -> hits, hit_idx:
-                                    nd2: RhPkgNode = pkgs[m.usize()]
-                                    if nd2.eco == 0 and rh_name_eq(0, pool, nd2.name_s.usize(), nd2.name_e.usize(), q.name_s.usize(), q.name_e.usize()):
-                                        cv: mutable RhSemver = RhSemver{major: 0, minor: 0, patch: 0, pre_s: 0, pre_e: 0}
-                                        if rh_semver_parse(pool, nd2.ver_s.usize(), nd2.ver_e.usize(), &cv):
-                                            if rh_semver_cmp(pool, &rv, &cv) == 0:
-                                                hits <- hits + 1
-                                                hit_idx <- m
-                                    m <- m + 1
-                            if hits == 1:
-                                if rh_edge_add(edges, q.from, hit_idx, 0):
-                                    made <- made + 1
-                            elif hits == 0:
-                                unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 0})
-                            else:
-                                if rh_edge_add(edges, q.from, hit_idx, 0):
-                                    made <- made + 1
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 1})
                 r <- r + 1
 
         def rh_cargo_src_kind(pool: darray[u8]&, s: usize, e: usize) -> u8 can[Memory.Allocate, Abort.Panic]:
@@ -3018,7 +3007,22 @@ module Package:
                     Base::rh_push_text(out, "\"")
                 Base::rh_push_text(out, ",\"source\":\"")
                 Base::rh_push_text(out, rh_src_label(n.src_kind))
-                Base::rh_push_text(out, "\",\"digest\":")
+                out.push(34)
+                if n.origin_s >= 0:
+                    origin_start: mutable usize = n.origin_s.usize()
+                    origin_end: mutable usize = n.origin_e.usize()
+                    source_identity: mutable darray[u8] = |pool, origin_start, origin_end|
+                        source_bytes: mutable darray[u8] = []
+                        while source_pos < origin_end |source_pos: usize = origin_start, pool, source_bytes, origin_end|:
+                            source_bytes.push(pool[source_pos])
+                            source_pos <- source_pos + 1
+                        source_hash: mutable darray[u8] = []
+                        Sha256::rh_sha256(source_bytes, source_hash)
+                        source_hash
+                    Base::rh_push_text(out, ",\"source_identity_sha256\":\"")
+                    out.extend(bytes_view(source_identity))
+                    out.push(34)
+                Base::rh_push_text(out, ",\"digest\":")
                 rh_emit_bool(out, n.has_digest != 0)
                 Base::rh_push_text(out, ",\"dev\":")
                 rh_emit_bool(out, n.dev != 0)

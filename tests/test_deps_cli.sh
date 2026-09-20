@@ -509,6 +509,23 @@ set -e
 [[ "$rc_bad_sum" -eq 4 ]] || fail "malformed go.sum must exit 4 (got $rc_bad_sum)"
 [[ ! -f "$T/bad-go-out/deps-go-graph.json" ]] || fail "partial graph written on malformed go.sum"
 
+echo "[deps] Cargo lock resolution distinguishes registry and exact version"
+mkdir -p "$T/cargo-source-collision"
+cp "$ROOT/fixtures/packages/cargo-source-collision.lock" "$T/cargo-source-collision/Cargo.lock"
+"$ROOT/build/rh_cli" deps --repo "$T/cargo-source-collision" --out "$T/cargo-source-collision-out" >/dev/null || fail "Cargo source-collision deps failed"
+python3 - "$T/cargo-source-collision-out/deps-cargo-graph.json" <<'PY'
+import hashlib, json, sys
+g = json.load(open(sys.argv[1]))
+assert [n["name"] for n in g["nodes"]] == ["app", "shared", "shared", "shared"], g["nodes"]
+assert [n["version"] for n in g["nodes"]] == ["0.1.0", "1.0.0", "1.0.0", "2.0.0"], g["nodes"]
+assert [(e["from"], e["to"]) for e in g["edges"]] == [(0, 1), (0, 2), (0, 3)], g["edges"]
+assert len(g["unresolved"]) == 1 and g["unresolved"][0]["reason"] == "missing", g["unresolved"]
+assert g["nodes"][1]["source_identity_sha256"] == hashlib.sha256(b"registry+https://registry-a.example/index").hexdigest(), g["nodes"][1]
+assert g["nodes"][2]["source_identity_sha256"] == hashlib.sha256(b"registry+https://registry-b.example/index").hexdigest(), g["nodes"][2]
+assert g["nodes"][3]["source_identity_sha256"] == g["nodes"][1]["source_identity_sha256"], g["nodes"][3]
+print("[deps] Cargo source identity and exact locked version OK")
+PY
+
 echo "[deps] negative: no manifests fails closed"
 mkdir -p "$T/empty"
 set +e

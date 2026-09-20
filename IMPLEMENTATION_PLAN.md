@@ -490,13 +490,13 @@ Use each ecosystem's official manifests, lockfile formats, and version semantics
 
 ### 8.3 Work packages
 
-**M03-01: Package coordinates.** Parse and preserve Package URLs where supported, registry identity, namespace, normalized names, raw names, and ecosystem-specific versions. Add collision fixtures for identical names in different registries.
+**M03-01: Package coordinates.** Parse and preserve Package URLs where supported, registry identity, namespace, normalized names, raw names, and ecosystem-specific versions. Add collision fixtures for identical names in different registries. Cargo lock nodes now retain source locators internally, resolve by exact name/version/source identity, and emit a SHA-256 source fingerprint instead of exposing the raw locator; `fixtures/packages/cargo-source-collision.lock` proves equal name/version coordinates from two registries stay distinct.
 
 **M03-02: Artifact identities.** Store expected and observed digests independently from version labels. Model multiple artifacts per package version and changed bytes under the same label.
 
 **M03-03: Manifest parsers.** Extract declared direct requirements, scope, optional conditions, and source spans without executing package scripts. Store unsupported expressions intact.
 
-**M03-04: Lockfile parsers.** Produce resolved graphs for supported contexts. Preserve multiple versions of one package, workspace members, registry aliases, local/path dependencies, Git dependencies, and unresolved external conditions.
+**M03-04: Lockfile parsers.** Produce resolved graphs for supported contexts. Preserve multiple versions of one package, workspace members, registry aliases, local/path dependencies, Git dependencies, and unresolved external conditions. Cargo lock dependency IDs are filtered by their exact locked version and source when present; absent matches remain unresolved instead of falling through to a same-name candidate.
 
 **M03-05: Registry enrichment.** Collect version metadata, publication times, source links, deprecations/yanks, and declared dependencies where available. Package source links are mapping assertions, not trusted project identity.
 
