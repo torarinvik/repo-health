@@ -367,6 +367,7 @@ module Package:
             from: mutable i64
             dst: mutable i64
             depctx: mutable u8
+            optional: mutable u8
 
         struct RhUnresolved:
             from: mutable i64
@@ -375,6 +376,7 @@ module Package:
             req_s: mutable i64
             req_e: mutable i64
             reason: mutable u8
+            optional: mutable u8
 
         struct RhRequire:
             from: mutable i64
@@ -387,6 +389,7 @@ module Package:
             req_s: mutable i64
             req_e: mutable i64
             depctx: mutable u8
+            optional: mutable u8
 
         # Unresolved reasons: 0 no candidate, 1 ambiguous (multiple versions),
         # 2 unsupported context (local/git/deleted refs we do not resolve here).
@@ -639,7 +642,7 @@ module Package:
                             return -1 if pool[ve.usize() - 1] != 41
                             src_s <- (source_pos + 1).i64()
                             src_e <- (ve.usize() - 1).i64()
-                req: RhRequire = RhRequire{from: cur, name_s: vs, name_e: nm_e.i64(), ver_s: ver_s, ver_e: ver_e, src_s: src_s, src_e: src_e, req_s: -1, req_e: -1, depctx: 0}
+                req: RhRequire = RhRequire{from: cur, name_s: vs, name_e: nm_e.i64(), ver_s: ver_s, ver_e: ver_e, src_s: src_s, src_e: src_e, req_s: -1, req_e: -1, depctx: 0, optional: 0}
                 reqs.push(req)
             1
 
@@ -658,12 +661,16 @@ module Package:
             rh_quoted_span(line, i, e, pool, vs, ve)
 
         # Append an edge unless the identical (from, to, depctx) triple exists.
-        def rh_edge_add(edges: mutable darray[RhDepEdge]&, from: i64, dst: i64, depctx: u8) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_edge_add(edges: mutable darray[RhDepEdge]&, from: i64, dst: i64, depctx: u8, optional: u8) -> bool can[Memory.Allocate, Abort.Panic]:
             while i < edges.count.i64() |i: i64 = 0, edges, from, dst, depctx|:
                 e: RhDepEdge = edges[i.usize()]
-                return false if e.from == from and e.dst == dst and e.depctx == depctx
+                if e.from == from and e.dst == dst and e.depctx == depctx:
+                    if optional != 0 and e.optional == 0:
+                        e.optional <- optional
+                        edges[i.usize()] <- e
+                    return false
                 i <- i + 1
-            edges.push(RhDepEdge{from: from, dst: dst, depctx: depctx})
+            edges.push(RhDepEdge{from: from, dst: dst, depctx: depctx, optional: optional})
             true
 
         # Resolve Cargo requirements to exact edges. A package ID's version and
@@ -685,12 +692,12 @@ module Package:
                                 count <- count + 1
                         n <- n + 1
                 if count == 0:
-                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 0})
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 0, optional: 0})
                 elif count == 1:
-                    if rh_edge_add(edges, q.from, first, 0):
+                    if rh_edge_add(edges, q.from, first, 0, q.optional):
                         made <- made + 1
                 else:
-                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 1})
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 1, optional: 0})
                 r <- r + 1
 
         def rh_cargo_src_kind(pool: darray[u8]&, s: usize, e: usize) -> u8 can[Memory.Allocate, Abort.Panic]:
@@ -728,6 +735,7 @@ module Package:
         # (recorded unresolved, reason 2). Requirement STRINGS are preserved
         # verbatim in req_s/req_e and never treated as resolved versions (R009).
 
+    private:
         def rh_npm_entry_name(pool: mutable darray[u8]&, ps: usize, pe: usize, ns: mutable i64&, ne: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if pe <= ps
             last: usize =
@@ -758,7 +766,21 @@ module Package:
             start
 
         # Collect one requirement map (name -> range string) from a JSON object.
-        def rh_npm_req_map(jnodes: darray[Json::RhJsonNode]&, pool: mutable darray[u8]&, texts: darray[u8]&, obj: i64, from: i64, depctx: u8, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_npm_optional_peer(jnodes: darray[Json::RhJsonNode]&, input: darray[u8]&, texts: darray[u8]&, peer_meta: i64, name_s: usize, name_e: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if peer_meta < 0
+            meta: Json::RhJsonNode = jnodes[peer_meta.usize()]
+            return false if meta.kind != 5
+            while child >= 0 |child: i64 = meta.first_child|:
+                key: Json::RhJsonNode = jnodes[child.usize()]
+                value: i64 = key.next_sibling
+                return false if value < 0
+                if key.kind == 3 and rh_span_eq2(texts, key.text_start.usize(), key.text_end.usize(), texts, name_s, name_e):
+                    optional_idx: i64 = Json::rh_json_obj_get(jnodes, texts, value, "optional")
+                    return Json::rh_json_is_true(jnodes, input, optional_idx)
+                child <- jnodes[value.usize()].next_sibling
+            false
+
+        def rh_npm_req_map(jnodes: darray[Json::RhJsonNode]&, pool: mutable darray[u8]&, texts: darray[u8]&, input: darray[u8]&, obj: i64, from: i64, depctx: u8, peer_meta: i64, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             o: Json::RhJsonNode = jnodes[obj.usize()]
             while child >= 0 |made: i64 = 0, child: i64 = o.first_child, pool, reqs| -> made:
                 kn: Json::RhJsonNode = jnodes[child.usize()]
@@ -766,11 +788,14 @@ module Package:
                 return -1 if vn < 0
                 vv: Json::RhJsonNode = jnodes[vn.usize()]
                 return -1 if vv.kind != 3
+                optional_peer: mutable u8 = 0
+                if depctx == 3 and rh_npm_optional_peer(jnodes, input, texts, peer_meta, kn.text_start.usize(), kn.text_end.usize()):
+                    optional_peer <- 1
                 ns: i64 = rh_pool_copy(pool, texts, kn.text_start.usize(), kn.text_end.usize())
                 ne: i64 = pool.count.i64()
                 rs: i64 = rh_pool_copy(pool, texts, vv.text_start.usize(), vv.text_end.usize())
                 re: i64 = pool.count.i64()
-                reqs.push(RhRequire{from: from, name_s: ns, name_e: ne, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rs, req_e: re, depctx: depctx})
+                reqs.push(RhRequire{from: from, name_s: ns, name_e: ne, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rs, req_e: re, depctx: depctx, optional: optional_peer})
                 made <- made + 1
                 child <- jnodes[vn.usize()].next_sibling
 
@@ -894,16 +919,16 @@ module Package:
         # v1 requirements: the "requires" object maps names to range strings.
         # Nested "dependencies" are package ENTRIES (walked separately), never
         # requirement strings (R009).
-        def rh_npm_v1_requires(jnodes: darray[Json::RhJsonNode]&, pool: mutable darray[u8]&, texts: darray[u8]&, entry: i64, from: i64, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_npm_v1_requires(jnodes: darray[Json::RhJsonNode]&, pool: mutable darray[u8]&, texts: darray[u8]&, input: darray[u8]&, entry: i64, from: i64, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             req: i64 = Json::rh_json_obj_get(jnodes, texts, entry, "requires")
             return 0 if req < 0
             rn: Json::RhJsonNode = jnodes[req.usize()]
             return 0 if rn.kind != 5
-            rh_npm_req_map(jnodes, pool, texts, req, from, 0, reqs)
+            rh_npm_req_map(jnodes, pool, texts, input, req, from, 0, -1, reqs)
 
         def rh_npm_v1_walk(jnodes: darray[Json::RhJsonNode]&, pool: mutable darray[u8]&, texts: darray[u8]&, input: darray[u8]&, obj: i64, cur_s: usize, cur_e: usize, pkgs: mutable darray[RhPkgNode]&, paths: mutable darray[i64]&, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             o: Json::RhJsonNode = jnodes[obj.usize()]
-            while child >= 0 |child: i64 = o.first_child, jnodes, pool, texts, cur_s, cur_e, pkgs, paths, reqs|:
+            while child >= 0 |child: i64 = o.first_child, jnodes, pool, texts, input, cur_s, cur_e, pkgs, paths, reqs|:
                 kn: Json::RhJsonNode = jnodes[child.usize()]
                 vn: i64 = kn.next_sibling
                 return -1 if vn < 0
@@ -916,7 +941,7 @@ module Package:
                     block_result: i64 = rh_npm_add_node(pkgs, pool, paths, texts, input, vn, jnodes, kid_s.usize(), kid_e.usize(), -1, -1, -1, -1)
                     block_result
                 return -1 if entry_idx < 0
-                return -1 if rh_npm_v1_requires(jnodes, pool, texts, vn, entry_idx, reqs) < 0
+                return -1 if rh_npm_v1_requires(jnodes, pool, texts, input, vn, entry_idx, reqs) < 0
                 nested: i64 = Json::rh_json_obj_get(jnodes, texts, vn, "dependencies")
                 if nested >= 0:
                     nn2: Json::RhJsonNode = jnodes[nested.usize()]
@@ -958,6 +983,7 @@ module Package:
         # paths[]), requirements, then resolves. Root identity comes from the
         # lock top-level name/version (always present in real locks; missing
         # fails closed). Returns the root index, or -1 malformed.
+    public:
         def rh_npm_lock_parse(lock_bytes: darray[u8]&, pkg_bytes: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, paths: mutable darray[i64]&, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             lnodes: mutable darray[Json::RhJsonNode] = []
             ltexts: mutable darray[u8] = []
@@ -1020,7 +1046,7 @@ module Package:
         # version fall back to top-level when absent there).
         def rh_npm_packages_walk(lnodes: darray[Json::RhJsonNode]&, pool: mutable darray[u8]&, ltexts: darray[u8]&, linput: darray[u8]&, pkgs_obj: i64, root: i64, tn_s: i64, tn_e: i64, tv_s: i64, tv_e: i64, pkgs: mutable darray[RhPkgNode]&, paths: mutable darray[i64]&, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             po: Json::RhJsonNode = lnodes[pkgs_obj.usize()]
-            while child >= 0 |child: i64 = po.first_child, lnodes, pool, ltexts, root, tn_s, tn_e, tv_s, tv_e, pkgs, paths, reqs|:
+            while child >= 0 |child: i64 = po.first_child, lnodes, pool, ltexts, linput, root, tn_s, tn_e, tv_s, tv_e, pkgs, paths, reqs|:
                 kn: Json::RhJsonNode = lnodes[child.usize()]
                 vn: i64 = kn.next_sibling
                 return -1 if vn < 0
@@ -1029,11 +1055,11 @@ module Package:
                 ps: i64 = rh_pool_copy(pool, ltexts, kn.text_start.usize(), kn.text_end.usize())
                 pe: i64 = pool.count.i64()
                 if ps == pe:
-                    return -1 if rh_npm_entry_reqs(lnodes, pool, ltexts, vn, root, reqs) < 0
+                    return -1 if rh_npm_entry_reqs(lnodes, pool, ltexts, linput, vn, root, reqs) < 0
                 else:
                     idx: i64 = rh_npm_add_node(pkgs, pool, paths, ltexts, linput, vn, lnodes, ps.usize(), pe.usize(), -1, -1, -1, -1)
                     return -1 if idx < 0
-                    return -1 if rh_npm_entry_reqs(lnodes, pool, ltexts, vn, idx, reqs) < 0
+                    return -1 if rh_npm_entry_reqs(lnodes, pool, ltexts, linput, vn, idx, reqs) < 0
                 child <- lnodes[vn.usize()].next_sibling
             0
 
@@ -1046,24 +1072,28 @@ module Package:
             return -1 if proot < 0
             po: Json::RhJsonNode = pnodes[proot.usize()]
             return -1 if po.kind != 5
-            return -1 if rh_npm_entry_reqs(pnodes, pool, ptexts, proot, root, reqs) < 0
+            return -1 if rh_npm_entry_reqs(pnodes, pool, ptexts, pkg_bytes, proot, root, reqs) < 0
             0
 
         # Iterate one entry's four dependency maps into requirements.
-        def rh_npm_entry_reqs(jnodes: darray[Json::RhJsonNode]&, pool: mutable darray[u8]&, texts: darray[u8]&, entry: i64, from: i64, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_npm_entry_reqs(jnodes: darray[Json::RhJsonNode]&, pool: mutable darray[u8]&, texts: darray[u8]&, input: darray[u8]&, entry: i64, from: i64, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             maps: mutable i64 = 0
-            maps <- maps + rh_npm_map_reqs(jnodes, pool, texts, entry, from, "dependencies", 0, reqs)
-            maps <- maps + rh_npm_map_reqs(jnodes, pool, texts, entry, from, "devDependencies", 1, reqs)
-            maps <- maps + rh_npm_map_reqs(jnodes, pool, texts, entry, from, "optionalDependencies", 2, reqs)
-            maps <- maps + rh_npm_map_reqs(jnodes, pool, texts, entry, from, "peerDependencies", 3, reqs)
+            maps <- maps + rh_npm_map_reqs(jnodes, pool, texts, input, entry, from, "dependencies", 0, reqs)
+            maps <- maps + rh_npm_map_reqs(jnodes, pool, texts, input, entry, from, "devDependencies", 1, reqs)
+            maps <- maps + rh_npm_map_reqs(jnodes, pool, texts, input, entry, from, "optionalDependencies", 2, reqs)
+            maps <- maps + rh_npm_map_reqs(jnodes, pool, texts, input, entry, from, "peerDependencies", 3, reqs)
             maps
 
-        def rh_npm_map_reqs(jnodes: darray[Json::RhJsonNode]&, pool: mutable darray[u8]&, texts: darray[u8]&, entry: i64, from: i64, mapkey: u8&, depctx: u8, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_npm_map_reqs(jnodes: darray[Json::RhJsonNode]&, pool: mutable darray[u8]&, texts: darray[u8]&, input: darray[u8]&, entry: i64, from: i64, mapkey: u8&, depctx: u8, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             m: i64 = Json::rh_json_obj_get(jnodes, texts, entry, mapkey)
             return 0 if m < 0
             mo: Json::RhJsonNode = jnodes[m.usize()]
             return -1 if mo.kind != 5
-            rh_npm_req_map(jnodes, pool, texts, m, from, depctx, reqs)
+            peer_meta: mutable i64 = -1
+            if depctx == 3:
+                peer_meta <- Json::rh_json_obj_get(jnodes, texts, entry, "peerDependenciesMeta")
+                return -1 if peer_meta >= 0 and jnodes[peer_meta.usize()].kind != 5
+            rh_npm_req_map(jnodes, pool, texts, input, m, from, depctx, peer_meta, reqs)
 
         # Resolve every collected requirement via walk-up. Returns edge count.
         def rh_npm_resolve(pkgs: darray[RhPkgNode]&, paths: darray[i64]&, pool: mutable darray[u8]&, reqs: darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -1079,11 +1109,11 @@ module Package:
                 reason: mutable i64 = 0
                 hit: i64 = rh_npm_lookup(pkgs, paths, pool, from_path_s, from_path_e, q.name_s.usize(), q.name_e.usize(), q.depctx == 3, &reason)
                 if hit >= 0:
-                    if rh_edge_add(edges, q.from, hit, q.depctx):
+                    if rh_edge_add(edges, q.from, hit, q.depctx, q.optional):
                         made <- made + 1
                 else:
                     code: u8 = 2 if reason == 2 else 0
-                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: code})
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: code, optional: q.optional})
                 r <- r + 1
 
         def rh_span_eq_text(texts: darray[u8]&, s: usize, e: usize, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -1944,7 +1974,7 @@ module Package:
             if ne == ns:
                 unknown_out[0] <- unknown_out[0] + 1
                 uns0: i64 = rh_pool_copy(pool, buf, a, b)
-                unresolved.push(RhUnresolved{from: 0, name_s: uns0, name_e: uns0 + (b - a).i64(), req_s: -1, req_e: -1, reason: 2})
+                unresolved.push(RhUnresolved{from: 0, name_s: uns0, name_e: uns0 + (b - a).i64(), req_s: -1, req_e: -1, reason: 2, optional: 0})
                 return
             c: mutable usize =
                 while c < b and (buf[c] == 32 or buf[c] == 9) |c: usize = ne| -> c:
@@ -1998,7 +2028,7 @@ module Package:
                 rhs <- rh_pool_copy(pool, buf, rs, re2)
                 rhe <- rhs + (re2 - rs).i64()
             if not is_opt:
-                reqs.push(RhRequire{from: 0, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rhs, req_e: rhe, depctx: depctx})
+                reqs.push(RhRequire{from: 0, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rhs, req_e: rhe, depctx: depctx, optional: 0})
             if exact and not has_extras and not has_marker and not has_url and not is_opt:
                 nname: i64 = rh_pool_copy(pool, buf, ns, ne)
                 nver: i64 = rh_pool_copy(pool, buf, vstart, re2)
@@ -2013,7 +2043,7 @@ module Package:
                     nd.ver_e <- nver + (re2 - vstart).i64()
                     nd.src_kind <- 0
                     pkgs[existing.usize()] <- nd
-                edges.push(RhDepEdge{from: 0, dst: existing, depctx: depctx})
+                edges.push(RhDepEdge{from: 0, dst: existing, depctx: depctx, optional: 0})
                 return
             uns_name: i64 = rh_pool_copy(pool, buf, ns, ne)
             uns_req: mutable i64 = -1
@@ -2022,7 +2052,7 @@ module Package:
                 uns_req <- rh_pool_copy(pool, buf, rs, re2)
                 uns_req_end <- uns_req + (re2 - rs).i64()
             reason: u8 = 2 if has_extras or has_marker or has_url or is_opt else 0
-            unresolved.push(RhUnresolved{from: 0, name_s: uns_name, name_e: uns_name + (ne - ns).i64(), req_s: uns_req, req_e: uns_req_end, reason: reason})
+            unresolved.push(RhUnresolved{from: 0, name_s: uns_name, name_e: uns_name + (ne - ns).i64(), req_s: uns_req, req_e: uns_req_end, reason: reason, optional: 0})
             return
 
         # Parse a requirements.txt into a root-plus-pinned graph. Returns 0 (root
@@ -2381,7 +2411,7 @@ module Package:
             if vs < ve:
                 rhs <- rh_pool_copy(pool, mod, vs.usize(), ve.usize())
                 rhe <- rhs + (ve - vs)
-            reqs.push(RhRequire{from: 0, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rhs, req_e: rhe, depctx: 0})
+            reqs.push(RhRequire{from: 0, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rhs, req_e: rhe, depctx: 0, optional: 0})
             if vs < ve and rh_go_version_supported(mod, vs, ve):
                 nname: i64 = rh_pool_copy(pool, mod, ns.usize(), ne.usize())
                 nver: i64 = rh_pool_copy(pool, mod, vs.usize(), ve.usize())
@@ -2396,11 +2426,11 @@ module Package:
                     nd.ver_e <- nver + (ve - vs)
                     nd.src_kind <- 0
                     pkgs[existing.usize()] <- nd
-                edges.push(RhDepEdge{from: 0, dst: existing, depctx: 0})
+                edges.push(RhDepEdge{from: 0, dst: existing, depctx: 0, optional: 0})
                 return
             # missing version or unsupported version -> unresolved (preserve text)
             uns_name: i64 = rh_pool_copy(pool, mod, ns.usize(), ne.usize())
-            unresolved.push(RhUnresolved{from: 0, name_s: uns_name, name_e: uns_name + (ne - ns), req_s: rhs, req_e: rhe, reason: 0})
+            unresolved.push(RhUnresolved{from: 0, name_s: uns_name, name_e: uns_name + (ne - ns), req_s: rhs, req_e: rhe, reason: 0, optional: 0})
             return
 
         # Replace/exclude/retract entry -> an explicit context-unresolved record.
@@ -2412,7 +2442,7 @@ module Package:
             return if ne <= ns
             name_s: i64 = rh_pool_copy(pool, mod, ns.usize(), ne.usize())
             full_s: i64 = rh_pool_copy(pool, mod, s.usize(), e.usize())
-            unresolved.push(RhUnresolved{from: 0, name_s: name_s, name_e: name_s + (ne - ns), req_s: full_s, req_e: full_s + (e - s), reason: 2})
+            unresolved.push(RhUnresolved{from: 0, name_s: name_s, name_e: name_s + (ne - ns), req_s: full_s, req_e: full_s + (e - s), reason: 2, optional: 0})
             return
 
         # --- Go module checksums (go.sum; M03-02) -------------------------------
@@ -3083,7 +3113,10 @@ module Package:
                 Base::rh_push_decimal_i64(out, ed.dst)
                 Base::rh_push_text(out, ",\"scope\":\"")
                 Base::rh_push_text(out, rh_scope_label(ed.depctx))
-                Base::rh_push_text(out, "\"}")
+                out.push(34)
+                if ed.optional != 0:
+                    Base::rh_push_text(out, ",\"optional\":true")
+                out.push(125)
                 e <- e + 1
             Base::rh_push_text(out, "],\"unresolved\":[")
             while u < unresolved.count.i64() |u: i64 = 0, unresolved, pool, out|:
@@ -3103,7 +3136,10 @@ module Package:
                     Base::rh_push_text(out, "\"")
                 Base::rh_push_text(out, ",\"reason\":\"")
                 Base::rh_push_text(out, rh_unres_label(ur.reason))
-                Base::rh_push_text(out, "\"}")
+                out.push(34)
+                if ur.optional != 0:
+                    Base::rh_push_text(out, ",\"optional\":true")
+                out.push(125)
                 u <- u + 1
             Base::rh_push_text(out, "],\"advisories\":[")
             while f < findings.count.i64() |f: i64 = 0, findings, advtexts, out, edges, pkgs, root|:
@@ -3289,9 +3325,9 @@ module Package:
                 if q.name_s >= 0:
                     hit: i64 = rh_gem_find_by_name(pkgs, pool, q.name_s.usize(), q.name_e.usize())
                     if hit >= 0:
-                        edges.push(RhDepEdge{from: q.from, dst: hit, depctx: q.depctx})
+                        edges.push(RhDepEdge{from: q.from, dst: hit, depctx: q.depctx, optional: 0})
                     else:
-                        unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 0})
+                        unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 0, optional: 0})
                 i <- i + 1
             0
 
@@ -3352,7 +3388,7 @@ module Package:
             if vs >= 0:
                 rhs <- rh_pool_copy(pool, buf, vs.usize(), ve.usize())
                 rhe <- rhs + (ve - vs)
-            reqs.push(RhRequire{from: from, name_s: name_s, name_e: name_s + (ne - ns), ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rhs, req_e: rhe, depctx: 0})
+            reqs.push(RhRequire{from: from, name_s: name_s, name_e: name_s + (ne - ns), ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rhs, req_e: rhe, depctx: 0, optional: 0})
             return
 
         def rh_gem_add_require(buf: darray[u8]&, ts: i64, te: i64, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, depctx: u8) -> void can[Memory.Allocate, Abort.Panic]:
@@ -3368,7 +3404,7 @@ module Package:
             if vs >= 0:
                 rhs <- rh_pool_copy(pool, buf, vs.usize(), ve.usize())
                 rhe <- rhs + (ve - vs)
-            reqs.push(RhRequire{from: 0, name_s: name_s, name_e: name_s + (ne - ns), ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rhs, req_e: rhe, depctx: depctx})
+            reqs.push(RhRequire{from: 0, name_s: name_s, name_e: name_s + (ne - ns), ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: rhs, req_e: rhe, depctx: depctx, optional: 0})
             return
 
         # --- Composer composer.lock (M08 ecosystems lane) ---------------------
@@ -3413,7 +3449,7 @@ module Package:
                 pkgs[idx.usize()] <- nd
             reqv: i64 = Json::rh_json_obj_get(jnodes, texts, entry, "require")
             if reqv >= 0:
-                _ = rh_npm_req_map(jnodes, pool, texts, reqv, idx, depctx, reqs)
+                _ = rh_npm_req_map(jnodes, pool, texts, texts, reqv, idx, depctx, -1, reqs)
             idx
 
         def rh_composer_find(pkgs: darray[RhPkgNode]&, pool: darray[u8]&, ns: usize, ne: usize, vs: i64, ve: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -3454,13 +3490,13 @@ module Package:
                 q: RhRequire = reqs[i.usize()]
                 if q.name_s >= 0:
                     if rh_composer_is_platform(pool, q.name_s.usize(), q.name_e.usize()):
-                        unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 2})
+                        unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 2, optional: 0})
                     else:
                         hit: i64 = rh_composer_find_by_name(pkgs, pool, q.name_s.usize(), q.name_e.usize())
                         if hit >= 0:
-                            edges.push(RhDepEdge{from: q.from, dst: hit, depctx: q.depctx})
+                            edges.push(RhDepEdge{from: q.from, dst: hit, depctx: q.depctx, optional: 0})
                         else:
-                            unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 0})
+                            unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 0, optional: 0})
                 i <- i + 1
             0
 
@@ -3575,7 +3611,7 @@ module Package:
                     if ver_s >= 0:
                         req_ver_s <- rh_pool_copy(pool, xml, ver_s.usize(), ver_e.usize())
                         req_ver_e <- req_ver_s + (ver_e - ver_s)
-                    reqs.push(RhRequire{from: 0, name_s: nname, name_e: nname_e, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: req_ver_s, req_e: req_ver_e, depctx: depctx})
+                    reqs.push(RhRequire{from: 0, name_s: nname, name_e: nname_e, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: req_ver_s, req_e: req_ver_e, depctx: depctx, optional: 0})
                     if ver_s >= 0 and rh_nuget_version_exact(xml, ver_s, ver_e):
                         existing: mutable i64 = -1
                         while p < pkgs.count.i64() |p: i64 = 0, pkgs, pool, nname, nname_e, req_ver_s, req_ver_e|:
@@ -3596,9 +3632,9 @@ module Package:
                             nd.src_kind <- RH_PSRC_REGISTRY
                             nd.dev <- 1 if depctx == RH_SCOPE_DEV else 0
                             pkgs[existing.usize()] <- nd
-                        edges.push(RhDepEdge{from: 0, dst: existing, depctx: depctx})
+                        edges.push(RhDepEdge{from: 0, dst: existing, depctx: depctx, optional: 0})
                     else:
-                        unresolved.push(RhUnresolved{from: 0, name_s: nname, name_e: nname_e, req_s: req_ver_s, req_e: req_ver_e, reason: RH_UNRES_MISSING})
+                        unresolved.push(RhUnresolved{from: 0, name_s: nname, name_e: nname_e, req_s: req_ver_s, req_e: req_ver_e, reason: RH_UNRES_MISSING, optional: 0})
                     found <- found + 1
                 line_start <- line_end + 1
             return -1 if found == 0
@@ -3678,7 +3714,7 @@ module Package:
             if vs >= 0 and ve > vs:
                 req_s <- rh_pool_copy(pool, xml, vs.usize(), ve.usize())
                 req_e <- req_s + (ve - vs)
-            reqs.push(RhRequire{from: 0, name_s: name_s, name_e: name_e, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: req_s, req_e: req_e, depctx: depctx})
+            reqs.push(RhRequire{from: 0, name_s: name_s, name_e: name_e, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: req_s, req_e: req_e, depctx: depctx, optional: 0})
             if vs >= 0 and rh_maven_version_exact(xml, vs, ve):
                 node: i64 = rh_node_add(pkgs, RH_ECO_MAVEN)
                 return -1 if node < 0
@@ -3691,9 +3727,9 @@ module Package:
                 nd.optional <- 1 if depctx == RH_SCOPE_OPTIONAL else 0
                 nd.dev <- 1 if depctx == RH_SCOPE_DEV else 0
                 pkgs[node.usize()] <- nd
-                edges.push(RhDepEdge{from: 0, dst: node, depctx: depctx})
+                edges.push(RhDepEdge{from: 0, dst: node, depctx: depctx, optional: 0})
             else:
-                unresolved.push(RhUnresolved{from: 0, name_s: name_s, name_e: name_e, req_s: req_s, req_e: req_e, reason: RH_UNRES_MISSING})
+                unresolved.push(RhUnresolved{from: 0, name_s: name_s, name_e: name_e, req_s: req_s, req_e: req_e, reason: RH_UNRES_MISSING, optional: 0})
             0
 
         # Parse the bounded Maven POM subset. Project and dependency coordinates use

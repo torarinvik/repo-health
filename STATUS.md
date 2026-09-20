@@ -129,7 +129,8 @@ tables, unversioned legacy plus versions 3/4, source kind/source fingerprint
 and checksum-as-digest, unknown keys counted; unsupported versions rejected) and
 npm (`lockfileVersion` 2/3 `packages` with Node walk-up nested-version
 preference, version-1 legacy `dependencies` trees, dev/optional/peer scopes,
-integrity digests; unsupported or mismatched revisions rejected), explicit
+integrity digests, and `peerDependenciesMeta` optional-peer conditions on both
+resolved and unresolved graph entries; unsupported or mismatched revisions rejected), explicit
 unresolved reasons (`missing` / `ambiguous` /
 `context` — a declared requirement never becomes an exact edge without
 resolution evidence), bounded forward/reverse BFS with truncation flags,

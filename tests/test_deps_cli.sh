@@ -284,6 +284,26 @@ rc_both=$?
 set -e
 [[ "$rc_both" -eq 4 ]] || fail "requirements.txt + pyproject.toml must fail closed (got $rc_both)"
 
+echo "[deps] npm optional peer metadata survives resolution and missing peers"
+mkdir -p "$T/peer-src"
+cat > "$T/peer-src/package-lock.json" <<'JSON'
+{"lockfileVersion":3,"name":"app","version":"1.0.0","packages":{"":{"name":"app","version":"1.0.0","dependencies":{"host":"^1.0.0"},"peerDependencies":{"present":"^1.0.0"}},"node_modules/host":{"version":"1.0.0","peerDependencies":{"missing":"^1.0.0"},"peerDependenciesMeta":{"missing":{"optional":true}}},"node_modules/present":{"version":"1.0.0"}}}
+JSON
+cat > "$T/peer-src/package.json" <<'JSON'
+{"name":"app","version":"1.0.0","dependencies":{"host":"^1.0.0"},"peerDependencies":{"present":"^1.0.0"},"peerDependenciesMeta":{"present":{"optional":true}}}
+JSON
+"$ROOT/build/rh_cli" deps --repo "$T/peer-src" --out "$T/peer-out" >/dev/null || fail "optional-peer deps failed"
+python3 - "$T/peer-out/deps-npm-graph.json" <<'PY'
+import json, sys
+graph = json.load(open(sys.argv[1]))
+assert graph["ecosystem"] == "npm", graph
+present = [edge for edge in graph["edges"] if edge["to"] == 2]
+assert len(present) == 1 and present[0]["scope"] == "peer" and present[0].get("optional") is True, graph["edges"]
+missing = [item for item in graph["unresolved"] if item["name"] == "missing"]
+assert len(missing) == 1 and missing[0]["reason"] == "context" and missing[0].get("optional") is True, graph["unresolved"]
+print("[deps] npm optional peer metadata retained")
+PY
+
 echo "[deps] unsupported PEP 621 dynamic arrays fail closed"
 mkdir -p "$T/pep621bad"
 printf '[project]\ndependencies = "dynamic"\n' > "$T/pep621bad/pyproject.toml"

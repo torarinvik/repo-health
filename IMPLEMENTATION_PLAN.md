@@ -494,7 +494,7 @@ Use each ecosystem's official manifests, lockfile formats, and version semantics
 
 **M03-02: Artifact identities.** Store expected and observed digests independently from version labels. Model multiple artifacts per package version and changed bytes under the same label.
 
-**M03-03: Manifest parsers.** Extract declared direct requirements, scope, optional conditions, and source spans without executing package scripts. Store unsupported expressions intact.
+**M03-03: Manifest parsers.** Extract declared direct requirements, scope, optional conditions, and source spans without executing package scripts. Store unsupported expressions intact. npm `peerDependenciesMeta` now retains `optional: true` through both resolved peer edges and unresolved peer requirements; the graph’s optional flag is additive and remains separate from peer scope.
 
 **M03-04: Lockfile parsers.** Produce resolved graphs for supported contexts. Preserve multiple versions of one package, workspace members, registry aliases, local/path dependencies, Git dependencies, and unresolved external conditions. Cargo lock dependency IDs are filtered by their exact locked version and source when present; absent matches remain unresolved instead of falling through to a same-name candidate. The bounded parser accepts unversioned legacy Cargo input plus Cargo lockfile versions 3/4, and npm's legacy version-1 dependency tree plus package-map versions 2/3; unknown declared revisions and revision/layout mismatches fail closed. (Official format references [P16], [P17].)
 
