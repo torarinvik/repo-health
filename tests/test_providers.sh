@@ -50,6 +50,10 @@ assert "complete lockfile coverage" in osv["assumption"] and "four pages" in osv
 assert "fuzzi" in osv["assumption"] and "feed freshness" in osv["assumption"], osv
 assert "four rounds" in osv["assumption"] and "only outstanding query items" in osv["assumption"], osv
 assert "public redistribution is not enabled" in osv["rights"], osv
+eco = by["ecosyste-ms"]
+assert eco["lifecycle"] == "active" and "one explicitly requested live package lookup" in eco["used_for"][0], eco
+assert "429" in eco["failure_mode"] and "no retries" in eco["failure_mode"], eco
+assert "CC BY-SA 4.0" in eco["rights"] and "link the licence" in eco["rights"], eco
 print("[providers] lifecycle honesty OK")
 PY
 
@@ -74,6 +78,18 @@ assert "feed_freshness" in src["unsupported"], src
 assert "source IDs and links" in osv["rights"], osv
 assert src["redistribution"] == "none", src
 print("[providers] bounded OSV source scope OK")
+PY
+
+echo "[providers] ecosyste.ms live scope matches current rights review"
+python3 - "$ROOT/ops/source-review-register.json" <<'PY'
+import json, sys
+src = {x["id"]: x for x in json.load(open(sys.argv[1]))["sources"]}["ecosyste-ms-package-lookup"]
+assert src["terms_reviewed_at"] == "2026-09-20", src
+assert src["redistribution"] == "metadata_only" and src["attribution"] == "required_link_back", src
+assert "package_lookup" in src["capabilities"] and "multi-package_batch_lookup" in src["unauthorized"], src
+assert "maintainer identities or contact details" in src["personal_data_fields"][0], src
+assert "CC BY-SA 4.0" in src["notes"] and "429" in src["notes"] and "never published" in src["notes"], src
+print("[providers] single-lookup rights and minimization OK")
 PY
 
 echo "[providers] failure modes state stale/unknown, not silent success"

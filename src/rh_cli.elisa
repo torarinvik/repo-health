@@ -114,6 +114,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli osv-query --graph <rh-dep-graph/1> --out <dir> [--continue-pagination] [--hydrate-advisories]")
     rh_cli_err("       rh_cli depsdev (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli ecosystem lookup --input <captured-lookup.json> --out <file>")
+    rh_cli_err("       rh_cli ecosystem lookup --ecosystem <id> --name <package> --out <file>  (one live lookup)")
     rh_cli_err("       rh_cli adapter-manifest --input <file> --out <file>")
     rh_cli_err("       rh_cli findings --input <file> --out <file>")
     rh_cli_err("       rh_cli resolution --input <rh-dep-graph/1> --out <file>")
@@ -849,17 +850,29 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_depsdev(slots[dvi_idx], slots[dvo_idx], "", false)
     if Base::rh_streq(cmd, "ecosystem"):
         return rh_cli_usage(2) if argc < 3 or not Base::rh_streq(slots[2], "lookup")
-        eli_idx, elo_idx =
-            while elq < argc |eli_idx: i64 = -1, elo_idx: i64 = -1, elq: i64 = 3, slots| -> eli_idx, elo_idx:
+        eli_idx, eec_idx, ena_idx, elo_idx =
+            while elq < argc |eli_idx: i64 = -1, eec_idx: i64 = -1, ena_idx: i64 = -1, elo_idx: i64 = -1, elq: i64 = 3, slots| -> eli_idx, eec_idx, ena_idx, elo_idx:
                 argeco: u8& = slots[elq].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(argeco, "--input"):
-                    if elq + 1 < argc:
+                    if elq + 1 < argc and eli_idx < 0:
                         elq <- elq + 1
                         eli_idx <- elq
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(argeco, "--ecosystem"):
+                    if elq + 1 < argc and eec_idx < 0:
+                        elq <- elq + 1
+                        eec_idx <- elq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(argeco, "--name"):
+                    if elq + 1 < argc and ena_idx < 0:
+                        elq <- elq + 1
+                        ena_idx <- elq
+                    else:
+                        return rh_cli_usage(2)
                 elif Base::rh_streq(argeco, "--out"):
-                    if elq + 1 < argc:
+                    if elq + 1 < argc and elo_idx < 0:
                         elq <- elq + 1
                         elo_idx <- elq
                     else:
@@ -867,8 +880,12 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 else:
                     return rh_cli_usage(2)
                 elq <- elq + 1
-        return rh_cli_usage(2) if eli_idx < 0 or elo_idx < 0
-        return rh_do_ecosystem_lookup(slots[eli_idx], slots[elo_idx])
+        return rh_cli_usage(2) if elo_idx < 0
+        if eli_idx >= 0:
+            return rh_cli_usage(2) if eec_idx >= 0 or ena_idx >= 0
+            return rh_do_ecosystem_lookup(slots[eli_idx], slots[elo_idx])
+        return rh_cli_usage(2) if eec_idx < 0 or ena_idx < 0
+        return rh_do_ecosystem_lookup_live(slots[eec_idx], slots[ena_idx], slots[elo_idx])
     if Base::rh_streq(cmd, "adapter-manifest"):
         ami_idx, amo_idx =
             while amq < argc |ami_idx: i64 = -1, amo_idx: i64 = -1, amq: i64 = 2, slots| -> ami_idx, amo_idx:
@@ -4370,6 +4387,60 @@ def rh_do_ecosystem_lookup(input_path: cstr, out_path: cstr) -> i32 can[Memory.A
     body.push(10)
     return 4 if not Base::rh_io_write(out_path, body)
     rh_cli_out("ecosystem lookup: captured enrichment observed")
+    0
+
+def rh_do_ecosystem_lookup_live(ecosystem: cstr, name: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    return 3 if not Git::rh_arg_safe(out_path)
+    source_url: mutable darray[u8] = []
+    if not EcosystemLookup::rh_ecosystem_lookup_request_url(ecosystem, name, source_url):
+        rh_cli_err("ecosystem lookup: rejected package coordinate")
+        return 3
+    source_url_ptr: cstr = (&source_url[0]).cast[cstr] can Unsafe.PointerCast
+    return 3 if not Git::rh_fetch_arg_safe(source_url_ptr) or not Git::rh_fetch_guard(source_url_ptr)
+
+    fetch_dir: mutable darray[u8] = []
+    if not rh_dirname(out_path, fetch_dir):
+        Base::rh_push_text(fetch_dir, ".")
+    fetch_dir.push(0)
+    fetch_dir_ptr: cstr = (&fetch_dir[0]).cast[cstr] can Unsafe.PointerCast
+    body_path: mutable darray[u8] = []
+    code_path: mutable darray[u8] = []
+    err_path: mutable darray[u8] = []
+    if not rh_out_path(fetch_dir_ptr, "ecosystem-lookup-fetch-body.json", body_path) or not rh_out_path(fetch_dir_ptr, "ecosystem-lookup-fetch-status.txt", code_path) or not rh_out_path(fetch_dir_ptr, "ecosystem-lookup-fetch.err", err_path):
+        rh_cli_err("ecosystem lookup: cannot stage fetch evidence")
+        return 4
+    body_path.push(0)
+    code_path.push(0)
+    err_path.push(0)
+    body_ptr: cstr = (&body_path[0]).cast[cstr] can Unsafe.PointerCast
+    code_ptr: cstr = (&code_path[0]).cast[cstr] can Unsafe.PointerCast
+    err_ptr: cstr = (&err_path[0]).cast[cstr] can Unsafe.PointerCast
+    if Git::rh_run_https_get(source_url_ptr, body_ptr, code_ptr, err_ptr) != 0:
+        rh_cli_err("ecosystem lookup: guarded transport failed; evidence retained where available")
+        return 4
+
+    code_raw: mutable darray[u8] = []
+    if Base::rh_io_read(code_ptr, code_raw) < 0 or not Base::rh_bytes_equal_literal(code_raw, 0, code_raw.count.i64(), "200"):
+        rh_cli_err("ecosystem lookup: provider did not return HTTP 200; enrichment unavailable")
+        return 4
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(body_ptr, raw) < 0 or raw.count.i64() > 4194304:
+        rh_cli_err("ecosystem lookup: response exceeds the 4 MiB parser bound")
+        return 4
+
+    status_value: mutable darray[u8] = []
+    Base::rh_absorb_bytes(code_raw, status_value)
+    status_value.push(0)
+    status_ptr: cstr = (&status_value[0]).cast[cstr] can Unsafe.PointerCast
+    body: mutable darray[u8] = []
+    if EcosystemLookup::rh_ecosystem_lookup_live_report(raw, ecosystem, name, source_url_ptr, status_ptr, body) != 0:
+        rh_cli_err("ecosystem lookup: unsupported or malformed provider response (fail closed)")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("ecosystem lookup: cannot write result")
+        return 4
+    rh_cli_out("ecosystem lookup: one attributed package result captured")
     0
 
 # --- M03-10 reviewed external adapter binding path. ---

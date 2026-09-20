@@ -1,10 +1,9 @@
 # rh_ecosystem_lookup.elisa — bounded ecosyste.ms package lookup capture (M03-10).
 #
-# The adapter consumes a reviewed, captured package lookup envelope. It keeps
-# provider identifiers and source locators as enrichment evidence; it never
-# promotes an aggregator claim to a canonical package or repository identity.
-# Unknown provider fields are ignored, while malformed observed records are
-# counted and rejected deterministically.
+# The adapter consumes a reviewed capture or one explicitly requested package
+# lookup. Provider identifiers and source locators remain enrichment evidence;
+# they never become canonical package or repository identity. Unknown fields
+# are ignored, while malformed observed records are counted and rejected.
 
 include "./rh_base.elisa"
 include "./rh_json.elisa"
@@ -49,8 +48,37 @@ module EcosystemLookup:
             rh_ecosystem_lookup_emit_span(out, texts, start, end) if present
             Base::rh_push_text(out, "null") if not present
 
-    public:
-        def rh_ecosystem_lookup_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_ecosystem_lookup_valid_query(ecosystem: cstr, name: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            ecosystem_len: usize = Base::rh_cstr_len_c(ecosystem)
+            name_len: usize = Base::rh_cstr_len_c(name)
+            return false if ecosystem_len == 0 or ecosystem_len > 48
+            return false if name_len == 0 or name_len > 256
+            while i < ecosystem_len |i: usize = 0, ecosystem, ecosystem_len|:
+                b: u8 = ecosystem[i]
+                return false if (b < 97 or b > 122) and (b < 48 or b > 57) and b != 45
+                i <- i + 1
+            supported_ecosystem: bool = Base::rh_streq(ecosystem, "cargo") or Base::rh_streq(ecosystem, "pypi") or Base::rh_streq(ecosystem, "go") or Base::rh_streq(ecosystem, "rubygems") or Base::rh_streq(ecosystem, "composer") or Base::rh_streq(ecosystem, "nuget") or Base::rh_streq(ecosystem, "maven") or Base::rh_streq(ecosystem, "npm")
+            return false if not supported_ecosystem
+            while i < name_len |i: usize = 0, name, name_len|:
+                b: u8 = name[i]
+                return false if b < 32 or b == 127
+                i <- i + 1
+            true
+
+        def rh_ecosystem_lookup_emit_url_value(out: mutable darray[u8]&, value: cstr) -> void can[Memory.Allocate, Abort.Panic]:
+            n: usize = Base::rh_cstr_len_c(value)
+            while i < n |i: usize = 0, value, n, out|:
+                b: u8 = value[i]
+                unreserved: bool = (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 45 or b == 46 or b == 95 or b == 126
+                if unreserved:
+                    out.push(b)
+                else:
+                    out.push(37)
+                    Base::rh_push_hexdigit(out, b.u64() / 16)
+                    Base::rh_push_hexdigit(out, b.u64() % 16)
+                i <- i + 1
+
+        def rh_ecosystem_lookup_report_with_origin(raw: darray[u8]&, out: mutable darray[u8]&, transport: u8&, source_url: cstr, status: cstr) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if raw.count.i64() > RH_ECOSYSTEM_LOOKUP_MAX_BYTES
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
@@ -84,7 +112,27 @@ module EcosystemLookup:
             EcosystemLookup::rh_ecosystem_lookup_emit_span(out, texts, query_eco_s, query_eco_e)
             Base::rh_push_text(out, ",\"name\":")
             EcosystemLookup::rh_ecosystem_lookup_emit_span(out, texts, query_name_s, query_name_e)
-            Base::rh_push_text(out, "},\"results\":[")
+            Base::rh_push_text(out, "},\"origin\":{\"transport\":\"")
+            Base::rh_push_text(out, transport)
+            Base::rh_push_text(out, "\",\"source_url\":")
+            if Base::rh_cstr_len_c(source_url) > 0:
+                url_bytes: mutable darray[u8] = []
+                Base::rh_push_cstr(url_bytes, source_url)
+                out.push(34)
+                Base::rh_json_escape(out, url_bytes, 0, url_bytes.count)
+                out.push(34)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"status\":")
+            if Base::rh_cstr_len_c(status) > 0:
+                status_bytes: mutable darray[u8] = []
+                Base::rh_push_cstr(status_bytes, status)
+                out.push(34)
+                Base::rh_json_escape(out, status_bytes, 0, status_bytes.count)
+                out.push(34)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"data_license\":\"CC-BY-SA-4.0\",\"license_url\":\"https://creativecommons.org/licenses/by-sa/4.0/\",\"attribution_required\":true,\"attribution_url\":\"https://ecosyste.ms/\",\"modifications_made\":true,\"modification_note\":\"filtered to allowlisted package fields; unselected provider fields are omitted\"},\"results\":[")
 
             rejected: mutable i64 = 0
             emitted: mutable i64 = 0
@@ -100,6 +148,8 @@ module EcosystemLookup:
                 ecosystem_e: mutable i64 = -1
                 accepted <- false if not EcosystemLookup::rh_ecosystem_lookup_span(nodes, texts, child, "name", &name_s, &name_e)
                 accepted <- false if not EcosystemLookup::rh_ecosystem_lookup_span(nodes, texts, child, "ecosystem", &ecosystem_s, &ecosystem_e)
+                accepted <- false if not Base::rh_bytes_equal_span(texts, name_s, name_e, texts, query_name_s, query_name_e)
+                accepted <- false if not Base::rh_bytes_equal_span(texts, ecosystem_s, ecosystem_e, texts, query_eco_s, query_eco_e)
 
                 version_s: mutable i64 = -1
                 version_e: mutable i64 = -1
@@ -167,5 +217,41 @@ module EcosystemLookup:
                 child <- nodes[child.usize()].next_sibling
             Base::rh_push_text(out, "],\"rejected\":")
             Base::rh_push_decimal_i64(out, rejected)
-            Base::rh_push_text(out, ",\"note\":\"captured ecosyste.ms metadata remains enrichment evidence; candidate mappings require independent identity and provenance review\"}")
+            Base::rh_push_text(out, ",\"note\":\"ecosyste.ms metadata remains enrichment evidence; attribute the source, link CC-BY-SA-4.0, indicate filtering, and independently review candidate identity and provenance\"}")
             0
+
+    public:
+        # Build only the documented lookup route on the reviewed provider host.
+        # Values are percent-encoded before reaching the guarded transport; no
+        # caller-supplied URL or additional query parameter is accepted.
+        def rh_ecosystem_lookup_request_url(ecosystem: cstr, name: cstr, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if out.count != 0 or not EcosystemLookup::rh_ecosystem_lookup_valid_query(ecosystem, name)
+            Base::rh_push_text(out, "https://packages.ecosyste.ms/api/v1/packages/lookup?ecosystem=")
+            EcosystemLookup::rh_ecosystem_lookup_emit_url_value(out, ecosystem)
+            Base::rh_push_text(out, "&name=")
+            EcosystemLookup::rh_ecosystem_lookup_emit_url_value(out, name)
+            out.push(0)
+            true
+
+        def rh_ecosystem_lookup_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            EcosystemLookup::rh_ecosystem_lookup_report_with_origin(raw, out, "captured", "", "")
+
+        # The live endpoint returns a package array directly. Wrap it in the
+        # established parser envelope, then publish only fields selected by
+        # rh_ecosystem_lookup_report_with_origin.
+        def rh_ecosystem_lookup_live_report(raw: darray[u8]&, ecosystem: cstr, name: cstr, source_url: cstr, status: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count.i64() > RH_ECOSYSTEM_LOOKUP_MAX_BYTES
+            return -1 if not EcosystemLookup::rh_ecosystem_lookup_valid_query(ecosystem, name)
+            envelope: mutable darray[u8] = []
+            Base::rh_push_text(envelope, "{\"schema\":\"rh-ecosystem-lookup-input/1\",\"provider\":\"ecosyste.ms\",\"query\":{\"ecosystem\":\"")
+            ecosystem_bytes: mutable darray[u8] = []
+            Base::rh_push_cstr(ecosystem_bytes, ecosystem)
+            Base::rh_json_escape(envelope, ecosystem_bytes, 0, ecosystem_bytes.count)
+            Base::rh_push_text(envelope, "\",\"name\":\"")
+            name_bytes: mutable darray[u8] = []
+            Base::rh_push_cstr(name_bytes, name)
+            Base::rh_json_escape(envelope, name_bytes, 0, name_bytes.count)
+            Base::rh_push_text(envelope, "\"},\"results\":")
+            Base::rh_absorb_bytes(raw, envelope)
+            envelope.push(125)
+            EcosystemLookup::rh_ecosystem_lookup_report_with_origin(envelope, out, "live", source_url, status)

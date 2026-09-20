@@ -1,0 +1,70 @@
+# test_ecosystem_lookup.elisa — deterministic query and live-envelope checks.
+# No network calls: the live response path receives a bounded captured array.
+include "./rh_base.elisa"
+include "./rh_ecosystem_lookup.elisa"
+
+def el_check(ok: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    return if ok
+    fails[0] <- fails[0] + 1
+    message: mutable darray[u8] =
+        message: mutable darray[u8] = []
+        Base::rh_push_text(message, "ECOSYSTEM-LOOKUP-FAIL ")
+        Base::rh_push_text(message, label)
+        message.push(10)
+        message
+    Base::rh_write_stdout(message)
+
+def el_contains(haystack: darray[u8]&, needle: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    n: usize = strlen(needle)
+    return false if n == 0 or haystack.count < n
+    while i + n <= haystack.count |i: usize = 0, haystack, needle, n|:
+        same: bool =
+            while k < n |same: bool = true, k: usize = 0, i| -> same:
+                same <- false if haystack[i + k] != needle[k]
+                k <- k + 1
+        return true if same
+        i <- i + 1
+    false
+
+def el_query_tests(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    url: mutable darray[u8] = []
+    built: bool = EcosystemLookup::rh_ecosystem_lookup_request_url("npm", "@scope/pkg", url)
+    el_check(built and Base::rh_bytes_equal_literal(url, 0, url.count.i64() - 1, "https://packages.ecosyste.ms/api/v1/packages/lookup?ecosystem=npm&name=%40scope%2fpkg"), "fixed-endpoint-and-encoded-query", fails)
+
+    injection_url: mutable darray[u8] = []
+    injection_built: bool = EcosystemLookup::rh_ecosystem_lookup_request_url("pypi", "pkg&limit=500", injection_url)
+    el_check(injection_built and Base::rh_bytes_equal_literal(injection_url, 0, injection_url.count.i64() - 1, "https://packages.ecosyste.ms/api/v1/packages/lookup?ecosystem=pypi&name=pkg%26limit%3d500"), "query-separator-encoded", fails)
+
+    bad_ecosystem: mutable darray[u8] = []
+    el_check(not EcosystemLookup::rh_ecosystem_lookup_request_url("PyPI", "numpy", bad_ecosystem), "reject-unknown-ecosystem-form", fails)
+    unsupported_ecosystem: mutable darray[u8] = []
+    el_check(not EcosystemLookup::rh_ecosystem_lookup_request_url("unknown", "numpy", unsupported_ecosystem), "reject-unsupported-ecosystem", fails)
+    bad_name: mutable darray[u8] = []
+    el_check(not EcosystemLookup::rh_ecosystem_lookup_request_url("pypi", "bad\nname", bad_name), "reject-control-in-name", fails)
+    return
+
+def el_live_report_test(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    raw: mutable darray[u8] = []
+    Base::rh_push_text(raw, "[{\"id\":42,\"name\":\"@scope/pkg\",\"ecosystem\":\"npm\",\"latest_release_number\":\"1.2.3\",\"repository_url\":\"https://example.org/source\",\"versions_count\":3,\"maintainers\":[{\"email\":\"private@example.org\"}]}]")
+    result: mutable darray[u8] = []
+    rc: i64 = EcosystemLookup::rh_ecosystem_lookup_live_report(raw, "npm", "@scope/pkg", "https://packages.ecosyste.ms/api/v1/packages/lookup?ecosystem=npm&name=%40scope%2Fpkg", "200", result)
+    el_check(rc == 0, "live-array-adapted", fails)
+    el_check(el_contains(result, "\"origin\":{\"transport\":\"live\",\"source_url\":\"https://packages.ecosyste.ms/api/v1/packages/lookup?ecosystem=npm&name=%40scope%2Fpkg\",\"status\":\"200\",\"data_license\":\"CC-BY-SA-4.0\",\"license_url\":\"https://creativecommons.org/licenses/by-sa/4.0/\",\"attribution_required\":true,\"attribution_url\":\"https://ecosyste.ms/\",\"modifications_made\":true,\"modification_note\":\"filtered to allowlisted package fields; unselected provider fields are omitted\"}"), "origin-attribution-and-license", fails)
+    el_check(el_contains(result, "\"query\":{\"ecosystem\":\"npm\",\"name\":\"@scope/pkg\"}"), "exact-query-retained", fails)
+    el_check(el_contains(result, "\"provider_id\":42") and el_contains(result, "\"version\":\"1.2.3\""), "allowlisted-fields-preserved", fails)
+    el_check(not el_contains(result, "maintainers") and not el_contains(result, "private@example.org"), "unselected-personal-fields-dropped", fails)
+    return
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    fails: mutable i64 = 0
+    el_query_tests(&fails)
+    el_live_report_test(&fails)
+    if fails == 0:
+        message: mutable darray[u8] =
+            message: mutable darray[u8] = []
+            Base::rh_push_text(message, "ECOSYSTEM LOOKUP OK")
+            message.push(10)
+            message
+        Base::rh_write_stdout(message)
+        return 0
+    1
