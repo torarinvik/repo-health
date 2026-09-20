@@ -79,6 +79,7 @@ dependencies = [{name = 'private', vcs = {url = 'https://example.invalid/private
 name = 'context-consumer-1.0.0.zip'
 path = 'vendor/context-consumer-1.0.0.zip'
 size = 0o62
+subdirectory = 'python/project'
 [packages.archive.hashes]
 sha256 = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
 
@@ -149,6 +150,8 @@ assert pkgs[0]["artifacts"][0]["source_sha256"] == hashlib.sha256(b"https://file
 assert pkgs[0]["artifacts"][1]["source_kind"] == "path", pkgs[0]["artifacts"][1]
 assert pkgs[4]["artifacts"][0]["kind"] == "archive" and pkgs[4]["artifacts"][0]["source_kind"] == "path", pkgs[4]
 assert pkgs[4]["artifacts"][0]["size_bytes"] == 50, pkgs[4]
+assert pkgs[4]["artifacts"][0]["subdirectory"] == "python/project", pkgs[4]
+assert pkgs[0]["artifacts"][0]["subdirectory"] is None, pkgs[0]
 assert [a["kind"] for a in pkgs[7]["artifacts"]] == ["wheel", "wheel", "sdist"], pkgs[7]
 assert pkgs[7]["artifacts"][0]["hashes"] == [{"algorithm": "sha256", "value": "f" * 64}], pkgs[7]["artifacts"][0]
 assert pkgs[7]["artifacts"][0]["size_bytes"] == 50, pkgs[7]["artifacts"][0]
@@ -156,7 +159,7 @@ assert pkgs[7]["artifacts"][0]["upload_time"] == "2025-01-02T03:04:05+00:00", pk
 assert pkgs[7]["artifacts"][1]["hashes"] == [{"algorithm": "sha512", "value": "1" * 128}], pkgs[7]["artifacts"][1]
 assert pkgs[7]["artifacts"][0]["source_sha256"] == hashlib.sha256(b"https://files.example.invalid/inline.whl").hexdigest(), pkgs[7]["artifacts"][0]
 serialized = json.dumps(report)
-for locator in ["https://index.example.invalid/simple/", "https://files.example.invalid/attrs-25.1.0.whl", "https://files.example.invalid/inline.whl", "vendor/inline-alt.whl"]:
+for locator in ["https://index.example.invalid/simple/", "https://files.example.invalid/attrs-25.1.0.whl", "https://files.example.invalid/inline.whl", "vendor/inline-alt.whl", "vendor/context-consumer-1.0.0.zip"]:
     assert locator not in serialized, report
 coverage = report["coverage"]
 assert coverage["direct_dependencies"] == "not_recorded" and coverage["markers_evaluated"] is False, coverage
@@ -289,6 +292,23 @@ set +e
 rc_invalid_upload_date=$?
 set -e
 [[ "$rc_invalid_upload_date" -eq 4 ]] || fail "invalid artifact upload date must fail closed (got $rc_invalid_upload_date)"
+
+cat > "$T/wheel-subdirectory.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[[packages.wheels]]
+name = 'x.whl'
+url = 'https://example.invalid/x.whl'
+hashes = {sha256 = 'aa'}
+subdirectory = 'python/project'
+EOF
+set +e
+"$ROOT/build/rh_cli" pylock --input "$T/wheel-subdirectory.toml" --out "$T/wheel-subdirectory.json" >/dev/null 2>&1
+rc_wheel_subdirectory=$?
+set -e
+[[ "$rc_wheel_subdirectory" -eq 4 ]] || fail "archive-only subdirectory must not attach to a wheel (got $rc_wheel_subdirectory)"
 
 echo "[pylock] local artifact hashes bind to audit and file bytes"
 "$ROOT/build/rh_cli" pylock-observe \

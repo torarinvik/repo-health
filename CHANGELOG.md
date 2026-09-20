@@ -33,7 +33,8 @@ on the real execution path.
   table and inline-table input forms. Optional declared artifact sizes are
   projected as `size_bytes` and checked against supplied local bytes. Explicit UTC
   artifact `upload-time` values are retained as source event times. Optional
-  package index URLs are retained only as `index_sha256` fingerprints.
+  archive `subdirectory` values are retained as package-root context within the
+  archive. Package index URLs are retained only as `index_sha256` fingerprints.
   Environment/group selection, complete artifact projection, and unsupported
   source fields remain counted as gaps.
   `rh_cli pylock-observe` now verifies supplied local bytes against SHA-256,
