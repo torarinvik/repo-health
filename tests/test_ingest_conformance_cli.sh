@@ -10,7 +10,7 @@ echo "[ingest] build"
 bash "$ROOT/tools/build.sh" >/dev/null
 [[ -x "$ROOT/build/rh_cli" ]] || fail "rh_cli not built"
 
-rm -rf "$T-root" "$T-root-2" "$T-root-bad" "$T-root-bad2" "$T-root-bad3" "$T-root-bad4" "$T-root-bad5" "$T-root-future" "$T-root-empty-pages" "$T-root-observed" "$T-root-unauthorized" "$T-root-unsupported" "$T-root-unavailable" "$T-root-undeclared" "$T-root-recovered" "$T-root-pending" "$T-input.json" "$T-out.json" "$T-out-2.json" "$T-bad.json" "$T-bad-status.json" "$T-x"
+rm -rf "$T-root" "$T-root-2" "$T-root-overlap" "$T-root-bad" "$T-root-bad2" "$T-root-bad3" "$T-root-bad4" "$T-root-bad5" "$T-root-future" "$T-root-empty-pages" "$T-root-observed" "$T-root-unauthorized" "$T-root-unsupported" "$T-root-unavailable" "$T-root-undeclared" "$T-root-recovered" "$T-root-pending" "$T-input.json" "$T-out.json" "$T-out-2.json" "$T-bad.json" "$T-bad-status.json" "$T-x"
 mkdir -p "$T"
 python3 - "$T-input.json" <<'PY'
 import json, sys
@@ -76,6 +76,25 @@ assert d["coverage"] == {"state":"partial", "collection_complete":False, "refres
 print("[ingest] replay result remains semantically stable")
 PY
 [[ "$(cat "$T-root-2/sources/github/coverage/issues.interval")" == "1000 2000 partial" ]] || fail "coverage interval does not retain acquisition bounds"
+
+echo "[ingest] overlapping intervals keep each observation and absorb duplicate events"
+cat > "$T/overlap-first.json" <<'JSON'
+{"schema":"rh-ingest-input/1","source":"github","capability":"issues","owner":"worker-a","lease_now":200,"lease_ttl":100,"collection_start":100,"collection_complete":true,"pages":[{"page":1,"status":"complete","commit":true,"events":[{"id":"issue:shared","line":"{\"id\":\"issue:shared\",\"state\":\"open\"}"}]}]}
+JSON
+"$ROOT/build/rh_cli" ingest --root "$T-root-overlap" --input "$T/overlap-first.json" --out "$T/overlap-first.out" >/dev/null || fail "first overlapping ingest"
+cat > "$T/overlap-second.json" <<'JSON'
+{"schema":"rh-ingest-input/1","source":"github","capability":"issues","owner":"worker-a","lease_now":250,"lease_ttl":100,"collection_start":150,"collection_complete":true,"pages":[{"page":1,"status":"complete","commit":true,"events":[{"id":"issue:shared","line":"{\"id\":\"issue:shared\",\"state\":\"open\"}"}]},{"page":2,"status":"complete","commit":true,"events":[{"id":"issue:new","line":"{\"id\":\"issue:new\",\"state\":\"open\"}"}]}]}
+JSON
+"$ROOT/build/rh_cli" ingest --root "$T-root-overlap" --input "$T/overlap-second.json" --out "$T/overlap-second.out" >/dev/null || fail "overlapping ingest"
+python3 - "$T/overlap-second.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["cursor"] == {"page":2, "event_count":2} and d["event_store_count"] == 2, d
+assert d["conformance"]["appended"] == 1 and d["conformance"]["duplicates_absorbed"] == 1, d
+assert d["coverage"] == {"state":"observed", "collection_complete":True, "refresh_last_success":True, "persisted":True}, d
+print("[ingest] overlapping event identity is idempotent")
+PY
+[[ "$(cat "$T-root-overlap/sources/github/coverage/issues.interval")" == $'100 200 observed\n150 250 observed' ]] || fail "overlapping coverage intervals were not both retained"
 
 echo "[ingest] per-capability coverage retains clean and typed failure states"
 for state in observed unauthorized unsupported unavailable; do

@@ -128,7 +128,11 @@ with clean committed acquisition is `observed`; mixed, undeclared, or
 unresolved-crash work is `partial`, and failure-only
 authorization, unsupported, and transport cases retain their typed states.
 A repeated page retry clears its pending commit marker before coverage can be
-reported as observed.
+reported as observed. An overlapping collection on the same store retains both
+coverage intervals while the immutable event index absorbs repeated event IDs.
+After a completed run, the shared ingest lease enters its reusable `available`
+phase; the next run receives a new fencing token, while ordinary job leases
+remain terminal on success.
 
 **M02-06 scoped snapshot reconciliation:** `rh_cli snapshot-reconcile
 --input <rh-snapshot-reconcile-input/1> --out <file>` emits a deterministic

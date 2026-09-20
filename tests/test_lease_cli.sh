@@ -63,6 +63,23 @@ assert d["ops"][1]["applied"] is False, d["ops"][1]
 print("[lease] stale-worker fencing OK")
 PY
 
+echo "[lease] reusable resource lock increments its fencing token"
+cat > "$T/d.json" <<'JSON'
+{"schema":"rh-store-lease-input/1","owner":"worker-1","ops":[{"op":"claim","now":1000,"ttl":100},{"op":"release","now":1001,"phase":"available"},{"op":"heartbeat","now":1002},{"op":"claim","now":1002,"ttl":100},{"op":"status","now":1002}]}
+JSON
+"$ROOT/build/rh_cli" store lease --root "$T" --job reusable --input "$T/d.json" --out "$T/d.out" >/dev/null || fail "reusable lease run"
+python3 - "$T/d.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+ops = d["ops"]
+assert ops[0] == {"op":"claim", "outcome":"claimed", "token":1, "phase":"leased"}, ops[0]
+assert ops[1] == {"op":"release", "applied":True, "phase":"available"}, ops[1]
+assert ops[2] == {"op":"heartbeat", "applied":False, "token":1}, ops[2]
+assert ops[3] == {"op":"claim", "outcome":"claimed", "token":2, "phase":"leased"}, ops[3]
+assert d["final"]["token"] == 2 and d["final"]["phase"] == "leased", d
+print("[lease] available release is reusable and fences the prior worker")
+PY
+
 echo "[lease] determinism + fail-closed negatives"
 "$ROOT/build/rh_cli" store lease --root "$T/det1" --job jobA --input "$T/a.json" --out "$T/det1.out" >/dev/null || fail "det1"
 "$ROOT/build/rh_cli" store lease --root "$T/det2" --job jobA --input "$T/a.json" --out "$T/det2.out" >/dev/null || fail "det2"

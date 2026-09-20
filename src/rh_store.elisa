@@ -2,6 +2,9 @@ include "./rh_base.elisa"
 include "./rh_observation.elisa"
 
 module Store:
+    private:
+        const RH_LS_AVAILABLE: i64 = 6
+
     public:
         # rh_store.elisa — durable ingestion store (M02-01/02/03/06/07, Elisa
         # adaptation: filesystem-backed, no Postgres in the M02 slice).
@@ -28,8 +31,9 @@ module Store:
         # it cannot publish after losing its fencing token.
         #
         # Lease phases: queued(0) leased(1) running(2) succeeded(3)
-        # failed_terminal(4) canceled(5). Terminal phases refuse acquisition (-2);
-        # an operator clears them by removing the lease file (runbook).
+        # failed_terminal(4) canceled(5) available(6). Job-terminal phases
+        # refuse acquisition (-2). The available resource-lock phase can be
+        # claimed again with a new fencing token after a completed operation.
 
         # Compare a byte span against a literal. Private to this file.
         # (private to this file)
@@ -250,6 +254,7 @@ module Store:
             return "succeeded" if phase == 3
             return "failed_terminal" if phase == 4
             return "canceled" if phase == 5
+            return "available" if phase == RH_LS_AVAILABLE
             "queued"
 
         def rh_phase_parse(word_s: usize, word_e: usize, data: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -258,6 +263,7 @@ module Store:
             return 3 if rh_span_eq(data, word_s, word_e, "succeeded")
             return 4 if rh_span_eq(data, word_s, word_e, "failed_terminal")
             return 5 if rh_span_eq(data, word_s, word_e, "canceled")
+            return RH_LS_AVAILABLE if rh_span_eq(data, word_s, word_e, "available")
             return 0 if rh_span_eq(data, word_s, word_e, "queued")
             -1
 
@@ -345,9 +351,14 @@ module Store:
                 phase: mutable i64 = 0
                 have: bool = rh_lease_read(path, &token, old_owner, &hb, &recorded, &phase)
                 if have:
-                    return -2 if phase == 3 or phase == 4 or phase == 5
-                    return -1 if now - hb <= recorded
-                token + 1
+                    if phase == RH_LS_AVAILABLE:
+                        token + 1
+                    else:
+                        return -2 if phase == 3 or phase == 4 or phase == 5
+                        return -1 if now - hb <= recorded
+                        token + 1
+                else:
+                    token + 1
             return -1 if ttl <= 0
             return -1 if not rh_lease_write(path, next, owner, now, ttl, 1)
             rh_lease_log(log_path, next, owner, now, "claim")
@@ -363,7 +374,7 @@ module Store:
             phase: mutable i64 = 0
             return false if not rh_lease_read(path, &cur, drop, &hb, &kept, &phase)
             return false if cur != token
-            return false if phase == 3 or phase == 4 or phase == 5
+            return false if phase == 3 or phase == 4 or phase == 5 or phase == RH_LS_AVAILABLE
             rh_lease_write(path, token, owner, now, kept, phase)
 
         # Release to a final phase only when the token still matches: a stale
@@ -381,3 +392,8 @@ module Store:
             return false if not rh_lease_write(path, token, owner, now, kept, final_phase)
             rh_lease_log(log_path, token, owner, now, "release")
             true
+
+        # Release a shared resource lock for reuse. A later claim receives the
+        # next fencing token; successful job leases should still finish terminally.
+        def rh_lease_release_available(path: cstr, log_path: cstr, token: i64, owner: u8&, now: i64) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            Store::rh_lease_release(path, log_path, token, owner, now, RH_LS_AVAILABLE)
