@@ -103,4 +103,8 @@ rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || fail "ecosystem stage must reject a non-ecosystem distribution (got $rc)"
 
+echo "[bench] single-node ecosystem profile terminates without modulo by zero"
+single="$("$ROOT/build/bench_runner" 1 1 ecosystem ecosystem)"
+[[ "$single" == *"nodes=1 edges=0"* ]] || fail "unexpected singleton workload: $single"
+
 echo "test_bench OK"
