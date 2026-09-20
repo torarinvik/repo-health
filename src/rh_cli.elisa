@@ -82,6 +82,7 @@ include "./rh_lineage.elisa"
 include "./rh_population.elisa"
 include "./rh_ingest_conformance.elisa"
 include "./rh_snapshot_reconcile.elisa"
+include "./rh_postgres_report.elisa"
 include "./rh_drilldown.elisa"
 include "./rh_role_grain.elisa"
 include "./rh_render.elisa"
@@ -176,6 +177,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli lineage --input <file> --out <file>")
     rh_cli_err("       rh_cli population --input <file> --out <file>")
     rh_cli_err("       rh_cli ingest --root <dir> --input <file> --out <file>")
+    rh_cli_err("       rh_cli postgres --input <rh-postgres-command/1> --out <file>  (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli drilldown --input <file> --out <file>")
     rh_cli_err("       rh_cli role-grain --input <file> --out <file>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
@@ -2457,6 +2459,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 iiq <- iiq + 1
         return rh_cli_usage(2) if ir_idx < 0 or ii_idx < 0 or io_idx < 0
         return rh_do_ingest(slots[ir_idx], slots[ii_idx], slots[io_idx])
+    if Base::rh_streq(cmd, "postgres"):
+        postgres_input_idx, postgres_out_idx =
+            while postgres_arg_index < argc |postgres_input_idx: i64 = -1, postgres_out_idx: i64 = -1, postgres_arg_index: i64 = 2, slots| -> postgres_input_idx, postgres_out_idx:
+                postgres_arg: u8& = slots[postgres_arg_index].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(postgres_arg, "--input"):
+                    if postgres_arg_index + 1 < argc:
+                        postgres_arg_index <- postgres_arg_index + 1
+                        postgres_input_idx <- postgres_arg_index
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(postgres_arg, "--out"):
+                    if postgres_arg_index + 1 < argc:
+                        postgres_arg_index <- postgres_arg_index + 1
+                        postgres_out_idx <- postgres_arg_index
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                postgres_arg_index <- postgres_arg_index + 1
+        return rh_cli_usage(2) if postgres_input_idx < 0 or postgres_out_idx < 0
+        return rh_do_postgres(slots[postgres_input_idx], slots[postgres_out_idx])
     if Base::rh_streq(cmd, "drilldown"):
         di_idx, do_idx =
             while ddq < argc |di_idx: i64 = -1, do_idx: i64 = -1, ddq: i64 = 2, slots| -> di_idx, do_idx:
@@ -7920,6 +7943,37 @@ def rh_do_population(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
         rh_cli_err("population: cannot write --out")
         return 4
     rh_cli_out("population: bounded downstream report emitted")
+    0
+
+# --- M02 PostgreSQL repository execution path. ---
+def rh_do_postgres(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected postgres argument (allowlist)")
+        return 3
+    database_url: u8&? = getenv("RH_DATABASE_URL")
+    if database_url == null:
+        rh_cli_err("postgres: RH_DATABASE_URL is required")
+        return 4
+    input_bytes: mutable darray[u8] =
+        bytes: mutable darray[u8] = []
+        Base::rh_push_cstr(bytes, input_path)
+        bytes.push(0)
+        bytes
+    input_path_ptr: cstr = (&input_bytes[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(input_path_ptr, raw) < 0:
+        rh_cli_err("postgres: cannot read --input")
+        return 4
+    conninfo: cstr = database_url.cast[cstr] can Unsafe.PointerCast
+    body: mutable darray[u8] = []
+    if PostgresReport::rh_postgres_command(raw, conninfo, body) != 0:
+        rh_cli_err("postgres: invalid command or database operation failed")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("postgres: cannot write --out")
+        return 4
+    rh_cli_out("postgres: operation complete")
     0
 
 # --- M02 research conformance execution path. ---

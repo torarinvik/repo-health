@@ -9,19 +9,25 @@ evidence references, indexes, and fenced job/cursor methods. The migration is
 not applied by the local CLI, so the SQL file is a target contract and not
 evidence of a deployed database.
 
-The first application method is in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa).
-It dynamically loads `libpq` and commits one complete or successful-empty
-collection page through `rh_commit_collection_page`, and exposes fenced job
-claim, heartbeat, and finish methods. It binds values through `PQexecParams`, applies
-a five-second connection timeout, and returns separate committed/duplicate or
-current/stale/failure outcomes. Set `RH_LIBPQ_PATH` when
+Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa),
+with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).
+`rh_cli postgres --input <rh-postgres-command/1> --out <file>` commits one
+complete or successful-empty collection page through `rh_commit_collection_page`,
+or performs fenced job claim, heartbeat, and finish. It binds values through
+`PQexecParams`, applies a five-second connection timeout, and reports separate
+committed/duplicate, claimed/empty, and applied/fenced outcomes; transport or
+query failures exit without writing a result. Supply
+the connection string through `RH_DATABASE_URL`; it is not accepted in command
+input or emitted in result files. Set `RH_LIBPQ_PATH` when
 the library is outside the platform loader path; otherwise the adapter checks
 the standard Homebrew paths on macOS and `libpq.so.5` on Linux. Supply the
-connection string through the calling Elisa program, never through a shell
-command. Remote connection strings should use `sslmode=verify-full` and a
+connection string as an environment setting, never as a command argument.
+Remote connection strings should use `sslmode=verify-full` and a
 trusted root certificate. The mock ABI gate is `tests/test_pg_adapter.sh`; set
 `RH_PG_ADAPTER=1` and optionally `RH_LIBPQ_PATH` to run these operations
 against an ephemeral PostgreSQL instance with `tests/test_pg_adapter_live.sh`.
+The CLI command contract and failure gates are covered by
+`tests/test_postgres_cli.sh`.
 
 ## Versioned things that can change
 
@@ -75,10 +81,10 @@ against an ephemeral PostgreSQL instance with `tests/test_pg_adapter_live.sh`.
 
 - There is no automatic migration runner; migrations are operator-led using
   the runbooks.
-- The active CLI has no database transaction layer yet. Collection-page commit
-  and job claim/heartbeat/finish have native methods; canonical event/evidence
-  persistence, configuration, and `rh_cli ingest` wiring remain open.
-  Filesystem fencing continues to govern the active runtime.
+- The active `rh_cli ingest` path still uses the filesystem store. PostgreSQL
+  page commit and job lease operations are available through `rh_cli postgres`,
+  while canonical event/evidence persistence and transactional ingestion wiring
+  remain open. Filesystem fencing continues to govern the active ingest runtime.
 - No migration has been performed across a format change in this repository
   yet; the rules above are the contract, and the first real migration must
   add a rehearsal to `tests/`.

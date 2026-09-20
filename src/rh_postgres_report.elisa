@@ -1,0 +1,191 @@
+# rh_postgres_report.elisa — bounded PostgreSQL operation command (M02-01).
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_postgres.elisa"
+
+module PostgresReport:
+    private:
+        const RH_PG_REPORT_MAX_BYTES: usize = 1048576
+
+        def rh_pg_report_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_pg_report_span(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&, allow_empty: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
+            return false if idx < 0 or not Json::rh_json_str_span(nodes, idx, start_out, end_out)
+            return false if end_out[0] < start_out[0] or (not allow_empty and end_out[0] == start_out[0])
+            while i < end_out[0] - start_out[0] |i: i64 = 0, texts, start_out, end_out|:
+                return false if texts[(start_out[0] + i).usize()] == 0
+                i <- i + 1
+            true
+
+        def rh_pg_report_text(texts: darray[u8]&, start: i64, end: i64) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
+            bytes: mutable darray[u8] = []
+            while i < end |i: i64 = start, bytes, texts, end|:
+                bytes.push(texts[i.usize()])
+                i <- i + 1
+            bytes.push(0)
+            bytes
+
+        def rh_pg_report_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, min_value: i64, max_value: i64, value_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, obj, key), &ok)
+            return false if ok == 0 or value < min_value or value > max_value
+            value_out[0] <- value
+            true
+
+        def rh_pg_report_emit_text(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            Base::rh_json_escape(out, texts, start.usize(), end.usize())
+            out.push(34)
+
+        def rh_pg_report_emit_cstr(out: mutable darray[u8]&, bytes: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            raw: mutable darray[u8] = []
+            while i + 1 < bytes.count |i: usize = 0, bytes, raw|:
+                raw.push(bytes[i])
+                i <- i + 1
+            out.push(34)
+            Base::rh_json_escape(out, raw, 0, raw.count)
+            out.push(34)
+
+    public:
+        # Commands contain no connection settings. RH_DATABASE_URL is read by
+        # the CLI and is never copied into the result or diagnostics.
+        def rh_postgres_command(raw: darray[u8]&, conninfo: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if raw.count == 0 or raw.count > RH_PG_REPORT_MAX_BYTES or Base::rh_cstr_len_c(conninfo) == 0 or Base::rh_cstr_len_c(conninfo) > 4096
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "schema", &schema_s, &schema_e, false)
+            return -1 if not PostgresReport::rh_pg_report_eq(texts, schema_s, schema_e, "rh-postgres-command/1")
+            operation_s: mutable i64 = 0
+            operation_e: mutable i64 = 0
+            return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "operation", &operation_s, &operation_e, false)
+
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "page_commit"):
+                run_s: mutable i64 = 0
+                run_e: mutable i64 = 0
+                scope_s: mutable i64 = 0
+                scope_e: mutable i64 = 0
+                before_s: mutable i64 = 0
+                before_e: mutable i64 = 0
+                after_s: mutable i64 = 0
+                after_e: mutable i64 = 0
+                complete_s: mutable i64 = 0
+                complete_e: mutable i64 = 0
+                evidence_s: mutable i64 = 0
+                evidence_e: mutable i64 = 0
+                now_s: mutable i64 = 0
+                now_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "run_id", &run_s, &run_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "scope_hash", &scope_s, &scope_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "cursor_before", &before_s, &before_e, true)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "cursor_after", &after_s, &after_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "completeness", &complete_s, &complete_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "evidence_id", &evidence_s, &evidence_e, true)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "now", &now_s, &now_e, false)
+                return -1 if not PostgresReport::rh_pg_report_eq(texts, complete_s, complete_e, "complete") and not PostgresReport::rh_pg_report_eq(texts, complete_s, complete_e, "empty")
+                page_number: mutable i64 = 0
+                record_count: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "page_number", 0, 2147483647, &page_number)
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "record_count", 0, 2147483647, &record_count)
+                run_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, run_s, run_e)
+                scope_hash: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, scope_s, scope_e)
+                cursor_before: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, before_s, before_e)
+                cursor_after: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, after_s, after_e)
+                completeness: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, complete_s, complete_e)
+                evidence_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, evidence_s, evidence_e)
+                now: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, now_s, now_e)
+                run_ptr: cstr = (&run_id[0]).cast[cstr] can Unsafe.PointerCast
+                scope_ptr: cstr = (&scope_hash[0]).cast[cstr] can Unsafe.PointerCast
+                before_ptr: cstr = (&cursor_before[0]).cast[cstr] can Unsafe.PointerCast
+                after_ptr: cstr = (&cursor_after[0]).cast[cstr] can Unsafe.PointerCast
+                completeness_ptr: cstr = (&completeness[0]).cast[cstr] can Unsafe.PointerCast
+                evidence_ptr: cstr = (&evidence_id[0]).cast[cstr] can Unsafe.PointerCast
+                now_ptr: cstr = (&now[0]).cast[cstr] can Unsafe.PointerCast
+                committed: i64 = Postgres::rh_pg_commit_collection_page(conninfo, run_ptr, page_number, scope_ptr, before_ptr, after_ptr, completeness_ptr, record_count, evidence_ptr, now_ptr)
+                return -1 if committed < 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"page_commit\",\"status\":\"")
+                Base::rh_push_text(out, "committed" if committed == 1 else "duplicate")
+                Base::rh_push_text(out, "\"}")
+                return 0
+
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "claim_job"):
+                worker_s: mutable i64 = 0
+                worker_e: mutable i64 = 0
+                now_s: mutable i64 = 0
+                now_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "worker_id", &worker_s, &worker_e, false) or worker_e - worker_s > 256
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "now", &now_s, &now_e, false)
+                lease_seconds: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "lease_seconds", 1, 86400, &lease_seconds)
+                worker_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, worker_s, worker_e)
+                now: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, now_s, now_e)
+                job_id: mutable darray[u8] = []
+                fencing_token: mutable i64 = 0
+                lease_expires: mutable darray[u8] = []
+                worker_ptr: cstr = (&worker_id[0]).cast[cstr] can Unsafe.PointerCast
+                now_ptr: cstr = (&now[0]).cast[cstr] can Unsafe.PointerCast
+                claimed: i64 = Postgres::rh_pg_claim_next_job(conninfo, worker_ptr, now_ptr, lease_seconds, job_id, &fencing_token, lease_expires)
+                return -1 if claimed < 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_job\",\"status\":\"")
+                if claimed == 0:
+                    Base::rh_push_text(out, "empty\"}")
+                else:
+                    Base::rh_push_text(out, "claimed\",\"job_id\":")
+                    PostgresReport::rh_pg_report_emit_cstr(out, job_id)
+                    Base::rh_push_text(out, ",\"fencing_token\":")
+                    Base::rh_push_decimal_i64(out, fencing_token)
+                    Base::rh_push_text(out, ",\"lease_expires_at\":")
+                    PostgresReport::rh_pg_report_emit_cstr(out, lease_expires)
+                    Base::rh_push_text(out, "}")
+                return 0
+
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "heartbeat_job") or PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "finish_job"):
+                job_s: mutable i64 = 0
+                job_e: mutable i64 = 0
+                now_s: mutable i64 = 0
+                now_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "job_id", &job_s, &job_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "now", &now_s, &now_e, false)
+                token: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "fencing_token", 1, 9223372036854775807, &token)
+                job_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, job_s, job_e)
+                now: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, now_s, now_e)
+                job_ptr: cstr = (&job_id[0]).cast[cstr] can Unsafe.PointerCast
+                now_ptr: cstr = (&now[0]).cast[cstr] can Unsafe.PointerCast
+                result: i64 =
+                    if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "heartbeat_job"):
+                        lease_seconds: mutable i64 = 0
+                        return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "lease_seconds", 1, 86400, &lease_seconds)
+                        Postgres::rh_pg_heartbeat_job(conninfo, job_ptr, token, now_ptr, lease_seconds)
+                    else:
+                        state_s: mutable i64 = 0
+                        state_e: mutable i64 = 0
+                        outcome_s: mutable i64 = 0
+                        outcome_e: mutable i64 = 0
+                        error_s: mutable i64 = 0
+                        error_e: mutable i64 = 0
+                        return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "state", &state_s, &state_e, false)
+                        return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "outcome", &outcome_s, &outcome_e, true)
+                        return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "error_kind", &error_s, &error_e, true)
+                        state: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, state_s, state_e)
+                        outcome: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, outcome_s, outcome_e)
+                        error_kind: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, error_s, error_e)
+                        state_ptr: cstr = (&state[0]).cast[cstr] can Unsafe.PointerCast
+                        outcome_ptr: cstr = (&outcome[0]).cast[cstr] can Unsafe.PointerCast
+                        error_ptr: cstr = (&error_kind[0]).cast[cstr] can Unsafe.PointerCast
+                        Postgres::rh_pg_finish_job(conninfo, job_ptr, token, state_ptr, now_ptr, outcome_ptr, error_ptr)
+                return -1 if result < 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"")
+                Base::rh_push_text(out, "heartbeat_job" if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "heartbeat_job") else "finish_job")
+                Base::rh_push_text(out, "\",\"status\":\"")
+                Base::rh_push_text(out, "applied" if result == 1 else "fenced")
+                Base::rh_push_text(out, "\"}")
+                return 0
+            -1
