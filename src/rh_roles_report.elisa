@@ -47,6 +47,13 @@ module RolesReport:
             return Roles::RH_ACTION_REVIEW if rh_rr_eq(texts, s, e, "review")
             0
 
+        def rh_rr_actor_kind(texts: darray[u8]&, s: i64, e: i64) -> u8:
+            return Roles::RH_ACTOR_KIND_HUMAN if rh_rr_eq(texts, s, e, "human")
+            return Roles::RH_ACTOR_KIND_BOT if rh_rr_eq(texts, s, e, "bot")
+            return Roles::RH_ACTOR_KIND_SERVICE if rh_rr_eq(texts, s, e, "service")
+            return Roles::RH_ACTOR_KIND_UNKNOWN if rh_rr_eq(texts, s, e, "unknown")
+            255
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_rr_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
@@ -123,7 +130,15 @@ module RolesReport:
                     return -1 if at_action < 0 or not rh_rr_str(nodes, texts, ac, "kind", &kind_s, &kind_e)
                     kind_action: u8 = rh_rr_action_kind(texts, kind_s, kind_e)
                     return -1 if kind_action == 0
-                    actions.push(Roles::RhObservedAction{actor_id: actor_action, kind: kind_action, observed_at: at_action})
+                    actor_kind_idx: i64 = Json::rh_json_obj_get(nodes, texts, ac, "actor_type")
+                    actor_kind: mutable u8 = Roles::RH_ACTOR_KIND_UNKNOWN
+                    if actor_kind_idx >= 0:
+                        actor_kind_s: mutable i64 = 0
+                        actor_kind_e: mutable i64 = 0
+                        return -1 if not Json::rh_json_str_span(nodes, actor_kind_idx, &actor_kind_s, &actor_kind_e)
+                        actor_kind <- rh_rr_actor_kind(texts, actor_kind_s, actor_kind_e)
+                        return -1 if actor_kind == 255
+                    actions.push(Roles::RhObservedAction{actor_id: actor_action, kind: kind_action, actor_kind: actor_kind, observed_at: at_action})
                     ac <- nodes[ac.usize()].next_sibling
             persistent_actors: mutable darray[i64] = []
             persistent_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "persistent_actors")
@@ -247,6 +262,9 @@ module RolesReport:
             observed_merge_actors: i64 = Roles::rh_observed_actor_count(actions, Roles::RH_ACTION_MERGE)
             observed_review_actors: i64 = Roles::rh_observed_actor_count(actions, Roles::RH_ACTION_REVIEW)
             unattributed_release_count: i64 = Roles::rh_observed_unattributed_count(actions, Roles::RH_ACTION_RELEASE)
+            automated_release_actions: mutable i64 = 0
+            attributed_release_actions: mutable i64 = 0
+            Roles::rh_observed_release_automation(actions, &automated_release_actions, &attributed_release_actions)
             release_actor_count_80: i64 = Roles::rh_observed_concentration_80(actions, Roles::RH_ACTION_RELEASE)
             review_actor_count_80: i64 = Roles::rh_observed_concentration_80(actions, Roles::RH_ACTION_REVIEW)
             Base::rh_push_decimal_i64(out, p)
@@ -339,6 +357,18 @@ module RolesReport:
             else:
                 Base::rh_push_text(out, "observed\",\"value\":")
                 Base::rh_push_decimal_i64(out, unattributed_release_count)
+            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
+            Base::rh_push_text(out, "{\"key\":\"maintainer.release_role_automation_share\",\"version\":\"1.0.0\",\"status\":\"")
+            if not has_actions:
+                Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"")
+            elif attributed_release_actions == 0:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-attributed-release-actions\"")
+            else:
+                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
+                Base::rh_push_decimal_i64(out, automated_release_actions)
+                Base::rh_push_text(out, ",\"den\":")
+                Base::rh_push_decimal_i64(out, attributed_release_actions)
+                Base::rh_push_text(out, "}")
             Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"concentration.release_actor_count_80\",\"version\":\"1.0.0\",\"status\":\"")
             if not has_actions:
