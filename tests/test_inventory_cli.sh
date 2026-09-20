@@ -58,6 +58,19 @@ assert "valid != complete" in d["note"], d["note"]
 print("[inventory] cyclonedx OK")
 PY
 
+for version in 1.4 1.6; do
+  echo "[inventory] CycloneDX $version declared support -> observed"
+  "$ROOT/build/rh_cli" inventory --format cyclonedx --input "$T/cyclonedx-$version.json" --out "$T/cdx-$version.json" >/dev/null || fail "CycloneDX $version parse"
+  cmp -s "$T/cdx-$version.json" "$ROOT/fixtures/inventory-results/cyclonedx-$version.json" || fail "CycloneDX $version result differs from golden"
+  python3 - "$T/cdx-$version.json" "$version" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["format"] == "cyclonedx" and d["spec_version"] == sys.argv[2], d
+assert d["status"] == "observed" and d["counts"]["components"] == 1, d
+print("[inventory] CycloneDX", sys.argv[2], "OK")
+PY
+done
+
 echo "[inventory] unmodeled top-level CycloneDX fields are counted, not dropped"
 printf '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[],"signature":{},"futureField":1}' > "$T/cdx-unknown.json"
 "$ROOT/build/rh_cli" inventory --format cyclonedx --input "$T/cdx-unknown.json" --out "$T/cdx-unknown.out" >/dev/null || fail "cyclonedx unknown-keys run"
