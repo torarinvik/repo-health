@@ -352,6 +352,64 @@ def check_go_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic,
         trial <- trial + 1
     return
 
+def check_xml_lock_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    bounded_result: bool =
+        nuget_packages: mutable darray[Package::RhPkgNode] = []
+        nuget_pool: mutable darray[u8] = []
+        nuget_requirements: mutable darray[Package::RhRequire] = []
+        nuget_edges: mutable darray[Package::RhDepEdge] = []
+        nuget_unresolved: mutable darray[Package::RhUnresolved] = []
+        nuget_unknown: mutable i64 = 0
+        nuget_status: i64 = Package::rh_nuget_parse(raw, nuget_packages, nuget_pool, nuget_requirements, nuget_edges, nuget_unresolved, &nuget_unknown)
+        maven_packages: mutable darray[Package::RhPkgNode] = []
+        maven_pool: mutable darray[u8] = []
+        maven_requirements: mutable darray[Package::RhRequire] = []
+        maven_edges: mutable darray[Package::RhDepEdge] = []
+        maven_unresolved: mutable darray[Package::RhUnresolved] = []
+        maven_unknown: mutable i64 = 0
+        maven_status: i64 = Package::rh_maven_parse(raw, maven_packages, maven_pool, maven_requirements, maven_edges, maven_unresolved, &maven_unknown)
+        (nuget_status == -1 or nuget_status == 0) and (maven_status == -1 or maven_status == 0) and nuget_packages.count <= raw.count + 1 and maven_packages.count <= raw.count + 1 and nuget_pool.count.i64() <= raw.count.i64() * 8 + 32 and maven_pool.count.i64() <= raw.count.i64() * 8 + 32 and nuget_requirements.count <= raw.count and maven_requirements.count <= raw.count and nuget_edges.count <= raw.count and maven_edges.count <= raw.count and nuget_unresolved.count <= raw.count and maven_unresolved.count <= raw.count and nuget_unknown >= 0 and nuget_unknown <= raw.count.i64() + 1 and maven_unknown >= 0 and maven_unknown <= raw.count.i64() + 1
+    t7check(bounded_result, "xml-lock-fuzz-bounds", fails)
+    return
+
+def check_xml_lock_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    nuget_corpus: mutable darray[u8] = []
+    Base::rh_push_text(nuget_corpus, "<packages>\n  <package id=\"Newtonsoft.Json\" version=\"13.0.3\" targetFramework=\"net8.0\" />\n</packages>\n")
+    while trial < 64 |trial: i64 = 0, rng: i64 = 6324555, nuget_corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < nuget_corpus.count |copied: usize = 0, nuget_corpus, fuzzed|:
+            fuzzed.push(nuget_corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_xml_lock_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+
+    maven_corpus: mutable darray[u8] = []
+    Base::rh_push_text(maven_corpus, "<project>\n<groupId>org.example</groupId>\n<artifactId>root</artifactId>\n<version>1.0.0</version>\n<dependencies>\n<dependency>\n<groupId>org.example</groupId>\n<artifactId>lib</artifactId>\n<version>1.2.3</version>\n</dependency>\n</dependencies>\n</project>\n")
+    while trial < 128 |trial: i64 = 0, rng: i64 = 7071067, maven_corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < maven_corpus.count |copied: usize = 0, maven_corpus, fuzzed|:
+            fuzzed.push(maven_corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_xml_lock_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+    return
+
 def try_bad_semver(data: darray[u8]&, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     ok: bool =
         vv: mutable Package::RhSemver = Package::RhSemver{0, 0, 0, 0, 0}
@@ -630,6 +688,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_archive_fuzz(&fails)
     check_npm_fuzz(&fails)
     check_go_fuzz(&fails)
+    check_xml_lock_fuzz(&fails)
     check_semver_hardening(&fails)
     check_semver_fuzz(&fails)
     check_lock_hardening(&fails)
