@@ -31,6 +31,13 @@ cache state and other host processes remain
 uncontrolled; `disk_context` describes the host, while `disk_workload` reports
 the temporary store corpus footprint described below.
 
+Set `RH_PROFILE_REPO` to opt into a full-history scan of a local Git repository
+through `rh_cli scan`. The profile records its revision, dirty state, commit and
+identity counts, history digest, latency, and memory samples. Every repetition
+uses its own temporary report directory, and the temporary evidence is deleted
+after profiling; the manifest does not retain raw author identities or commit
+messages. The scan reads local history only and does not fetch from a remote.
+
 Each `rh-bench/3` manifest also contains a temporary local-store disk profile.
 The harness puts 17 deterministic evidence files (13 unique contents) through
 `rh_cli store put`, verifies every content-addressed object, and records source

@@ -837,11 +837,13 @@ logical bytes, deduplication, and filesystem allocation when available. The
 bounded cases, including central-hub and cycle graphs. The ecosystem profile
 exercises package-version identities, accepted mirror grouping, independent
 partial history/review coverage, temporal and runtime/Linux graph projections,
-and the real correction invalidation/replay path. It still does not model real
-project histories, arbitrary historical correction replay, or worker-scheduler
-load shedding. Concurrency results now include a 1 ms target-poll series summing live-child RSS reads per driver pass, explicit
-missed samples, and a conservative upper bound from summed child high-water
-marks; short peaks can fall between polls.
+and the real correction invalidation/replay path. Core workloads remain synthetic and do not cover arbitrary historical
+correction replay or worker-scheduler load shedding. `RH_PROFILE_REPO` now opts
+into a full local Git-history scan that records source revision, history digest,
+counts, latency, and memory samples without retaining raw identities or fetching
+remotely. Concurrency results include a 1 ms target-poll series summing live-
+child RSS reads per driver pass, explicit missed samples, and a conservative
+sum-of-high-water-marks bound; short peaks can fall between polls.
 Request-budget variation, remote object storage, and deployed database load also
 remain unmeasured. Downstream shared-cache snapshots now use
 `rh-projection-snapshot/2`: they store only the public downstream graph, remap

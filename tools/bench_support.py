@@ -100,7 +100,7 @@ def configured_concurrent_jobs() -> int:
     return jobs
 
 
-def measure(command: Sequence[str], reps: int, concurrent_jobs: int = 1) -> dict[str, object]:
+def measure(command: Sequence[str] | Callable[[], Sequence[str]], reps: int, concurrent_jobs: int = 1) -> dict[str, object]:
     """Warm once, then time fresh processes in batches with identical output."""
     if reps < 2:
         raise ValueError("at least two repetitions are required")
@@ -116,7 +116,8 @@ def measure(command: Sequence[str], reps: int, concurrent_jobs: int = 1) -> dict
                 child_pids.append(pid)
 
         started = time.perf_counter()
-        futures = [executor.submit(run_process, command, register_child) for _ in range(concurrent_jobs)]
+        commands = [command() if callable(command) else command for _ in range(concurrent_jobs)]
+        futures = [executor.submit(run_process, run_command, register_child) for run_command in commands]
         sampled_peak = 0
         sample_count = 0
         while any(not future.done() for future in futures):

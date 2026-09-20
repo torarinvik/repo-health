@@ -11,12 +11,13 @@ mkdir -p "$OUT_DIR"
 [[ -x "$ROOT/build/bench_runner" ]] || bash "$ROOT/tools/build.sh" >/dev/null
 
 python3 - "$ROOT" "$OUT_DIR" <<'PY'
-import json, os, shutil, sys
+import json, os, shutil, subprocess, sys, tempfile
 root = sys.argv[1]
 sys.path.insert(0, os.path.join(root, "tools"))
 from bench_support import configured_concurrent_jobs, environment_metadata, measure, output_fields, throughput_and_outcomes
 root, out_dir = sys.argv[1], sys.argv[2]
 binp = os.path.join(root, "build", "bench_runner")
+cli = os.path.join(root, "build", "rh_cli")
 reps = int(os.environ.get("RH_BENCH_REPS", "10"))
 if reps < 2:
     raise SystemExit("RH_BENCH_REPS must be at least 2")
@@ -66,6 +67,50 @@ for nodes, seed, distribution, stages in workloads:
     digests = {output_fields(value).get("digest", "") for value in structural.values()}
     if len(digests) != 1:
         raise SystemExit("stage digests disagree for %s/%s" % (nodes, seed))
+
+history_profile = None
+history_repo = os.environ.get("RH_PROFILE_REPO")
+if history_repo:
+    if not os.path.isdir(history_repo):
+        raise SystemExit("RH_PROFILE_REPO must name a local Git repository")
+    try:
+        history_revision = subprocess.check_output(["git", "-C", history_repo, "rev-parse", "HEAD"], text=True).strip()
+        history_dirty = bool(subprocess.check_output(["git", "-C", history_repo, "status", "--porcelain"], text=True))
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit("RH_PROFILE_REPO must name a readable local Git repository") from exc
+    with tempfile.TemporaryDirectory(prefix="rh-profile-history-", dir="/tmp") as history_work:
+        repo_alias = os.path.join(history_work, "repo")
+        os.symlink(os.path.realpath(history_repo), repo_alias, target_is_directory=True)
+        output_ordinal = [0]
+
+        def local_history_command() -> list[str]:
+            output_path = os.path.join(history_work, "scan-%04d" % output_ordinal[0])
+            output_ordinal[0] += 1
+            return [cli, "scan", "--repo", repo_alias, "--out", output_path, "--full-history"]
+
+        sample = measure(local_history_command, reps, concurrent_jobs)
+        fields = output_fields(sample["output"])
+        if any(key not in fields for key in ("commits", "identities", "months", "digest")):
+            raise SystemExit("local history scan output lacks stable summary fields")
+        history_profile = {
+            "source": "local git history",
+            "repository_revision": history_revision,
+            "repository_working_tree_dirty": history_dirty,
+            "commits": int(fields["commits"]),
+            "identities": int(fields["identities"]),
+            "active_months": int(fields["months"]),
+            "history_digest": fields["digest"],
+            "latency": sample["latency"],
+            "peak_rss": sample["peak_rss"],
+            "concurrent_peak_rss_upper_bound": sample["concurrent_peak_rss_upper_bound"],
+            "sampled_concurrent_peak_rss": sample["sampled_concurrent_peak_rss"],
+            "outcomes": {
+                "successful_repetitions": sample["successful_repetitions"],
+                "failed_repetitions": sample["failed_repetitions"],
+                "concurrent_processes_per_repetition": sample["concurrent_processes_per_repetition"],
+            },
+            "scope": "full-history local scan through rh_cli; distinct temporary output per repetition; no remote fetch",
+        }
 manifest = {
     **metadata,
     "profile": "rh-profile/3",
@@ -77,6 +122,7 @@ manifest = {
         for nodes, seed, distribution, stages in workloads
     ],
     "runs": runs,
+    "repository_history": history_profile,
 }
 path = os.path.join(out_dir, "profile-manifest.json")
 with open(path, "w", encoding="utf-8") as fh:
