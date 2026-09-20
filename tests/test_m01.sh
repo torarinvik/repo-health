@@ -85,7 +85,10 @@ EOF
 "$CLI" replay --bundle "$T/rep-fix2/bundle.manifest" --out "$T/replay-fix2" >/dev/null || fail "replay"
 python3 -c "
 import json; d = json.load(open('$T/replay-fix2/replay.json'))
-assert d['verified'] is True, d; print('[m01] replay verified OK')"
+assert d['verified'] is True, d
+m = {x['key']: x for x in d['metrics']}
+assert m['coverage.replay_match_share']['value'] == {'num': 1, 'den': 1}, m
+print('[m01] replay verified OK')"
 # determinism: scan twice, same digest
 "$CLI" scan --repo "$T/fix2" --out "$T/rep-fix2b" --window-days 36500 >/dev/null || fail "rescan"
 a="$(grep digest-fnv1a64 "$T/rep-fix2/bundle.manifest")"; b="$(grep digest-fnv1a64 "$T/rep-fix2b/bundle.manifest")"
