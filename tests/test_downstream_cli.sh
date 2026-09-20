@@ -22,6 +22,63 @@ cat > "$T/diamond.json" <<'JSON'
 {"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"iso","version":"1"},{"id":1,"name":"top","version":"1"},{"id":2,"name":"mid-a","version":"1"},{"id":3,"name":"mid-b","version":"1"},{"id":4,"name":"leaf","version":"1"}],"edges":[{"from":1,"to":2,"scope":"normal"},{"from":1,"to":3,"scope":"normal"},{"from":2,"to":4,"scope":"normal"},{"from":3,"to":4,"scope":"normal"}],"unresolved":[],"advisories":[]}
 JSON
 
+# Bitemporal edge evidence: introduced/removed are valid time; first_seen is
+# collector knowledge time. The two axes must remain independently queryable.
+cat > "$T/temporal.json" <<'JSON'
+{"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"focus","version":"1"},{"id":1,"name":"known-normal","version":"1"},{"id":2,"name":"late-dev","version":"2"},{"id":3,"name":"removed-normal","version":"3"},{"id":4,"name":"new-normal","version":"4"}],"edges":[{"from":1,"to":0,"scope":"normal","platform":1,"introduced":100,"first_seen":300},{"from":2,"to":0,"scope":"dev","platform":2,"introduced":100,"first_seen":400},{"from":3,"to":0,"scope":"normal","platform":1,"introduced":100,"removed":200,"first_seen":100},{"from":4,"to":0,"scope":"normal","platform":1,"introduced":250,"first_seen":100}],"unresolved":[],"advisories":[]}
+JSON
+
+echo "[downstream] valid time, known time, scope, and platform form an explicit v2 projection"
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/time-a" --valid-as-of 300 --known-as-of 350 --scope normal --platform 1 >/dev/null || fail "temporal projection run"
+python3 - "$T/time-a/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-downstream/2", d
+p = d["projection"]
+assert (p["edge_scope"], p["platform"], p["valid_as_of"], p["known_as_of"]) == ("normal", 1, 300, 350), p
+assert p["visible_edge_count"] == 2, p
+assert d["direct_count"] == 2 and {n["id"] for n in d["direct"]} == {1, 4}, d
+print("[downstream] explicit projection OK")
+PY
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/time-b" --valid-as-of 300 --known-as-of 450 >/dev/null || fail "later-known projection run"
+python3 - "$T/time-b/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-downstream/2", d
+assert d["direct_count"] == 3 and {n["id"] for n in d["direct"]} == {1, 2, 4}, d
+assert d["projection"]["visible_edge_count"] == 3, d["projection"]
+print("[downstream] later-known evidence is visible retrospectively only when requested")
+PY
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/time-c" --valid-as-of 150 --known-as-of 450 >/dev/null || fail "earlier-valid projection run"
+python3 - "$T/time-c/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["direct_count"] == 3 and {n["id"] for n in d["direct"]} == {1, 2, 3}, d
+assert d["projection"]["valid_as_of"] == 150 and d["projection"]["known_as_of"] == 450, d["projection"]
+print("[downstream] removed/new edges obey valid time independently")
+PY
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/time-snapshot-a" --snapshot-root "$T/time-snapshots" --valid-as-of 300 --known-as-of 350 --scope normal --platform 1 >/dev/null || fail "temporal snapshot run"
+time_sid_a=$(python3 - "$T/time-snapshot-a/downstream.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["projection"]["snapshot_id"])
+PY
+)
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/time-snapshot-b" --snapshot-root "$T/time-snapshots" --valid-as-of 300 --known-as-of 350 --scope normal --platform 1 >/dev/null || fail "temporal snapshot replay"
+time_sid_b=$(python3 - "$T/time-snapshot-b/downstream.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["projection"]["snapshot_id"])
+PY
+)
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/time-snapshot-c" --snapshot-root "$T/time-snapshots" --valid-as-of 150 --known-as-of 350 --scope normal --platform 1 >/dev/null || fail "changed temporal snapshot run"
+time_sid_c=$(python3 - "$T/time-snapshot-c/downstream.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["projection"]["snapshot_id"])
+PY
+)
+[[ "$time_sid_a" == "$time_sid_b" ]] || fail "identical temporal projections must replay the same snapshot"
+[[ "$time_sid_a" != "$time_sid_c" ]] || fail "a changed valid-time projection must create a new snapshot"
+echo "[downstream] temporal projection snapshot identity OK"
+
 # Cycle: 1->2, 2->1 (plus an isolated node 0).
 cat > "$T/cycle.json" <<'JSON'
 {"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"iso","version":"1"},{"id":1,"name":"a","version":"1"},{"id":2,"name":"b","version":"1"}],"edges":[{"from":1,"to":2,"scope":"normal"},{"from":2,"to":1,"scope":"normal"}],"unresolved":[],"advisories":[]}
@@ -211,6 +268,15 @@ printf '{"schema":"rh-intrinsics/2","metrics":[],"values":[]}' > "$T/badintr.jso
 rc_intr=$?
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/nointr" --intrinsics "$T/does-not-exist.json" >/dev/null 2>&1
 rc_intrmiss=$?
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/bad-time" --valid-as-of nope >/dev/null 2>&1
+rc_time=$?
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/bad-scope" --scope unknown >/dev/null 2>&1
+rc_scope=$?
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/bad-platform" --platform 0 >/dev/null 2>&1
+rc_platform=$?
+printf '%s' '{"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"a","version":"1"}],"edges":[{"from":0,"to":0,"introduced":100,"removed":99}],"unresolved":[],"advisories":[]}' > "$T/bad-interval.json"
+"$ROOT/build/rh_cli" downstream --graph "$T/bad-interval.json" --subject 0 --out "$T/bad-interval" >/dev/null 2>&1
+rc_interval=$?
 set -e
 [[ "$rc_subj" -eq 3 ]] || fail "missing subject must exit 3 (got $rc_subj)"
 [[ "$rc_bad" -eq 4 ]] || fail "malformed graph must exit 4 (got $rc_bad)"
@@ -219,5 +285,9 @@ set -e
 [[ "$rc_pair2" -eq 2 ]] || fail "non-numeric --mirror must exit 2 (got $rc_pair2)"
 [[ "$rc_intr" -eq 4 ]] || fail "bad intrinsics schema must exit 4 (got $rc_intr)"
 [[ "$rc_intrmiss" -eq 4 ]] || fail "missing intrinsics file must exit 4 (got $rc_intrmiss)"
+[[ "$rc_time" -eq 2 ]] || fail "malformed valid-time filter must exit 2 (got $rc_time)"
+[[ "$rc_scope" -eq 2 ]] || fail "unknown scope filter must exit 2 (got $rc_scope)"
+[[ "$rc_platform" -eq 2 ]] || fail "invalid platform filter must exit 2 (got $rc_platform)"
+[[ "$rc_interval" -eq 4 ]] || fail "invalid edge validity interval must exit 4 (got $rc_interval)"
 
 echo "test_downstream_cli OK"

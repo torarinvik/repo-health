@@ -42,6 +42,18 @@ module DownstreamReport:
                 k <- k + 1
             lit[n.usize()] == 0
 
+        # Optional temporal edge fields default to an unbounded value. A present
+        # field with the wrong JSON type is rejected rather than silently erased.
+        def rh_ds_optional_i64(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, object: i64, key: u8&, value: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            value[0] <- 0
+            field: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            return true if field < 0
+            ok: mutable i64 = 0
+            parsed: i64 = Json::rh_json_int(nodes, raw, field, &ok)
+            return false if ok != 1 or parsed < 0
+            value[0] <- parsed
+            true
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_ds_parse_pair(s: u8&, a_out: mutable i64&, b_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             a_out[0] <- -1
@@ -109,8 +121,10 @@ module DownstreamReport:
         # Parse a dep graph and emit a downstream report. Returns:
         #   0 ok, -1 malformed/unsupported shape, -2 subject id not present,
         #   -3 malformed intrinsics document.
+        # Explicit valid/known-time or edge filters emit the versioned
+        # rh-downstream/2 projection; default callers retain rh-downstream/1.
     public:
-        def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, private_ids: darray[i64]&, asserts: darray[Graph::RhAssertion]&, mapping_revision: i64, intr_raw: darray[u8]&, has_intr: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, snapshot_id: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, private_ids: darray[i64]&, asserts: darray[Graph::RhAssertion]&, mapping_revision: i64, scope_filter: u8, platform_filter: i64, valid_as_of: i64, known_as_of: i64, schema_version: i64, intr_raw: darray[u8]&, has_intr: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, snapshot_id: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -173,10 +187,19 @@ module DownstreamReport:
                         if Json::rh_json_str_span(nodes, sc, &ss, &se):
                             scb <- rh_ds_scope(texts, ss, se)
                     if okf == 1 and okt == 1:
-                        edges.push(Graph::RhGraphEdge{from: frm, dst: dst, scope: scb, platform: 0, introduced: 0, removed: 0, first_seen: 0})
+                        edge_platform: mutable i64 = 0
+                        introduced: mutable i64 = 0
+                        removed: mutable i64 = 0
+                        first_seen: mutable i64 = 0
+                        return -1 if not rh_ds_optional_i64(nodes, texts, raw, echild, "platform", &edge_platform)
+                        return -1 if not rh_ds_optional_i64(nodes, texts, raw, echild, "introduced", &introduced)
+                        return -1 if not rh_ds_optional_i64(nodes, texts, raw, echild, "removed", &removed)
+                        return -1 if not rh_ds_optional_i64(nodes, texts, raw, echild, "first_seen", &first_seen)
+                        return -1 if introduced > 0 and removed > 0 and removed <= introduced
+                        edges.push(Graph::RhGraphEdge{from: frm, dst: dst, scope: scb, platform: edge_platform, introduced: introduced, removed: removed, first_seen: first_seen})
                 echild <- nodes[echild.usize()].next_sibling
 
-            p: mutable Graph::RhProjection = Graph::rh_projection_make(1, Graph::RH_SCOPE_ALL, 0, 0, 0, 0, mapping_revision, true, max_nodes, max_depth)
+            p: mutable Graph::RhProjection = Graph::rh_projection_make(1, scope_filter, platform_filter, valid_as_of, known_as_of, 0, mapping_revision, true, max_nodes, max_depth)
             direct: mutable darray[i64] = []
             dc: i64 = Graph::rh_direct_dependents(edges, vis, subject, &p, direct)
             trans: mutable darray[i64] = []
@@ -265,16 +288,40 @@ module DownstreamReport:
                     total <- total + icounts[i]
                     i <- i + 1
 
-            Base::rh_push_text(out, "{\"schema\":\"rh-downstream/1\",\"graph_source\":\"")
+            Base::rh_push_text(out, "{\"schema\":\"rh-downstream/")
+            Base::rh_push_decimal_i64(out, schema_version)
+            Base::rh_push_text(out, "\",\"graph_source\":\"")
             Base::rh_push_cstr(out, graph_source)
             Base::rh_push_text(out, "\",\"subject\":")
             Base::rh_push_decimal_i64(out, subject)
-            Base::rh_push_text(out, ",\"projection\":{\"edge_scope\":\"all\",\"public_only\":true,\"max_nodes\":")
+            Base::rh_push_text(out, ",\"projection\":{\"edge_scope\":\"")
+            if schema_version == 1:
+                Base::rh_push_text(out, "all")
+            elif p.scope_filter == Graph::RH_SCOPE_ALL:
+                Base::rh_push_text(out, "all")
+            elif p.scope_filter == 1:
+                Base::rh_push_text(out, "normal")
+            elif p.scope_filter == 2:
+                Base::rh_push_text(out, "dev")
+            elif p.scope_filter == 3:
+                Base::rh_push_text(out, "optional")
+            else:
+                Base::rh_push_text(out, "peer")
+            Base::rh_push_text(out, "\",\"public_only\":true,\"max_nodes\":")
             Base::rh_push_decimal_i64(out, max_nodes)
             Base::rh_push_text(out, ",\"max_depth\":")
             Base::rh_push_decimal_i64(out, max_depth)
             Base::rh_push_text(out, ",\"identity_revision\":0,\"mapping_revision\":")
             Base::rh_push_decimal_i64(out, mapping_revision)
+            if schema_version >= 2:
+                Base::rh_push_text(out, ",\"platform\":")
+                Base::rh_push_decimal_i64(out, p.platform)
+                Base::rh_push_text(out, ",\"valid_as_of\":")
+                Base::rh_push_decimal_i64(out, p.valid_as_of)
+                Base::rh_push_text(out, ",\"known_as_of\":")
+                Base::rh_push_decimal_i64(out, p.known_as_of)
+                Base::rh_push_text(out, ",\"visible_edge_count\":")
+                Base::rh_push_decimal_i64(out, visible_edges)
             Base::rh_push_text(out, ",\"snapshot_id\":")
             if snapshot_id.count > 0:
                 out.push(34)

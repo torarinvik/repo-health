@@ -15,6 +15,7 @@ evidence of a deployed database.
 |---|---|---|
 | Public schemas | `rh-jsonschema/1` dialect, per-schema `name` | `schemas/*.schema.json` |
 | Dependency graph | `rh-dep-graph/1` | `fixtures/packages/*.golden.json` |
+| Temporal downstream report | `rh-downstream/2` | `rh_cli downstream` with explicit projection filters |
 | Canonical repo | `rh-canonical-repo/1` | `fixtures/connectors/*.canonical.json` |
 | Evidence bundle | manifest schema versions | `bundle.manifest` |
 | Metric definitions | `key` + `version` | `metrics/definitions/*.json` |

@@ -37,7 +37,7 @@ for c in d["contracts"]:
 for want in ("dep-graph", "canonical-repo", "bundle-manifest", "report",
              "continuity-report", "metric-registry", "source-review-register",
              "release-packet", "release-signature", "continuity-metrics",
-             "deps-metrics", "downstream-report", "policy-result",
+             "deps-metrics", "downstream-report", "downstream-temporal-report", "policy-result",
              "corrections-result", "inventory-observation",
              "vcs-observation", "patch-report", "notify-result",
              "query-result", "identity-result", "release-feed-result",
