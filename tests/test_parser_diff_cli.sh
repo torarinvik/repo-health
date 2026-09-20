@@ -24,6 +24,9 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-parser-diff/1" and d["status"] == "match", d
 assert d["summary"] == {"mismatches": 0, "mapping": 0, "context": 0, "parser_support": 0, "normalization": 0}, d["summary"]
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["coverage.parser_error_count"]["value"] == 0, metrics
+assert metrics["coverage.mapping_conflict_count"]["value"] == 0, metrics
 assert d["parsers"] == {"native": "native-lock/1", "candidate": "alt-lock/2", "configuration": "cargo-default", "visibility": "public"}, d["parsers"]
 assert len(d["cache_key"]) == 16, d
 print("[parser-diff] equal snapshot + metadata OK")
@@ -51,6 +54,9 @@ assert d["summary"]["mapping"] >= 1, d["summary"]
 assert d["summary"]["context"] >= 1, d["summary"]
 assert d["summary"]["parser_support"] >= 1, d["summary"]
 assert d["summary"]["normalization"] >= 2, d["summary"]
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["coverage.parser_error_count"]["value"] == d["summary"]["parser_support"], metrics
+assert metrics["coverage.mapping_conflict_count"]["value"] == d["summary"]["mapping"], metrics
 classes = {x["class"] for x in d["mismatches"]}
 assert {"mapping", "context", "parser_support", "normalization"} <= classes, classes
 print("[parser-diff] loss classes + visibility isolation OK")
