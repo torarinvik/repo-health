@@ -138,10 +138,11 @@ withdrawn excluded from current matches, fixed-only ranges treated as
 vulnerable-from-start per OSV semantics, unsupported ranges unknown),
 canonical `rh-dep-graph/1` JSON with byte-checked goldens.
 Cargo lock resolution now filters by exact locked version and, when present,
-the exact registry/Git source locator. Graph nodes retain a SHA-256 source
-fingerprint while keeping raw locators out of the report; the collision fixture
-and CLI gate verify equal crate names and versions from two registries remain
-distinct, while a missing exact version stays unresolved. The standalone
+the exact registry/Git source locator. Cargo and npm lock nodes retain source
+locators as SHA-256 fingerprints while keeping raw locators out of reports;
+the Cargo registry-collision and npm nested-package fixtures verify equal
+name/version coordinates from distinct sources remain separate. A missing
+exact Cargo version stays unresolved. The standalone
 `rh_cli resolution --input <rh-dep-graph/1> --out <file>` adapter now emits
 `rh-resolution-instance/1`, separating package identity from graph-local
 provider node IDs and retaining the deterministic input digest. A third

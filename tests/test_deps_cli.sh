@@ -540,6 +540,20 @@ assert not g["unresolved"], g["unresolved"]
 print("[deps] npm v2 layout + exact graph OK")
 PY
 
+echo "[deps] npm resolved locators distinguish nested same-version packages"
+mkdir -p "$T/npm-source-locators"
+cp "$ROOT/fixtures/packages/npm-source-locators.lock.json" "$T/npm-source-locators/package-lock.json"
+"$ROOT/build/rh_cli" deps --repo "$T/npm-source-locators" --out "$T/npm-source-locators-out" >/dev/null || fail "npm source-locator deps failed"
+python3 - "$T/npm-source-locators-out/deps-npm-graph.json" <<'PY'
+import hashlib, json, sys
+g = json.load(open(sys.argv[1]))
+assert [n["name"] for n in g["nodes"]] == ["app", "shared", "parent", "shared"], g["nodes"]
+assert {(e["from"], e["to"]) for e in g["edges"]} == {(0, 1), (0, 2), (2, 3)}, g["edges"]
+assert g["nodes"][1]["source_identity_sha256"] == hashlib.sha256(b"https://registry-a.example/shared-1.0.0.tgz").hexdigest(), g["nodes"][1]
+assert g["nodes"][3]["source_identity_sha256"] == hashlib.sha256(b"https://registry-b.example/shared-1.0.0.tgz").hexdigest(), g["nodes"][3]
+print("[deps] npm resolved source locators remain distinct and private")
+PY
+
 echo "[deps] unsupported declared lockfile revisions fail closed"
 mkdir -p "$T/bad-cargo-revision"
 cat > "$T/bad-cargo-revision/Cargo.lock" <<'EOF'

@@ -490,7 +490,7 @@ Use each ecosystem's official manifests, lockfile formats, and version semantics
 
 ### 8.3 Work packages
 
-**M03-01: Package coordinates.** Parse and preserve Package URLs where supported, registry identity, namespace, normalized names, raw names, and ecosystem-specific versions. Add collision fixtures for identical names in different registries. Cargo lock nodes now retain source locators internally, resolve by exact name/version/source identity, and emit a SHA-256 source fingerprint instead of exposing the raw locator; `fixtures/packages/cargo-source-collision.lock` proves equal name/version coordinates from two registries stay distinct.
+**M03-01: Package coordinates.** Parse and preserve Package URLs where supported, registry identity, namespace, normalized names, raw names, and ecosystem-specific versions. Add collision fixtures for identical names in different registries. Cargo lock nodes and npm `resolved` entries now retain source locators internally and emit SHA-256 source fingerprints instead of exposing raw locators. Cargo lock dependencies resolve by exact name/version/source identity; the Cargo registry collision and npm nested-package fixtures prove equal name/version coordinates from distinct sources stay distinct.
 
 **M03-02: Artifact identities.** Store expected and observed digests independently from version labels. Model multiple artifacts per package version and changed bytes under the same label.
 
