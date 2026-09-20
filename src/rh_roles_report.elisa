@@ -117,6 +117,24 @@ module RolesReport:
                     return -1 if kind_action == 0
                     actions.push(Roles::RhObservedAction{actor_id: actor_action, kind: kind_action, observed_at: at_action})
                     ac <- nodes[ac.usize()].next_sibling
+            persistent_actors: mutable darray[i64] = []
+            persistent_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "persistent_actors")
+            has_persistent_profile: bool = persistent_idx >= 0
+            if has_persistent_profile:
+                return -1 if nodes[persistent_idx.usize()].kind != Json::RH_JSON_ARR
+                persistent_array: Json::RhJsonNode = nodes[persistent_idx.usize()]
+                while pa >= 0 |pa: i64 = persistent_array.first_child, nodes, raw, persistent_actors|:
+                    actor_ok: mutable i64 = 0
+                    actor_persistent: i64 = Json::rh_json_int(nodes, raw, pa, &actor_ok)
+                    return -1 if actor_ok == 0 or actor_persistent < 0
+                    persistent_actors.push(actor_persistent)
+                    pa <- nodes[pa.usize()].next_sibling
+            permission_complete_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "permission_inventory_complete")
+            has_permission_complete: bool = permission_complete_idx >= 0
+            permission_complete: mutable bool = false
+            if has_permission_complete:
+                return -1 if nodes[permission_complete_idx.usize()].kind != Json::RH_JSON_BOOL
+                permission_complete <- Json::rh_json_is_true(nodes, raw, permission_complete_idx)
             Base::rh_push_text(out, "{\"schema\":\"rh-roles-result/1\",\"declaration_count\":")
             Base::rh_push_decimal_i64(out, decls.count.i64())
             Base::rh_push_text(out, ",\"authorization_state\":\"")
@@ -199,17 +217,20 @@ module RolesReport:
                     permission_inventory_den <- permission_inventory_den + 1 if active_provider and not seen_provider
                     i <- i + 1
             active_declared_12m: mutable i64 = -1
-            if has_as_of:
+            if has_as_of and has_persistent_profile:
                 active_declared_12m <- 0
-                cutoff_12m: i64 = current_as_of - 31536000
-                while i < decls.count |i: usize = 0, decls, current_as_of, cutoff_12m, active_declared_12m|:
+                while i < decls.count |i: usize = 0, decls, current_as_of, persistent_actors, active_declared_12m|:
                     d: Roles::RhRoleDecl = decls[i]
-                    eligible: bool = (d.role == Roles::RH_ROLE_OWNER or d.role == Roles::RH_ROLE_MAINTAINER) and d.declared_at <= cutoff_12m and (d.revoked_at == 0 or d.revoked_at > current_as_of)
+                    persistent_actor: mutable bool = false
+                    while k < persistent_actors.count |k: usize = 0, persistent_actors, d, persistent_actor|:
+                        persistent_actor <- true if persistent_actors[k] == d.actor_id
+                        k <- k + 1
+                    eligible: bool = persistent_actor and (d.role == Roles::RH_ROLE_OWNER or d.role == Roles::RH_ROLE_MAINTAINER) and d.declared_at <= current_as_of and (d.revoked_at == 0 or d.revoked_at > current_as_of)
                     seen_12m: mutable bool = false
                     if eligible:
-                        while j < i |j: usize = 0, i, decls, current_as_of, cutoff_12m, d, seen_12m|:
+                        while j < i |j: usize = 0, i, decls, current_as_of, d, seen_12m|:
                             prior: Roles::RhRoleDecl = decls[j]
-                            prior_eligible: bool = prior.actor_id == d.actor_id and (prior.role == Roles::RH_ROLE_OWNER or prior.role == Roles::RH_ROLE_MAINTAINER) and prior.declared_at <= cutoff_12m and (prior.revoked_at == 0 or prior.revoked_at > current_as_of)
+                            prior_eligible: bool = prior.actor_id == d.actor_id and (prior.role == Roles::RH_ROLE_OWNER or prior.role == Roles::RH_ROLE_MAINTAINER) and prior.declared_at <= current_as_of and (prior.revoked_at == 0 or prior.revoked_at > current_as_of)
                             seen_12m <- true if prior_eligible
                             j <- j + 1
                     active_declared_12m <- active_declared_12m + 1 if eligible and not seen_12m
@@ -275,11 +296,13 @@ module RolesReport:
                 Base::rh_push_text(out, "null")
             Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"maintainer.active_declared_12m\",\"version\":\"1.0.0\",\"status\":\"")
-            if has_as_of:
+            if has_as_of and has_persistent_profile:
                 Base::rh_push_text(out, "observed\",\"value\":")
                 Base::rh_push_decimal_i64(out, active_declared_12m)
-            else:
+            elif not has_as_of:
                 Base::rh_push_text(out, "unsupported\",\"reason\":\"no-declaration-as-of-time\"")
+            else:
+                Base::rh_push_text(out, "unsupported\",\"reason\":\"persistent-activity-profile-not-supplied\"")
             Base::rh_push_text(out, ",\"as_of\":")
             if has_as_of:
                 Base::rh_push_decimal_i64(out, current_as_of)
@@ -337,11 +360,13 @@ module RolesReport:
                 Base::rh_push_text(out, "unsupported\",\"reason\":\"authorized-provider-permission-enumeration-not-available\"")
             elif not has_as_of:
                 Base::rh_push_text(out, "unsupported\",\"reason\":\"no-declaration-as-of-time\"")
+            elif not has_permission_complete or not permission_complete:
+                Base::rh_push_text(out, "unsupported\",\"reason\":\"permission-inventory-completeness-not-supplied\"")
             elif permission_inventory_den == 0:
                 Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-active-provider-permission-actors\"")
             else:
                 Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_i64(out, permission_current)
+                Base::rh_push_decimal_i64(out, permission_inventory_den)
                 Base::rh_push_text(out, ",\"den\":")
                 Base::rh_push_decimal_i64(out, permission_inventory_den)
                 Base::rh_push_text(out, "}")

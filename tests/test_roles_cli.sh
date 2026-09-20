@@ -17,7 +17,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"observed_actions":[{"actor_id":1,"kind":"release","at":120},{"actor_id":2,"kind":"release","at":130},{"actor_id":3,"kind":"merge","at":140},{"actor_id":4,"kind":"review","at":150},{"actor_id":4,"kind":"review","at":160}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
+{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":true,"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"observed_actions":[{"actor_id":1,"kind":"release","at":120},{"actor_id":2,"kind":"release","at":130},{"actor_id":3,"kind":"merge","at":140},{"actor_id":4,"kind":"review","at":150},{"actor_id":4,"kind":"review","at":160}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
 JSON
 "$ROOT/build/rh_cli" roles --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
 python3 - "$T/out.json" <<'PY'
@@ -62,7 +62,7 @@ cmp -s "$T/out.json" "$T/out2.json" || fail "roles output not deterministic"
 
 echo "[roles] twelve-month declared continuity uses the explicit as-of time"
 cat > "$T/long.json" <<'JSON'
-{"schema":"rh-roles-input/1","as_of":31536100,"declarations":[{"actor_id":9,"role":"maintainer","permission":0,"source":"file","declared_at":100}]}
+{"schema":"rh-roles-input/1","as_of":31536100,"persistent_actors":[9],"declarations":[{"actor_id":9,"role":"maintainer","permission":0,"source":"file","declared_at":100}]}
 JSON
 "$ROOT/build/rh_cli" roles --input "$T/long.json" --out "$T/long.out.json" >/dev/null || fail "long declaration run"
 python3 - "$T/long.out.json" <<'PY'
@@ -72,6 +72,20 @@ m = {x["key"]: x for x in d["metrics"]}
 assert m["maintainer.active_declared_12m"]["value"] == 1, m
 assert m["maintainer.active_declared_12m"]["as_of"] == 31536100, m
 print("[roles] twelve-month declaration metric OK")
+PY
+
+echo "[roles] missing evidence stays unsupported"
+printf '{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"as_of":31536100,"declarations":[{"actor_id":9,"role":"maintainer","permission":1,"source":"provider","declared_at":100}]}' > "$T/incomplete.json"
+"$ROOT/build/rh_cli" roles --input "$T/incomplete.json" --out "$T/incomplete.out.json" >/dev/null || fail "incomplete evidence run"
+python3 - "$T/incomplete.out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+assert m["maintainer.active_declared_12m"]["status"] == "unsupported", m
+assert m["maintainer.active_declared_12m"]["reason"] == "persistent-activity-profile-not-supplied", m
+assert m["maintainer.permission_inventory_coverage"]["status"] == "unsupported", m
+assert m["maintainer.permission_inventory_coverage"]["reason"] == "permission-inventory-completeness-not-supplied", m
+print("[roles] missing activity and permission completeness evidence stays unsupported")
 PY
 
 echo "[roles] bounded file URL capture retains transport evidence"
