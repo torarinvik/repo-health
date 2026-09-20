@@ -2530,7 +2530,7 @@ def rh_do_serve(root: cstr, port: i64, maxc: i64) -> i32 can[Memory.Allocate, Ab
 
 # --- M03 dependency graph execution path. ---
 # Reads a local project's Cargo.lock and npm package.json plus a
-# package-lock.json or npm-shrinkwrap.json,
+# package-lock.json, npm-shrinkwrap.json, or fallback Yarn Classic v1 yarn.lock,
 # requirements.txt, bounded PEP 621 pyproject.toml, go.mod, Gemfile.lock,
 # composer.lock, packages.config, or the bounded pom.xml subset,
 # resolves the version-aware graph, and writes one rh-dep-graph/1 report per
@@ -2758,14 +2758,21 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
     if not rh_out_path(repo, "npm-shrinkwrap.json", sw):
         rh_cli_err("deps: bad repo path")
         return 3
+    yl: mutable darray[u8] = []
+    if not rh_out_path(repo, "yarn.lock", yl):
+        rh_cli_err("deps: bad repo path")
+        return 3
     swp: cstr = (&sw[0]).cast[cstr] can Unsafe.PointerCast
+    ylp: cstr = (&yl[0]).cast[cstr] can Unsafe.PointerCast
     use_shrinkwrap: bool = file_exists(swp)
     use_package_lock: bool = file_exists(plp)
-    npm_lock_path: cstr = swp if use_shrinkwrap else plp
-    if use_shrinkwrap or use_package_lock:
+    use_yarn_lock: bool = not use_shrinkwrap and not use_package_lock and file_exists(ylp)
+    npm_lock_path: mutable cstr = swp if use_shrinkwrap else plp
+    if use_shrinkwrap or use_package_lock or use_yarn_lock:
+        npm_lock_path <- ylp if use_yarn_lock
         nlock: mutable darray[u8] = []
         if Base::rh_io_read(npm_lock_path, nlock) < 0:
-            rh_cli_err("deps: cannot read npm lockfile")
+            rh_cli_err("deps: cannot read Node lockfile")
             return 4
         pj: mutable darray[u8] = []
         if not rh_out_path(repo, "package.json", pj):
@@ -2781,13 +2788,14 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         npool: mutable darray[u8] = []
         npaths: mutable darray[i64] = []
         nreqs: mutable darray[Package::RhRequire] = []
-        nroot: i64 = Package::rh_npm_lock_parse(nlock, npkg, npkgs, npool, npaths, nreqs)
-        if nroot < 0:
-            rh_cli_err("deps: malformed npm lockfile (structured failure, no partial graph)")
-            return 4
         nedges: mutable darray[Package::RhDepEdge] = []
         nunres: mutable darray[Package::RhUnresolved] = []
-        _ = Package::rh_npm_resolve(npkgs, npaths, npool, nreqs, nedges, nunres)
+        nroot: i64 = Package::rh_npm_lock_parse(nlock, npkg, npkgs, npool, npaths, nreqs) if not use_yarn_lock else Package::rh_yarn_lock_parse(nlock, npkg, npkgs, npool, nreqs, nedges, nunres)
+        if nroot < 0:
+            rh_cli_err("deps: malformed Node lockfile (structured failure, no partial graph)")
+            return 4
+        if not use_yarn_lock:
+            _ = Package::rh_npm_resolve(npkgs, npaths, npool, nreqs, nedges, nunres)
         nunsup: i64 = Package::rh_unsupported_range_count(nreqs, npool)
         nfind: mutable darray[Package::RhAdvisory] = []
         nwd: mutable i64 = 0

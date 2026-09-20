@@ -742,6 +742,69 @@ assert not g["unresolved"], g["unresolved"]
 print("[deps] npm v2 layout + exact graph OK")
 PY
 
+echo "[deps] Yarn Classic v1 selectors resolve exact scopes and preserve source identities"
+mkdir -p "$T/yarn-classic"
+cp "$ROOT/fixtures/packages/yarn-classic-v1.lock" "$T/yarn-classic/yarn.lock"
+cp "$ROOT/fixtures/packages/yarn-classic-v1.package.json" "$T/yarn-classic/package.json"
+"$ROOT/build/rh_cli" deps --repo "$T/yarn-classic" --out "$T/yarn-classic-out" \
+  | grep -q "ecosystems=1 npm=8/8 unresolved=0 unsupported=1" || fail "Yarn Classic v1 summary"
+python3 - "$T/yarn-classic-out/deps-npm-graph.json" <<'PY'
+import hashlib, json, sys
+g = json.load(open(sys.argv[1]))
+nodes = {n["id"]: n for n in g["nodes"]}
+assert [nodes[i]["name"] for i in range(8)] == ["yarn-app", "@scope/tool", "helper", "shared", "optional-helper", "shared", "dev-only", "git-tool"], nodes
+edges = {(e["from"], e["to"], e["scope"]) for e in g["edges"]}
+assert edges == {(0, 1, "normal"), (0, 1, "dev"), (0, 6, "dev"), (0, 7, "dev"), (1, 2, "normal"), (1, 4, "optional"), (2, 3, "normal"), (4, 5, "normal")}, edges
+assert nodes[3]["source_identity_sha256"] == hashlib.sha256(b"https://registry-a.example/shared-1.0.0.tgz").hexdigest(), nodes[3]
+assert nodes[5]["source_identity_sha256"] == hashlib.sha256(b"https://registry-b.example/shared-1.0.0.tgz").hexdigest(), nodes[5]
+assert nodes[7]["source"] == "git", nodes[7]
+assert len(g["artifacts"]) == 3 and not g["unresolved"], g
+payload = open(sys.argv[1], "rb").read()
+assert b"registry-a.example" not in payload and b"github.com" not in payload, "raw Yarn locators leaked"
+print("[deps] Yarn v1 exact selectors, scopes, integrity, and locator privacy OK")
+PY
+
+echo "[deps] Yarn is a fallback when npm lockfiles are absent"
+cp "$ROOT/fixtures/packages/npm-v2-lock.json" "$T/yarn-classic/package-lock.json"
+"$ROOT/build/rh_cli" deps --repo "$T/yarn-classic" --out "$T/yarn-npm-precedence" >/dev/null || fail "npm lockfile precedence over Yarn"
+python3 - "$T/yarn-npm-precedence/deps-npm-graph.json" <<'PY'
+import json, sys
+g = json.load(open(sys.argv[1]))
+assert [n["name"] for n in g["nodes"]] == ["v2-app", "left"], g["nodes"]
+print("[deps] npm lockfile keeps precedence over Yarn")
+PY
+
+echo "[deps] unsupported Yarn revisions fail closed without a graph"
+mkdir -p "$T/yarn-v2"
+printf '# yarn lockfile v2\n' > "$T/yarn-v2/yarn.lock"
+cp "$ROOT/fixtures/packages/yarn-classic-v1.package.json" "$T/yarn-v2/package.json"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/yarn-v2" --out "$T/yarn-v2-out" >/dev/null 2>&1
+rc_bad_yarn_revision=$?
+set -e
+[[ "$rc_bad_yarn_revision" -eq 4 ]] || fail "unsupported Yarn lockfile revision must exit 4 (got $rc_bad_yarn_revision)"
+[[ ! -f "$T/yarn-v2-out/deps-npm-graph.json" ]] || fail "unsupported Yarn revision wrote a partial graph"
+
+echo "[deps] Yarn does not infer edges from package names when selectors differ"
+mkdir -p "$T/yarn-missing"
+cat > "$T/yarn-missing/yarn.lock" <<'EOF'
+# yarn lockfile v1
+only@~1.0.0:
+  version "1.1.0"
+  resolved "https://registry.example/only-1.1.0.tgz"
+EOF
+cat > "$T/yarn-missing/package.json" <<'EOF'
+{"name":"yarn-missing","version":"1.0.0","dependencies":{"only":"^1.0.0"}}
+EOF
+"$ROOT/build/rh_cli" deps --repo "$T/yarn-missing" --out "$T/yarn-missing-out" >/dev/null || fail "Yarn exact-selector missing case failed"
+python3 - "$T/yarn-missing-out/deps-npm-graph.json" <<'PY'
+import json, sys
+g = json.load(open(sys.argv[1]))
+assert not g["edges"] and len(g["unresolved"]) == 1, g
+assert g["unresolved"][0]["reason"] == "missing", g["unresolved"]
+print("[deps] unmatched Yarn selector remains unresolved")
+PY
+
 echo "[deps] npm-shrinkwrap uses package-lock format and npm precedence"
 mkdir -p "$T/npm-shrinkwrap"
 cp "$ROOT/fixtures/packages/npm-v2-lock.json" "$T/npm-shrinkwrap/npm-shrinkwrap.json"

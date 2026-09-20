@@ -812,6 +812,177 @@ module Package:
         # verbatim in req_s/req_e and never treated as resolved versions (R009).
 
     private:
+        # Yarn Classic lock selectors resolve requirements by the exact
+        # name/range descriptor written by Yarn. These spans stay private to
+        # this adapter; graph consumers receive only package nodes and edges.
+        struct RhYarnSelector:
+            node: mutable i64
+            name_s: mutable i64
+            name_e: mutable i64
+            req_s: mutable i64
+            req_e: mutable i64
+
+        def rh_yarn_selector_split(pool: darray[u8]&, s: usize, e: usize, name_s: mutable i64&, name_e: mutable i64&, req_s: mutable i64&, req_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s >= e
+            delimiter: usize =
+                if pool[s] == 64:
+                    slash: usize =
+                        while k < e |k: usize = s + 1| -> k:
+                            break if pool[k] == 47
+                            k <- k + 1
+                    return false if slash >= e
+                    while k < e |k: usize = slash + 1| -> k:
+                        break if pool[k] == 64
+                        k <- k + 1
+                else:
+                    while k < e |k: usize = s| -> k:
+                        break if pool[k] == 64
+                        k <- k + 1
+            return false if delimiter <= s or delimiter + 1 >= e
+            name_s[0] <- s.i64()
+            name_e[0] <- delimiter.i64()
+            req_s[0] <- (delimiter + 1).i64()
+            req_e[0] <- e.i64()
+            return false if rh_span_prefix(pool, req_s[0].usize(), req_e[0].usize(), "npm:")
+            true
+
+        def rh_yarn_has_space(data: darray[u8]&, s: usize, e: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < e |i: usize = s|:
+                return true if data[i] == 32 or data[i] == 9 or data[i] == 13
+                i <- i + 1
+            false
+
+        def rh_yarn_selector_source(pool: darray[u8]&, s: usize, e: usize) -> u8 can[Memory.Allocate, Abort.Panic]:
+            return RH_PSRC_GIT if rh_span_prefix(pool, s, e, "git+") or rh_span_prefix(pool, s, e, "git://") or rh_span_prefix(pool, s, e, "github:")
+            return RH_PSRC_PATH if rh_span_prefix(pool, s, e, "file:") or rh_span_prefix(pool, s, e, "link:") or rh_span_prefix(pool, s, e, "workspace:")
+            RH_PSRC_UNKNOWN
+
+        # One quoted or unquoted scalar token; quoted values use the same
+        # bounded escape grammar as the TOML parser. `next_out` marks the first
+        # byte after the token so callers can require an exact line shape.
+        def rh_yarn_token(line: darray[u8]&, s: usize, e: usize, pool: mutable darray[u8]&, value_s: mutable i64&, value_e: mutable i64&, next_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            i: mutable usize = s
+            while i < e:
+                break if line[i] != 32 and line[i] != 9
+                i <- i + 1
+            return false if i >= e
+            if line[i] == 34:
+                next: i64 = rh_quoted_span(line, i, e, pool, value_s, value_e)
+                return false if next < 0
+                next_out[0] <- next
+            else:
+                start: usize = i
+                while i < e |i|:
+                    break if line[i] == 32 or line[i] == 9
+                    return false if line[i] == 34 or line[i] == 39
+                    i <- i + 1
+                return false if i == start
+                value_s[0] <- rh_pool_copy(pool, line, start, i)
+                value_e[0] <- pool.count.i64()
+                next_out[0] <- i.i64()
+            true
+
+        # Decode a selector list from one Yarn v1 header, append its exact
+        # descriptor mappings, and create the associated resolved package node.
+        # Unsupported aliases and duplicate selectors fail closed.
+        def rh_yarn_entry_header(line: darray[u8]&, s: usize, e: usize, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, selectors: mutable darray[RhYarnSelector]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if e <= s or line[e - 1] != 58
+            key_end: usize = e - 1
+            node: mutable i64 = -1
+            first_name_s: mutable i64 = -1
+            first_name_e: mutable i64 = -1
+            first_selector_source: mutable u8 = RH_PSRC_UNKNOWN
+            segment_s: mutable usize = s
+            quoted: mutable bool = false
+            escaped: mutable bool = false
+            while i <= key_end |i: usize = s, pool, selectors, pkgs, node, first_name_s, first_name_e, first_selector_source, segment_s, quoted, escaped|:
+                split: mutable bool = i == key_end
+                if i < key_end:
+                    b: u8 = line[i]
+                    if quoted and escaped:
+                        escaped <- false
+                    elif quoted and b == 92:
+                        escaped <- true
+                    elif b == 34:
+                        quoted <- not quoted
+                    elif b == 44 and not quoted:
+                        split <- true
+                if split:
+                    a: mutable i64 = 0
+                    z: mutable i64 = 0
+                    rh_trim_span(line, segment_s, i, &a, &z)
+                    return -1 if z <= a
+                    selector_s: mutable i64 = 0
+                    selector_e: mutable i64 = 0
+                    if line[a.usize()] == 34:
+                        next: mutable i64 = rh_quoted_span(line, a.usize(), z.usize(), pool, &selector_s, &selector_e)
+                        return -1 if next < 0
+                        while next.usize() < z.usize() |next|:
+                            break if line[next.usize()] != 32 and line[next.usize()] != 9
+                            next <- next + 1
+                        return -1 if next.usize() != z.usize()
+                    else:
+                        selector_s <- rh_pool_copy(pool, line, a.usize(), z.usize())
+                        selector_e <- pool.count.i64()
+                        return -1 if rh_yarn_has_space(pool, selector_s.usize(), selector_e.usize())
+                    name_s: mutable i64 = 0
+                    name_e: mutable i64 = 0
+                    req_s: mutable i64 = 0
+                    req_e: mutable i64 = 0
+                    return -1 if not rh_yarn_selector_split(pool, selector_s.usize(), selector_e.usize(), &name_s, &name_e, &req_s, &req_e)
+                    selector_source: u8 = rh_yarn_selector_source(pool, req_s.usize(), req_e.usize())
+                    if node < 0:
+                        node <- rh_node_add(pkgs, RH_ECO_NPM)
+                        return -1 if node < 0
+                        first_name_s <- name_s
+                        first_name_e <- name_e
+                        first_selector_source <- selector_source
+                        package: mutable RhPkgNode = pkgs[node.usize()]
+                        package.name_s <- name_s
+                        package.name_e <- name_e
+                        package.src_kind <- selector_source
+                        pkgs[node.usize()] <- package
+                    else:
+                        return -1 if not rh_span_eq2(pool, first_name_s.usize(), first_name_e.usize(), pool, name_s.usize(), name_e.usize())
+                        return -1 if selector_source != first_selector_source
+                    return -1 if selectors.count.i64() >= 200000
+                    return -1 if rh_yarn_selector_duplicate(selectors, pool, name_s.usize(), name_e.usize(), req_s.usize(), req_e.usize())
+                    selectors.push(RhYarnSelector{node: node, name_s: name_s, name_e: name_e, req_s: req_s, req_e: req_e})
+                    segment_s <- i + 1
+                i <- i + 1
+            return -1 if quoted or escaped or node < 0
+            node
+
+        def rh_yarn_selector_duplicate(selectors: darray[RhYarnSelector]&, pool: darray[u8]&, name_s: usize, name_e: usize, req_s: usize, req_e: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < selectors.count.i64() |i: i64 = 0|:
+                existing: RhYarnSelector = selectors[i.usize()]
+                same: bool = rh_span_eq2(pool, existing.name_s.usize(), existing.name_e.usize(), pool, name_s, name_e) and rh_span_eq2(pool, existing.req_s.usize(), existing.req_e.usize(), pool, req_s, req_e)
+                return true if same
+                i <- i + 1
+            false
+
+        def rh_yarn_resolve(pool: darray[u8]&, selectors: darray[RhYarnSelector]&, reqs: darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < reqs.count.i64() |i: i64 = 0, edges, unresolved|:
+                requirement: RhRequire = reqs[i.usize()]
+                candidate: mutable i64 = -1
+                ambiguous: mutable bool = false
+                while j < selectors.count.i64() |j: i64 = 0, candidate, ambiguous|:
+                    selector: RhYarnSelector = selectors[j.usize()]
+                    exact_name: bool = rh_span_eq2(pool, selector.name_s.usize(), selector.name_e.usize(), pool, requirement.name_s.usize(), requirement.name_e.usize())
+                    exact_range: bool = requirement.req_s >= 0 and rh_span_eq2(pool, selector.req_s.usize(), selector.req_e.usize(), pool, requirement.req_s.usize(), requirement.req_e.usize())
+                    if exact_name and exact_range:
+                        if candidate < 0:
+                            candidate <- selector.node
+                        elif candidate != selector.node:
+                            ambiguous <- true
+                    j <- j + 1
+                if candidate >= 0 and not ambiguous:
+                    _ = rh_edge_add(edges, requirement.from, candidate, requirement.depctx, requirement.optional)
+                else:
+                    unresolved.push(RhUnresolved{from: requirement.from, name_s: requirement.name_s, name_e: requirement.name_e, req_s: requirement.req_s, req_e: requirement.req_e, reason: RH_UNRES_AMBIGUOUS if ambiguous else RH_UNRES_MISSING, optional: requirement.optional})
+                i <- i + 1
+            edges.count.i64()
+
         # Cargo's older lockfiles keep package checksums in a generic metadata
         # table. Index only when such an entry exists; ordinary and newer locks
         # do not pay for the lookup table.
@@ -1324,6 +1495,154 @@ module Package:
                     code: u8 = 2 if reason == 2 else 0
                     unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: code, optional: q.optional})
                 r <- r + 1
+
+    private:
+        def rh_yarn_root(pkg_bytes: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if pkg_bytes.count == 0 or pkg_bytes.count > 1048576
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            parsed: i64 = Json::rh_json_parse(pkg_bytes, nodes, texts)
+            return -1 if parsed < 0
+            manifest: Json::RhJsonNode = nodes[parsed.usize()]
+            return -1 if manifest.kind != 5
+            name_idx: i64 = Json::rh_json_obj_get(nodes, texts, parsed, "name")
+            version_idx: i64 = Json::rh_json_obj_get(nodes, texts, parsed, "version")
+            return -1 if name_idx < 0 or version_idx < 0
+            name: Json::RhJsonNode = nodes[name_idx.usize()]
+            version: Json::RhJsonNode = nodes[version_idx.usize()]
+            return -1 if name.kind != 3 or version.kind != 3
+            return -1 if name.text_start == name.text_end or version.text_start == version.text_end
+            root: i64 = rh_node_add(pkgs, RH_ECO_NPM)
+            return -1 if root < 0
+            root_node: mutable RhPkgNode = pkgs[root.usize()]
+            root_node.name_s <- rh_pool_copy(pool, texts, name.text_start.usize(), name.text_end.usize())
+            root_node.name_e <- pool.count.i64()
+            root_node.ver_s <- rh_pool_copy(pool, texts, version.text_start.usize(), version.text_end.usize())
+            root_node.ver_e <- pool.count.i64()
+            pkgs[root.usize()] <- root_node
+            return -1 if rh_npm_entry_reqs(nodes, pool, texts, pkg_bytes, parsed, root, reqs) < 0
+            root
+
+    public:
+        # Yarn Classic v1 lockfile adapter. Yarn records the exact descriptor
+        # selectors alongside resolved versions, so requirements resolve only
+        # by exact name/range evidence. Berry lockfiles, aliases, and unknown
+        # record fields remain outside this version-pinned parser.
+        def rh_yarn_lock_parse(lock: darray[u8]&, pkg_bytes: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if lock.count == 0 or lock.count > 4194304
+            root: i64 = rh_yarn_root(pkg_bytes, pkgs, pool, reqs)
+            return -1 if root < 0
+            selectors: mutable darray[RhYarnSelector] = []
+            header_seen: mutable bool = false
+            current_node: mutable i64 = -1
+            current_scope: mutable i64 = -1
+            version_seen: mutable bool = false
+            resolved_seen: mutable bool = false
+            integrity_seen: mutable bool = false
+            entry_count: mutable i64 = 0
+            while pos < lock.count |pos: usize = 0, pool, pkgs, reqs, edges, unresolved, selectors, header_seen, current_node, current_scope, version_seen, resolved_seen, integrity_seen, entry_count|:
+                line_end: usize =
+                    newline: i64 = Base::rh_find_byte(lock, pos, 10)
+                    newline.usize() if newline >= 0 else lock.count
+                return -1 if line_end - pos > 65536
+                start: mutable i64 = 0
+                end: mutable i64 = 0
+                rh_trim_span(lock, pos, line_end, &start, &end)
+                indent: usize = start.usize() - pos
+                if end > start:
+                    return -1 if lock[pos] == 9
+                    if lock[start.usize()] == 35:
+                        if rh_span_prefix(lock, start.usize(), end.usize(), "# yarn lockfile v"):
+                            prefix_len: usize = strlen("# yarn lockfile v")
+                            return -1 if header_seen or end.usize() != start.usize() + prefix_len + 1 or lock[start.usize() + prefix_len] != 49
+                            header_seen <- true
+                    elif indent == 0:
+                        return -1 if current_node >= 0 and not version_seen
+                        current_node <- rh_yarn_entry_header(lock, start.usize(), end.usize(), pkgs, pool, selectors)
+                        return -1 if current_node < 0
+                        current_scope <- -1
+                        version_seen <- false
+                        resolved_seen <- false
+                        integrity_seen <- false
+                        entry_count <- entry_count + 1
+                    elif current_node < 0:
+                        return -1
+                    elif indent == 2:
+                        current_scope <- -1
+                        if rh_span_lit(lock, start.usize(), end.usize(), "dependencies:"):
+                            current_scope <- 0
+                        elif rh_span_lit(lock, start.usize(), end.usize(), "optionalDependencies:"):
+                            current_scope <- 2
+                        elif rh_span_lit(lock, start.usize(), end.usize(), "peerDependencies:"):
+                            current_scope <- 3
+                        else:
+                            key_s: mutable i64 = 0
+                            key_e: mutable i64 = 0
+                            key_next: mutable i64 = 0
+                            return -1 if not rh_yarn_token(lock, start.usize(), end.usize(), pool, &key_s, &key_e, &key_next)
+                            value_s: mutable i64 = 0
+                            value_e: mutable i64 = 0
+                            value_next: mutable i64 = 0
+                            return -1 if not rh_yarn_token(lock, key_next.usize(), end.usize(), pool, &value_s, &value_e, &value_next)
+                            rest_pos: mutable usize = value_next.usize()
+                            while rest_pos < end.usize() |rest_pos|:
+                                break if lock[rest_pos] != 32 and lock[rest_pos] != 9
+                                rest_pos <- rest_pos + 1
+                            return -1 if rest_pos != end.usize() or value_s == value_e
+                            if rh_span_lit(pool, key_s.usize(), key_e.usize(), "version"):
+                                return -1 if version_seen
+                                package: mutable RhPkgNode = pkgs[current_node.usize()]
+                                package.ver_s <- value_s
+                                package.ver_e <- value_e
+                                pkgs[current_node.usize()] <- package
+                                version_seen <- true
+                            elif rh_span_lit(pool, key_s.usize(), key_e.usize(), "resolved"):
+                                return -1 if resolved_seen
+                                package: mutable RhPkgNode = pkgs[current_node.usize()]
+                                package.origin_s <- value_s
+                                package.origin_e <- value_e
+                                if package.src_kind == RH_PSRC_UNKNOWN:
+                                    package.src_kind <- RH_PSRC_REGISTRY
+                                    if rh_span_prefix(pool, value_s.usize(), value_e.usize(), "git+") or rh_span_prefix(pool, value_s.usize(), value_e.usize(), "git://") or rh_span_prefix(pool, value_s.usize(), value_e.usize(), "github:"):
+                                        package.src_kind <- RH_PSRC_GIT
+                                    elif rh_span_prefix(pool, value_s.usize(), value_e.usize(), "file:") or rh_span_prefix(pool, value_s.usize(), value_e.usize(), "link:") or rh_span_prefix(pool, value_s.usize(), value_e.usize(), "workspace:"):
+                                        package.src_kind <- RH_PSRC_PATH
+                                pkgs[current_node.usize()] <- package
+                                resolved_seen <- true
+                            elif rh_span_lit(pool, key_s.usize(), key_e.usize(), "integrity"):
+                                return -1 if integrity_seen
+                                package: mutable RhPkgNode = pkgs[current_node.usize()]
+                                package.has_digest <- 1
+                                package.dig_s <- value_s
+                                package.dig_e <- value_e
+                                pkgs[current_node.usize()] <- package
+                                integrity_seen <- true
+                            else:
+                                return -1
+                    elif indent == 4:
+                        return -1 if current_scope < 0 or reqs.count.i64() >= 200000
+                        name_s: mutable i64 = 0
+                        name_e: mutable i64 = 0
+                        name_next: mutable i64 = 0
+                        return -1 if not rh_yarn_token(lock, start.usize(), end.usize(), pool, &name_s, &name_e, &name_next)
+                        req_s: mutable i64 = 0
+                        req_e: mutable i64 = 0
+                        req_next: mutable i64 = 0
+                        return -1 if not rh_yarn_token(lock, name_next.usize(), end.usize(), pool, &req_s, &req_e, &req_next)
+                        rest_pos2: mutable usize = req_next.usize()
+                        while rest_pos2 < end.usize() |rest_pos2|:
+                            break if lock[rest_pos2] != 32 and lock[rest_pos2] != 9
+                            rest_pos2 <- rest_pos2 + 1
+                        return -1 if rest_pos2 != end.usize() or name_s == name_e or req_s == req_e
+                        reqs.push(RhRequire{from: current_node, name_s: name_s, name_e: name_e, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: req_s, req_e: req_e, depctx: current_scope.u8(), optional: 0})
+                    else:
+                        return -1
+                pos <- line_end + 1
+            if current_node >= 0 and not version_seen:
+                return -1
+            return -1 if not header_seen or entry_count == 0
+            _ = rh_yarn_resolve(pool, selectors, reqs, edges, unresolved)
+            root
 
         def rh_span_eq_text(texts: darray[u8]&, s: usize, e: usize, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s.i64(), e.i64(), lit)
