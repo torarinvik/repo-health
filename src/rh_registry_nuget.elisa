@@ -9,10 +9,11 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 
-const RH_REGMETA_NUGET_MAX_VERSIONS: i64 = 10000
-
 module RegistryNuget:
     private:
+        const RH_REGMETA_NUGET_MAX_VERSIONS: i64 = 10000
+        const RH_REGMETA_NUGET_MAX_DEPRECATION_NOTICE_BYTES: i64 = 4096
+
         def rh_nuget_value(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_obj_get(nodes, texts, obj, key)
 
@@ -24,6 +25,26 @@ module RegistryNuget:
             return -1 if nodes[listed.usize()].kind != Json::RH_JSON_BOOL
             Base::rh_push_text(out, "false" if Json::rh_json_is_true(nodes, raw, listed) else "true")
             1
+
+        def rh_nuget_deprecation(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, entry: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            deprecation: i64 = RegistryNuget::rh_nuget_value(nodes, texts, entry, "deprecation")
+            if deprecation < 0:
+                Base::rh_push_text(out, "\"deprecated\":false,\"deprecation_notice\":null")
+                return 0
+            if nodes[deprecation.usize()].kind == Json::RH_JSON_NULL:
+                Base::rh_push_text(out, "\"deprecated\":null,\"deprecation_notice\":null")
+                return 0
+            return -1 if nodes[deprecation.usize()].kind != Json::RH_JSON_OBJ
+            message: i64 = RegistryNuget::rh_nuget_value(nodes, texts, deprecation, "message")
+            if message < 0 or nodes[message.usize()].kind == Json::RH_JSON_NULL:
+                Base::rh_push_text(out, "\"deprecated\":true,\"deprecation_notice\":null")
+                return 0
+            return -1 if nodes[message.usize()].kind != Json::RH_JSON_STR
+            return -1 if nodes[message.usize()].text_end - nodes[message.usize()].text_start > RH_REGMETA_NUGET_MAX_DEPRECATION_NOTICE_BYTES
+            Base::rh_push_text(out, "\"deprecated\":true,\"deprecation_notice\":\"")
+            Base::rh_json_escape(out, texts, nodes[message.usize()].text_start.usize(), nodes[message.usize()].text_end.usize())
+            Base::rh_push_text(out, "\"")
+            0
 
         def rh_nuget_dependencies(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, entry: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             groups: i64 = RegistryNuget::rh_nuget_value(nodes, texts, entry, "dependencyGroups")
@@ -76,6 +97,8 @@ module RegistryNuget:
                 out.push(34)
             else:
                 Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",")
+            return -1 if RegistryNuget::rh_nuget_deprecation(nodes, texts, entry, out) != 0
             Base::rh_push_text(out, ",\"repository\":")
             project_s: mutable i64 = 0
             project_e: mutable i64 = 0

@@ -3,7 +3,8 @@
 # path: `rh_cli registry-meta` turns an rh-registry-meta/1 document into
 # rh-registry-meta-result/1. Asserts yanked versions are retained, an absent
 # yank field is null (unknown, not false), numeric and ISO published times
-# are preserved, a declared repository link is an assertion (not identity),
+# are preserved, deprecation notices stay tri-state and bounded, a declared
+# repository link is an assertion (not identity),
 # declared dependency counts are exact, and malformed input fails closed.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,17 +23,21 @@ python3 - "$T/out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-registry-meta-result/1", d
-assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1, "with_repo": 1,
+assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1,
+                       "deprecated": 1, "not_deprecated": 1, "unknown_deprecation": 1, "with_repo": 1,
                        "declared_deps": 3, "optional_deps": 1, "dev_deps": 1}, d["counts"]
 v = d["versions"]
-assert v[0] == {"version": "1.0.0", "yanked": False, "published_at": 1609459200,
+assert v[0] == {"version": "1.0.0", "yanked": False, "deprecated": False, "deprecation_notice": None,
+                "published_at": 1609459200,
                 "repository": "https://example.invalid/serde",
                 "dep_count": 3, "optional_dep_count": 1, "dev_dep_count": 1}, v[0]
 assert v[1]["yanked"] is True and v[1]["published_at"] == "2024-03-10T12:00:00Z", v[1]
+assert v[1]["deprecated"] is True and v[1]["deprecation_notice"] == "Use 1.0.2 instead", v[1]
 # retained, not deleted: the yanked version is still present
 assert len(v) == 3 and v[1]["version"] == "1.0.1", v
 # absent yank -> null (unknown), never false
 assert v[2]["yanked"] is None and v[2]["published_at"] is None, v[2]
+assert v[2]["deprecated"] is None and v[2]["deprecation_notice"] is None, v[2]
 assert "assertion, not identity" in d["note"], d["note"]
 assert "retained, not deleted" in d["note"], d["note"]
 print("[registry-meta] counts + honest states OK")
@@ -82,7 +87,8 @@ python3 - "$T/pypi.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-registry-meta-result/1", d
-assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1, "with_repo": 3,
+assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1,
+                       "deprecated": 0, "not_deprecated": 0, "unknown_deprecation": 3, "with_repo": 3,
                        "declared_deps": 2, "optional_deps": 1, "dev_deps": 0}, d["counts"]
 v = d["versions"]
 assert v[0]["version"] == "1.0.0" and v[0]["yanked"] is False, v[0]
@@ -103,8 +109,9 @@ cat > "$T/npm.json" <<'JSON'
     "1.1.0": "2024-02-02T00:00:00Z"
   },
   "versions": {
-    "1.0.0": {
-      "version": "1.0.0",
+      "1.0.0": {
+        "version": "1.0.0",
+        "deprecated": "Use 1.1.0 instead",
       "repository": {"type": "git", "url": "https://example.invalid/demo.git"},
       "dependencies": {"a": "^1"},
       "optionalDependencies": {"b": "^2"},
@@ -122,13 +129,16 @@ JSON
 python3 - "$T/npm.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["counts"] == {"versions": 2, "yanked": 0, "unknown_yank": 2, "with_repo": 2,
+assert d["counts"] == {"versions": 2, "yanked": 0, "unknown_yank": 2,
+                       "deprecated": 1, "not_deprecated": 1, "unknown_deprecation": 0, "with_repo": 2,
                        "declared_deps": 3, "optional_deps": 1, "dev_deps": 1}, d["counts"]
 v = d["versions"]
 assert v[0]["published_at"] == "2024-01-02T00:00:00Z", v[0]
 assert v[0]["repository"] == "https://example.invalid/demo.git", v[0]
+assert v[0]["deprecated"] is True and v[0]["deprecation_notice"] == "Use 1.1.0 instead", v[0]
 assert v[0]["dep_count"] == 3 and v[0]["optional_dep_count"] == 1 and v[0]["dev_dep_count"] == 1, v[0]
 assert v[1]["repository"] == "https://example.invalid/home" and v[1]["yanked"] is None, v[1]
+assert v[1]["deprecated"] is False and v[1]["deprecation_notice"] is None, v[1]
 print("[registry-meta] npm release/time/repository/dependency normalization OK")
 PY
 
@@ -147,7 +157,8 @@ JSON
 python3 - "$T/crates.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1, "with_repo": 3,
+assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1,
+                       "deprecated": 0, "not_deprecated": 0, "unknown_deprecation": 3, "with_repo": 3,
                        "declared_deps": 0, "optional_deps": 0, "dev_deps": 0}, d["counts"]
 v = d["versions"]
 assert v[0]["published_at"] == "2024-01-02T00:00:00Z" and v[0]["repository"] == "https://example.invalid/demo", v[0]
@@ -161,7 +172,8 @@ cp "$ROOT/fixtures/packages/rubygems-project.json" "$T/rubygems.json"
 python3 - "$T/rubygems.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1, "with_repo": 3,
+assert d["counts"] == {"versions": 3, "yanked": 1, "unknown_yank": 1,
+                       "deprecated": 0, "not_deprecated": 0, "unknown_deprecation": 3, "with_repo": 3,
                        "declared_deps": 2, "optional_deps": 0, "dev_deps": 1}, d["counts"]
 v = d["versions"]
 assert v[0]["version"] == "1.0.0" and v[0]["repository"] == "https://example.invalid/gems/demo", v[0]
@@ -191,12 +203,14 @@ cp "$ROOT/fixtures/packages/nuget-registration.json" "$T/nuget.json"
 python3 - "$T/nuget.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["counts"] == {"versions": 2, "yanked": 1, "unknown_yank": 0, "with_repo": 1,
+assert d["counts"] == {"versions": 2, "yanked": 1, "unknown_yank": 0,
+                       "deprecated": 1, "not_deprecated": 1, "unknown_deprecation": 0, "with_repo": 1,
                        "declared_deps": 2, "optional_deps": 0, "dev_deps": 0}, d["counts"]
 v = d["versions"]
 assert v[0]["version"] == "1.0.0" and v[0]["yanked"] is False, v[0]
 assert v[0]["repository"] == "https://example.invalid/nuget/demo" and v[0]["dep_count"] == 2, v[0]
 assert v[1]["version"] == "1.1.0" and v[1]["yanked"] is True, v[1]
+assert v[1]["deprecated"] is True and v[1]["deprecation_notice"] == "Use 2.0.0 or later", v[1]
 print("[registry-meta] NuGet registration normalization OK")
 PY
 
@@ -208,9 +222,11 @@ JSON
 python3 - "$T/nuget-nested.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["counts"] == {"versions": 1, "yanked": 0, "unknown_yank": 1, "with_repo": 0,
+assert d["counts"] == {"versions": 1, "yanked": 0, "unknown_yank": 1,
+                       "deprecated": 0, "not_deprecated": 1, "unknown_deprecation": 0, "with_repo": 0,
                        "declared_deps": 0, "optional_deps": 0, "dev_deps": 0}, d["counts"]
-assert d["versions"] == [{"version": "2.0.0", "yanked": None, "published_at": None,
+assert d["versions"] == [{"version": "2.0.0", "yanked": None, "deprecated": False,
+                          "deprecation_notice": None, "published_at": None,
                           "repository": None, "dep_count": 0, "optional_dep_count": 0,
                           "dev_dep_count": 0}], d["versions"]
 print("[registry-meta] NuGet nested page + unknown listed state OK")
@@ -255,8 +271,15 @@ printf '[{"number":42}]' > "$T/rubygems-bad.json"
 "$ROOT/build/rh_cli" registry-meta --input "$T/rubygems-bad.json" --out "$T/x" >/dev/null 2>&1; rc_rubygems=$?
 printf '{"items":[{"catalogEntry":{"version":42}}]}' > "$T/nuget-bad.json"
 "$ROOT/build/rh_cli" registry-meta --input "$T/nuget-bad.json" --out "$T/x" >/dev/null 2>&1; rc_nuget=$?
+printf '{"versions":[{"num":"1","deprecated":"yes"}]}' > "$T/deprecated-bad.json"
+"$ROOT/build/rh_cli" registry-meta --input "$T/deprecated-bad.json" --out "$T/x" >/dev/null 2>&1; rc_deprecated=$?
+python3 - "$T/deprecated-large.json" <<'PY'
+import json, sys
+json.dump({"versions": [{"num": "1", "deprecated": True, "deprecation_notice": "x" * 4097}]}, open(sys.argv[1], "w"))
+PY
+"$ROOT/build/rh_cli" registry-meta --input "$T/deprecated-large.json" --out "$T/x" >/dev/null 2>&1; rc_deprecated_large=$?
 set -e
-for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked" "$rc_npm" "$rc_crates" "$rc_rubygems" "$rc_nuget"; do
+for rc in "$rc_shape" "$rc_arr" "$rc_novers" "$rc_json" "$rc_missing" "$rc_blocked" "$rc_npm" "$rc_crates" "$rc_rubygems" "$rc_nuget" "$rc_deprecated" "$rc_deprecated_large"; do
   [[ "$rc" -eq 4 ]] || fail "malformed registry-meta input must exit 4 (got $rc)"
 done
 

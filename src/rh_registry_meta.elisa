@@ -19,6 +19,7 @@ include "./rh_registry_pypi.elisa"
 module RegistryMeta:
     private:
         const RH_REGMETA_MAX_VERSIONS: i64 = 10000
+        const RH_REGMETA_MAX_DEPRECATION_NOTICE_BYTES: i64 = 4096
 
         # (private to this file)
         def rh_regmeta_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -60,6 +61,9 @@ module RegistryMeta:
             ver_s: i64
             ver_e: i64
             yanked: i64
+            deprecated: i64
+            deprecation_notice_s: i64
+            deprecation_notice_e: i64
             has_published: i64
             published_epoch: i64
             published_s: i64
@@ -76,16 +80,19 @@ module RegistryMeta:
             versions: mutable i64
             yanked_count: mutable i64
             unknown_yank_count: mutable i64
+            deprecated_count: mutable i64
+            not_deprecated_count: mutable i64
+            unknown_deprecation_count: mutable i64
             with_repo: mutable i64
             declared_deps: mutable i64
             optional_deps: mutable i64
             dev_deps: mutable i64
 
         # Parse `{"versions":[...]}`. Returns 0 on success, -1 when the document is
-        # not parseable or lacks a versions array. Versions missing a non-empty
-        # label are skipped and counted in `versions` only when retained.
+        # not parseable, lacks a versions array, or contains a version without a
+        # non-empty label.
         def rh_regmeta_parse(raw: darray[u8]&, pool: mutable darray[u8]&, out: mutable darray[RhRegVersion]&, meta_out: mutable RhRegMeta&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            meta_out[0] <- RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+            meta_out[0] <- RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, deprecated_count: 0, not_deprecated_count: 0, unknown_deprecation_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             arr: i64 = |nodes, texts|
@@ -98,60 +105,82 @@ module RegistryMeta:
             return -1 if arr < 0
             an: Json::RhJsonNode = nodes[arr.usize()]
             return -1 if an.kind != Json::RH_JSON_ARR
-            m: RhRegMeta = RhRegMeta{ok: 1, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+            m: RhRegMeta = RhRegMeta{ok: 1, versions: 0, yanked_count: 0, unknown_yank_count: 0, deprecated_count: 0, not_deprecated_count: 0, unknown_deprecation_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
             while child >= 0 |child: i64 = an.first_child, nodes, texts, pool, out, m|:
                 nxt: i64 = nodes[child.usize()].next_sibling
                 return -1 if out.count.i64() >= RH_REGMETA_MAX_VERSIONS
                 vs: mutable i64 = -1
                 ve: mutable i64 = -1
-                if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "num"), &vs, &ve) or ve <= vs:
-                    m.versions <- m.versions + 1
+                return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "num"), &vs, &ve) or ve <= vs
+                m.versions <- m.versions + 1
+                yank: mutable i64 = -1
+                ynode: i64 = Json::rh_json_obj_get(nodes, texts, child, "yanked")
+                if ynode >= 0:
+                    if nodes[ynode.usize()].kind == Json::RH_JSON_BOOL:
+                        yank <- 0
+                        if Json::rh_json_is_true(nodes, raw, ynode):
+                            yank <- 1
+                if yank == 1:
+                    m.yanked_count <- m.yanked_count + 1
+                if yank == -1:
+                    m.unknown_yank_count <- m.unknown_yank_count + 1
+                deprecated: mutable i64 = -1
+                deprecated_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "deprecated")
+                if deprecated_idx >= 0:
+                    if nodes[deprecated_idx.usize()].kind == Json::RH_JSON_NULL:
+                        deprecated <- -1
+                    elif nodes[deprecated_idx.usize()].kind == Json::RH_JSON_BOOL:
+                        deprecated <- 0
+                        if Json::rh_json_is_true(nodes, raw, deprecated_idx):
+                            deprecated <- 1
+                    else:
+                        return -1
+                deprecation_notice_s: mutable i64 = -1
+                deprecation_notice_e: mutable i64 = -1
+                notice_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "deprecation_notice")
+                if notice_idx >= 0 and nodes[notice_idx.usize()].kind != Json::RH_JSON_NULL:
+                    return -1 if not Json::rh_json_str_span(nodes, notice_idx, &deprecation_notice_s, &deprecation_notice_e)
+                    return -1 if deprecation_notice_e - deprecation_notice_s > RH_REGMETA_MAX_DEPRECATION_NOTICE_BYTES
+                    return -1 if deprecation_notice_e > deprecation_notice_s and deprecated != 1
+                if deprecated == 1:
+                    m.deprecated_count <- m.deprecated_count + 1
+                elif deprecated == 0:
+                    m.not_deprecated_count <- m.not_deprecated_count + 1
                 else:
-                    m.versions <- m.versions + 1
-                    yank: mutable i64 = -1
-                    ynode: i64 = Json::rh_json_obj_get(nodes, texts, child, "yanked")
-                    if ynode >= 0:
-                        if nodes[ynode.usize()].kind == Json::RH_JSON_BOOL:
-                            yank <- 0
-                            if Json::rh_json_is_true(nodes, raw, ynode):
-                                yank <- 1
-                    if yank == 1:
-                        m.yanked_count <- m.yanked_count + 1
-                    if yank == -1:
-                        m.unknown_yank_count <- m.unknown_yank_count + 1
-                    has_pub: mutable i64 = 0
-                    pub: mutable i64 = -1
-                    ps: mutable i64 = -1
-                    pe: mutable i64 = -1
-                    pnode: i64 = Json::rh_json_obj_get(nodes, texts, child, "published_at")
-                    if pnode >= 0:
-                        if nodes[pnode.usize()].kind == Json::RH_JSON_NUM:
-                            pok: mutable i64 = 0
-                            pub <- Json::rh_json_int(nodes, raw, pnode, &pok)
-                            if pok == 1:
-                                has_pub <- 1
-                        if nodes[pnode.usize()].kind == Json::RH_JSON_STR:
-                            if Json::rh_json_str_span(nodes, pnode, &ps, &pe):
-                                has_pub <- 1
-                    rs: mutable i64 = -1
-                    re: i64 = -1
-                    has_repo: mutable i64 = 0
-                    if Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "repository"), &rs, &re):
-                        if re > rs:
-                            has_repo <- 1
-                            m.with_repo <- m.with_repo + 1
-                    dt: mutable i64 = 0
-                    do_: mutable i64 = 0
-                    dd: mutable i64 = 0
-                    rh_regmeta_deps(nodes, raw, texts, Json::rh_json_obj_get(nodes, texts, child, "deps"), &dt, &do_, &dd)
-                    m.declared_deps <- m.declared_deps + dt
-                    m.optional_deps <- m.optional_deps + do_
-                    m.dev_deps <- m.dev_deps + dd
-                    v2: i64 = rh_regmeta_copy(pool, texts, vs, ve)
-                    r2: i64 = rh_regmeta_copy(pool, texts, rs, re)
-                    p2: i64 = rh_regmeta_copy(pool, texts, ps, pe)
-                    out.push(RhRegVersion{ver_s: v2, ver_e: rh_regmeta_end(v2, vs, ve), yanked: yank, has_published: has_pub, published_epoch: pub, published_s: p2, published_e: rh_regmeta_end(p2, ps, pe), has_repo: has_repo, repo_s: r2, repo_e: rh_regmeta_end(r2, rs, re), dep_count: dt, optional_dep_count: do_, dev_dep_count: dd})
+                    m.unknown_deprecation_count <- m.unknown_deprecation_count + 1
+                has_pub: mutable i64 = 0
+                pub: mutable i64 = -1
+                ps: mutable i64 = -1
+                pe: mutable i64 = -1
+                pnode: i64 = Json::rh_json_obj_get(nodes, texts, child, "published_at")
+                if pnode >= 0:
+                    if nodes[pnode.usize()].kind == Json::RH_JSON_NUM:
+                        pok: mutable i64 = 0
+                        pub <- Json::rh_json_int(nodes, raw, pnode, &pok)
+                        if pok == 1:
+                            has_pub <- 1
+                    if nodes[pnode.usize()].kind == Json::RH_JSON_STR:
+                        if Json::rh_json_str_span(nodes, pnode, &ps, &pe):
+                            has_pub <- 1
+                rs: mutable i64 = -1
+                re: i64 = -1
+                has_repo: mutable i64 = 0
+                if Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "repository"), &rs, &re):
+                    if re > rs:
+                        has_repo <- 1
+                        m.with_repo <- m.with_repo + 1
+                dt: mutable i64 = 0
+                do_: mutable i64 = 0
+                dd: mutable i64 = 0
+                rh_regmeta_deps(nodes, raw, texts, Json::rh_json_obj_get(nodes, texts, child, "deps"), &dt, &do_, &dd)
+                m.declared_deps <- m.declared_deps + dt
+                m.optional_deps <- m.optional_deps + do_
+                m.dev_deps <- m.dev_deps + dd
+                v2: i64 = rh_regmeta_copy(pool, texts, vs, ve)
+                notice2: i64 = rh_regmeta_copy(pool, texts, deprecation_notice_s, deprecation_notice_e)
+                r2: i64 = rh_regmeta_copy(pool, texts, rs, re)
+                p2: i64 = rh_regmeta_copy(pool, texts, ps, pe)
+                out.push(RhRegVersion{ver_s: v2, ver_e: rh_regmeta_end(v2, vs, ve), yanked: yank, deprecated: deprecated, deprecation_notice_s: notice2, deprecation_notice_e: rh_regmeta_end(notice2, deprecation_notice_s, deprecation_notice_e), has_published: has_pub, published_epoch: pub, published_s: p2, published_e: rh_regmeta_end(p2, ps, pe), has_repo: has_repo, repo_s: r2, repo_e: rh_regmeta_end(r2, rs, re), dep_count: dt, optional_dep_count: do_, dev_dep_count: dd})
                 child <- nxt
             meta_out[0] <- m
             0
-

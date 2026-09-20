@@ -28,6 +28,8 @@ def type_ok(val, t):
         return isinstance(val, dict)
     if t == "bool":
         return isinstance(val, bool)
+    if t == "bool_or_null":
+        return val is None or isinstance(val, bool)
     if t == "str_or_null":
         return val is None or isinstance(val, str)
     if t == "int_or_null":

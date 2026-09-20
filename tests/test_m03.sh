@@ -61,7 +61,7 @@ grep -q "DECLARED" "$ROOT/src/rh_inventory.elisa" || fail "declared-spec-set not
 grep -q "valid != complete" "$ROOT/src/rh_inventory.elisa" || fail "valid-vs-complete caveat missing"
 grep -q "unknown_top_keys" "$ROOT/src/rh_spdx.elisa" || fail "spdx unknown-field note missing"
 
-echo "[m03] registry enrichment: yanks retained, links are assertions"
+echo "[m03] registry enrichment: yanks/deprecations retained, links are assertions"
 grep -q "yanked is NOT deleted" "$ROOT/src/rh_registry_meta.elisa" || fail "yank-retention note missing"
 grep -q "ASSERTION, not identity" "$ROOT/src/rh_registry_meta.elisa" || fail "link-assertion note missing"
 

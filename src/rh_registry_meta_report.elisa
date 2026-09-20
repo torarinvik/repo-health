@@ -5,7 +5,8 @@
 # per-version metadata with the honest states preserved — a yanked version is
 # RETAINED (not deleted), an absent yank field is `null` (unknown, never
 # false), a published time may be numeric or an ISO string (unknown stays
-# null), a declared repository link is an ASSERTION not identity, and
+# null), deprecation stays tri-state with its bounded notice, a declared
+# repository link is an ASSERTION not identity, and
 # declared dependency counts are NOT resolved edges. Malformed input fails
 # closed.
 
@@ -28,7 +29,7 @@ module RegistryMetaReport:
         def rh_registry_meta_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             pool: mutable darray[u8] = []
             versions: mutable darray[RegistryMeta::RhRegVersion] = []
-            meta: mutable RegistryMeta::RhRegMeta = RegistryMeta::RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
+            meta: mutable RegistryMeta::RhRegMeta = RegistryMeta::RhRegMeta{ok: 0, versions: 0, yanked_count: 0, unknown_yank_count: 0, deprecated_count: 0, not_deprecated_count: 0, unknown_deprecation_count: 0, with_repo: 0, declared_deps: 0, optional_deps: 0, dev_deps: 0}
             provider_nodes: mutable darray[Json::RhJsonNode] = []
             provider_texts: mutable darray[u8] = []
             provider_root: i64 = Json::rh_json_parse(raw, provider_nodes, provider_texts)
@@ -36,6 +37,7 @@ module RegistryMetaReport:
             nuget_shape: bool = provider_root >= 0 and provider_nodes[provider_root.usize()].kind == Json::RH_JSON_OBJ and Json::rh_json_obj_get(provider_nodes, provider_texts, provider_root, "items") >= 0 and Json::rh_json_obj_get(provider_nodes, provider_texts, provider_root, "versions") < 0
             rubygems_versions: i64 = provider_root if provider_root >= 0 and provider_nodes[provider_root.usize()].kind == Json::RH_JSON_ARR else Json::rh_json_obj_get(provider_nodes, provider_texts, provider_root, "versions")
             rubygems_shape: bool = rubygems_versions >= 0 and provider_nodes[rubygems_versions.usize()].kind == Json::RH_JSON_ARR and provider_nodes[rubygems_versions.usize()].first_child >= 0 and Json::rh_json_obj_get(provider_nodes, provider_texts, provider_nodes[rubygems_versions.usize()].first_child, "number") >= 0
+            canonical_shape: bool = provider_root >= 0 and provider_nodes[provider_root.usize()].kind == Json::RH_JSON_OBJ and not crates_shape and not rubygems_shape and Json::rh_json_obj_get(provider_nodes, provider_texts, provider_root, "versions") >= 0 and provider_nodes[Json::rh_json_obj_get(provider_nodes, provider_texts, provider_root, "versions").usize()].kind == Json::RH_JSON_ARR
             if nuget_shape:
                 normalized: mutable darray[u8] = []
                 return -1 if RegistryNuget::rh_regmeta_nuget_normalize(raw, normalized) != 0
@@ -48,6 +50,8 @@ module RegistryMetaReport:
                 normalized: mutable darray[u8] = []
                 return -1 if RegistryCrates::rh_regmeta_crates_normalize(raw, normalized) != 0
                 return -1 if RegistryMeta::rh_regmeta_parse(normalized, pool, versions, &meta) != 0
+            elif canonical_shape:
+                return -1 if RegistryMeta::rh_regmeta_parse(raw, pool, versions, &meta) != 0
             elif RegistryMeta::rh_regmeta_parse(raw, pool, versions, &meta) != 0:
                 normalized: mutable darray[u8] = []
                 if RegistryPypi::rh_regmeta_pypi_normalize(raw, normalized) != 0:
@@ -66,6 +70,12 @@ module RegistryMetaReport:
             Base::rh_push_decimal_i64(out, meta.yanked_count)
             Base::rh_push_text(out, ",\"unknown_yank\":")
             Base::rh_push_decimal_i64(out, meta.unknown_yank_count)
+            Base::rh_push_text(out, ",\"deprecated\":")
+            Base::rh_push_decimal_i64(out, meta.deprecated_count)
+            Base::rh_push_text(out, ",\"not_deprecated\":")
+            Base::rh_push_decimal_i64(out, meta.not_deprecated_count)
+            Base::rh_push_text(out, ",\"unknown_deprecation\":")
+            Base::rh_push_decimal_i64(out, meta.unknown_deprecation_count)
             Base::rh_push_text(out, ",\"with_repo\":")
             Base::rh_push_decimal_i64(out, meta.with_repo)
             Base::rh_push_text(out, ",\"declared_deps\":")
@@ -88,6 +98,20 @@ module RegistryMetaReport:
                     Base::rh_push_text(out, "true")
                 else:
                     Base::rh_push_text(out, "false")
+                Base::rh_push_text(out, ",\"deprecated\":")
+                if v.deprecated == 1:
+                    Base::rh_push_text(out, "true")
+                elif v.deprecated == 0:
+                    Base::rh_push_text(out, "false")
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"deprecation_notice\":")
+                if v.deprecation_notice_s >= 0:
+                    Base::rh_push_text(out, "\"")
+                    rh_rmr_emit(out, pool, v.deprecation_notice_s, v.deprecation_notice_e)
+                    Base::rh_push_text(out, "\"")
+                else:
+                    Base::rh_push_text(out, "null")
                 Base::rh_push_text(out, ",\"published_at\":")
                 if v.has_published == 0:
                     Base::rh_push_text(out, "null")
@@ -112,5 +136,5 @@ module RegistryMetaReport:
                 Base::rh_push_decimal_i64(out, v.dev_dep_count)
                 Base::rh_push_text(out, "}")
                 i <- i + 1
-            Base::rh_push_text(out, "],\"note\":\"a yanked version is retained, not deleted; an absent yank field is null (unknown), not false; a declared repository link is an assertion, not identity; declared dependencies are counts, not resolved edges\"}")
+            Base::rh_push_text(out, "],\"note\":\"a yanked version is retained, not deleted; an absent yank field is null (unknown), not false; an absent deprecation field is null (unknown) unless the provider adapter establishes an explicit non-deprecated state; notices are source text capped at 4096 bytes; a declared repository link is an assertion, not identity; declared dependencies are counts, not resolved edges\"}")
             0

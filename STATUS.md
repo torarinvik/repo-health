@@ -258,18 +258,22 @@ dependency, and vulnerability reference counts. Dependency-scoped
 separate; the importer never treats one scoped assertion as proof that the
 whole inventory is complete. Composition arrays and source files are bounded.
 Registry metadata is parsed by `src/rh_registry_meta.elisa`: version
-labels, yanked flags, published times (epoch or raw string), declared
-dependency counts, and a declared source link. Invariants held: a yanked
+labels, yanked flags, published times (epoch or raw string), tri-state
+deprecation, bounded deprecation notices, declared dependency counts, and a
+declared source link. Invariants held: a yanked
 version is **retained**, not deleted; an absent yank field is unknown, not
 false; a declared source link is an assertion, not identity (F023); and
 declared dependencies are counts, not resolved edges. Registry enrichment
 is a real path too: `src/rh_registry_meta_report.elisa` + `rh_cli
 registry-meta --input <file> --out <file>` emit `rh-registry-meta-result/1`
 with a yanked version retained (not deleted), an absent yank field as
-`null` (unknown, never false), numeric and ISO published times preserved,
+`null` (unknown, never false), npm and NuGet deprecation notices retained
+with explicit provider deprecation state, unknown deprecation kept separate
+for providers without that signal, numeric and ISO published times preserved,
 the declared repository link labelled an assertion, and exact
 declared/optional/dev dependency counts; `tests/test_registry_meta_cli.sh`
-covers canonical and PyPI project shapes plus the fail-closed negatives.
+covers canonical, npm, NuGet, and PyPI project shapes, the 4096-byte notice
+bound, and fail-closed negatives.
 `go.sum` module checksums now attach exact `h1:` evidence as `module` artifacts
 to matching Go nodes, while `/go.mod` checksums are retained as separate
 `go_mod` artifacts; `h1` values are checked as canonical Base64 SHA-256 and

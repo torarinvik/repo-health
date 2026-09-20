@@ -498,7 +498,7 @@ Use each ecosystem's official manifests, lockfile formats, and version semantics
 
 **M03-04: Lockfile parsers.** Produce resolved graphs for supported contexts. Preserve multiple versions of one package, workspace members, registry aliases, local/path dependencies, Git dependencies, and unresolved external conditions. Cargo lock dependency IDs are filtered by their exact locked version and source when present; absent matches remain unresolved instead of falling through to a same-name candidate. The bounded parser accepts unversioned legacy Cargo input plus Cargo lockfile versions 3/4, npm's legacy version-1 dependency tree plus package-map versions 2/3, and NuGet `packages.lock.json` format version 1 with exactly one target framework. NuGet direct packages create root edges, each locked package dependency resolves by case-insensitive package ID plus exact resolved version, and the target framework remains on the graph root. NuGet content hashes are retained as expected artifact values without claiming raw archive verification. Multi-target files, other format versions, duplicate IDs, malformed dependencies, and unsupported fields fail closed. Unknown Cargo/npm/NuGet revisions and revision/layout mismatches fail closed. (Official format references [P16], [P17], [P21], [P22].)
 
-**M03-05: Registry enrichment.** Collect version metadata, publication times, source links, deprecations/yanks, and declared dependencies where available. Package source links are mapping assertions, not trusted project identity.
+**M03-05: Registry enrichment.** Collect version metadata, publication times, source links, deprecations/yanks, and declared dependencies where available. Package source links are mapping assertions, not trusted project identity. The canonical registry report now counts deprecated, explicitly non-deprecated, and unknown versions separately and retains bounded source notices. npm's empty deprecation message means the version was undeprecated; a non-empty message marks that version deprecated [P24]. NuGet registration catalog entries retain the deprecation message when present [P25]. Other adapters preserve unknown rather than infer a negative state when they provide no deprecation signal.
 
 **M03-06: Graph storage.** Build outgoing and incoming adjacency for exact resolved edges. Add bounded breadth-first traversal with deduplication, cycle handling, and truncation metadata.
 
@@ -1788,6 +1788,8 @@ These primary sources were checked while preparing the design and the current im
 [P21]: https://learn.microsoft.com/en-us/nuget/consume-packages/package-references-in-project-files "NuGet lock files and per-target-framework resolved dependency closures"
 [P22]: https://github.com/NuGet/Home/wiki/Enable-repeatable-package-restore-using-lock-file "NuGet lock file format and package dependency/content-hash fields"
 [P23]: https://cyclonedx.org/guides/sbom/external-references "CycloneDX composition completeness aggregates and scoped assertions"
+[P24]: https://docs.npmjs.com/cli/v11/commands/npm-deprecate/ "npm version deprecation messages and empty-message undeprecation"
+[P25]: https://learn.microsoft.com/en-us/nuget/api/registration-base-url-resource "NuGet registration catalog deprecation metadata"
 
 | Reference | Implementation use |
 |---|---|
@@ -1809,6 +1811,7 @@ These primary sources were checked while preparing the design and the current im
 | [P20] | Verify Go `.mod` and module ZIP h1 values with Go's one-file and `HashZip`/`Hash1` semantics, within explicit ZIP/DEFLATE bounds. |
 | [P21] / [P22] | Parse only the declared NuGet lock subset, preserve target-framework and content-hash evidence, and reject unsupported format versions and multi-target ambiguity. |
 | [P23] | Preserve CycloneDX composition completeness by declared scope and avoid upgrading partial or unknown assertions into a whole-inventory claim. |
+| [P24] / [P25] | Normalize npm and NuGet deprecation notices without treating missing signals in other providers as non-deprecation. |
 
 ## 29. Final implementation rule
 
