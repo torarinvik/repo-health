@@ -285,14 +285,17 @@ hash algorithm/value pairs are retained as expected artifact evidence; optional
 declared byte sizes are retained as `size_bytes`; explicit UTC artifact
 `upload-time` values are retained verbatim as source event time; archive
 `subdirectory` values preserve package-root context; package index URLs, artifact
-URLs, and paths appear only as SHA-256 fingerprints.
+URLs, and paths appear only as SHA-256 fingerprints. VCS package sources retain
+the VCS type, exact commit ID, optional requested revision, and subdirectory;
+directory sources retain their path fingerprint, editable flag, and
+subdirectory. Source-specific dependency requirements remain context-only.
 `rh_cli pylock-observe` checks supplied local artifact bytes against
 SHA-256/SHA-384/SHA-512 values and any declared size, then emits the separate
 `rh-pylock-artifact-observation-result/1` sidecar bound to the audit digest and
 artifact ID. Size and digest mismatches remain `changed`; unknown algorithms
 remain unsupported, and no archive is opened or extracted. Marker evaluation,
 environment/group selection, complete artifact metadata, and unsupported
-source forms remain coverage gaps. `tests/test_pylock_cli.sh`, its audit and
+source-specific dependency selectors and complete TOML grammar remain coverage gaps. `tests/test_pylock_cli.sh`, its audit and
 observation goldens, schema checks, and public-contract registrations cover
 these paths. This does not close full Python or ecosystem lockfile coverage.
 One inventory

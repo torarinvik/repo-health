@@ -35,8 +35,13 @@ on the real execution path.
   artifact `upload-time` values are retained as source event times. Optional
   archive `subdirectory` values are retained as package-root context within the
   archive. Package index URLs are retained only as `index_sha256` fingerprints.
+  `[packages.vcs]` records retain the VCS type, exact commit ID, optional
+  requested revision, source subdirectory, and a fingerprint of the URL/path
+  locator. `[packages.directory]` records retain a path fingerprint, editable
+  flag (defaulting to `false`), and source subdirectory. Locators remain private,
+  and source-specific dependency requirements remain context-only.
   Environment/group selection, complete artifact projection, and unsupported
-  source fields remain counted as gaps.
+  fields remain counted as gaps.
   `rh_cli pylock-observe` now verifies supplied local bytes against SHA-256,
   SHA-384, and SHA-512 values and emits a separate
   `rh-pylock-artifact-observation-result/1` sidecar bound to the audit digest

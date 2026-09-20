@@ -104,6 +104,34 @@ wheels = [
   {name = 'inline-alt.whl', path = 'vendor/inline-alt.whl', hashes = {sha512 = '11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111'}},
 ]
 sdist = {name = 'inline.tar.gz', url = 'https://files.example.invalid/inline.tar.gz', hashes = {sha256 = '2222222222222222222222222222222222222222222222222222222222222222'}}
+
+[[packages]]
+name = 'git-library'
+[packages.vcs]
+type = 'git'
+url = 'https://git.example.invalid/team/library.git'
+requested-revision = 'release/1.x'
+commit-id = '0123456789abcdef0123456789abcdef01234567'
+subdirectory = 'python/library'
+
+[[packages]]
+name = 'editable-library'
+[packages.directory]
+path = '../workspace/editable-library'
+editable = true
+subdirectory = 'packages/python'
+
+[[packages]]
+name = 'locked-library'
+[packages.directory]
+path = 'vendor/locked-library'
+
+[[packages]]
+name = 'local-git-library'
+[packages.vcs]
+type = 'git'
+path = '../git/local-library'
+commit-id = '89abcdef0123456789abcdef0123456789abcdef'
 EOF
 
 "$ROOT/build/rh_cli" pylock --input "$T/pylock.toml" --out "$T/result.json" | grep -q 'PEP 751 audit emitted' || fail "command did not emit audit"
@@ -123,7 +151,7 @@ assert report["extras"] == ["speedups", "docs"], report
 assert report["dependency_groups"] == ["dev", "test"], report
 assert report["default_groups"] == ["dev"], report
 pkgs = report["packages"]
-assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-consumer", "context-consumer", "missing-consumer", "table-context-consumer", "inline-artifact-consumer"], pkgs
+assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-consumer", "context-consumer", "missing-consumer", "table-context-consumer", "inline-artifact-consumer", "git-library", "editable-library", "locked-library", "local-git-library"], pkgs
 assert pkgs[0]["marker"] == "sys_platform == 'linux' # retained inside string", pkgs[0]
 assert pkgs[0]["index_sha256"] == hashlib.sha256(b"https://index.example.invalid/simple/").hexdigest(), pkgs[0]
 assert pkgs[1]["index_sha256"] is None, pkgs[1]
@@ -158,8 +186,24 @@ assert pkgs[7]["artifacts"][0]["size_bytes"] == 50, pkgs[7]["artifacts"][0]
 assert pkgs[7]["artifacts"][0]["upload_time"] == "2025-01-02T03:04:05+00:00", pkgs[7]["artifacts"][0]
 assert pkgs[7]["artifacts"][1]["hashes"] == [{"algorithm": "sha512", "value": "1" * 128}], pkgs[7]["artifacts"][1]
 assert pkgs[7]["artifacts"][0]["source_sha256"] == hashlib.sha256(b"https://files.example.invalid/inline.whl").hexdigest(), pkgs[7]["artifacts"][0]
+assert pkgs[8]["source"] == {
+    "kind": "vcs", "vcs_type": "git", "source_kind": "url",
+    "source_sha256": hashlib.sha256(b"https://git.example.invalid/team/library.git").hexdigest(),
+    "requested_revision": "release/1.x", "commit_id": "0123456789abcdef0123456789abcdef01234567",
+    "editable": None, "subdirectory": "python/library",
+}, pkgs[8]
+assert pkgs[9]["source"] == {
+    "kind": "directory", "vcs_type": None, "source_kind": "path",
+    "source_sha256": hashlib.sha256(b"../workspace/editable-library").hexdigest(),
+    "requested_revision": None, "commit_id": None, "editable": True,
+    "subdirectory": "packages/python",
+}, pkgs[9]
+assert pkgs[10]["source"]["kind"] == "directory" and pkgs[10]["source"]["editable"] is False, pkgs[10]
+assert pkgs[11]["source"]["kind"] == "vcs" and pkgs[11]["source"]["source_kind"] == "path", pkgs[11]
+assert pkgs[11]["source"]["source_sha256"] == hashlib.sha256(b"../git/local-library").hexdigest(), pkgs[11]
+assert pkgs[11]["source"]["requested_revision"] is None and pkgs[11]["source"]["commit_id"] == "89abcdef0123456789abcdef0123456789abcdef", pkgs[11]
 serialized = json.dumps(report)
-for locator in ["https://index.example.invalid/simple/", "https://files.example.invalid/attrs-25.1.0.whl", "https://files.example.invalid/inline.whl", "vendor/inline-alt.whl", "vendor/context-consumer-1.0.0.zip"]:
+for locator in ["https://index.example.invalid/simple/", "https://files.example.invalid/attrs-25.1.0.whl", "https://files.example.invalid/inline.whl", "vendor/inline-alt.whl", "vendor/context-consumer-1.0.0.zip", "https://git.example.invalid/team/library.git", "../workspace/editable-library", "vendor/locked-library", "../git/local-library"]:
     assert locator not in serialized, report
 coverage = report["coverage"]
 assert coverage["direct_dependencies"] == "not_recorded" and coverage["markers_evaluated"] is False, coverage
@@ -204,6 +248,74 @@ for input in "$T/missing-artifact-hash.toml" "$T/duplicate-artifact-hash.toml"; 
   rc=$?
   set -e
   [[ "$rc" -eq 4 ]] || fail "missing or duplicate artifact hashes must fail closed (got $rc)"
+done
+
+cat > "$T/missing-vcs-commit.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[packages.vcs]
+type = 'git'
+url = 'https://example.invalid/x.git'
+EOF
+cat > "$T/both-vcs-locators.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[packages.vcs]
+type = 'git'
+url = 'https://example.invalid/x.git'
+path = '../x'
+commit-id = '0123456789abcdef'
+EOF
+cat > "$T/missing-directory-path.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[packages.directory]
+editable = true
+EOF
+cat > "$T/source-and-artifact.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[packages.directory]
+path = 'vendor/x'
+[[packages.wheels]]
+name = 'x.whl'
+hashes = {sha256 = 'aa'}
+EOF
+cat > "$T/duplicate-source-table.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[packages.directory]
+path = 'vendor/x'
+[packages.vcs]
+type = 'git'
+url = 'https://example.invalid/x.git'
+commit-id = '0123456789abcdef'
+EOF
+cat > "$T/nonboolean-editable.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[packages.directory]
+path = 'vendor/x'
+editable = 'true'
+EOF
+for input in "$T/missing-vcs-commit.toml" "$T/both-vcs-locators.toml" "$T/missing-directory-path.toml" "$T/source-and-artifact.toml" "$T/duplicate-source-table.toml" "$T/nonboolean-editable.toml"; do
+  set +e
+  "$ROOT/build/rh_cli" pylock --input "$input" --out "$T/bad-source.json" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" -eq 4 ]] || fail "invalid PEP 751 source record must fail closed (got $rc: $input)"
 done
 
 cat > "$T/partial-artifact.toml" <<'EOF'

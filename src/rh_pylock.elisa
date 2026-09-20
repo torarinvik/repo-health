@@ -43,6 +43,20 @@ module Pylock:
             python_e: mutable i64
             index_s: mutable i64
             index_e: mutable i64
+            source_kind: mutable u8
+            source_type_s: mutable i64
+            source_type_e: mutable i64
+            source_locator_s: mutable i64
+            source_locator_e: mutable i64
+            source_locator_kind: mutable u8
+            source_revision_s: mutable i64
+            source_revision_e: mutable i64
+            source_commit_s: mutable i64
+            source_commit_e: mutable i64
+            source_subdirectory_s: mutable i64
+            source_subdirectory_e: mutable i64
+            source_editable: mutable bool
+            source_editable_seen: mutable bool
             dependency_array: mutable u8
 
         struct RhPylockReference:
@@ -90,6 +104,11 @@ module Pylock:
         def rh_pylock_artifact_exists(artifacts: darray[RhPylockArtifact]&, owner: i64, kind: u8) -> bool:
             for index in 0..<artifacts.count |index, artifacts, owner, kind|:
                 return true if artifacts[index].owner == owner and artifacts[index].kind == kind
+            false
+
+        def rh_pylock_package_has_artifact(artifacts: darray[RhPylockArtifact]&, owner: i64) -> bool:
+            for index in 0..<artifacts.count |index, artifacts, owner|:
+                return true if artifacts[index].owner == owner
             false
 
         def rh_pylock_lower(value: u8) -> u8:
@@ -655,20 +674,46 @@ module Pylock:
                 if trimmed_start < trimmed_end:
                     if Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[[packages]]"):
                         return -1 if packages.count.i64() >= RH_PYLOCK_MAX_PACKAGES
-                        packages.push(RhPylockPackage{name_s: -1, name_e: -1, version_s: -1, version_e: -1, marker_s: -1, marker_e: -1, python_s: -1, python_e: -1, index_s: -1, index_e: -1, dependency_array: 0})
+                        packages.push(RhPylockPackage{
+                            name_s: -1,
+                            name_e: -1,
+                            version_s: -1,
+                            version_e: -1,
+                            marker_s: -1,
+                            marker_e: -1,
+                            python_s: -1,
+                            python_e: -1,
+                            index_s: -1,
+                            index_e: -1,
+                            source_kind: 0,
+                            source_type_s: -1,
+                            source_type_e: -1,
+                            source_locator_s: -1,
+                            source_locator_e: -1,
+                            source_locator_kind: 0,
+                            source_revision_s: -1,
+                            source_revision_e: -1,
+                            source_commit_s: -1,
+                            source_commit_e: -1,
+                            source_subdirectory_s: -1,
+                            source_subdirectory_e: -1,
+                            source_editable: false,
+                            source_editable_seen: false,
+                            dependency_array: 0,
+                        })
                         package_index <- packages.count.i64() - 1
                         reference_index <- -1
                         artifact_index <- -1
                         section <- 1
                         packages_seen <- true
                     elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[[packages.wheels]]"):
-                        return -1 if package_index < 0
+                        return -1 if package_index < 0 or packages[package_index.usize()].source_kind != 0
                         artifact_index <- rh_pylock_artifact_push(artifacts, package_index, 1)
                         return -1 if artifact_index < 0
                         reference_index <- -1
                         section <- 3
                     elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.sdist]"):
-                        return -1 if package_index < 0
+                        return -1 if package_index < 0 or packages[package_index.usize()].source_kind != 0
                         for prior in 0..<artifacts.count |prior, artifacts, package_index|:
                             prior_artifact: RhPylockArtifact = artifacts[prior]
                             return -1 if prior_artifact.owner == package_index and prior_artifact.kind == 2
@@ -677,7 +722,7 @@ module Pylock:
                         reference_index <- -1
                         section <- 5
                     elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.archive]"):
-                        return -1 if package_index < 0
+                        return -1 if package_index < 0 or packages[package_index.usize()].source_kind != 0
                         for prior2 in 0..<artifacts.count |prior2, artifacts, package_index|:
                             prior_artifact2: RhPylockArtifact = artifacts[prior2]
                             return -1 if prior_artifact2.owner == package_index and prior_artifact2.kind == 3
@@ -685,6 +730,22 @@ module Pylock:
                         return -1 if artifact_index < 0
                         reference_index <- -1
                         section <- 7
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.vcs]"):
+                        return -1 if package_index < 0 or packages[package_index.usize()].source_kind != 0 or rh_pylock_package_has_artifact(artifacts, package_index)
+                        pkg_source: mutable RhPylockPackage = packages[package_index.usize()]
+                        pkg_source.source_kind <- 1
+                        packages[package_index.usize()] <- pkg_source
+                        reference_index <- -1
+                        artifact_index <- -1
+                        section <- 10
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.directory]"):
+                        return -1 if package_index < 0 or packages[package_index.usize()].source_kind != 0 or rh_pylock_package_has_artifact(artifacts, package_index)
+                        pkg_directory: mutable RhPylockPackage = packages[package_index.usize()]
+                        pkg_directory.source_kind <- 2
+                        packages[package_index.usize()] <- pkg_directory
+                        reference_index <- -1
+                        artifact_index <- -1
+                        section <- 11
                     elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.wheels.hashes]"):
                         return -1 if artifact_index < 0 or artifacts[artifact_index.usize()].kind != 1
                         reference_index <- -1
@@ -713,7 +774,7 @@ module Pylock:
                         reference_index <- -1
                         artifact_index <- -1
                         unknown_tables[0] <- unknown_tables[0] + 1
-                    elif section == 0 or section == 1 or section == 2 or section == 3 or section == 4 or section == 5 or section == 6 or section == 7 or section == 8:
+                    elif section == 0 or section == 1 or section == 2 or section == 3 or section == 4 or section == 5 or section == 6 or section == 7 or section == 8 or section == 10 or section == 11:
                         key_s: mutable usize = trimmed_start
                         key_e: mutable usize = trimmed_end
                         value_s: mutable usize = trimmed_start
@@ -792,20 +853,20 @@ module Pylock:
                                 return -1 if not rh_pylock_scalar_string(data, pool, value_s, value_end, &pkg_index.index_s, &pkg_index.index_e) or pkg_index.index_s == pkg_index.index_e
                                 packages[package_index.usize()] <- pkg_index
                             elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "wheels"):
-                                return -1 if value_s >= value_end or data[value_s] != 91 or rh_pylock_artifact_exists(artifacts, package_index, 1)
+                                return -1 if packages[package_index.usize()].source_kind != 0 or value_s >= value_end or data[value_s] != 91 or rh_pylock_artifact_exists(artifacts, package_index, 1)
                                 closed_at: mutable usize = 0
                                 return -1 if not rh_pylock_inline_artifact_array(data, pool, artifacts, hashes, package_index, 1, value_s, unknown_artifact, &closed_at)
                                 line_start <- closed_at + 1
                                 line_end <- closed_at
                             elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "sdist"):
-                                return -1 if value_s >= value_end or data[value_s] != 123 or rh_pylock_artifact_exists(artifacts, package_index, 2)
+                                return -1 if packages[package_index.usize()].source_kind != 0 or value_s >= value_end or data[value_s] != 123 or rh_pylock_artifact_exists(artifacts, package_index, 2)
                                 next: mutable usize = 0
                                 return -1 if not rh_pylock_inline_artifact(data, pool, artifacts, hashes, package_index, 2, value_s, value_end, unknown_artifact, &next)
                                 while next < value_end and (data[next] == 32 or data[next] == 9) |next, data, value_end|:
                                     next <- next + 1
                                 return -1 if next != value_end
                             elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "archive"):
-                                return -1 if value_s >= value_end or data[value_s] != 123 or rh_pylock_artifact_exists(artifacts, package_index, 3)
+                                return -1 if packages[package_index.usize()].source_kind != 0 or value_s >= value_end or data[value_s] != 123 or rh_pylock_artifact_exists(artifacts, package_index, 3)
                                 next2: mutable usize = 0
                                 return -1 if not rh_pylock_inline_artifact(data, pool, artifacts, hashes, package_index, 3, value_s, value_end, unknown_artifact, &next2)
                                 while next2 < value_end and (data[next2] == 32 or data[next2] == 9) |next2, data, value_end|:
@@ -824,6 +885,34 @@ module Pylock:
                                 ref: mutable RhPylockReference = refs[reference_index.usize()]
                                 return -1 if not rh_pylock_reference_field(data, pool, trimmed_start, trimmed_end, &ref, unknown_dependency)
                                 refs[reference_index.usize()] <- ref
+                            elif section == 10 or section == 11:
+                                source: mutable RhPylockPackage = packages[package_index.usize()]
+                                if section == 10 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "type"):
+                                    return -1 if source.source_type_s >= 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &source.source_type_s, &source.source_type_e)
+                                elif section == 10 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "url"):
+                                    return -1 if source.source_locator_kind != 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &source.source_locator_s, &source.source_locator_e) or source.source_locator_s == source.source_locator_e
+                                    source.source_locator_kind <- 1
+                                elif section == 10 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "path"):
+                                    return -1 if source.source_locator_kind != 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &source.source_locator_s, &source.source_locator_e) or source.source_locator_s == source.source_locator_e
+                                    source.source_locator_kind <- 2
+                                elif section == 10 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "requested-revision"):
+                                    return -1 if source.source_revision_s >= 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &source.source_revision_s, &source.source_revision_e)
+                                elif section == 10 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "commit-id"):
+                                    return -1 if source.source_commit_s >= 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &source.source_commit_s, &source.source_commit_e)
+                                elif section == 10 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "subdirectory"):
+                                    return -1 if source.source_subdirectory_s >= 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &source.source_subdirectory_s, &source.source_subdirectory_e)
+                                elif section == 11 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "path"):
+                                    return -1 if source.source_locator_kind != 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &source.source_locator_s, &source.source_locator_e) or source.source_locator_s == source.source_locator_e
+                                    source.source_locator_kind <- 2
+                                elif section == 11 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "editable"):
+                                    return -1 if source.source_editable_seen or (not Base::rh_bytes_equal_literal(data, value_s.i64(), value_end.i64(), "true") and not Base::rh_bytes_equal_literal(data, value_s.i64(), value_end.i64(), "false"))
+                                    source.source_editable <- Base::rh_bytes_equal_literal(data, value_s.i64(), value_end.i64(), "true")
+                                    source.source_editable_seen <- true
+                                elif section == 11 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "subdirectory"):
+                                    return -1 if source.source_subdirectory_s >= 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &source.source_subdirectory_s, &source.source_subdirectory_e)
+                                else:
+                                    unknown_package[0] <- unknown_package[0] + 1
+                                packages[package_index.usize()] <- source
                             elif section == 3 or section == 5 or section == 7:
                                 return -1 if artifact_index < 0 or not rh_pylock_artifact_field(data, pool, artifacts, hashes, artifact_index, trimmed_start, trimmed_end, unknown_artifact)
                             elif section == 4 or section == 6 or section == 8:
@@ -844,6 +933,9 @@ module Pylock:
                 pkg5: RhPylockPackage = packages[package_id]
                 return -1 if pkg5.name_s < 0 or pkg5.name_s == pkg5.name_e
                 return -1 if (pkg5.index_s < 0 and pkg5.index_e >= 0) or (pkg5.index_s >= 0 and pkg5.index_s == pkg5.index_e)
+                return -1 if pkg5.source_kind == 1 and (pkg5.source_type_s < 0 or pkg5.source_type_s == pkg5.source_type_e or pkg5.source_commit_s < 0 or pkg5.source_commit_s == pkg5.source_commit_e or pkg5.source_locator_kind == 0)
+                return -1 if pkg5.source_kind == 2 and (pkg5.source_locator_kind != 2 or pkg5.source_locator_s < 0)
+                return -1 if pkg5.source_kind == 0 and (pkg5.source_type_s >= 0 or pkg5.source_locator_s >= 0 or pkg5.source_commit_s >= 0 or pkg5.source_revision_s >= 0 or pkg5.source_subdirectory_s >= 0 or pkg5.source_editable_seen)
             for reference_id in 0..<refs.count |reference_id, refs|:
                 reference: RhPylockReference = refs[reference_id]
                 return -1 if reference.name_s < 0 or reference.name_s == reference.name_e
@@ -887,6 +979,28 @@ module Pylock:
                 out.push(34)
                 out.extend(bytes_view(digest))
                 out.push(34)
+
+        def rh_pylock_emit_source(out: mutable darray[u8]&, pool: darray[u8]&, package: mutable RhPylockPackage) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "{\"kind\":\"")
+            Base::rh_push_text(out, "vcs" if package.source_kind == 1 else "directory" if package.source_kind == 2 else "none")
+            Base::rh_push_text(out, "\",\"vcs_type\":")
+            rh_pylock_emit_string(out, pool, package.source_type_s, package.source_type_e)
+            Base::rh_push_text(out, ",\"source_kind\":")
+            Base::rh_push_text(out, "\"url\"" if package.source_locator_kind == 1 else "\"path\"" if package.source_locator_kind == 2 else "null")
+            Base::rh_push_text(out, ",\"source_sha256\":")
+            rh_pylock_emit_fingerprint(out, pool, package.source_locator_s, package.source_locator_e)
+            Base::rh_push_text(out, ",\"requested_revision\":")
+            rh_pylock_emit_string(out, pool, package.source_revision_s, package.source_revision_e)
+            Base::rh_push_text(out, ",\"commit_id\":")
+            rh_pylock_emit_string(out, pool, package.source_commit_s, package.source_commit_e)
+            Base::rh_push_text(out, ",\"editable\":")
+            if package.source_kind != 2:
+                Base::rh_push_text(out, "null")
+            else:
+                Base::rh_push_text(out, "true" if package.source_editable else "false")
+            Base::rh_push_text(out, ",\"subdirectory\":")
+            rh_pylock_emit_string(out, pool, package.source_subdirectory_s, package.source_subdirectory_e)
+            out.push(125)
 
         def rh_pylock_target(pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, reference: mutable RhPylockReference, target_out: mutable i64&) -> u8 can[Memory.Allocate, Abort.Panic]:
             return 3 if reference.context == 1
@@ -959,6 +1073,8 @@ module Pylock:
                 rh_pylock_emit_string(out, pool, pkg.python_s, pkg.python_e)
                 Base::rh_push_text(out, ",\"index_sha256\":")
                 rh_pylock_emit_fingerprint(out, pool, pkg.index_s, pkg.index_e)
+                Base::rh_push_text(out, ",\"source\":")
+                rh_pylock_emit_source(out, pool, pkg)
                 Base::rh_push_text(out, ",\"dependencies\":[")
                 first: mutable bool = true
                 for reference_id in 0..<references.count |reference_id, references, pool, packages, out, package_id, first|:
