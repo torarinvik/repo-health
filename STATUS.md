@@ -1209,13 +1209,23 @@ cross-source identity are deferred to M04.
 | 1 | Baseline + ADR-000 | `implemented` (license: public domain, owner-confirmed; toolchain pinned in TOOLCHAIN.md) |
 | 2 | Identifiers, intervals, observations | `implemented` (oracles green) |
 | 3 | Metric-definition schema + linter | `implemented` (`rh_registry_lint` + JSON mirror check) |
-| 4 | Synthetic history + graph fixtures | `implemented` (harness-built git fixtures; graph fixtures pending M03) |
+| 4 | Synthetic history + graph fixtures | `implemented` (harness-built Git histories and checked-in dependency graph goldens, `tests/test_m01.sh`, `tests/test_deps_cli.sh`) |
 | 5 | Bounded subprocess + URL policy | `implemented` (allowlist oracles + exit-3 gates) |
 | 6 | Bare-Git metadata extraction | `implemented` (plumbing-only runners) |
 | 7 | Evidence bundle + digest verify | `implemented` (FNV manifest + replay exit-0/5) |
 | 8 | First ten foundational metrics | `implemented` (see table) |
 | 9 | JSON/Markdown report + explain | `implemented` (report.json/md; `rh_cli explain` emits `repo-health-explain/1`) |
-| 10–20 | (see IMPLEMENTATION_PLAN.md) | `planned` |
+| 10 | Extend to the initial 30–40 metric subset | `implemented` (209 metric definitions are implemented; registry/status agreement and admission lint pass in `tests/test_m00.sh`) |
+| 11 | PostgreSQL ingestion, cursor transaction, and lease tests | `partial` (target migrations and static contract checks exist; the application still uses filesystem ingestion, and live PostgreSQL crash-boundary rehearsal has not run) |
+| 12 | First forge adapter and controlled-instance fixtures | `implemented` (GitHub normalization, captured workflow events, and controlled connector-instance checks in `tests/test_forge_cli.sh`, `tests/test_forge_events_cli.sh`, and `tests/test_connector_cli.sh`) |
+| 13 | Second forge plus generic self-hosted URL support | `implemented` (GitLab, Gitea, Forgejo, and Bitbucket mappings plus approved self-hosted connector fixtures; `tests/test_m02.sh`, `tests/test_forge_cli.sh`, `tests/test_connector_cli.sh`) |
+| 14 | Package identity and first lockfile parser | `implemented` (Cargo and npm graph parsers with exact contextual resolution; `tests/test_deps_cli.sh`) |
+| 15 | Second ecosystem and advisory matching | `implemented` (multiple ecosystem parsers, offline OSV matching, and bounded query capture; `tests/test_deps_cli.sh`, `tests/test_osv_query_cli.sh`) |
+| 16 | Persistent cohorts and role concentration | `implemented` (censored retention, role-specific events, and concentration; `tests/test_m04.sh`, `tests/test_roles_cli.sh`, `tests/test_continuity_cli.sh`) |
+| 17 | Temporal reverse dependencies and downstream condition | `implemented` (bitemporal labeled projections, reverse reachability, and per-metric coverage; `tests/test_m05.sh`, `tests/test_downstream_cli.sh`) |
+| 18 | Four-valued policy evaluation | `implemented` (allow/warn/deny/unknown precedence and exceptions; `tests/test_m06.sh`, `tests/test_policy_cli.sh`) |
+| 19 | Security, privacy, rights, and restore reviews | `partial` (transport, privacy, rights, backup, and restore paths are tested; independent threat-model review and opt-in pilot remain open) |
+| 20 | Opt-in maintainer pilot and defect correction | `partial` (pilot-review intake and output are implemented; an external maintainer pilot, correction sample, and governance sign-off remain open) |
 | maintainer.role_assignments_with_end_dates | 1.0.0 | `implemented` (F014; explicit positive revocation timestamps only) |
 | maintainer.declared_current | 1.0.0 | `implemented` (F012, F013, F014; active owner/maintainer declarations at the selected as-of time) |
 | maintainer.permission_observed_current | 1.0.0 | `implemented` (F012, F013, F014; authorized provider permission declarations at the selected as-of time) |
