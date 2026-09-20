@@ -496,7 +496,7 @@ Use each ecosystem's official manifests, lockfile formats, and version semantics
 
 **M03-03: Manifest parsers.** Extract declared direct requirements, scope, optional conditions, and source spans without executing package scripts. Store unsupported expressions intact.
 
-**M03-04: Lockfile parsers.** Produce resolved graphs for supported contexts. Preserve multiple versions of one package, workspace members, registry aliases, local/path dependencies, Git dependencies, and unresolved external conditions. Cargo lock dependency IDs are filtered by their exact locked version and source when present; absent matches remain unresolved instead of falling through to a same-name candidate.
+**M03-04: Lockfile parsers.** Produce resolved graphs for supported contexts. Preserve multiple versions of one package, workspace members, registry aliases, local/path dependencies, Git dependencies, and unresolved external conditions. Cargo lock dependency IDs are filtered by their exact locked version and source when present; absent matches remain unresolved instead of falling through to a same-name candidate. The bounded parser accepts unversioned legacy Cargo input plus Cargo lockfile versions 3/4, and npm's legacy version-1 dependency tree plus package-map versions 2/3; unknown declared revisions and revision/layout mismatches fail closed. (Official format references [P16], [P17].)
 
 **M03-05: Registry enrichment.** Collect version metadata, publication times, source links, deprecations/yanks, and declared dependencies where available. Package source links are mapping assertions, not trusted project identity.
 
@@ -1780,6 +1780,8 @@ These sources were checked while preparing the design on 2026-09-18. Revalidate 
 [P13]: https://google.github.io/osv.dev/post-v1-query/ "OSV package/version query request, response, and pagination contract"
 [P14]: https://google.github.io/osv.dev/post-v1-querybatch/ "OSV ordered package query batch and per-query result contract"
 [P15]: https://google.github.io/osv.dev/get-v1-vulns/ "OSV full vulnerability record lookup by ID"
+[P16]: https://doc.rust-lang.org/nightly/nightly-rustc/cargo/resolver/resolve/enum.ResolveVersion.html "Cargo lockfile versions and unstable version 5 status"
+[P17]: https://docs.npmjs.com/files/package-lock.json/ "npm package-lock version semantics and layouts"
 
 | Reference | Implementation use |
 |---|---|
@@ -1795,6 +1797,7 @@ These sources were checked while preparing the design on 2026-09-18. Revalidate 
 | [P11] | Transactional foundation for durable scheduling and ingestion. |
 | [P12] | Optional metadata reuse after terms, rights, and provenance review. |
 | [P13] / [P14] / [P15] | OSV single-query full advisory evidence, bounded ordered batch summaries, and full-record lookup by returned ID. |
+| [P16] / [P17] | Pin accepted Cargo/npm lockfile revisions and reject unsupported declared revisions. |
 
 ## 29. Final implementation rule
 

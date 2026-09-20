@@ -481,7 +481,7 @@ module Package:
 
         def rh_cargo_parse(lock: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             unknown_out[0] <- 0
-            while pos < lock.count |count: i64 = 0, cur: i64 = -1, in_deps: bool = false, pos: usize = 0, pkgs, pool, reqs, unknown_out| -> count:
+            while pos < lock.count |count: i64 = 0, cur: i64 = -1, in_deps: bool = false, top_level: bool = true, lock_version_seen: bool = false, pos: usize = 0, pkgs, pool, reqs, unknown_out| -> count:
                 lend: usize =
                     nl: i64 = Base::rh_find_byte(lock, pos, 10)
                     nl.usize() if nl >= 0 else lock.count
@@ -493,6 +493,7 @@ module Package:
                         pos <- lend + 1
                         continue
                     if lock[ts.usize()] == 91:
+                        top_level <- false
                         in_deps <- false
                         if rh_span_lit(lock, ts.usize(), te.usize(), "[[package]]"):
                             cur <- rh_node_add(pkgs, 0)
@@ -510,6 +511,27 @@ module Package:
                         pos <- lend + 1
                         continue
                     if cur < 0:
+                        if top_level and rh_span_prefix(lock, ts.usize(), te.usize(), "version"):
+                            ks_root: mutable i64 = 0
+                            ke_root: mutable i64 = 0
+                            return -1 if not rh_toml_key(lock, ts.usize(), te.usize(), &ks_root, &ke_root)
+                            if rh_span_lit(lock, ks_root.usize(), ke_root.usize(), "version"):
+                                return -1 if lock_version_seen
+                                lock_view: mutable darray[u8]& = lock
+                                version_pos: usize =
+                                    while version_pos < te.usize() |version_pos: usize = ke_root.usize(), lock_view| -> version_pos:
+                                        break if lock_view[version_pos] != 32 and lock_view[version_pos] != 9 and lock_view[version_pos] != 61
+                                        version_pos <- version_pos + 1
+                                return -1 if version_pos >= te.usize() or (lock_view[version_pos] != 51 and lock_view[version_pos] != 52)
+                                format_version: i64 = (lock_view[version_pos] - 48).i64()
+                                version_end: usize = version_pos + 1
+                                while version_end < te.usize() |version_end: usize = version_pos + 1, lock_view|:
+                                    if lock_view[version_end] == 35:
+                                        break
+                                    return -1 if lock_view[version_end] != 32 and lock_view[version_end] != 9
+                                    version_end <- version_end + 1
+                                return -1 if format_version != 3 and format_version != 4
+                                lock_version_seen <- true
                         pos <- lend + 1
                         continue
                     ks: mutable i64 = 0
@@ -932,6 +954,16 @@ module Package:
             return -1 if lroot < 0
             lro: Json::RhJsonNode = lnodes[lroot.usize()]
             return -1 if lro.kind != 5
+            lock_version_idx: i64 = Json::rh_json_obj_get(lnodes, ltexts, lroot, "lockfileVersion")
+            pkgs_obj: i64 = Json::rh_json_obj_get(lnodes, ltexts, lroot, "packages")
+            if lock_version_idx >= 0:
+                lock_version_ok: mutable i64 = 0
+                lock_version: i64 = Json::rh_json_int(lnodes, lock_bytes, lock_version_idx, &lock_version_ok)
+                return -1 if lock_version_ok != 1 or lock_version < 1 or lock_version > 3
+                return -1 if lock_version == 1 and pkgs_obj >= 0
+                return -1 if lock_version >= 2 and pkgs_obj < 0
+            else:
+                return -1 if pkgs_obj >= 0
             tn_s: mutable i64 = -1
             tn_e: mutable i64 = -1
             tv_s: mutable i64 = -1
@@ -959,7 +991,6 @@ module Package:
             rn.ver_s <- tv_s
             rn.ver_e <- tv_e
             pkgs[root.usize()] <- rn
-            pkgs_obj: i64 = Json::rh_json_obj_get(lnodes, ltexts, lroot, "packages")
             if pkgs_obj >= 0:
                 pk: Json::RhJsonNode = lnodes[pkgs_obj.usize()]
                 return -1 if pk.kind != 5

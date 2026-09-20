@@ -125,10 +125,12 @@ crosswalk.
 **M03 scope (in progress):** implemented — ecosystem-native semver
 (strict, prerelease precedence, build ignored), Cargo name normalization
 (case/dash-insensitive), lockfile-only resolution for Cargo (`[[package]]`
-tables incl. source kind + checksum-as-digest, unknown keys counted) and
+tables, unversioned legacy plus versions 3/4, source kind/source fingerprint
+and checksum-as-digest, unknown keys counted; unsupported versions rejected) and
 npm (`lockfileVersion` 2/3 `packages` with Node walk-up nested-version
-preference, v1 legacy `requires` trees, dev/optional/peer scopes,
-integrity digests), explicit unresolved reasons (`missing` / `ambiguous` /
+preference, version-1 legacy `dependencies` trees, dev/optional/peer scopes,
+integrity digests; unsupported or mismatched revisions rejected), explicit
+unresolved reasons (`missing` / `ambiguous` /
 `context` — a declared requirement never becomes an exact edge without
 resolution evidence), bounded forward/reverse BFS with truncation flags,
 bounded witness paths, offline OSV matching (id/alias merge counted,

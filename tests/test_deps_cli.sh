@@ -526,6 +526,47 @@ assert g["nodes"][3]["source_identity_sha256"] == g["nodes"][1]["source_identity
 print("[deps] Cargo source identity and exact locked version OK")
 PY
 
+echo "[deps] npm lockfile v2 package map is supported"
+mkdir -p "$T/npm-v2"
+cp "$ROOT/fixtures/packages/npm-v2-lock.json" "$T/npm-v2/package-lock.json"
+"$ROOT/build/rh_cli" deps --repo "$T/npm-v2" --out "$T/npm-v2-out" \
+  | grep -q "ecosystems=1 npm=1/1 unresolved=0 unsupported=0" || fail "npm lockfile v2 summary"
+python3 - "$T/npm-v2-out/deps-npm-graph.json" <<'PY'
+import json, sys
+g = json.load(open(sys.argv[1]))
+assert [n["name"] for n in g["nodes"]] == ["v2-app", "left"], g["nodes"]
+assert [(e["from"], e["to"]) for e in g["edges"]] == [(0, 1)], g["edges"]
+assert not g["unresolved"], g["unresolved"]
+print("[deps] npm v2 layout + exact graph OK")
+PY
+
+echo "[deps] unsupported declared lockfile revisions fail closed"
+mkdir -p "$T/bad-cargo-revision"
+cat > "$T/bad-cargo-revision/Cargo.lock" <<'EOF'
+version = 5
+
+[[package]]
+name = "app"
+version = "1.0.0"
+EOF
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/bad-cargo-revision" --out "$T/bad-cargo-revision-out" >/dev/null 2>&1
+rc_bad_cargo_revision=$?
+set -e
+[[ "$rc_bad_cargo_revision" -eq 4 ]] || fail "unsupported Cargo lockfile revision must exit 4 (got $rc_bad_cargo_revision)"
+[[ ! -f "$T/bad-cargo-revision-out/deps-cargo-graph.json" ]] || fail "Cargo graph written for unsupported revision"
+
+mkdir -p "$T/bad-npm-revision"
+cat > "$T/bad-npm-revision/package-lock.json" <<'EOF'
+{"lockfileVersion":4,"name":"bad","packages":{"":{"name":"bad","version":"1.0.0"}},"version":"1.0.0"}
+EOF
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/bad-npm-revision" --out "$T/bad-npm-revision-out" >/dev/null 2>&1
+rc_bad_npm_revision=$?
+set -e
+[[ "$rc_bad_npm_revision" -eq 4 ]] || fail "unsupported npm lockfile revision must exit 4 (got $rc_bad_npm_revision)"
+[[ ! -f "$T/bad-npm-revision-out/deps-npm-graph.json" ]] || fail "npm graph written for unsupported revision"
+
 echo "[deps] negative: no manifests fails closed"
 mkdir -p "$T/empty"
 set +e
