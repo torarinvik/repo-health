@@ -305,6 +305,53 @@ module Continuity:
             den_out[0] <- total
             1
 
+        # Exact top-k share over the same attributed event population. The small
+        # fixed insertion set keeps this allocation-free and deterministic; k is
+        # bounded to five because these catalog metrics are top-three and top-five
+        # shares. Zero totals remain not_applicable rather than false zero shares.
+        def rh_topk_share(counts: darray[u64]&, k: i64, num_out: mutable u64&, den_out: mutable u64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            num_out[0] <- 0
+            den_out[0] <- 0
+            return -2 if k <= 0 or k > 5
+            top1: mutable u64 = 0
+            top2: mutable u64 = 0
+            top3: mutable u64 = 0
+            top4: mutable u64 = 0
+            top5: mutable u64 = 0
+            total: mutable u64 = 0
+            while i < counts.count.i64() |i: i64 = 0, counts, k, top1, top2, top3, top4, top5, total|:
+                c: u64 = counts[i.usize()]
+                total <- total + c
+                if c > top1:
+                    top5 <- top4
+                    top4 <- top3
+                    top3 <- top2
+                    top2 <- top1
+                    top1 <- c
+                elif c > top2:
+                    top5 <- top4
+                    top4 <- top3
+                    top3 <- top2
+                    top2 <- c
+                elif c > top3:
+                    top5 <- top4
+                    top4 <- top3
+                    top3 <- c
+                elif c > top4:
+                    top5 <- top4
+                    top4 <- c
+                elif c > top5:
+                    top5 <- c
+                i <- i + 1
+            return -1 if total == 0
+            selected: mutable u64 = top1 + top2 if k == 2 else top1
+            selected <- top1 + top2 + top3 if k == 3
+            selected <- top1 + top2 + top3 + top4 if k == 4
+            selected <- top1 + top2 + top3 + top4 + top5 if k == 5
+            num_out[0] <- selected
+            den_out[0] <- total
+            1
+
 
         # Role visibility: a maintainer who reviews consistently but authors few
         # commits must remain visible through role-specific events. This is a
@@ -324,7 +371,7 @@ module Continuity:
         # is `not_applicable`, never 0 (unknown != zero). Censored/unobservable and
         # the raw concentration components are reported alongside so every
         # denominator can be audited. Raw emails never appear here.
-        def rh_continuity_metrics_write(out: mutable darray[u8]&, identity_rev: i64, actors_total: i64, persistent: i64, active3: i64, active6: i64, active9: i64, event_share_num: i64, event_share_den: i64, tenure_days: i64, retained: i64, eligible: i64, censored: i64, unobservable: i64, retained_365: i64, eligible_365: i64, censored_365: i64, unobservable_365: i64, first_seen_supported: bool, hhi_n: u64, hhi_d: u64, eff_n: u64, eff_d: u64, fifty: i64, eighty: i64, top_n: u64, top_d: u64, gini_n: u64, gini_d: u64) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_continuity_metrics_write(out: mutable darray[u8]&, identity_rev: i64, actors_total: i64, persistent: i64, active3: i64, active6: i64, active9: i64, event_share_num: i64, event_share_den: i64, tenure_days: i64, retained: i64, eligible: i64, censored: i64, unobservable: i64, retained_365: i64, eligible_365: i64, censored_365: i64, unobservable_365: i64, first_seen_supported: bool, hhi_n: u64, hhi_d: u64, eff_n: u64, eff_d: u64, fifty: i64, eighty: i64, top_n: u64, top_d: u64, top3_n: u64, top3_d: u64, top5_n: u64, top5_d: u64, gini_n: u64, gini_d: u64) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"schema\":\"rh-continuity-metrics/1\",\"identity_revision\":")
             Base::rh_push_decimal_i64(out, identity_rev)
             Base::rh_push_text(out, ",\"actors_total\":")
@@ -468,6 +515,26 @@ module Continuity:
                 Base::rh_push_decimal_u64(out, top_n)
                 Base::rh_push_text(out, ",\"den\":")
                 Base::rh_push_decimal_u64(out, top_d)
+                Base::rh_push_text(out, "}")
+            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
+            Base::rh_push_text(out, "{\"key\":\"concentration.top3_event_share\",\"version\":\"1.0.0\",\"status\":\"")
+            if top3_d == 0:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
+            else:
+                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
+                Base::rh_push_decimal_u64(out, top3_n)
+                Base::rh_push_text(out, ",\"den\":")
+                Base::rh_push_decimal_u64(out, top3_d)
+                Base::rh_push_text(out, "}")
+            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
+            Base::rh_push_text(out, "{\"key\":\"concentration.top5_event_share\",\"version\":\"1.0.0\",\"status\":\"")
+            if top5_d == 0:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
+            else:
+                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
+                Base::rh_push_decimal_u64(out, top5_n)
+                Base::rh_push_text(out, ",\"den\":")
+                Base::rh_push_decimal_u64(out, top5_d)
                 Base::rh_push_text(out, "}")
             Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
             Base::rh_push_text(out, "{\"key\":\"concentration.hhi\",\"version\":\"1.0.0\",\"status\":\"")

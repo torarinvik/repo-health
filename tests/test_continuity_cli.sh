@@ -66,6 +66,8 @@ assert by["concentration.change_hhi"]["value"] == {"num": 7, "den": 25}, by["con
 assert by["concentration.change_effective_actor_count"]["value"] == {"num": 25, "den": 7}, by
 assert by["concentration.change_absence_factor_50"]["value"] == 2, by
 assert by["concentration.top1_event_share"]["value"] == {"num": 2, "den": 5}, by
+assert by["concentration.top3_event_share"]["value"] == {"num": 4, "den": 5}, by
+assert by["concentration.top5_event_share"]["value"] == {"num": 5, "den": 5}, by
 assert by["concentration.hhi"]["value"] == {"num": 7, "den": 25}, by
 assert by["concentration.effective_actor_count"]["value"] == {"num": 25, "den": 7}, by
 assert by["concentration.absence_factor_50"]["value"] == 2, by
