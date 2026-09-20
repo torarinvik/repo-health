@@ -156,6 +156,46 @@ def oq_check_pagination(fails: mutable i64&) -> void can[Memory.Allocate, Abort.
     oq_check(OsvQuery::rh_osv_query_collect_page(malformed, bad_out, bad_token, &bad_page, &bad_total) != 0, "reject-non-object-vulnerability", fails)
     return
 
+def oq_check_graph_batch(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    graph: mutable darray[u8] = []
+    Base::rh_push_text(graph, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"cargo\",\"nodes\":[{\"id\":0,\"name\":\"app\",\"version\":\"0.1.0\",\"source\":\"registry\"},{\"id\":1,\"name\":\"local\",\"version\":\"1.0.0\",\"source\":\"git\"},{\"id\":2,\"name\":\"unknown-version\",\"version\":null,\"source\":\"registry\"}],\"edges\":[],\"unresolved\":[],\"advisories\":[]}")
+    request: mutable darray[u8] = []
+    query_nodes: mutable darray[u8] = []
+    query_count: mutable i64 = 0
+    skipped_count: mutable i64 = 0
+    omitted_count: mutable i64 = 0
+    build_rc: i64 = OsvQuery::rh_osv_query_build_graph_batch(graph, request, query_nodes, &query_count, &skipped_count, &omitted_count)
+    expected: u8& = "{\"queries\":[{\"package\":{\"ecosystem\":\"crates.io\",\"name\":\"app\"},\"version\":\"0.1.0\"}]}"
+    oq_check(build_rc == 0 and query_count == 1 and skipped_count == 2 and omitted_count == 0, "graph-query-counts", fails)
+    oq_check(Base::rh_bytes_equal_literal(request, 0, request.count.i64(), expected), "graph-query-request", fails)
+    oq_check(Base::rh_bytes_equal_literal(query_nodes, 0, query_nodes.count.i64(), "[{\"query_index\":0,\"graph_node_index\":0,\"node_id\":0}]"), "graph-query-node-map", fails)
+
+    response: mutable darray[u8] = []
+    Base::rh_push_text(response, "{\"results\":[{\"vulns\":[{\"id\":\"OSV-1\",\"modified\":\"2026-01-01T00:00:00Z\"}]},{\"vulns\":[],\"next_page_token\":\"next\"}]}")
+    page_tokens: mutable i64 = 0
+    advisory_ids: mutable i64 = 0
+    response_rc: i64 = OsvQuery::rh_osv_query_validate_batch_response(response, 2, &page_tokens, &advisory_ids)
+    oq_check(response_rc == 0 and page_tokens == 1 and advisory_ids == 1, "batch-response-summary", fails)
+    oq_check(OsvQuery::rh_osv_query_validate_batch_response(response, 1, &page_tokens, &advisory_ids) != 0, "batch-response-count-mismatch", fails)
+
+    capped: mutable darray[u8] = []
+    capped_map: mutable darray[u8] = []
+    Base::rh_push_text(capped, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"cargo\",\"nodes\":[")
+    while node_id < 65 |node_id: i64 = 0, capped|:
+        Base::rh_push_text(capped, "{\"id\":")
+        Base::rh_push_decimal_i64(capped, node_id)
+        Base::rh_push_text(capped, ",\"name\":\"p\",\"version\":\"1.0.0\",\"source\":\"registry\"}")
+        capped.push(44) if node_id < 64
+        node_id <- node_id + 1
+    Base::rh_push_text(capped, "],\"edges\":[],\"unresolved\":[],\"advisories\":[]}")
+    capped_request: mutable darray[u8] = []
+    capped_queries: mutable i64 = 0
+    capped_skipped: mutable i64 = 0
+    capped_omitted: mutable i64 = 0
+    capped_rc: i64 = OsvQuery::rh_osv_query_build_graph_batch(capped, capped_request, capped_map, &capped_queries, &capped_skipped, &capped_omitted)
+    oq_check(capped_rc == 0 and capped_queries == OsvQuery::RH_OSV_QUERY_BATCH_MAX_ITEMS and capped_skipped == 0 and capped_omitted == 1, "batch-item-cap", fails)
+    return
+
 def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     fails: mutable i64 = 0
     oq_check_requests(&fails)
@@ -163,6 +203,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]
     oq_check_responses(&fails)
     oq_check_commit(&fails)
     oq_check_pagination(&fails)
+    oq_check_graph_batch(&fails)
     if fails == 0:
         message: mutable darray[u8] =
             message: mutable darray[u8] = []

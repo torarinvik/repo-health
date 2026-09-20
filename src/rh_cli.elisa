@@ -108,6 +108,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
     rh_cli_err("       rh_cli osv-query --input <rh-osv-query-input/1|2> --out <dir> [--continue-pagination]")
+    rh_cli_err("       rh_cli osv-query --graph <rh-dep-graph/1> --out <dir>")
     rh_cli_err("       rh_cli depsdev (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli ecosystem lookup --input <captured-lookup.json> --out <file>")
     rh_cli_err("       rh_cli adapter-manifest --input <file> --out <file>")
@@ -792,15 +793,20 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dr_idx], false)
     if Base::rh_streq(cmd, "osv-query"):
         return rh_cli_usage(2) if argc != 6 and argc != 7
-        osv_input_flag: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
         osv_out_flag: u8& = slots[4].cast[u8&] can Unsafe.PointerCast
-        return rh_cli_usage(2) if not Base::rh_streq(osv_input_flag, "--input")
         return rh_cli_usage(2) if not Base::rh_streq(osv_out_flag, "--out")
+        osv_mode_flag: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        if argc == 6:
+            if Base::rh_streq(osv_mode_flag, "--input"):
+                return OsvQueryCli::rh_do_osv_query(slots[3], slots[5], false)
+            if Base::rh_streq(osv_mode_flag, "--graph"):
+                return OsvQueryCli::rh_do_osv_graph_query(slots[3], slots[5])
+            return rh_cli_usage(2)
+        return rh_cli_usage(2) if not Base::rh_streq(osv_mode_flag, "--input")
         continue_pages: mutable bool = false
-        if argc == 7:
-            page_flag: u8& = slots[6].cast[u8&] can Unsafe.PointerCast
-            return rh_cli_usage(2) if not Base::rh_streq(page_flag, "--continue-pagination")
-            continue_pages <- true
+        page_flag: u8& = slots[6].cast[u8&] can Unsafe.PointerCast
+        return rh_cli_usage(2) if not Base::rh_streq(page_flag, "--continue-pagination")
+        continue_pages <- true
         return OsvQueryCli::rh_do_osv_query(slots[3], slots[5], continue_pages)
     if Base::rh_streq(cmd, "depsdev"):
         dvi_idx, dvu_idx, dvo_idx =
@@ -3446,6 +3452,134 @@ module OsvQueryCli:
                 buffer.push(10)
                 buffer
             Base::rh_write_stdout(buffer)
+
+        # Query at most 64 versioned registry coordinates from a canonical
+        # graph. querybatch returns ID summaries only; this path never hands
+        # them to the full-record offline matcher.
+        def rh_do_osv_graph_query_inner(graph_path: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            if not Git::rh_arg_safe(graph_path) or not Git::rh_arg_safe(out):
+                rh_osv_query_err("osv-query: rejected path argument (allowlist)")
+                return 3
+            if Git::rh_ensure_dir(out) != 0:
+                rh_osv_query_err("osv-query: cannot create output directory")
+                return 4
+
+            request_path: mutable darray[u8] = []
+            response_path: mutable darray[u8] = []
+            status_path: mutable darray[u8] = []
+            error_path: mutable darray[u8] = []
+            result_path: mutable darray[u8] = []
+            return 4 if not rh_osv_output_path(out, "osv-query-batch-request.json", request_path)
+            return 4 if not rh_osv_output_path(out, "osv-query-batch-response.raw.json", response_path)
+            return 4 if not rh_osv_output_path(out, "osv-query-batch-http-status.txt", status_path)
+            return 4 if not rh_osv_output_path(out, "osv-query-batch.err", error_path)
+            return 4 if not rh_osv_output_path(out, "osv-query-batch-result.json", result_path)
+            request_path.push(0)
+            response_path.push(0)
+            status_path.push(0)
+            error_path.push(0)
+            result_path.push(0)
+            request_ptr: cstr = (&request_path[0]).cast[cstr] can Unsafe.PointerCast
+            response_ptr: cstr = (&response_path[0]).cast[cstr] can Unsafe.PointerCast
+            status_ptr: cstr = (&status_path[0]).cast[cstr] can Unsafe.PointerCast
+            error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
+            result_ptr: cstr = (&result_path[0]).cast[cstr] can Unsafe.PointerCast
+            _ = remove_file(request_ptr)
+            _ = remove_file(response_ptr)
+            _ = remove_file(status_ptr)
+            _ = remove_file(error_ptr)
+            _ = remove_file(result_ptr)
+
+            input_size: i64 = Base::rh_file_size(graph_path)
+            if input_size <= 0 or input_size > OsvQuery::RH_OSV_QUERY_BATCH_MAX_INPUT:
+                rh_osv_query_err("osv-query: graph is empty or exceeds the 4 MiB batch-input bound")
+                return 3
+            graph_raw: mutable darray[u8] = []
+            if Base::rh_io_read(graph_path, graph_raw) != input_size:
+                rh_osv_query_err("osv-query: cannot read bounded dependency graph")
+                return 4
+            request: mutable darray[u8] = []
+            query_nodes: mutable darray[u8] = []
+            query_count: mutable i64 = 0
+            skipped_count: mutable i64 = 0
+            omitted_count: mutable i64 = 0
+            if OsvQuery::rh_osv_query_build_graph_batch(graph_raw, request, query_nodes, &query_count, &skipped_count, &omitted_count) != 0:
+                rh_osv_query_err("osv-query: malformed or unsupported rh-dep-graph/1 input")
+                return 3
+            request.push(10)
+            if not Base::rh_io_write(request_ptr, request):
+                rh_osv_query_err("osv-query: cannot retain graph batch request")
+                return 4
+
+            page_token_count: mutable i64 = 0
+            advisory_id_count: mutable i64 = 0
+            response_hash: mutable darray[u8] = []
+            if query_count > 0:
+                if Git::rh_run_osv_query_batch(request_ptr, response_ptr, status_ptr, error_ptr) != 0:
+                    rh_osv_query_err("osv-query: bounded batch transport failed; inspect retained evidence")
+                    return 4
+                status: mutable darray[u8] = []
+                if Base::rh_io_read(status_ptr, status) < 0 or status.count != 3:
+                    rh_osv_query_err("osv-query: batch HTTP status is missing or malformed")
+                    return 4
+                if status[0] != 50 or status[1] != 48 or status[2] != 48:
+                    rh_osv_query_err("osv-query: OSV batch returned non-200; inspect retained evidence")
+                    return 4
+                raw_response: mutable darray[u8] = []
+                if Base::rh_io_read(response_ptr, raw_response) < 0 or raw_response.count.i64() > Git::RH_FETCH_MAX_BYTES:
+                    rh_osv_query_err("osv-query: cannot read bounded batch response")
+                    return 4
+                Sha256::rh_sha256(raw_response, response_hash)
+                if response_hash.count != 64:
+                    rh_osv_query_err("osv-query: could not digest raw batch response")
+                    return 4
+                if OsvQuery::rh_osv_query_validate_batch_response(raw_response, query_count, &page_token_count, &advisory_id_count) != 0:
+                    rh_osv_query_err("osv-query: malformed or positionally incomplete batch response; raw response retained")
+                    return 4
+
+            captured_at: i64 = Base::rh_now()
+            is_partial: bool = skipped_count > 0 or omitted_count > 0 or page_token_count > 0
+            result: mutable darray[u8] =
+                result: mutable darray[u8] = []
+                Base::rh_push_text(result, "{\"schema\":\"rh-osv-query-batch-result/1\",\"endpoint\":\"https://api.osv.dev/v1/querybatch\",\"captured_at_epoch\":")
+                Base::rh_push_decimal_i64(result, captured_at) if captured_at >= 0
+                Base::rh_push_text(result, "null") if captured_at < 0
+                Base::rh_push_text(result, ",\"http_status\":")
+                Base::rh_push_text(result, "200" if query_count > 0 else "null")
+                Base::rh_push_text(result, ",\"state\":\"")
+                Base::rh_push_text(result, "empty" if query_count == 0 else "partial" if is_partial else "collected")
+                Base::rh_push_text(result, "\",\"response_detail\":\"advisory_ids_only\",\"query_nodes\":")
+                result.extend(bytes_view(query_nodes))
+                Base::rh_push_text(result, ",\"query_count\":")
+                Base::rh_push_decimal_i64(result, query_count)
+                Base::rh_push_text(result, ",\"skipped_node_count\":")
+                Base::rh_push_decimal_i64(result, skipped_count)
+                Base::rh_push_text(result, ",\"omitted_node_count\":")
+                Base::rh_push_decimal_i64(result, omitted_count)
+                Base::rh_push_text(result, ",\"advisory_id_count\":")
+                Base::rh_push_decimal_i64(result, advisory_id_count)
+                Base::rh_push_text(result, ",\"page_token_count\":")
+                Base::rh_push_decimal_i64(result, page_token_count)
+                Base::rh_push_text(result, ",\"request_file\":\"osv-query-batch-request.json\",\"raw_response_file\":")
+                Base::rh_push_text(result, "\"osv-query-batch-response.raw.json\"" if query_count > 0 else "null")
+                Base::rh_push_text(result, ",\"http_status_file\":")
+                Base::rh_push_text(result, "\"osv-query-batch-http-status.txt\"" if query_count > 0 else "null")
+                Base::rh_push_text(result, ",\"stderr_file\":")
+                Base::rh_push_text(result, "\"osv-query-batch.err\"" if query_count > 0 else "null")
+                Base::rh_push_text(result, ",\"raw_response_sha256\":")
+                if query_count > 0:
+                    result.push(34)
+                    result.extend(bytes_view(response_hash))
+                    result.push(34)
+                else:
+                    Base::rh_push_text(result, "null")
+                Base::rh_push_text(result, "}\n")
+                result
+            if not Base::rh_io_write(result_ptr, result):
+                rh_osv_query_err("osv-query: cannot write graph batch result envelope")
+                return 4
+            rh_osv_query_out("osv-query: graph batch captured; response contains advisory IDs only" if query_count > 0 else "osv-query: graph has no eligible versioned nodes")
+            0
         # --- M03-08 OSV package/version and commit query adapter. ---
         # Page continuation is opt-in, retains per-page transport evidence, and stops
         # after four pages or fails closed on repeated tokens and aggregate overflow.
@@ -3696,6 +3830,9 @@ module OsvQueryCli:
                 return 4
             rh_osv_query_out("osv-query: captured bounded paginated response" if continue_pages and not more_available else "osv-query: pagination bound reached; result is partial" if more_available else "osv-query: captured response for the supplied query")
             0
+
+        def rh_do_osv_graph_query(graph_path: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            rh_do_osv_graph_query_inner(graph_path, out)
 
 # --- M03-09 deps.dev enrichment adapter. ---
 # Captures one provider version response with bounded transport evidence and

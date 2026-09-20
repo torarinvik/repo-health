@@ -181,9 +181,16 @@ matching is not implemented. Default mode retains the v1 result contract and
 reports a returned token as `more_available`. Opt-in `--continue-pagination`
 uses `rh-osv-query-result/2`, follows at most four pages, retains request/raw
 response/status/stderr/digest evidence for each page, and marks a capped result
-partial with its continuation token. OSV documents its server-side version
-matching as fuzzy, and this path records capture time but does not establish
-feed freshness. Automated queries for all resolved graph nodes remain open.
+partial with its continuation value. The explicit `osv-query --graph` mode now
+accepts `rh-dep-graph/1`, submits at most 64 eligible versioned nodes through
+the fixed `/v1/querybatch` endpoint, and records skipped and omitted node
+counts. Its `rh-osv-query-batch-result/1` retains ordered request/raw response
+evidence plus the query-to-graph-node index map, and reports per-query advisory IDs/modification summaries only; it
+does not produce full records for `deps --osv`. Per-query continuation values
+are retained in the raw response and make the result partial. OSV documents
+server-side version matching as fuzzy, and capture time does not establish
+feed freshness. Complete lockfile coverage and full-record hydration of batch
+summaries remain open.
 `tests/test_osv_query_cli.sh` uses fake DNS/cURL programs, checks the pinned
 request and evidence, and hands its response to the existing offline matcher.
 `tests/test_deps_cli.sh` checks the supported Cargo, npm,

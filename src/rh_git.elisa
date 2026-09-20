@@ -730,6 +730,22 @@ module Git:
             cmd.push(0)
             cmd
 
+        # Shared private transport for the two fixed OSV POST operations. The
+        # only endpoint values are supplied by public wrappers below.
+        def rh_run_osv_post(url: cstr, request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if not rh_arg_safe(request_file)
+            return -1 if not rh_arg_safe(body_file)
+            return -1 if not rh_arg_safe(code_file)
+            return -1 if not rh_arg_safe(err_file)
+            return -1 if not rh_fetch_guard(url)
+            pin: mutable darray[u8] = []
+            return -1 if not rh_prepare_https_pin(url, err_file, pin)
+            transport: i64 =
+                cmd: mutable darray[u8] = rh_osv_post_command(url, request_file, body_file, code_file, err_file, pin)
+                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+                block_result
+            transport
+
     public:
         # Run a bounded HTTPS/file fetch for forge APIs (M02-05 transport).
         # Policy, all enforced before and during the call (S002/S003/S012):
@@ -767,19 +783,12 @@ module Git:
         # proxies, redirects, oversized bodies, and long hangs are rejected.
         # Returns curl's process status; callers must separately require HTTP 200.
         def rh_run_osv_query(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            url: cstr = "https://api.osv.dev/v1/query"
-            return -1 if not rh_arg_safe(request_file)
-            return -1 if not rh_arg_safe(body_file)
-            return -1 if not rh_arg_safe(code_file)
-            return -1 if not rh_arg_safe(err_file)
-            return -1 if not rh_fetch_guard(url)
-            pin: mutable darray[u8] = []
-            return -1 if not rh_prepare_https_pin(url, err_file, pin)
-            transport: i64 =
-                cmd: mutable darray[u8] = rh_osv_post_command(url, request_file, body_file, code_file, err_file, pin)
-                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
-                block_result
-            transport
+            rh_run_osv_post("https://api.osv.dev/v1/query", request_file, body_file, code_file, err_file)
+
+        # Run a bounded ordered graph batch. Callers cannot choose the endpoint;
+        # querybatch is kept separate because its response contains IDs only.
+        def rh_run_osv_query_batch(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            rh_run_osv_post("https://api.osv.dev/v1/querybatch", request_file, body_file, code_file, err_file)
 
         # Run a bounded bare clone for https remotes (M01-03): no worktree, no
         # checkout (so no smudge/clean filters, no hooks execute), blob-less and

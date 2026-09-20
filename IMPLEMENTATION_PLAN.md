@@ -504,7 +504,9 @@ Use each ecosystem's official manifests, lockfile formats, and version semantics
 
 **M03-07: Inventory interchange.** Implement one pinned SPDX or CycloneDX version with schema validation. The second format can follow in M08. Store importer completeness and source provenance. A syntactically valid inventory may still be incomplete.
 
-**M03-08: OSV integration.** Query supported package/version or commit contexts; preserve advisory source IDs, alias assertions, affected ranges, withdrawal status, and feed freshness. Record unknown when version matching is unsupported. The bounded `rh_cli osv-query` path accepts `rh-osv-query-input/1` for one package plus the supplied version string, or `/2` for a full 40/64-hex Git commit hash, then POSTs to the fixed OSV `/v1/query` endpoint. Its default one-page mode retains the `/1` result contract; opt-in `--continue-pagination` emits `rh-osv-query-result/2`, follows at most four pages, retains every page's request/raw response/status/stderr and SHA-256 digest, and combines advisory records for the existing offline matcher. If the fourth page still returns a token, the result is explicitly partial and the continuation token is retained. Commit-query results remain separate context evidence because Git-range matching is not implemented in the dependency graph. OSV documents package-version matching as fuzzy, so the submitted coordinate does not guarantee an exact server-side match; capture time does not establish feed freshness. Automated queries across every resolved lockfile node remain open. (Paper §10; [P13].)
+**M03-08: OSV integration.** Query supported package/version or commit contexts; preserve advisory source IDs, alias assertions, affected ranges, withdrawal status, and feed freshness. Record unknown when version matching is unsupported. The bounded `rh_cli osv-query` path accepts `rh-osv-query-input/1` for one package plus the supplied version string, or `/2` for a full 40/64-hex Git commit hash, then POSTs to the fixed OSV `/v1/query` endpoint. Its default one-page mode retains the `/1` result contract; opt-in `--continue-pagination` emits `rh-osv-query-result/2`, follows at most four pages, retains every page's request/raw response/status/stderr and SHA-256 digest, and combines full advisory records for the existing offline matcher. If page four still returns a continuation value, the result is explicitly partial and that value is retained. Commit-query results remain separate context evidence because Git-range matching is not implemented in the dependency graph. OSV documents package-version matching as fuzzy, so the submitted coordinate does not guarantee an exact server-side match; capture time does not establish feed freshness.
+
+The explicit `rh_cli osv-query --graph <rh-dep-graph/1> --out <dir>` path now submits at most 64 eligible versioned nodes in graph order to the fixed `/v1/querybatch` endpoint. It skips path/Git and versionless nodes and counts eligible nodes omitted after the cap. The `/1` batch result retains the exact ordered request and raw response plus a query-to-graph-node index map, reports per-query advisory ID/modification summaries, and marks skipped, omitted, or paginated coverage partial; per-query continuation values remain in raw evidence and are not followed. The batch response is not a full-record matcher input, so advisory hydration and complete lockfile coverage remain open. (Paper §10; [P13], [P14].)
 
 **M03-09: Optional data enrichment.** Integrate deps.dev only through a source adapter that records coverage and origin. The local graph remains useful if the enrichment service is unavailable. [P02] [P03]
 
@@ -1775,7 +1777,8 @@ These sources were checked while preparing the design on 2026-09-18. Revalidate 
 [P10]: https://reproducible-builds.org/docs/definition/ "Reproducible Builds definition"
 [P11]: https://www.postgresql.org/docs/current/explicit-locking.html "PostgreSQL transactional locking primitives"
 [P12]: https://ecosyste.ms/ "ecosyste.ms optional data and tooling services"
-[P13]: https://google.github.io/osv.dev/post-v1-query/ "OSV exact-version query request, response, and pagination contract"
+[P13]: https://google.github.io/osv.dev/post-v1-query/ "OSV package/version query request, response, and pagination contract"
+[P14]: https://google.github.io/osv.dev/post-v1-querybatch/ "OSV ordered package query batch and per-query result contract"
 
 | Reference | Implementation use |
 |---|---|
@@ -1790,6 +1793,7 @@ These sources were checked while preparing the design on 2026-09-18. Revalidate 
 | [P10] | Distinguishing successful builds from reproducible builds. |
 | [P11] | Transactional foundation for durable scheduling and ingestion. |
 | [P12] | Optional metadata reuse after terms, rights, and provenance review. |
+| [P13] / [P14] | OSV single-query full advisory evidence and bounded ordered batch summaries. |
 
 ## 29. Final implementation rule
 

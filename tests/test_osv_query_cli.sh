@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Offline OSV transport integration: fake resolver and curl; no package data leaves the host.
-# The fixture exercises rh-osv-query-input/1 and the result envelope is rh-osv-query-result/1.
+# The fixtures exercise rh-osv-query-input/1 plus single-query and bounded graph-batch contracts.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 T="/tmp/rh-osv-query-cli"
@@ -49,7 +49,7 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-[ "$url" = 'https://api.osv.dev/v1/query' ] || exit 88
+[ "$url" = "${OSV_QUERY_FAKE_ENDPOINT:-https://api.osv.dev/v1/query}" ] || exit 88
 [ "$pin" = 'api.osv.dev:443:93.184.216.34' ] || exit 89
 [ "$proto" = '=https' ] || exit 90
 [ "$redirects" = '0' ] || exit 91
@@ -97,6 +97,63 @@ assert json.load(open(out / "osv-query-response.json"))["vulns"], "normalized re
 assert (out / "osv-query-http-status.txt").read_text() == "200"
 assert (out / "osv-query.err").exists()
 print("[osv-query] pinned POST evidence OK")
+PY
+
+echo "[osv-query] bounded graph batch retains IDs-only positional summaries"
+cp "$ROOT/fixtures/packages/cargo-graph.golden.json" "$T/graph.json"
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_ENDPOINT=https://api.osv.dev/v1/querybatch \
+OSV_QUERY_FAKE_RESPONSE="$ROOT/fixtures/packages/osv-query-batch-response.json" \
+OSV_QUERY_FAKE_HTTP=200 \
+OSV_QUERY_CAPTURE="$T/batch.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/batch.sent.json" \
+  "$ROOT/build/rh_cli" osv-query --graph "$T/graph.json" --out "$T/batch-out" >/dev/null
+python3 - "$T" <<'PY'
+import hashlib, json, pathlib, sys
+t = pathlib.Path(sys.argv[1]); out = t / "batch-out"
+request = json.load(open(out / "osv-query-batch-request.json"))
+assert len(request["queries"]) == 6, request
+assert request["queries"][0] == {"package":{"ecosystem":"crates.io","name":"app"},"version":"0.1.0"}
+assert request["queries"][-1] == {"package":{"ecosystem":"crates.io","name":"top"},"version":"0.2.0"}
+assert json.load(open(t / "batch.sent.json")) == request
+args = open(t / "batch.args").read().splitlines()
+assert "https://api.osv.dev/v1/querybatch" in args, args
+assert args[args.index("--resolve") + 1] == "api.osv.dev:443:93.184.216.34", args
+r = json.load(open(out / "osv-query-batch-result.json"))
+assert r["schema"] == "rh-osv-query-batch-result/1" and r["state"] == "partial", r
+assert r["response_detail"] == "advisory_ids_only", r
+assert r["query_count"] == 6 and r["skipped_node_count"] == 1 and r["omitted_node_count"] == 0, r
+assert [(q["query_index"], q["graph_node_index"], q["node_id"]) for q in r["query_nodes"]] == [(0,0,0),(1,1,1),(2,2,2),(3,3,3),(4,4,4),(5,5,5)], r
+assert r["advisory_id_count"] == 3 and r["page_token_count"] == 1, r
+raw = (out / r["raw_response_file"]).read_bytes()
+assert r["raw_response_sha256"] == hashlib.sha256(raw).hexdigest(), r
+assert json.loads(raw)["results"][3]["next_page_token"] == "node-four-next"
+assert (out / r["http_status_file"]).read_text() == "200"
+assert (out / r["stderr_file"]).exists()
+assert not (out / "osv-query-response.json").exists(), "IDs-only response must not look matcher-ready"
+print("[osv-query] bounded graph batch and IDs-only response evidence OK")
+PY
+
+echo "[osv-query] empty graph batch avoids an unnecessary request"
+cat > "$T/empty-graph.json" <<'JSON'
+{"schema":"rh-dep-graph/1","ecosystem":"cargo","nodes":[],"edges":[],"unresolved":[],"advisories":[]}
+JSON
+PATH="$T/bin:$PATH" \
+OSV_QUERY_FAKE_ENDPOINT=https://api.osv.dev/v1/querybatch \
+OSV_QUERY_FAKE_RESPONSE="$ROOT/fixtures/packages/osv-query-batch-response.json" \
+OSV_QUERY_FAKE_HTTP=200 \
+OSV_QUERY_CAPTURE="$T/empty-batch.args" \
+OSV_QUERY_REQUEST_CAPTURE="$T/empty-batch.sent.json" \
+  "$ROOT/build/rh_cli" osv-query --graph "$T/empty-graph.json" --out "$T/empty-batch-out" >/dev/null
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+t = pathlib.Path(sys.argv[1]); out = t / "empty-batch-out"
+r = json.load(open(out / "osv-query-batch-result.json"))
+assert json.load(open(out / r["request_file"])) == {"queries": []}
+assert r["state"] == "empty" and r["query_count"] == 0 and r["query_nodes"] == [], r
+assert r["http_status"] is None and r["raw_response_file"] is None and r["raw_response_sha256"] is None, r
+assert not (t / "empty-batch.args").exists() and not (out / "osv-query-batch-http-status.txt").exists()
+print("[osv-query] empty batch state and no-network path OK")
 PY
 
 echo "[osv-query] full commit-hash query uses the same guarded endpoint"

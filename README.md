@@ -45,6 +45,9 @@ the default checks use local data, while HTTPS fetches need network access.
 
 # Query OSV for one full Git commit hash
 ./build/rh_cli osv-query --input ./fixtures/packages/osv-query-commit.json --out ./osv-commit-query/
+
+# Query up to 64 eligible nodes from a dependency graph in one OSV batch
+./build/rh_cli osv-query --graph ./deps-cargo-graph.json --out ./osv-query-batch/
 ```
 
 `osv-query` accepts `rh-osv-query-input/1` for one supported ecosystem, package
@@ -62,9 +65,20 @@ Without `--continue-pagination`, the command keeps its one-page
 `rh-osv-query-result/2`, follows at most four pages, keeps raw request/response,
 status, stderr, and a digest for each page, and combines the returned
 advisories for the offline matcher. If page four still returns a token, the
-result is `partial` and the token is retained in
-`osv-query-next-page-token.txt`. Queries over every lockfile node remain
-pending.
+result is `partial` and the continuation value is retained in
+`osv-query-next-page-token.txt`.
+
+The explicit `--graph` mode accepts `rh-dep-graph/1`, submits up to 64
+versioned nodes in request order to the fixed `/v1/querybatch` endpoint, and
+reports path/Git or versionless nodes as skipped and over-cap nodes as omitted.
+It retains the ordered request, raw response, HTTP status, stderr, and response
+digest in `rh-osv-query-batch-result/1`, including a positional map from each
+query to its graph node. OSV's batch response contains per-query
+advisory ID and modification summaries rather than full advisory records; any
+per-query continuation values remain in the raw response and make the result
+partial. This summary is not a `deps --osv` matcher input. The full-record
+single-query path remains available for matcher handoff. Batches are capped,
+so they do not establish complete lockfile coverage.
 
 ## Repository layout
 

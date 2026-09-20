@@ -46,7 +46,7 @@ osv = by["osv-data"]
 assert osv["lifecycle"] == "active", osv
 assert any("full commit-hash" in u for u in osv["used_for"]), osv
 assert "more_available" in osv["failure_mode"] and "unknown" in osv["failure_mode"], osv
-assert "bulk lockfile" in osv["assumption"] and "four pages" in osv["assumption"], osv
+assert "complete lockfile coverage" in osv["assumption"] and "four pages" in osv["assumption"], osv
 assert "fuzzi" in osv["assumption"] and "feed freshness" in osv["assumption"], osv
 assert "public redistribution is not enabled" in osv["rights"], osv
 print("[providers] lifecycle honesty OK")
@@ -59,11 +59,12 @@ provider = json.load(open(sys.argv[1]))
 source = json.load(open(sys.argv[2]))
 osv = {x["id"]: x for x in provider["dependencies"]}["osv-data"]
 src = {x["id"]: x for x in source["sources"]}["osv-data"]
-assert src["base_url"] == "https://api.osv.dev/v1/query", src
-assert set(src["capabilities"]) == {"package_version_string_query", "full_commit_hash_query", "bounded_pagination"}, src
-assert "bulk_lockfile_queries" in src["unauthorized"], src
+assert src["base_url"] == "https://api.osv.dev/v1/", src
+assert set(src["capabilities"]) == {"package_version_string_query", "full_commit_hash_query", "bounded_pagination", "bounded_graph_batch_query"}, src
+assert "complete_lockfile_coverage" in src["unauthorized"], src
 assert "pagination_continuation" not in src["unauthorized"], src
 assert "at most four pages" in src["notes"] and "partial" in src["notes"], src
+assert "at most 64" in src["notes"] and "summaries, not full advisory records" in src["notes"], src
 assert "uniform_underlying_data_license" in src["unsupported"], src
 assert "feed_freshness" in src["unsupported"], src
 assert "source IDs and links" in osv["rights"], osv

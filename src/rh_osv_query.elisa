@@ -211,6 +211,139 @@ module OsvQuery:
                 j <- j + 1
             true
 
+        # Convert a canonical dependency graph into OSV's ordered querybatch
+        # request. Versioned path/git nodes are not registry coordinates; more
+        # than the fixed batch bound is counted as omitted instead of guessed.
+        def rh_osv_query_build_graph_batch_inner(raw: darray[u8]&, out: mutable darray[u8]&, query_nodes_out: mutable darray[u8]&, query_count_out: mutable i64&, skipped_out: mutable i64&, omitted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            query_count_out[0] <- 0
+            skipped_out[0] <- 0
+            omitted_out[0] <- 0
+            return -1 if raw.count.i64() > RH_OSV_QUERY_BATCH_MAX_INPUT
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or not rh_osv_query_fields(nodes, root, 6)
+            schema: i64 = rh_osv_query_member(nodes, texts, root, "schema")
+            ecosystem: i64 = rh_osv_query_member(nodes, texts, root, "ecosystem")
+            graph_nodes: i64 = rh_osv_query_member(nodes, texts, root, "nodes")
+            edges: i64 = rh_osv_query_member(nodes, texts, root, "edges")
+            unresolved: i64 = rh_osv_query_member(nodes, texts, root, "unresolved")
+            advisories: i64 = rh_osv_query_member(nodes, texts, root, "advisories")
+            schema_s: mutable i64 = -1
+            schema_e: mutable i64 = -1
+            ecosystem_s: mutable i64 = -1
+            ecosystem_e: mutable i64 = -1
+            return -1 if not rh_osv_query_span(nodes, schema, &schema_s, &schema_e)
+            return -1 if not rh_osv_query_eq(texts, schema_s, schema_e, "rh-dep-graph/1")
+            return -1 if not rh_osv_query_span(nodes, ecosystem, &ecosystem_s, &ecosystem_e)
+            eco: i64 = rh_osv_query_ecosystem(texts, ecosystem_s, ecosystem_e)
+            return -1 if eco < 0 or graph_nodes < 0 or edges < 0 or unresolved < 0 or advisories < 0
+            return -1 if nodes[graph_nodes.usize()].kind != Json::RH_JSON_ARR or nodes[edges.usize()].kind != Json::RH_JSON_ARR
+            return -1 if nodes[unresolved.usize()].kind != Json::RH_JSON_ARR or nodes[advisories.usize()].kind != Json::RH_JSON_ARR
+            Base::rh_push_text(out, "{\"queries\":[")
+            query_nodes_out.push(91)
+            while node >= 0 |node: i64 = nodes[graph_nodes.usize()].first_child, graph_node_index: i64 = 0, nodes, texts, raw, out, query_nodes_out, eco, query_count_out, skipped_out, omitted_out|:
+                return -1 if nodes[node.usize()].kind != Json::RH_JSON_OBJ
+                node_id: i64 = rh_osv_query_member(nodes, texts, node, "id")
+                name: i64 = rh_osv_query_member(nodes, texts, node, "name")
+                version: i64 = rh_osv_query_member(nodes, texts, node, "version")
+                source: i64 = rh_osv_query_member(nodes, texts, node, "source")
+                return -1 if node_id < 0 or name < 0 or version < 0 or source < 0
+                return -1 if nodes[node_id.usize()].kind != Json::RH_JSON_NUM
+                node_id_ok: mutable i64 = 0
+                parsed_node_id: i64 = Json::rh_json_int(nodes, raw, node_id, &node_id_ok)
+                return -1 if node_id_ok != 1 or parsed_node_id < 0
+                name_s: mutable i64 = -1
+                name_e: mutable i64 = -1
+                source_s: mutable i64 = -1
+                source_e: mutable i64 = -1
+                return -1 if not rh_osv_query_span(nodes, name, &name_s, &name_e)
+                return -1 if not rh_osv_query_span(nodes, source, &source_s, &source_e)
+                return -1 if not rh_osv_query_clean_text(texts, name_s, name_e)
+                return -1 if not rh_osv_query_clean_text(texts, source_s, source_e)
+                is_checkout: bool = rh_osv_query_eq(texts, source_s, source_e, "path") or rh_osv_query_eq(texts, source_s, source_e, "git")
+                if is_checkout or nodes[version.usize()].kind == Json::RH_JSON_NULL:
+                    skipped_out[0] <- skipped_out[0] + 1
+                else:
+                    version_s: mutable i64 = -1
+                    version_e: mutable i64 = -1
+                    return -1 if not rh_osv_query_span(nodes, version, &version_s, &version_e)
+                    return -1 if not rh_osv_query_clean_text(texts, version_s, version_e)
+                    if query_count_out[0] >= RH_OSV_QUERY_BATCH_MAX_ITEMS:
+                        omitted_out[0] <- omitted_out[0] + 1
+                    else:
+                        if query_count_out[0] > 0:
+                            out.push(44)
+                        Base::rh_push_text(out, "{\"package\":{\"ecosystem\":\"")
+                        Base::rh_push_text(out, Package::rh_osv_ecosystem(eco.u8()))
+                        Base::rh_push_text(out, "\",\"name\":\"")
+                        Base::rh_json_escape(out, texts, name_s.usize(), name_e.usize())
+                        Base::rh_push_text(out, "\"},\"version\":\"")
+                        Base::rh_json_escape(out, texts, version_s.usize(), version_e.usize())
+                        Base::rh_push_text(out, "\"}")
+                        query_nodes_out.push(44) if query_count_out[0] > 0
+                        Base::rh_push_text(query_nodes_out, "{\"query_index\":")
+                        Base::rh_push_decimal_i64(query_nodes_out, query_count_out[0])
+                        Base::rh_push_text(query_nodes_out, ",\"graph_node_index\":")
+                        Base::rh_push_decimal_i64(query_nodes_out, graph_node_index)
+                        Base::rh_push_text(query_nodes_out, ",\"node_id\":")
+                        Base::rh_push_decimal_i64(query_nodes_out, parsed_node_id)
+                        query_nodes_out.push(125)
+                        query_count_out[0] <- query_count_out[0] + 1
+                node <- nodes[node.usize()].next_sibling
+                graph_node_index <- graph_node_index + 1
+            Base::rh_push_text(out, "]}")
+            query_nodes_out.push(93)
+            0
+
+        # Validate the positional querybatch response and count summaries without
+        # pretending its IDs-only payload contains affected ranges or full records.
+        def rh_osv_query_validate_batch_response_inner(raw: darray[u8]&, expected_count: i64, page_token_count_out: mutable i64&, advisory_id_count_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            page_token_count_out[0] <- 0
+            advisory_id_count_out[0] <- 0
+            return -1 if expected_count < 0 or raw.count.i64() > RH_OSV_QUERY_MAX_RESPONSE
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or not rh_osv_query_fields(nodes, root, 1)
+            results: i64 = rh_osv_query_member(nodes, texts, root, "results")
+            return -1 if results < 0 or nodes[results.usize()].kind != Json::RH_JSON_ARR
+            return -1 if nodes[results.usize()].child_count.i64() != expected_count
+            while result >= 0 |result: i64 = nodes[results.usize()].first_child, nodes, texts, page_token_count_out, advisory_id_count_out|:
+                return -1 if nodes[result.usize()].kind != Json::RH_JSON_OBJ
+                vulns: i64 = rh_osv_query_member(nodes, texts, result, "vulns")
+                token: i64 = rh_osv_query_member(nodes, texts, result, "next_page_token")
+                return -1 if vulns == -2 or token == -2
+                return -1 if nodes[result.usize()].child_count > 4
+                if token >= 0:
+                    token_s: mutable i64 = -1
+                    token_e: mutable i64 = -1
+                    return -1 if not rh_osv_query_span(nodes, token, &token_s, &token_e)
+                    return -1 if token_e - token_s > RH_OSV_QUERY_MAX_TOKEN or not rh_osv_query_clean_text(texts, token_s, token_e)
+                    page_token_count_out[0] <- page_token_count_out[0] + 1
+                if vulns >= 0:
+                    return -1 if nodes[vulns.usize()].kind != Json::RH_JSON_ARR
+                    while vuln >= 0 |vuln: i64 = nodes[vulns.usize()].first_child, nodes, texts, advisory_id_count_out|:
+                        return -1 if nodes[vuln.usize()].kind != Json::RH_JSON_OBJ
+                        advisory_id: i64 = rh_osv_query_member(nodes, texts, vuln, "id")
+                        modified: i64 = rh_osv_query_member(nodes, texts, vuln, "modified")
+                        return -1 if advisory_id == -2 or modified == -2
+                        return -1 if nodes[vuln.usize()].child_count > 4
+                        if advisory_id >= 0:
+                            id_s: mutable i64 = -1
+                            id_e: mutable i64 = -1
+                            return -1 if not rh_osv_query_span(nodes, advisory_id, &id_s, &id_e)
+                            return -1 if not rh_osv_query_clean_text(texts, id_s, id_e)
+                            advisory_id_count_out[0] <- advisory_id_count_out[0] + 1
+                        if modified >= 0:
+                            modified_s: mutable i64 = -1
+                            modified_e: mutable i64 = -1
+                            return -1 if not rh_osv_query_span(nodes, modified, &modified_s, &modified_e)
+                            return -1 if not rh_osv_query_clean_text(texts, modified_s, modified_e)
+                        vuln <- nodes[vuln.usize()].next_sibling
+                result <- nodes[result.usize()].next_sibling
+            0
+
         def rh_osv_query_make_request(texts: darray[u8]&, name_s: i64, name_e: i64, version_s: i64, version_e: i64, ecosystem: u8, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"package\":{\"ecosystem\":\"")
             Base::rh_push_text(out, Package::rh_osv_ecosystem(ecosystem))
@@ -223,6 +356,8 @@ module OsvQuery:
     public:
         # Shared transport/aggregation policy: the CLI never follows page five.
         const RH_OSV_QUERY_MAX_PAGES: i64 = 4
+        const RH_OSV_QUERY_BATCH_MAX_INPUT: i64 = 4194304
+        const RH_OSV_QUERY_BATCH_MAX_ITEMS: i64 = 64
 
         # CLI-facing bounded pagination primitives. JSON scanning, span tracking,
         # and token storage remain private to this module.
@@ -234,6 +369,13 @@ module OsvQuery:
 
         def rh_osv_query_remember_page_token(token: darray[u8]&, seen: mutable darray[u8]&, starts: mutable darray[i64]&, lengths: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
             rh_osv_query_remember_token(token, seen, starts, lengths)
+
+        # Public graph-batch boundary keeps JSON parsing and node details private.
+        def rh_osv_query_build_graph_batch(raw: darray[u8]&, out: mutable darray[u8]&, query_nodes_out: mutable darray[u8]&, query_count_out: mutable i64&, skipped_out: mutable i64&, omitted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_osv_query_build_graph_batch_inner(raw, out, query_nodes_out, query_count_out, skipped_out, omitted_out)
+
+        def rh_osv_query_validate_batch_response(raw: darray[u8]&, expected_count: i64, page_token_count_out: mutable i64&, advisory_id_count_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_osv_query_validate_batch_response_inner(raw, expected_count, page_token_count_out, advisory_id_count_out)
 
         # Read a versioned query contract and build OSV's v1/query body.
         # Query kind is 0 for a package/version request and 1 for a commit hash.
