@@ -35,6 +35,10 @@ assert d["status"] == "observed" and d["value"] == 3, d
 assert d["pair"] == {"predecessor": 0, "successor": 1}, d
 assert d["window_complete_months"] == 12, d
 assert "no motive attribution" in d["note"], d
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["succession.declared_handovers"]["status"] == "observed", metrics
+assert metrics["succession.declared_handovers"]["value"] == 1, metrics
+assert metrics["succession.observed_activity_overlap_months"]["value"] == 3, metrics
 print("[succession] overlap OK")
 PY
 
@@ -52,6 +56,9 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["status"] == "not_applicable", d
 assert "no-declared" in d["reason"], d
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["succession.declared_handovers"]["status"] == "not_applicable", metrics
+assert metrics["succession.observed_activity_overlap_months"]["status"] == "not_applicable", metrics
 print("[succession] not_applicable OK")
 PY
 
