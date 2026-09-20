@@ -66,6 +66,7 @@ m = {x["key"]: x for x in d["metrics"]}
 assert m["history.commit_count"]["value"] == 3, m
 assert m["history.reachable_revisions"]["value"] == 3, m
 assert m["history.revisions_reachable_default"]["value"] == 3, m
+assert m["history.collection_complete_windows"]["value"] == {"complete": 1, "requested": 1}, m
 assert m["history.rejected_record_count"]["value"] == 0, m
 assert m["contributors.raw_identity_count"]["value"] == 2, m
 assert m["activity.active_complete_months"]["value"] == 3, m
@@ -75,7 +76,7 @@ assert m["contributor.source_accounts"]["value"] == 2, m
 assert m["coverage.lineage_complete_share"]["value"] == {"num": 1, "den": 1}, m
 assert m["activity.weekly_count_slope"]["status"] in ("observed", "not_applicable"), m
 assert m["activity.weekly_count_variance"]["status"] in ("observed", "not_applicable"), m
-assert len(d["metrics"]) == 41, d
+assert len(d["metrics"]) == 42, d
 coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "coverage.window_completeness"}
 assert coverage[("coverage.window_completeness", "1.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "1.0.0")]["value"]["den"], coverage
 assert coverage[("coverage.window_completeness", "2.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "2.0.0")]["value"]["den"], coverage
