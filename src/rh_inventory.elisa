@@ -17,8 +17,6 @@ module Inventory:
 
 
 
-        const RH_BOM_MAX_COMPONENTS: i64 = 100000
-
         struct RhBomComponent:
             type_s: i64
             type_e: i64
@@ -31,6 +29,13 @@ module Inventory:
             hash_count: i64
             valid_sha256: i64
 
+        struct RhBomComposition:
+            aggregate_s: i64
+            aggregate_e: i64
+            assemblies: i64
+            dependencies: i64
+            vulnerabilities: i64
+
         struct RhBom:
             ok: mutable i64
             spec_unsupported: mutable i64
@@ -40,6 +45,14 @@ module Inventory:
             with_hash: mutable i64
             digest_known: mutable i64
             unknown_top_keys: mutable i64
+            dependency_composition_count: mutable i64
+            dependency_complete_count: mutable i64
+            dependency_incomplete_count: mutable i64
+            dependency_unknown_count: mutable i64
+            dependency_not_specified_count: mutable i64
+
+    private:
+        const RH_BOM_MAX_COMPONENTS: i64 = 100000
 
         # (private to this file)
         def rh_bom_copy(pool: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -131,6 +144,8 @@ module Inventory:
                         known <- true
                     if rh_bom_span_eq(texts, ks, ke, "vulnerabilities"):
                         known <- true
+                    if rh_bom_span_eq(texts, ks, ke, "compositions"):
+                        known <- true
                     if not known:
                         total <- total + 1
                 is_key <- not is_key
@@ -140,12 +155,79 @@ module Inventory:
         def rh_bom_span_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, lit)
 
+        # CycloneDX composition completeness values. Preserve the specific
+        # aggregate in the report; these classes are only for coverage counts.
+        def rh_bom_aggregate_class(texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 1 if rh_bom_span_eq(texts, s, e, "complete")
+            return 2 if rh_bom_span_eq(texts, s, e, "incomplete")
+            return 2 if rh_bom_span_eq(texts, s, e, "incomplete_first_party_only")
+            return 2 if rh_bom_span_eq(texts, s, e, "incomplete_first_party_opensource_only")
+            return 2 if rh_bom_span_eq(texts, s, e, "incomplete_first_party_proprietary_only")
+            return 2 if rh_bom_span_eq(texts, s, e, "incomplete_third_party_only")
+            return 2 if rh_bom_span_eq(texts, s, e, "incomplete_third_party_opensource_only")
+            return 2 if rh_bom_span_eq(texts, s, e, "incomplete_third_party_proprietary_only")
+            return 3 if rh_bom_span_eq(texts, s, e, "unknown")
+            return 4 if rh_bom_span_eq(texts, s, e, "not_specified")
+            -1
+
+        # Composition targets are reference arrays. Their identifiers remain
+        # in the source BOM, linked by its input digest; this importer records
+        # the exact per-scope target cardinalities without promoting them to a
+        # dependency graph.
+        def rh_bom_ref_count(nodes: darray[Json::RhJsonNode]&, arr: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if arr < 0
+            return -1 if nodes[arr.usize()].kind != Json::RH_JSON_ARR
+            while child >= 0 |count: i64 = 0, child: i64 = nodes[arr.usize()].first_child| -> count:
+                return -1 if count >= RH_BOM_MAX_COMPONENTS
+                ref: Json::RhJsonNode = nodes[child.usize()]
+                return -1 if ref.kind != Json::RH_JSON_STR or ref.text_end <= ref.text_start
+                count <- count + 1
+                child <- ref.next_sibling
+
+        # Retain only composition assertions scoped to dependency references;
+        # other composition scopes remain visible as rows with their counts.
+        def rh_bom_compositions(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, pool: mutable darray[u8]&, out: mutable darray[RhBomComposition]&, bom: mutable RhBom&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            arr: i64 = Json::rh_json_obj_get(nodes, texts, root, "compositions")
+            return -1 if arr == -2
+            return 0 if arr < 0
+            return -1 if nodes[arr.usize()].kind != Json::RH_JSON_ARR
+            while child >= 0 |child: i64 = nodes[arr.usize()].first_child, pool, out, bom|:
+                return -1 if out.count.i64() >= RH_BOM_MAX_COMPONENTS or nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                aggregate_node: i64 = Json::rh_json_obj_get(nodes, texts, child, "aggregate")
+                aggregate_s: mutable i64 = -1
+                aggregate_e: mutable i64 = -1
+                return -1 if not Json::rh_json_str_span(nodes, aggregate_node, &aggregate_s, &aggregate_e) or rh_bom_aggregate_class(texts, aggregate_s, aggregate_e) < 0
+                assemblies_node: i64 = Json::rh_json_obj_get(nodes, texts, child, "assemblies")
+                dependencies_node: i64 = Json::rh_json_obj_get(nodes, texts, child, "dependencies")
+                vulnerabilities_node: i64 = Json::rh_json_obj_get(nodes, texts, child, "vulnerabilities")
+                return -1 if assemblies_node == -2 or dependencies_node == -2 or vulnerabilities_node == -2
+                assemblies: i64 = rh_bom_ref_count(nodes, assemblies_node)
+                dependencies: i64 = rh_bom_ref_count(nodes, dependencies_node)
+                vulnerabilities: i64 = rh_bom_ref_count(nodes, vulnerabilities_node)
+                return -1 if assemblies < 0 or dependencies < 0 or vulnerabilities < 0
+                copied_start: i64 = rh_bom_copy(pool, texts, aggregate_s, aggregate_e)
+                aggregate_class: i64 = rh_bom_aggregate_class(texts, aggregate_s, aggregate_e)
+                if dependencies_node >= 0:
+                    bom.dependency_composition_count <- bom.dependency_composition_count + 1
+                    if aggregate_class == 1:
+                        bom.dependency_complete_count <- bom.dependency_complete_count + 1
+                    elif aggregate_class == 2:
+                        bom.dependency_incomplete_count <- bom.dependency_incomplete_count + 1
+                    elif aggregate_class == 3:
+                        bom.dependency_unknown_count <- bom.dependency_unknown_count + 1
+                    else:
+                        bom.dependency_not_specified_count <- bom.dependency_not_specified_count + 1
+                out.push(RhBomComposition{aggregate_s: copied_start, aggregate_e: copied_start + aggregate_e - aggregate_s, assemblies: assemblies, dependencies: dependencies, vulnerabilities: vulnerabilities})
+                child <- nodes[child.usize()].next_sibling
+            0
+
         # Parse a CycloneDX JSON document. Returns 0 when a BOM was recognized
         # (including an unsupported spec version, which is reported in the result),
         # -1 when the payload is not JSON/not CycloneDX. Components missing a
         # non-empty name or version are counted invalid and skipped.
-        def rh_bom_parse(raw: darray[u8]&, pool: mutable darray[u8]&, out: mutable darray[RhBomComponent]&, bom_out: mutable RhBom&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            bom_out[0] <- RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+    public:
+        def rh_bom_parse(raw: darray[u8]&, pool: mutable darray[u8]&, out: mutable darray[RhBomComponent]&, compositions: mutable darray[RhBomComposition]&, bom_out: mutable RhBom&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            bom_out[0] <- RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0, dependency_composition_count: 0, dependency_complete_count: 0, dependency_incomplete_count: 0, dependency_unknown_count: 0, dependency_not_specified_count: 0}
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -162,7 +244,7 @@ module Inventory:
                 return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "specVersion"), &vs, &ve)
                 block_result: bool = rh_bom_spec_supported(texts, vs, ve)
                 block_result
-            b: RhBom = RhBom{ok: 1, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: rh_bom_unknown_keys(nodes, texts, root)}
+            b: mutable RhBom = RhBom{ok: 1, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: rh_bom_unknown_keys(nodes, texts, root), dependency_composition_count: 0, dependency_complete_count: 0, dependency_incomplete_count: 0, dependency_unknown_count: 0, dependency_not_specified_count: 0}
             if not supported:
                 b.spec_unsupported <- 1
                 bom_out[0] <- b
@@ -210,6 +292,7 @@ module Inventory:
                     p2e: i64 = rh_bom_span_end_after(pool, ps, pe, p2s)
                     out.push(RhBomComponent{type_s: t2s, type_e: t2e, name_s: n2s, name_e: n2e, version_s: v2s, version_e: v2e, purl_s: p2s, purl_e: p2e, hash_count: hc, valid_sha256: hv})
                 child <- nxt
+            return -1 if rh_bom_compositions(nodes, texts, root, pool, compositions, b) != 0
             bom_out[0] <- b
             0
 

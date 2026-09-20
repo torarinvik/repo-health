@@ -502,7 +502,7 @@ Use each ecosystem's official manifests, lockfile formats, and version semantics
 
 **M03-06: Graph storage.** Build outgoing and incoming adjacency for exact resolved edges. Add bounded breadth-first traversal with deduplication, cycle handling, and truncation metadata.
 
-**M03-07: Inventory interchange.** Implement one pinned SPDX or CycloneDX version with schema validation. The second format can follow in M08. Store importer completeness and source provenance. A syntactically valid inventory may still be incomplete.
+**M03-07: Inventory interchange.** Implement one pinned SPDX or CycloneDX version with schema validation. The second format can follow in M08. Store importer completeness and source provenance. A syntactically valid inventory may still be incomplete. The current CycloneDX importer retains per-composition aggregate assertions and separates dependency-scoped `complete`, `incomplete`, `unknown`, and `not_specified` counts; it does not upgrade those scoped assertions into a claim that the whole BOM is complete. Both CycloneDX and SPDX results carry the exact input SHA-256 and an origin kind; URL captures also carry a one-way URL digest, while raw locators and local paths remain unpublished. Inputs and composition reference arrays are bounded. (Composition meaning: [P23].)
 
 **M03-08: OSV integration.** Query supported package/version or commit contexts; preserve advisory source IDs, alias assertions, affected ranges, withdrawal status, and feed freshness. Record unknown when version matching is unsupported. The bounded `rh_cli osv-query` path accepts `rh-osv-query-input/1` for one package plus the supplied version string, or `/2` for a full 40/64-hex Git commit hash, then POSTs to the fixed OSV `/v1/query` endpoint. Its default one-page mode retains the `/1` result contract; opt-in `--continue-pagination` emits `rh-osv-query-result/2`, follows at most four pages, retains every page's request/raw response/status/stderr and SHA-256 digest, and combines full advisory records for the existing offline matcher. If page four still returns a continuation value, the result is explicitly partial and that value is retained. Commit-query results remain separate context evidence because Git-range matching is not implemented in the dependency graph. OSV documents package-version matching as fuzzy, so the submitted coordinate does not guarantee an exact server-side match; capture time does not establish feed freshness.
 
@@ -1763,7 +1763,7 @@ The product's own growth metrics—downloads, stars, or number of indexed reposi
 
 ## 28. Primary implementation references
 
-These sources were checked while preparing the design on 2026-09-18. Revalidate provider behavior and pin supported interfaces during each connector implementation. The companion architecture contains the broader reference list and source-specific support boundaries.
+These primary sources were checked while preparing the design and the current implementation changes on 2026-09-20. Revalidate provider behavior and pin supported interfaces during each connector implementation. The companion architecture contains the broader reference list and source-specific support boundaries.
 
 [P01]: https://docs.github.com/en/rest/metrics/traffic "GitHub traffic API and authorization/reporting limitations"
 [P02]: https://docs.deps.dev/api/v3/ "deps.dev package/dependency API and coverage"
@@ -1787,6 +1787,7 @@ These sources were checked while preparing the design on 2026-09-18. Revalidate 
 [P20]: https://go.dev/src/cmd/vendor/golang.org/x/mod/sumdb/dirhash/hash.go "Go h1 directory hash construction and ZIP file-content hashing"
 [P21]: https://learn.microsoft.com/en-us/nuget/consume-packages/package-references-in-project-files "NuGet lock files and per-target-framework resolved dependency closures"
 [P22]: https://github.com/NuGet/Home/wiki/Enable-repeatable-package-restore-using-lock-file "NuGet lock file format and package dependency/content-hash fields"
+[P23]: https://cyclonedx.org/guides/sbom/external-references "CycloneDX composition completeness aggregates and scoped assertions"
 
 | Reference | Implementation use |
 |---|---|
@@ -1807,6 +1808,7 @@ These sources were checked while preparing the design on 2026-09-18. Revalidate 
 | [P19] | Validate Go `h1` checksums as canonical Base64 SHA-256 before accepting checksum evidence. |
 | [P20] | Verify Go `.mod` and module ZIP h1 values with Go's one-file and `HashZip`/`Hash1` semantics, within explicit ZIP/DEFLATE bounds. |
 | [P21] / [P22] | Parse only the declared NuGet lock subset, preserve target-framework and content-hash evidence, and reject unsupported format versions and multi-target ambiguity. |
+| [P23] | Preserve CycloneDX composition completeness by declared scope and avoid upgrading partial or unknown assertions into a whole-inventory claim. |
 
 ## 29. Final implementation rule
 

@@ -249,6 +249,14 @@ both formats report `unknown_top_keys` (top-level fields the parser does
 not model are **counted**, not silently dropped). `tests/test_inventory_cli.sh` covers
 both formats, determinism, the unsupported-version branch, and the
 negatives.
+Each `rh-inventory/1` result now carries SHA-256 of the exact source bytes,
+the origin kind (`local_input` or `captured_url`), and a SHA-256 of the URL
+locator when fetched; raw URLs and local paths are not published. CycloneDX
+1.4/1.5/1.6 composition aggregates are retained by scope with assembly,
+dependency, and vulnerability reference counts. Dependency-scoped
+`complete`, `incomplete`, `unknown`, and `not_specified` assertions remain
+separate; the importer never treats one scoped assertion as proof that the
+whole inventory is complete. Composition arrays and source files are bounded.
 Registry metadata is parsed by `src/rh_registry_meta.elisa`: version
 labels, yanked flags, published times (epoch or raw string), declared
 dependency counts, and a declared source link. Invariants held: a yanked

@@ -11,6 +11,7 @@
 
 include "./rh_base.elisa"
 include "./rh_json.elisa"
+include "./rh_sha256.elisa"
 include "./rh_inventory.elisa"
 include "./rh_spdx.elisa"
 
@@ -29,6 +30,57 @@ module InventoryReport:
                 pool.push(texts[k.usize()])
                 k <- k + 1
             start
+
+        # Bind each normalized observation to the exact retained source bytes.
+        # Hash the locator instead of publishing it so query tokens and local
+        # paths do not become part of a public report.
+        def rh_inv_provenance(raw: darray[u8]&, source_url: cstr, has_url: bool, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, ",\"provenance\":{\"input_sha256\":\"")
+            Sha256::rh_sha256(raw, out)
+            Base::rh_push_text(out, "\",\"origin\":\"")
+            Base::rh_push_text(out, "captured_url" if has_url else "local_input")
+            Base::rh_push_text(out, "\",\"locator_sha256\":")
+            if has_url:
+                locator: mutable darray[u8] =
+                    locator: mutable darray[u8] = []
+                    Base::rh_push_cstr(locator, source_url)
+                    locator
+                Base::rh_push_text(out, "\"")
+                Sha256::rh_sha256(locator, out)
+                out.push(34)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, "}")
+
+        def rh_inv_completeness(compositions: darray[Inventory::RhBomComposition]&, pool: darray[u8]&, bom: Inventory::RhBom, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, ",\"completeness\":{\"dependency_assertions\":{\"state\":\"")
+            Base::rh_push_text(out, "not_asserted" if bom.dependency_composition_count == 0 else "declared")
+            Base::rh_push_text(out, "\",\"count\":")
+            Base::rh_push_decimal_i64(out, bom.dependency_composition_count)
+            Base::rh_push_text(out, ",\"complete\":")
+            Base::rh_push_decimal_i64(out, bom.dependency_complete_count)
+            Base::rh_push_text(out, ",\"incomplete\":")
+            Base::rh_push_decimal_i64(out, bom.dependency_incomplete_count)
+            Base::rh_push_text(out, ",\"unknown\":")
+            Base::rh_push_decimal_i64(out, bom.dependency_unknown_count)
+            Base::rh_push_text(out, ",\"not_specified\":")
+            Base::rh_push_decimal_i64(out, bom.dependency_not_specified_count)
+            Base::rh_push_text(out, "},\"compositions\":[")
+            while i < compositions.count.i64() |i: i64 = 0, compositions, pool, out|:
+                c: Inventory::RhBomComposition = compositions[i.usize()]
+                if i > 0:
+                    out.push(44)
+                Base::rh_push_text(out, "{\"aggregate\":\"")
+                rh_inv_emit_span(out, pool, c.aggregate_s, c.aggregate_e)
+                Base::rh_push_text(out, "\",\"assemblies\":")
+                Base::rh_push_decimal_i64(out, c.assemblies)
+                Base::rh_push_text(out, ",\"dependencies\":")
+                Base::rh_push_decimal_i64(out, c.dependencies)
+                Base::rh_push_text(out, ",\"vulnerabilities\":")
+                Base::rh_push_decimal_i64(out, c.vulnerabilities)
+                out.push(125)
+                i <- i + 1
+            Base::rh_push_text(out, "]}")
 
         # Extract a top-level string field (spec version) into pool; span in pool.
         # (private to this file)
@@ -52,17 +104,20 @@ module InventoryReport:
 
         # CycloneDX. Returns 0 observed, 1 unsupported-spec (report written),
         # -1 not a CycloneDX document.
-        def rh_inv_cyclonedx(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_inv_cyclonedx(raw: darray[u8]&, source_url: cstr, has_url: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             pool: mutable darray[u8] = []
             comps: mutable darray[Inventory::RhBomComponent] = []
-            bom: mutable Inventory::RhBom = Inventory::RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
-            return -1 if Inventory::rh_bom_parse(raw, pool, comps, &bom) != 0
+            composition_assertions: mutable darray[Inventory::RhBomComposition] = []
+            bom: mutable Inventory::RhBom = Inventory::RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0, dependency_composition_count: 0, dependency_complete_count: 0, dependency_incomplete_count: 0, dependency_unknown_count: 0, dependency_not_specified_count: 0}
+            return -1 if Inventory::rh_bom_parse(raw, pool, comps, composition_assertions, &bom) != 0
             sv_s: mutable i64 = -1
             sv_e: mutable i64 = -1
             rh_inv_spec_version(raw, "specVersion", pool, &sv_s, &sv_e)
             Base::rh_push_text(out, "{\"schema\":\"rh-inventory/1\",\"format\":\"cyclonedx\",\"spec_version\":\"")
             rh_inv_emit_span(out, pool, sv_s, sv_e)
-            Base::rh_push_text(out, "\",\"status\":\"")
+            out.push(34)
+            rh_inv_provenance(raw, source_url, has_url, out)
+            Base::rh_push_text(out, ",\"status\":\"")
             if bom.spec_unsupported == 1:
                 Base::rh_push_text(out, "unsupported\",\"reason\":\"spec-version-not-in-declared-supported-set\"")
             else:
@@ -97,6 +152,7 @@ module InventoryReport:
                     Base::rh_push_text(out, "}")
                     i <- i + 1
                 Base::rh_push_text(out, "]")
+                rh_inv_completeness(composition_assertions, pool, bom, out)
                 Base::rh_push_text(out, ",\"metrics\":[")
                 Base::rh_push_text(out, "{\"key\":\"inventory.component_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
                 Base::rh_push_decimal_i64(out, bom.component_count)
@@ -132,7 +188,7 @@ module InventoryReport:
 
         # SPDX 2.3. Returns 0 observed, 1 unsupported-spec (report written),
         # -1 not an SPDX document.
-        def rh_inv_spdx(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_inv_spdx(raw: darray[u8]&, source_url: cstr, has_url: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             pool: mutable darray[u8] = []
             pkgs: mutable darray[Spdx::RhSpdxPackage] = []
             spdx: mutable Spdx::RhSpdx = Spdx::RhSpdx{ok: 0, spec_unsupported: 0, packages: 0, invalid_packages: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
@@ -142,7 +198,9 @@ module InventoryReport:
             rh_inv_spec_version(raw, "spdxVersion", pool, &sv_s, &sv_e)
             Base::rh_push_text(out, "{\"schema\":\"rh-inventory/1\",\"format\":\"spdx\",\"spec_version\":\"")
             rh_inv_emit_span(out, pool, sv_s, sv_e)
-            Base::rh_push_text(out, "\",\"status\":\"")
+            out.push(34)
+            rh_inv_provenance(raw, source_url, has_url, out)
+            Base::rh_push_text(out, ",\"status\":\"")
             if spdx.spec_unsupported == 1:
                 Base::rh_push_text(out, "unsupported\",\"reason\":\"spec-version-not-in-declared-supported-set\"")
             else:
@@ -177,6 +235,7 @@ module InventoryReport:
                     Base::rh_push_text(out, "}")
                     i <- i + 1
                 Base::rh_push_text(out, "]")
+                Base::rh_push_text(out, ",\"completeness\":{\"dependency_assertions\":{\"state\":\"not_asserted\",\"count\":0,\"complete\":0,\"incomplete\":0,\"unknown\":0,\"not_specified\":0},\"compositions\":[]}")
                 Base::rh_push_text(out, ",\"metrics\":[")
                 Base::rh_push_text(out, "{\"key\":\"inventory.component_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
                 Base::rh_push_decimal_i64(out, spdx.packages)
@@ -212,6 +271,8 @@ module InventoryReport:
 
         # format: 0 cyclonedx, 1 spdx.
     public:
-        def rh_inventory_report(raw: darray[u8]&, format: u8, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            return rh_inv_cyclonedx(raw, out) if format == 0
-            rh_inv_spdx(raw, out)
+        const RH_INVENTORY_MAX_BYTES: i64 = 67108864
+        def rh_inventory_report(raw: darray[u8]&, format: u8, source_url: cstr, has_url: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count.i64() > RH_INVENTORY_MAX_BYTES
+            return rh_inv_cyclonedx(raw, source_url, has_url, out) if format == 0
+            rh_inv_spdx(raw, source_url, has_url, out)
