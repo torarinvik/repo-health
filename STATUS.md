@@ -281,7 +281,8 @@ project-root requirements and labels these links informational, the result is
 bound to exact input bytes by SHA-256, not an install graph or OSV input;
 bounded wheel, sdist, and archive hash algorithm/value pairs are retained as
 expected artifact evidence; optional declared byte sizes are retained as
-`size_bytes`; URL/path locators appear only as SHA-256 fingerprints.
+`size_bytes`; package index URLs, artifact URLs, and paths appear only as
+SHA-256 fingerprints.
 `rh_cli pylock-observe` checks supplied local artifact bytes against
 SHA-256/SHA-384/SHA-512 values and any declared size, then emits the separate
 `rh-pylock-artifact-observation-result/1` sidecar bound to the audit digest and
