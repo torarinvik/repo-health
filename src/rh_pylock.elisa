@@ -12,6 +12,9 @@ module Pylock:
         const RH_PYLOCK_MAX_BYTES: usize = 8388608
         const RH_PYLOCK_MAX_PACKAGES: i64 = 10000
         const RH_PYLOCK_MAX_DEPENDENCIES: i64 = 200000
+        const RH_PYLOCK_MAX_ARTIFACTS: i64 = 200000
+        const RH_PYLOCK_MAX_HASHES: i64 = 200000
+        const RH_PYLOCK_MAX_HASHES_PER_ARTIFACT: i64 = 64
 
         struct RhPylockPackage:
             name_s: mutable i64
@@ -32,11 +35,34 @@ module Pylock:
             version_e: mutable i64
             context: mutable u8
 
+        struct RhPylockArtifact:
+            owner: mutable i64
+            kind: mutable u8
+            name_s: mutable i64
+            name_e: mutable i64
+            locator_s: mutable i64
+            locator_e: mutable i64
+            locator_kind: mutable u8
+            first_hash: mutable i64
+            hash_count: mutable i64
+
+        struct RhPylockArtifactHash:
+            artifact: mutable i64
+            algorithm_s: mutable i64
+            algorithm_e: mutable i64
+            value_s: mutable i64
+            value_e: mutable i64
+
         def rh_pylock_copy(pool: mutable darray[u8]&, data: darray[u8]&, s: usize, e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
             start: i64 = pool.count.i64()
             for i in s..<e |pool, data|:
                 pool.push(data[i])
             start
+
+        def rh_pylock_artifact_push(artifacts: mutable darray[RhPylockArtifact]&, owner: i64, kind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if artifacts.count.i64() >= RH_PYLOCK_MAX_ARTIFACTS
+            artifacts.push(RhPylockArtifact{owner: owner, kind: kind, name_s: -1, name_e: -1, locator_s: -1, locator_e: -1, locator_kind: 0, first_hash: -1, hash_count: 0})
+            artifacts.count.i64() - 1
 
         def rh_pylock_lower(value: u8) -> u8:
             return value + 32 if value >= 65 and value <= 90
@@ -57,6 +83,108 @@ module Pylock:
             for i in 0..<(a_e - a_s).usize() |pool, a_s, b_s|:
                 return false if pool[(a_s + i.i64()).usize()] != pool[(b_s + i.i64()).usize()]
             true
+
+        def rh_pylock_artifact_hash_record(pool: mutable darray[u8]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, artifact: i64, algorithm_s: i64, algorithm_e: i64, value_s: i64, value_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if hashes.count.i64() >= RH_PYLOCK_MAX_HASHES or algorithm_s < 0 or algorithm_s == algorithm_e or value_s < 0 or value_s == value_e
+            artifact_record: mutable RhPylockArtifact = artifacts[artifact.usize()]
+            return false if artifact_record.hash_count >= RH_PYLOCK_MAX_HASHES_PER_ARTIFACT
+            start: usize = artifact_record.first_hash.usize() if artifact_record.first_hash >= 0 else hashes.count
+            for existing in start..<hashes.count |existing, hashes, pool, artifact, algorithm_s, algorithm_e|:
+                prior: RhPylockArtifactHash = hashes[existing]
+                return false if prior.artifact == artifact and rh_pylock_equal(pool, prior.algorithm_s, prior.algorithm_e, algorithm_s, algorithm_e)
+            hashes.push(RhPylockArtifactHash{artifact: artifact, algorithm_s: algorithm_s, algorithm_e: algorithm_e, value_s: value_s, value_e: value_e})
+            artifact_record.first_hash <- hashes.count.i64() - 1 if artifact_record.hash_count == 0
+            artifact_record.hash_count <- artifact_record.hash_count + 1
+            artifacts[artifact.usize()] <- artifact_record
+            true
+
+        def rh_pylock_hash_key(data: darray[u8]&, start: usize, end: usize) -> bool:
+            return false if start >= end
+            for i in start..<end |i, data|:
+                b: u8 = data[i]
+                return false if not ((b >= 65 and b <= 90) or (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 45 or b == 95)
+            true
+
+        def rh_pylock_inline_hashes(data: mutable darray[u8]&, pool: mutable darray[u8]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, artifact: i64, start: usize, end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= end or data[start] != 123 or data[end - 1] != 125
+            cursor: mutable usize = start + 1
+            limit: usize = end - 1
+            count: mutable i64 = 0
+            while cursor < limit |cursor, limit, data, pool, artifacts, hashes, artifact, count|:
+                while cursor < limit and (data[cursor] == 32 or data[cursor] == 9 or data[cursor] == 13 or data[cursor] == 10) |cursor, data, limit|:
+                    cursor <- cursor + 1
+                if cursor < limit:
+                    field_start: usize = cursor
+                    quote: mutable u8 = 0
+                    while cursor < limit and (quote != 0 or data[cursor] != 44) |cursor, data, limit, quote|:
+                        if quote == 0:
+                            quote <- data[cursor] if data[cursor] == 34 or data[cursor] == 39
+                        elif data[cursor] == quote:
+                            quote <- 0
+                        return false if data[cursor] == 92
+                        cursor <- cursor + 1
+                    return false if quote != 0
+                    field_end: usize = cursor
+                    key_s: mutable usize = field_start
+                    key_e: mutable usize = field_end
+                    value_s: mutable usize = field_start
+                    return false if not rh_pylock_assignment(data, field_start, field_end, &key_s, &key_e, &value_s)
+                    rh_pylock_trim(data, &key_s, &key_e)
+                    value_e: usize = rh_pylock_comment_end(data, value_s, field_end)
+                    value_end: mutable usize = value_e
+                    rh_pylock_trim(data, &value_s, &value_end)
+                    return false if not rh_pylock_hash_key(data, key_s, key_e)
+                    algorithm_s: i64 = rh_pylock_copy(pool, data, key_s, key_e)
+                    algorithm_e: i64 = algorithm_s + (key_e - key_s).i64()
+                    value_start: mutable i64 = -1
+                    value_stop: mutable i64 = -1
+                    return false if not rh_pylock_scalar_string(data, pool, value_s, value_end, &value_start, &value_stop)
+                    return false if not rh_pylock_artifact_hash_record(pool, artifacts, hashes, artifact, algorithm_s, algorithm_e, value_start, value_stop)
+                    count <- count + 1
+                    cursor <- cursor + 1 if cursor < limit and data[cursor] == 44
+            count > 0
+
+        def rh_pylock_artifact_field(data: mutable darray[u8]&, pool: mutable darray[u8]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, artifact_index: i64, start: usize, end: usize, unknown_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            key_s: mutable usize = start
+            key_e: mutable usize = end
+            value_s: mutable usize = start
+            return false if not rh_pylock_assignment(data, start, end, &key_s, &key_e, &value_s)
+            value_e: usize = rh_pylock_comment_end(data, value_s, end)
+            value_end: mutable usize = value_e
+            rh_pylock_trim(data, &value_s, &value_end)
+            artifact: mutable RhPylockArtifact = artifacts[artifact_index.usize()]
+            if Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "name"):
+                return false if artifact.name_s >= 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &artifact.name_s, &artifact.name_e)
+            elif Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "url"):
+                return false if artifact.locator_kind != 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &artifact.locator_s, &artifact.locator_e)
+                artifact.locator_kind <- 1
+            elif Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "path"):
+                return false if artifact.locator_kind != 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &artifact.locator_s, &artifact.locator_e)
+                artifact.locator_kind <- 2
+            elif Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "hashes"):
+                return false if not rh_pylock_inline_hashes(data, pool, artifacts, hashes, artifact_index, value_s, value_end)
+                return true
+            else:
+                unknown_out[0] <- unknown_out[0] + 1
+            artifacts[artifact_index.usize()] <- artifact
+            true
+
+        def rh_pylock_artifact_hash_field(data: mutable darray[u8]&, pool: mutable darray[u8]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, artifact_index: i64, start: usize, end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            key_s: mutable usize = start
+            key_e: mutable usize = end
+            value_s: mutable usize = start
+            return false if not rh_pylock_assignment(data, start, end, &key_s, &key_e, &value_s)
+            rh_pylock_trim(data, &key_s, &key_e)
+            value_e: usize = rh_pylock_comment_end(data, value_s, end)
+            value_end: mutable usize = value_e
+            rh_pylock_trim(data, &value_s, &value_end)
+            return false if not rh_pylock_hash_key(data, key_s, key_e)
+            algorithm_s: i64 = rh_pylock_copy(pool, data, key_s, key_e)
+            algorithm_e: i64 = algorithm_s + (key_e - key_s).i64()
+            value_start: mutable i64 = -1
+            value_stop: mutable i64 = -1
+            return false if not rh_pylock_scalar_string(data, pool, value_s, value_end, &value_start, &value_stop)
+            rh_pylock_artifact_hash_record(pool, artifacts, hashes, artifact_index, algorithm_s, algorithm_e, value_start, value_stop)
 
         def rh_pylock_trim(data: darray[u8]&, start: mutable usize&, end: mutable usize&) -> void can[Memory.Allocate, Abort.Panic]:
             while start[0] < end[0] and (data[start[0]] == 32 or data[start[0]] == 9 or data[start[0]] == 13) |data, start, end|:
@@ -238,15 +366,16 @@ module Pylock:
                 cursor <- cursor + 1
             square_depth == 0 and quote == 0
 
-        def rh_pylock_parse(data: mutable darray[u8]&, pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, refs: mutable darray[RhPylockReference]&, created_s: mutable i64&, created_e: mutable i64&, python_s: mutable i64&, python_e: mutable i64&, unknown_top: mutable i64&, unknown_package: mutable i64&, unknown_dependency: mutable i64&, unknown_tables: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_pylock_parse(data: mutable darray[u8]&, pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, refs: mutable darray[RhPylockReference]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, created_s: mutable i64&, created_e: mutable i64&, python_s: mutable i64&, python_e: mutable i64&, unknown_top: mutable i64&, unknown_package: mutable i64&, unknown_dependency: mutable i64&, unknown_artifact: mutable i64&, unknown_tables: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if data.count == 0 or data.count > RH_PYLOCK_MAX_BYTES
             section: mutable i64 = 0
             package_index: mutable i64 = -1
             reference_index: mutable i64 = -1
+            artifact_index: mutable i64 = -1
             packages_seen: mutable bool = false
             lock_version_ok: mutable bool = false
             line_start: mutable usize = 0
-            while line_start <= data.count |line_start, data, pool, packages, refs, created_s, created_e, python_s, python_e, unknown_top, unknown_package, unknown_dependency, unknown_tables, section, package_index, reference_index, packages_seen, lock_version_ok|:
+            while line_start <= data.count |line_start, data, pool, packages, refs, artifacts, hashes, created_s, created_e, python_s, python_e, unknown_top, unknown_package, unknown_dependency, unknown_artifact, unknown_tables, section, package_index, reference_index, artifact_index, packages_seen, lock_version_ok|:
                 line_end: mutable usize =
                     while i < data.count and data[i] != 10 |i: usize = line_start, data| -> i:
                         i <- i + 1
@@ -260,12 +389,50 @@ module Pylock:
                         packages.push(RhPylockPackage{name_s: -1, name_e: -1, version_s: -1, version_e: -1, marker_s: -1, marker_e: -1, python_s: -1, python_e: -1, dependency_array: 0})
                         package_index <- packages.count.i64() - 1
                         reference_index <- -1
+                        artifact_index <- -1
                         section <- 1
                         packages_seen <- true
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[[packages.wheels]]"):
+                        return -1 if package_index < 0
+                        artifact_index <- rh_pylock_artifact_push(artifacts, package_index, 1)
+                        return -1 if artifact_index < 0
+                        reference_index <- -1
+                        section <- 3
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.sdist]"):
+                        return -1 if package_index < 0
+                        for prior in 0..<artifacts.count |prior, artifacts, package_index|:
+                            prior_artifact: RhPylockArtifact = artifacts[prior]
+                            return -1 if prior_artifact.owner == package_index and prior_artifact.kind == 2
+                        artifact_index <- rh_pylock_artifact_push(artifacts, package_index, 2)
+                        return -1 if artifact_index < 0
+                        reference_index <- -1
+                        section <- 5
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.archive]"):
+                        return -1 if package_index < 0
+                        for prior2 in 0..<artifacts.count |prior2, artifacts, package_index|:
+                            prior_artifact2: RhPylockArtifact = artifacts[prior2]
+                            return -1 if prior_artifact2.owner == package_index and prior_artifact2.kind == 3
+                        artifact_index <- rh_pylock_artifact_push(artifacts, package_index, 3)
+                        return -1 if artifact_index < 0
+                        reference_index <- -1
+                        section <- 7
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.wheels.hashes]"):
+                        return -1 if artifact_index < 0 or artifacts[artifact_index.usize()].kind != 1
+                        reference_index <- -1
+                        section <- 4
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.sdist.hashes]"):
+                        return -1 if artifact_index < 0 or artifacts[artifact_index.usize()].kind != 2
+                        reference_index <- -1
+                        section <- 6
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.archive.hashes]"):
+                        return -1 if artifact_index < 0 or artifacts[artifact_index.usize()].kind != 3
+                        reference_index <- -1
+                        section <- 8
                     elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[[packages.dependencies]]"):
                         return -1 if package_index < 0 or packages[package_index.usize()].dependency_array == 1
                         reference_index <- rh_pylock_push_reference(refs, package_index)
                         return -1 if reference_index < 0
+                        artifact_index <- -1
                         section <- 2
                     elif data[trimmed_start] == 91:
                         if section == 2 and reference_index >= 0:
@@ -273,10 +440,11 @@ module Pylock:
                             nested_ref.context <- 1
                             refs[reference_index.usize()] <- nested_ref
                             unknown_dependency[0] <- unknown_dependency[0] + 1
-                        section <- 3
+                        section <- 9
                         reference_index <- -1
+                        artifact_index <- -1
                         unknown_tables[0] <- unknown_tables[0] + 1
-                    elif section == 0 or section == 1 or section == 2:
+                    elif section == 0 or section == 1 or section == 2 or section == 3 or section == 4 or section == 5 or section == 6 or section == 7 or section == 8:
                         key_s: mutable usize = trimmed_start
                         key_e: mutable usize = trimmed_end
                         value_s: mutable usize = trimmed_start
@@ -330,6 +498,10 @@ module Pylock:
                                 ref: mutable RhPylockReference = refs[reference_index.usize()]
                                 return -1 if not rh_pylock_reference_field(data, pool, trimmed_start, trimmed_end, &ref, unknown_dependency)
                                 refs[reference_index.usize()] <- ref
+                            elif section == 3 or section == 5 or section == 7:
+                                return -1 if artifact_index < 0 or not rh_pylock_artifact_field(data, pool, artifacts, hashes, artifact_index, trimmed_start, trimmed_end, unknown_artifact)
+                            elif section == 4 or section == 6 or section == 8:
+                                return -1 if artifact_index < 0 or not rh_pylock_artifact_hash_field(data, pool, artifacts, hashes, artifact_index, trimmed_start, trimmed_end)
                             else:
                                 if section == 0:
                                     unknown_top[0] <- unknown_top[0] + 1
@@ -349,6 +521,12 @@ module Pylock:
                 reference: RhPylockReference = refs[reference_id]
                 return -1 if reference.name_s < 0 or reference.name_s == reference.name_e
                 return -1 if reference.version_s >= 0 and reference.version_s == reference.version_e
+            for artifact_id in 0..<artifacts.count |artifact_id, artifacts|:
+                artifact: RhPylockArtifact = artifacts[artifact_id]
+                return -1 if (artifact.name_s < 0 and artifact.name_e >= 0) or (artifact.name_s >= 0 and artifact.name_s == artifact.name_e)
+                return -1 if (artifact.locator_kind == 0 and (artifact.locator_s >= 0 or artifact.locator_e >= 0)) or (artifact.locator_kind != 0 and (artifact.locator_s < 0 or artifact.locator_s == artifact.locator_e))
+                return -1 if artifact.name_s < 0 and artifact.locator_kind == 0
+                return -1 if artifact.hash_count == 0
             0
 
         def rh_pylock_emit_string(out: mutable darray[u8]&, pool: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
@@ -357,6 +535,19 @@ module Pylock:
             else:
                 out.push(34)
                 Base::rh_json_escape(out, pool, start.usize(), end.usize())
+                out.push(34)
+
+        def rh_pylock_emit_fingerprint(out: mutable darray[u8]&, pool: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            if start < 0:
+                Base::rh_push_text(out, "null")
+            else:
+                value: mutable darray[u8] = []
+                for i in start.usize()..<end.usize() |i, pool, value|:
+                    value.push(pool[i])
+                digest: mutable darray[u8] = []
+                Sha256::rh_sha256(value, digest)
+                out.push(34)
+                out.extend(bytes_view(digest))
                 out.push(34)
 
         def rh_pylock_target(pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, reference: mutable RhPylockReference, target_out: mutable i64&) -> u8 can[Memory.Allocate, Abort.Panic]:
@@ -380,6 +571,8 @@ module Pylock:
             pool: mutable darray[u8] = []
             packages: mutable darray[RhPylockPackage] = []
             references: mutable darray[RhPylockReference] = []
+            artifacts: mutable darray[RhPylockArtifact] = []
+            hashes: mutable darray[RhPylockArtifactHash] = []
             created_s: mutable i64 = -1
             created_e: mutable i64 = -1
             python_s: mutable i64 = -1
@@ -387,8 +580,9 @@ module Pylock:
             unknown_top: mutable i64 = 0
             unknown_package: mutable i64 = 0
             unknown_dependency: mutable i64 = 0
+            unknown_artifact: mutable i64 = 0
             unknown_tables: mutable i64 = 0
-            return -1 if rh_pylock_parse(data, pool, packages, references, &created_s, &created_e, &python_s, &python_e, &unknown_top, &unknown_package, &unknown_dependency, &unknown_tables) != 0
+            return -1 if rh_pylock_parse(data, pool, packages, references, artifacts, hashes, &created_s, &created_e, &python_s, &python_e, &unknown_top, &unknown_package, &unknown_dependency, &unknown_artifact, &unknown_tables) != 0
             input_hash: mutable darray[u8] = []
             Sha256::rh_sha256(data, input_hash)
             Base::rh_push_text(out, "{\"schema\":\"rh-pylock-audit/1\",\"format\":\"PEP 751\",\"parser\":\"bounded-core-projection\",\"lock_version\":\"1.0\",\"created_by\":")
@@ -400,7 +594,9 @@ module Pylock:
             Base::rh_push_text(out, ",\"requires_python\":")
             rh_pylock_emit_string(out, pool, python_s, python_e)
             Base::rh_push_text(out, ",\"root_relationship\":\"not_recorded\",\"dependency_semantics\":\"informational_only\",\"packages\":[")
-            for package_id in 0..<packages.count |package_id, packages, pool, references, out|:
+            artifact_cursor: mutable usize = 0
+            hash_cursor: mutable usize = 0
+            for package_id in 0..<packages.count |package_id, packages, pool, references, out, artifact_cursor, hash_cursor|:
                 pkg: RhPylockPackage = packages[package_id]
                 if package_id > 0:
                     out.push(44)
@@ -436,8 +632,43 @@ module Pylock:
                         Base::rh_push_text(out, ",\"resolution\":\"")
                         Base::rh_push_text(out, "resolved" if state == 0 else "missing" if state == 1 else "ambiguous" if state == 2 else "context")
                         Base::rh_push_text(out, "\"}")
+                Base::rh_push_text(out, "],\"artifacts\":[")
+                first_artifact: mutable bool = true
+                while artifact_cursor < artifacts.count and artifacts[artifact_cursor].owner == package_id.i64() |artifact_cursor, artifacts, hashes, pool, out, package_id, first_artifact, hash_cursor|:
+                    artifact_id: mutable usize = artifact_cursor
+                    artifact: RhPylockArtifact = artifacts[artifact_id]
+                    artifact_cursor <- artifact_cursor + 1
+                    if not first_artifact:
+                        out.push(44)
+                    first_artifact <- false
+                    Base::rh_push_text(out, "{\"kind\":\"")
+                    Base::rh_push_text(out, "wheel" if artifact.kind == 1 else "sdist" if artifact.kind == 2 else "archive")
+                    Base::rh_push_text(out, "\",\"name\":")
+                    rh_pylock_emit_string(out, pool, artifact.name_s, artifact.name_e)
+                    Base::rh_push_text(out, ",\"source_kind\":")
+                    Base::rh_push_text(out, "\"url\"" if artifact.locator_kind == 1 else "\"path\"" if artifact.locator_kind == 2 else "\"name_only\"")
+                    Base::rh_push_text(out, ",\"source_sha256\":")
+                    rh_pylock_emit_fingerprint(out, pool, artifact.locator_s, artifact.locator_e)
+                    Base::rh_push_text(out, ",\"hashes\":[")
+                    first_hash: mutable bool = true
+                    while hash_cursor < hashes.count and hashes[hash_cursor].artifact == artifact_id.i64() |hash_cursor, hashes, pool, out, artifact_id, first_hash|:
+                        hash: RhPylockArtifactHash = hashes[hash_cursor]
+                        hash_cursor <- hash_cursor + 1
+                        if not first_hash:
+                            out.push(44)
+                        first_hash <- false
+                        Base::rh_push_text(out, "{\"algorithm\":")
+                        rh_pylock_emit_string(out, pool, hash.algorithm_s, hash.algorithm_e)
+                        Base::rh_push_text(out, ",\"value\":")
+                        rh_pylock_emit_string(out, pool, hash.value_s, hash.value_e)
+                        out.push(125)
+                    Base::rh_push_text(out, "]}")
                 Base::rh_push_text(out, "]}")
-            Base::rh_push_text(out, "],\"coverage\":{\"direct_dependencies\":\"not_recorded\",\"markers_evaluated\":false,\"artifacts_projected\":false,\"unprojected_top_level_fields\":")
+            Base::rh_push_text(out, "],\"coverage\":{\"direct_dependencies\":\"not_recorded\",\"markers_evaluated\":false,\"artifacts_projected\":false,\"artifact_hashes_projected\":")
+            Base::rh_push_text(out, "true" if unknown_artifact == 0 and unknown_package == 0 else "false")
+            Base::rh_push_text(out, ",\"unprojected_artifact_fields\":")
+            Base::rh_push_decimal_i64(out, unknown_artifact)
+            Base::rh_push_text(out, ",\"unprojected_top_level_fields\":")
             Base::rh_push_decimal_i64(out, unknown_top)
             Base::rh_push_text(out, ",\"unprojected_package_fields\":")
             Base::rh_push_decimal_i64(out, unknown_package)

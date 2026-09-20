@@ -279,8 +279,10 @@ name plus optional version identifies one package entry, and reports missing,
 ambiguous, or source-specific references distinctly. Because PEP 751 omits
 project-root requirements and labels these links informational, the result is
 bound to exact input bytes by SHA-256, not an install graph or OSV input;
-unprojected artifact, environment, and
-source data remain visible in coverage counts. `tests/test_pylock_cli.sh`, its
+bounded wheel, sdist, and archive hash algorithm/value pairs are retained as
+expected artifact evidence; URL/path locators appear only as SHA-256
+fingerprints. Complete artifact projection, environment/group selection, and
+source forms remain visible in coverage counts. `tests/test_pylock_cli.sh`, its
 golden fixture, schema check, and public-contract registration cover the
 projection. This does not close full Python or ecosystem lockfile coverage.
 One inventory

@@ -74,9 +74,11 @@ are not automatically matched against a package graph.
 auditing but does not record project-root requirements, and those relationships
 are informational. The audit therefore preserves package markers and Python
 version constraints without evaluating them, reports missing or ambiguous
-references, and counts lock fields it does not project. It does not create a
-`rh-dep-graph/1` or OSV input; resolved graph integration and artifact-hash
-projection remain open.
+references, and retains expected hashes for bounded wheel, sdist, and archive
+entries. URL and path locators are represented by SHA-256 fingerprints. It
+counts lock fields it does not project and does not create a `rh-dep-graph/1`
+or OSV input; complete artifact projection and Python lockfile integration
+remain open.
 Without `--continue-pagination`, the command keeps its one-page
 `rh-osv-query-result/1` behavior and marks a returned `next_page_token` as
 `more_available`. The opt-in continuation mode emits

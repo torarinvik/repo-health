@@ -25,11 +25,15 @@ on the real execution path.
   report keeps package markers and Python constraints, marks dependency links
   informational, and never invents a project-root relationship that the format
   does not record; `input_sha256` binds the result to the exact lock bytes.
-  Missing, ambiguous, and source-specific references remain
-  distinct; omitted artifact, environment, and source fields are counted.
+  Missing, ambiguous, and source-specific references remain distinct. Bounded
+  wheel, sdist, and archive records retain expected hash values and fingerprint
+  URL/path locators with SHA-256 without publishing the locators.
+  Environment/group selection, complete artifact projection, and unsupported
+  source fields remain counted as gaps.
   `tests/test_pylock_cli.sh`, a checked-in golden, schema, and public-contract
-  entry cover the new result. Full TOML validation, artifact hashes, project
-  manifest integration, and use as a resolved dependency graph remain open.
+  entry cover the new result. Full TOML validation, complete artifact metadata
+  and byte observation, project manifest integration, and use as a resolved
+  dependency graph remain open.
 - M11 forecast evidence now requires a named observable binary outcome and
   retains model and baseline Brier scores with the same submitted evaluation
   cohort identifier and sample count. `rh-forecast-input/2` and

@@ -21,10 +21,22 @@ name = 'attrs'
 version = '25.1.0'
 marker = "sys_platform == 'linux' # retained inside string"
 requires-python = '>=3.8'
-wheels = [{name = 'attrs-25.1.0-py3-none-any.whl', hashes = {sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}}]
+[[packages.wheels]]
+name = 'attrs-25.1.0-py3-none-any.whl'
+url = 'https://files.example.invalid/attrs-25.1.0.whl'
+hashes = {sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', blake2b_256 = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'}
 
-[[packages.wheels.hashes]]
+[[packages.wheels]]
+name = 'attrs-25.1.0-cp312-cp312-manylinux.whl'
+path = '../wheelhouse/attrs-cp312.whl'
+[packages.wheels.hashes]
 sha256 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+[packages.sdist]
+name = 'attrs-25.1.0.tar.gz'
+url = 'https://files.example.invalid/attrs-25.1.0.tar.gz'
+[packages.sdist.hashes]
+sha256 = 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
 
 [[packages]]
 name = 'attrs'
@@ -47,6 +59,11 @@ dependencies = [{name = 'attrs'}]
 name = 'context-consumer'
 version = '1.0.0'
 dependencies = [{name = 'private', vcs = {url = 'https://example.invalid/private'}}]
+[packages.archive]
+name = 'context-consumer-1.0.0.zip'
+path = 'vendor/context-consumer-1.0.0.zip'
+[packages.archive.hashes]
+sha256 = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
 
 [[packages]]
 name = 'missing-consumer'
@@ -83,11 +100,24 @@ assert pkgs[3]["dependencies"][0]["resolution"] == "ambiguous", pkgs[3]
 assert pkgs[4]["dependencies"][0]["resolution"] == "context", pkgs[4]
 assert pkgs[5]["dependencies"][0]["resolution"] == "missing", pkgs[5]
 assert pkgs[6]["dependencies"][0]["resolution"] == "context", pkgs[6]
+assert [a["kind"] for a in pkgs[0]["artifacts"]] == ["wheel", "wheel", "sdist"], pkgs[0]["artifacts"]
+assert pkgs[0]["artifacts"][0]["hashes"] == [
+    {"algorithm": "sha256", "value": "a" * 64},
+    {"algorithm": "blake2b_256", "value": "c" * 64},
+], pkgs[0]["artifacts"][0]
+assert pkgs[0]["artifacts"][1]["hashes"] == [{"algorithm": "sha256", "value": "b" * 64}], pkgs[0]["artifacts"][1]
+assert pkgs[0]["artifacts"][2]["hashes"] == [{"algorithm": "sha256", "value": "d" * 64}], pkgs[0]["artifacts"][2]
+assert pkgs[0]["artifacts"][0]["source_kind"] == "url", pkgs[0]["artifacts"][0]
+assert pkgs[0]["artifacts"][0]["source_sha256"] == hashlib.sha256(b"https://files.example.invalid/attrs-25.1.0.whl").hexdigest(), pkgs[0]["artifacts"][0]
+assert pkgs[0]["artifacts"][1]["source_kind"] == "path", pkgs[0]["artifacts"][1]
+assert pkgs[4]["artifacts"][0]["kind"] == "archive" and pkgs[4]["artifacts"][0]["source_kind"] == "path", pkgs[4]
+assert "https://files.example.invalid/attrs-25.1.0.whl" not in json.dumps(report), report
 coverage = report["coverage"]
 assert coverage["direct_dependencies"] == "not_recorded" and coverage["markers_evaluated"] is False, coverage
-assert coverage["artifacts_projected"] is False and coverage["unprojected_top_level_fields"] == 1, coverage
-assert coverage["unprojected_package_fields"] >= 1 and coverage["unprojected_dependency_fields"] == 2, coverage
-assert coverage["unprojected_tables"] == 2, coverage
+assert coverage["artifacts_projected"] is False and coverage["artifact_hashes_projected"] is True, coverage
+assert coverage["unprojected_artifact_fields"] == 0 and coverage["unprojected_top_level_fields"] == 1, coverage
+assert coverage["unprojected_package_fields"] == 0 and coverage["unprojected_dependency_fields"] == 2, coverage
+assert coverage["unprojected_tables"] == 1, coverage
 print("[pylock] PEP 751 relationships and loss coverage OK")
 PY
 
@@ -101,6 +131,51 @@ for input in "$T/bad-version.toml" "$T/bad-string.toml"; do
   set -e
   [[ "$rc" -eq 4 ]] || fail "unsupported PEP 751 input must fail closed (got $rc)"
 done
+cat > "$T/missing-artifact-hash.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[packages.sdist]
+name = 'x.tar.gz'
+url = 'https://example.invalid/x.tar.gz'
+EOF
+cat > "$T/duplicate-artifact-hash.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[[packages.wheels]]
+name = 'x.whl'
+hashes = {sha256 = 'aa', sha256 = 'bb'}
+EOF
+for input in "$T/missing-artifact-hash.toml" "$T/duplicate-artifact-hash.toml"; do
+  set +e
+  "$ROOT/build/rh_cli" pylock --input "$input" --out "$T/bad-artifact.json" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" -eq 4 ]] || fail "missing or duplicate artifact hashes must fail closed (got $rc)"
+done
+
+cat > "$T/partial-artifact.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[packages.sdist]
+name = 'x.tar.gz'
+url = 'https://example.invalid/x.tar.gz'
+size = 128
+hashes = {sha256 = 'aa'}
+EOF
+"$ROOT/build/rh_cli" pylock --input "$T/partial-artifact.toml" --out "$T/partial-artifact.json" >/dev/null
+python3 - "$T/partial-artifact.json" <<'PY'
+import json, sys
+coverage = json.load(open(sys.argv[1]))["coverage"]
+assert coverage["artifact_hashes_projected"] is False, coverage
+assert coverage["unprojected_artifact_fields"] == 1, coverage
+PY
+
 set +e
 "$ROOT/build/rh_cli" pylock --input "$T/pylock.toml" --input "$T/pylock.toml" --out "$T/duplicate-option.json" >/dev/null 2>&1
 rc_duplicate_option=$?
