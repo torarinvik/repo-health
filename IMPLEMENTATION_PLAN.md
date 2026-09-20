@@ -1076,6 +1076,8 @@ Use temporal splits, project-family separation, censoring, and data available at
 
 A forecast is a model result with a horizon and population—not a fact that the project will fail. It cannot silently change default policy decisions.
 
+**Current repository checkpoint:** `rh_cli forecast` consumes `rh-forecast-input/2` and emits `rh-forecast-result/2`. The envelope requires an observable binary outcome, temporal/family-separated/censoring-aware split declarations, and exact model and baseline Brier scores with a matching submitted cohort identifier and sample count. It validates captured evaluation evidence; it does not train the model or independently verify the supplied split membership or cohort identity, and remains opt-in and separate from policy.
+
 ### 16.3 Publication anomaly analysis
 
 Study deviations in artifact digests, source mappings, publishing actors, release cadence, and dependency changes. A model may flag an unusual event for review; unusual does not mean malicious.

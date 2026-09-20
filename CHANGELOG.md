@@ -19,6 +19,14 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- M11 forecast evidence now requires a named observable binary outcome and
+  retains model and baseline Brier scores with the same submitted evaluation
+  cohort identifier and sample count. `rh-forecast-input/2` and
+  `rh-forecast-result/2` reject mismatched
+  baseline cohorts, a baseline identical to the model, and labels outside
+  `event`/`no_event`; both outputs remain experimental and outside policy
+  decisions. `tests/test_forecast_cli.sh` covers the new comparison and
+  fail-closed cases.
 - M08 review-workflow lane — Gerrit: `src/rh_gerrit.elisa` plus
   `rh_cli vcs --format gerrit` (`rh-gerrit/1`) parse a Gerrit changes query
   response and fold N re-pushed patch-sets into **one** logical change keyed

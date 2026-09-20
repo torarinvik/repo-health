@@ -45,6 +45,13 @@ module Forecast:
                 i <- i + 1
             true
 
+        def rh_forecast_spans_equal(texts: darray[u8]&, left_s: i64, left_e: i64, right_s: i64, right_e: i64) -> bool:
+            return false if left_s < 0 or right_s < 0 or left_e < left_s or right_e < right_s or left_e - left_s != right_e - right_s
+            while i < left_e - left_s |i: i64 = 0, texts, left_s, right_s|:
+                return false if texts[(left_s + i).usize()] != texts[(right_s + i).usize()]
+                i <- i + 1
+            true
+
         def rh_forecast_emit_str(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
             out.push(34)
             Base::rh_json_escape(out, texts, s.usize(), e.usize())
@@ -83,6 +90,7 @@ module Forecast:
                 label_e: mutable i64 = 0
                 return false if not Forecast::rh_forecast_str(nodes, texts, child, "label", &label_s, &label_e)
                 return false if label_e <= label_s
+                return false if not Forecast::rh_forecast_eq(texts, label_s, label_e, "event") and not Forecast::rh_forecast_eq(texts, label_s, label_e, "no_event")
                 out.push(44) if count_out[0] > 0
                 Base::rh_push_text(out, "{\"subject_id\":")
                 Base::rh_push_decimal_i64(out, subject)
@@ -105,16 +113,21 @@ module Forecast:
             schema: i64 = Forecast::rh_forecast_get(nodes, texts, root, "schema")
             return -1 if schema < 0 or nodes[schema.usize()].kind != Json::RH_JSON_STR
             sn: Json::RhJsonNode = nodes[schema.usize()]
-            return -1 if not Forecast::rh_forecast_eq(texts, sn.text_start, sn.text_end, "rh-forecast-input/1")
+            return -1 if not Forecast::rh_forecast_eq(texts, sn.text_start, sn.text_end, "rh-forecast-input/2")
             ms: mutable i64 = 0
             me: mutable i64 = 0
             ps: mutable i64 = 0
             pe: mutable i64 = 0
             bs: mutable i64 = 0
             be: mutable i64 = 0
+            os: mutable i64 = 0
+            oe: mutable i64 = 0
             return -1 if not Forecast::rh_forecast_str(nodes, texts, root, "model_id", &ms, &me)
             return -1 if not Forecast::rh_forecast_str(nodes, texts, root, "population", &ps, &pe)
             return -1 if not Forecast::rh_forecast_str(nodes, texts, root, "baseline", &bs, &be)
+            return -1 if not Forecast::rh_forecast_str(nodes, texts, root, "outcome", &os, &oe)
+            return -1 if me <= ms or pe <= ps or be <= bs or oe <= os
+            return -1 if Forecast::rh_forecast_spans_equal(texts, ms, me, bs, be)
             cutoff_ok: mutable i64 = 0
             horizon_ok: mutable i64 = 0
             cutoff: i64 = Forecast::rh_forecast_int(nodes, raw, texts, root, "cutoff", &cutoff_ok)
@@ -130,6 +143,10 @@ module Forecast:
             return -1 if not Forecast::rh_forecast_predictions(nodes, raw, texts, Forecast::rh_forecast_get(nodes, texts, root, "predictions"), predictions, &prediction_count)
             calibration: i64 = Forecast::rh_forecast_get(nodes, texts, root, "calibration")
             return -1 if calibration < 0 or nodes[calibration.usize()].kind != Json::RH_JSON_OBJ
+            model_cohort_s: mutable i64 = 0
+            model_cohort_e: mutable i64 = 0
+            return -1 if not Forecast::rh_forecast_str(nodes, texts, calibration, "cohort_id", &model_cohort_s, &model_cohort_e)
+            return -1 if model_cohort_e <= model_cohort_s
             brier: mutable darray[u8] = []
             burden: mutable darray[u8] = []
             return -1 if not Forecast::rh_forecast_ratio(nodes, raw, texts, calibration, "brier", brier)
@@ -141,12 +158,35 @@ module Forecast:
             subgroup: i64 = Forecast::rh_forecast_int(nodes, raw, texts, calibration, "subgroup_coverage_percent", &subgroup_ok)
             sample_count: i64 = Forecast::rh_forecast_int(nodes, raw, texts, calibration, "sample_count", &sample_ok)
             return -1 if fp_ok == 0 or subgroup_ok == 0 or sample_ok == 0 or false_positives < 0 or subgroup < 0 or subgroup > 100 or sample_count <= 0
-            Base::rh_push_text(out, "{\"schema\":\"rh-forecast-result/1\",\"model_id\":")
+            return -1 if false_positives > sample_count or prediction_count <= 0
+            baseline_eval: i64 = Forecast::rh_forecast_get(nodes, texts, root, "baseline_evaluation")
+            return -1 if baseline_eval < 0 or nodes[baseline_eval.usize()].kind != Json::RH_JSON_OBJ
+            baseline_brier: mutable darray[u8] = []
+            return -1 if not Forecast::rh_forecast_ratio(nodes, raw, texts, baseline_eval, "brier", baseline_brier)
+            baseline_cohort_s: mutable i64 = 0
+            baseline_cohort_e: mutable i64 = 0
+            return -1 if not Forecast::rh_forecast_str(nodes, texts, baseline_eval, "cohort_id", &baseline_cohort_s, &baseline_cohort_e)
+            baseline_sample_ok: mutable i64 = 0
+            baseline_sample_count: i64 = Forecast::rh_forecast_int(nodes, raw, texts, baseline_eval, "sample_count", &baseline_sample_ok)
+            return -1 if baseline_cohort_e <= baseline_cohort_s or baseline_sample_ok == 0 or baseline_sample_count <= 0 or baseline_sample_count != sample_count
+            return -1 if not Forecast::rh_forecast_spans_equal(texts, model_cohort_s, model_cohort_e, baseline_cohort_s, baseline_cohort_e)
+            Base::rh_push_text(out, "{\"schema\":\"rh-forecast-result/2\",\"model_id\":")
             Forecast::rh_forecast_emit_str(out, texts, ms, me)
             Base::rh_push_text(out, ",\"population\":")
             Forecast::rh_forecast_emit_str(out, texts, ps, pe)
+            Base::rh_push_text(out, ",\"outcome\":")
+            Forecast::rh_forecast_emit_str(out, texts, os, oe)
             Base::rh_push_text(out, ",\"baseline\":")
             Forecast::rh_forecast_emit_str(out, texts, bs, be)
+            Base::rh_push_text(out, ",\"evaluation_cohort_id\":")
+            Forecast::rh_forecast_emit_str(out, texts, model_cohort_s, model_cohort_e)
+            Base::rh_push_text(out, ",\"baseline_evaluation\":{\"brier\":")
+            out.extend(bytes_view(baseline_brier))
+            Base::rh_push_text(out, ",\"cohort_id\":")
+            Forecast::rh_forecast_emit_str(out, texts, model_cohort_s, model_cohort_e)
+            Base::rh_push_text(out, ",\"sample_count\":")
+            Base::rh_push_decimal_i64(out, baseline_sample_count)
+            Base::rh_push_text(out, "}")
             Base::rh_push_text(out, ",\"cutoff\":")
             Base::rh_push_decimal_i64(out, cutoff)
             Base::rh_push_text(out, ",\"horizon_days\":")
@@ -166,5 +206,5 @@ module Forecast:
             out.extend(bytes_view(burden))
             Base::rh_push_text(out, ",\"sample_count\":")
             Base::rh_push_decimal_i64(out, sample_count)
-            Base::rh_push_text(out, "},\"status\":\"experimental\",\"note\":\"forecast evidence is opt-in and evaluated at the declared cutoff and horizon; it is not a fact that the project will fail and cannot change default policy decisions\"}")
+            Base::rh_push_text(out, "},\"status\":\"experimental\",\"note\":\"forecast evidence compares model and baseline calibration on the same sample count for the declared observable outcome, cutoff, and horizon; it is not a fact that the project will fail and cannot change default policy decisions\"}")
             0
