@@ -17,7 +17,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-release-feed-input/1","first_seen":1700000123,"releases":[{"tag":"v1.0.0","published_at":1700000000,"prerelease":false,"withdrawn":true,"supported_line":"1.x","source_mapped":true,"assets":[{"name":"a.tgz","digest":"sha256:abc"},{"name":"b.tgz"}]},{"tag":"v1.1.0","prerelease":true,"supported_line":"1.x","source_mapped":false}]}
+{"schema":"rh-release-feed-input/1","first_seen":1700000123,"releases":[{"tag":"v1.0.0","published_at":1700000000,"prerelease":false,"withdrawn":true,"supported_line":"1.x","support_end_at":1800000000,"support_end_issuer":"release-policy","source_mapped":true,"assets":[{"name":"a.tgz","digest":"sha256:abc"},{"name":"b.tgz"}]},{"tag":"v1.1.0","prerelease":true,"supported_line":"1.x","source_mapped":false}]}
 JSON
 "$ROOT/build/rh_cli" release-feed --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
 python3 - "$T/out.json" <<'PY'
@@ -41,14 +41,15 @@ assert {k: metrics[k]["value"] for k in (
 }, metrics
 assert metrics["release.withdrawn_publications"]["value"] == 1, metrics
 assert metrics["release.supported_lines"]["value"] == 1, metrics
+assert metrics["release.support_end_timestamp"] == {"key":"release.support_end_timestamp","version":"1.0.0","status":"observed","value":1800000000,"evidence":["release-feed-input"]}, metrics
 assert metrics["release.release_source_mapping_coverage"]["value"] == {"num": 1, "den": 2}, metrics
 assert metrics["release.latest_stable_age_days"]["value"] == 0, metrics
 assert metrics["release.interrelease_median_days"]["status"] == "not_applicable", metrics
 assert metrics["release.interrelease_variance"]["status"] == "not_applicable", metrics
 assert r[0] == {"tag": "v1.0.0", "published_at": 1700000000, "first_seen": 1700000123,
-                "target": None, "prerelease": False, "withdrawn": True, "supported_line": "1.x", "source_mapped": True, "asset_count": 2, "digest_known_count": 1}, r[0]
+                "target": None, "prerelease": False, "withdrawn": True, "supported_line": "1.x", "support_end_at": 1800000000, "support_end_issuer": "release-policy", "source_mapped": True, "asset_count": 2, "digest_known_count": 1}, r[0]
 # missing published time stays unknown (null), never replaced by first-seen
-assert r[1]["published_at"] is None and r[1]["target"] is None and r[1]["prerelease"] is True and r[1]["withdrawn"] is None and r[1]["supported_line"] == "1.x" and r[1]["source_mapped"] is False and r[1]["first_seen"] == 1700000123, r[1]
+assert r[1]["published_at"] is None and r[1]["target"] is None and r[1]["prerelease"] is True and r[1]["withdrawn"] is None and r[1]["supported_line"] == "1.x" and r[1]["support_end_at"] is None and r[1]["support_end_issuer"] is None and r[1]["source_mapped"] is False and r[1]["first_seen"] == 1700000123, r[1]
 assert d["source"] == {"history_supported": False, "identity_supported": False}, d["source"]
 assert "no history or author identity is derived" in d["note"], d["note"]
 print("[release-feed] fields + validity/known time OK")
@@ -65,6 +66,7 @@ m = {x["key"]: x for x in json.load(open(sys.argv[1]))["metrics"]}
 assert m["release.latest_stable_age_days"]["value"] == 1, m
 assert m["release.interrelease_median_days"]["value"] == 3, m
 assert m["release.interrelease_variance"]["value"] == 1, m
+assert m["release.support_end_timestamp"]["status"] == "unsupported", m
 print("[release-feed] cadence metrics OK")
 PY
 
