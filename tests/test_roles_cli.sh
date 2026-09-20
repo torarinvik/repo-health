@@ -44,6 +44,8 @@ assert metrics["maintainer.permission_inventory_coverage"]["value"] == {"num": 1
 assert metrics["maintainer.observed_release_actors"]["value"] == 2, metrics
 assert metrics["maintainer.observed_merge_actors"]["value"] == 1, metrics
 assert metrics["maintainer.observed_review_actors"]["value"] == 1, metrics
+assert metrics["concentration.release_actor_count_80"]["value"] == 2, metrics
+assert metrics["concentration.review_actor_count_80"]["value"] == 1, metrics
 roles = [(q["actor_id"], q["as_of"], q["declared_role"]) for q in d["queries"]]
 assert roles == [(1, 150, "owner"), (2, 150, "triager"), (2, 250, "unknown"),
                  (3, 250, "unknown"), (3, 350, "member"), (4, 150, "unknown")], roles
