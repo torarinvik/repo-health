@@ -27,7 +27,8 @@ on the real execution path.
   does not record; `input_sha256` binds the result to the exact lock bytes.
   Missing, ambiguous, and source-specific references remain distinct. Bounded
   wheel, sdist, and archive records retain expected hash values and fingerprint
-  URL/path locators with SHA-256 without publishing the locators.
+  URL/path locators with SHA-256 without publishing the locators, including
+  table and inline-table input forms.
   Environment/group selection, complete artifact projection, and unsupported
   source fields remain counted as gaps.
   `tests/test_pylock_cli.sh`, a checked-in golden, schema, and public-contract

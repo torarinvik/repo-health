@@ -64,6 +64,11 @@ module Pylock:
             artifacts.push(RhPylockArtifact{owner: owner, kind: kind, name_s: -1, name_e: -1, locator_s: -1, locator_e: -1, locator_kind: 0, first_hash: -1, hash_count: 0})
             artifacts.count.i64() - 1
 
+        def rh_pylock_artifact_exists(artifacts: darray[RhPylockArtifact]&, owner: i64, kind: u8) -> bool:
+            for index in 0..<artifacts.count |index, artifacts, owner, kind|:
+                return true if artifacts[index].owner == owner and artifacts[index].kind == kind
+            false
+
         def rh_pylock_lower(value: u8) -> u8:
             return value + 32 if value >= 65 and value <= 90
             value
@@ -185,6 +190,82 @@ module Pylock:
             value_stop: mutable i64 = -1
             return false if not rh_pylock_scalar_string(data, pool, value_s, value_end, &value_start, &value_stop)
             rh_pylock_artifact_hash_record(pool, artifacts, hashes, artifact_index, algorithm_s, algorithm_e, value_start, value_stop)
+
+        def rh_pylock_inline_artifact(data: mutable darray[u8]&, pool: mutable darray[u8]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, owner: i64, kind: u8, start: usize, end: usize, unknown_out: mutable i64&, next_out: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= end or data[start] != 123
+            depth: mutable i64 = 1
+            quote: mutable u8 = 0
+            limit: mutable usize = end
+            close: usize =
+                while i < limit |i: usize = start + 1, data, depth, quote, limit| -> i:
+                    b: u8 = data[i]
+                    if quote != 0:
+                        return false if b == 92
+                        quote <- 0 if b == quote
+                    elif b == 34 or b == 39:
+                        quote <- b
+                    elif b == 123:
+                        depth <- depth + 1
+                    elif b == 125:
+                        depth <- depth - 1
+                        break if depth == 0
+                    i <- i + 1
+            return false if close >= limit or depth != 0 or quote != 0
+            artifact_index: i64 = rh_pylock_artifact_push(artifacts, owner, kind)
+            return false if artifact_index < 0
+            field_start: mutable usize = start + 1
+            field_cursor: mutable usize = field_start
+            field_quote: mutable u8 = 0
+            field_depth: mutable i64 = 0
+            while field_cursor <= close |field_cursor, close, data, pool, artifacts, hashes, artifact_index, unknown_out, field_start, field_quote, field_depth|:
+                if field_cursor == close or (data[field_cursor] == 44 and field_quote == 0 and field_depth == 0):
+                    field_s: mutable usize = field_start
+                    field_e: mutable usize = field_cursor
+                    rh_pylock_trim(data, &field_s, &field_e)
+                    return false if field_s < field_e and not rh_pylock_artifact_field(data, pool, artifacts, hashes, artifact_index, field_s, field_e, unknown_out)
+                    field_start <- field_cursor + 1
+                else:
+                    if field_quote != 0:
+                        field_quote <- 0 if data[field_cursor] == field_quote
+                    elif data[field_cursor] == 34 or data[field_cursor] == 39:
+                        field_quote <- data[field_cursor]
+                    elif data[field_cursor] == 123:
+                        field_depth <- field_depth + 1
+                    elif data[field_cursor] == 125:
+                        field_depth <- field_depth - 1 if field_depth > 0
+                    return false if data[field_cursor] == 92
+                field_cursor <- field_cursor + 1
+            next_out[0] <- close + 1
+            true
+
+        def rh_pylock_inline_artifact_array(data: mutable darray[u8]&, pool: mutable darray[u8]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, owner: i64, kind: u8, start: usize, unknown_out: mutable i64&, close_out: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= data.count or data[start] != 91
+            cursor: mutable usize = start + 1
+            while cursor < data.count |cursor, data, pool, artifacts, hashes, owner, kind, unknown_out, close_out|:
+                while cursor < data.count and (data[cursor] == 32 or data[cursor] == 9 or data[cursor] == 13 or data[cursor] == 10) |cursor, data|:
+                    cursor <- cursor + 1
+                if cursor < data.count and data[cursor] == 35:
+                    cursor <- while comment < data.count and data[comment] != 10 |comment: usize = cursor, data| -> comment:
+                        comment <- comment + 1
+                    continue
+                return false if cursor >= data.count
+                if data[cursor] == 93:
+                    close_out[0] <- cursor
+                    return true
+                return false if data[cursor] != 123
+                next: mutable usize = 0
+                return false if not rh_pylock_inline_artifact(data, pool, artifacts, hashes, owner, kind, cursor, data.count, unknown_out, &next)
+                cursor <- next
+                while cursor < data.count and (data[cursor] == 32 or data[cursor] == 9 or data[cursor] == 13 or data[cursor] == 10) |cursor, data|:
+                    cursor <- cursor + 1
+                if cursor < data.count and data[cursor] == 44:
+                    cursor <- cursor + 1
+                elif cursor < data.count and data[cursor] == 93:
+                    close_out[0] <- cursor
+                    return true
+                else:
+                    return false
+            false
 
         def rh_pylock_trim(data: darray[u8]&, start: mutable usize&, end: mutable usize&) -> void can[Memory.Allocate, Abort.Panic]:
             while start[0] < end[0] and (data[start[0]] == 32 or data[start[0]] == 9 or data[start[0]] == 13) |data, start, end|:
@@ -485,6 +566,26 @@ module Pylock:
                                 return -1 if pkg4.python_s >= 0
                                 return -1 if not rh_pylock_scalar_string(data, pool, value_s, value_end, &pkg4.python_s, &pkg4.python_e)
                                 packages[package_index.usize()] <- pkg4
+                            elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "wheels"):
+                                return -1 if value_s >= value_end or data[value_s] != 91 or rh_pylock_artifact_exists(artifacts, package_index, 1)
+                                closed_at: mutable usize = 0
+                                return -1 if not rh_pylock_inline_artifact_array(data, pool, artifacts, hashes, package_index, 1, value_s, unknown_artifact, &closed_at)
+                                line_start <- closed_at + 1
+                                line_end <- closed_at
+                            elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "sdist"):
+                                return -1 if value_s >= value_end or data[value_s] != 123 or rh_pylock_artifact_exists(artifacts, package_index, 2)
+                                next: mutable usize = 0
+                                return -1 if not rh_pylock_inline_artifact(data, pool, artifacts, hashes, package_index, 2, value_s, value_end, unknown_artifact, &next)
+                                while next < value_end and (data[next] == 32 or data[next] == 9) |next, data, value_end|:
+                                    next <- next + 1
+                                return -1 if next != value_end
+                            elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "archive"):
+                                return -1 if value_s >= value_end or data[value_s] != 123 or rh_pylock_artifact_exists(artifacts, package_index, 3)
+                                next2: mutable usize = 0
+                                return -1 if not rh_pylock_inline_artifact(data, pool, artifacts, hashes, package_index, 3, value_s, value_end, unknown_artifact, &next2)
+                                while next2 < value_end and (data[next2] == 32 or data[next2] == 9) |next2, data, value_end|:
+                                    next2 <- next2 + 1
+                                return -1 if next2 != value_end
                             elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "dependencies"):
                                 pkg5: mutable RhPylockPackage = packages[package_index.usize()]
                                 return -1 if pkg5.dependency_array == 1 or value_s >= value_end or data[value_s] != 91

@@ -78,6 +78,14 @@ version = '1.0.0'
 name = 'private'
 [packages.dependencies.vcs]
 url = 'https://example.invalid/private'
+
+[[packages]]
+name = 'inline-artifact-consumer'
+wheels = [
+  {name = 'inline.whl', url = 'https://files.example.invalid/inline.whl', hashes = {sha256 = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'}},
+  {name = 'inline-alt.whl', path = 'vendor/inline-alt.whl', hashes = {sha512 = '11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111'}},
+]
+sdist = {name = 'inline.tar.gz', url = 'https://files.example.invalid/inline.tar.gz', hashes = {sha256 = '2222222222222222222222222222222222222222222222222222222222222222'}}
 EOF
 
 "$ROOT/build/rh_cli" pylock --input "$T/pylock.toml" --out "$T/result.json" | grep -q 'PEP 751 audit emitted' || fail "command did not emit audit"
@@ -93,7 +101,7 @@ assert report["input_sha256"] == hashlib.sha256(source).hexdigest(), report
 assert report["root_relationship"] == "not_recorded", report
 assert report["dependency_semantics"] == "informational_only", report
 pkgs = report["packages"]
-assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-consumer", "context-consumer", "missing-consumer", "table-context-consumer"], pkgs
+assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-consumer", "context-consumer", "missing-consumer", "table-context-consumer", "inline-artifact-consumer"], pkgs
 assert pkgs[0]["marker"] == "sys_platform == 'linux' # retained inside string", pkgs[0]
 assert pkgs[2]["dependencies"] == [{"name": "attrs", "version": "25.1.0", "target": 0, "resolution": "resolved"}], pkgs[2]
 assert pkgs[3]["dependencies"][0]["resolution"] == "ambiguous", pkgs[3]
@@ -111,7 +119,13 @@ assert pkgs[0]["artifacts"][0]["source_kind"] == "url", pkgs[0]["artifacts"][0]
 assert pkgs[0]["artifacts"][0]["source_sha256"] == hashlib.sha256(b"https://files.example.invalid/attrs-25.1.0.whl").hexdigest(), pkgs[0]["artifacts"][0]
 assert pkgs[0]["artifacts"][1]["source_kind"] == "path", pkgs[0]["artifacts"][1]
 assert pkgs[4]["artifacts"][0]["kind"] == "archive" and pkgs[4]["artifacts"][0]["source_kind"] == "path", pkgs[4]
-assert "https://files.example.invalid/attrs-25.1.0.whl" not in json.dumps(report), report
+assert [a["kind"] for a in pkgs[7]["artifacts"]] == ["wheel", "wheel", "sdist"], pkgs[7]
+assert pkgs[7]["artifacts"][0]["hashes"] == [{"algorithm": "sha256", "value": "f" * 64}], pkgs[7]["artifacts"][0]
+assert pkgs[7]["artifacts"][1]["hashes"] == [{"algorithm": "sha512", "value": "1" * 128}], pkgs[7]["artifacts"][1]
+assert pkgs[7]["artifacts"][0]["source_sha256"] == hashlib.sha256(b"https://files.example.invalid/inline.whl").hexdigest(), pkgs[7]["artifacts"][0]
+serialized = json.dumps(report)
+for locator in ["https://files.example.invalid/attrs-25.1.0.whl", "https://files.example.invalid/inline.whl", "vendor/inline-alt.whl"]:
+    assert locator not in serialized, report
 coverage = report["coverage"]
 assert coverage["direct_dependencies"] == "not_recorded" and coverage["markers_evaluated"] is False, coverage
 assert coverage["artifacts_projected"] is False and coverage["artifact_hashes_projected"] is True, coverage
