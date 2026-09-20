@@ -39,6 +39,7 @@ assert metrics["roles.file_declaration_count"]["value"] == 2, metrics
 assert metrics["roles.operator_declaration_count"]["value"] == 1, metrics
 assert metrics["maintainer.role_assignments_with_end_dates"]["value"] == 1, metrics
 assert metrics["maintainer.declared_current"]["value"] == 1 and metrics["maintainer.declared_current"]["as_of"] == 350, metrics
+assert metrics["maintainer.permission_observed_current"]["value"] == 1, metrics
 roles = [(q["actor_id"], q["as_of"], q["declared_role"]) for q in d["queries"]]
 assert roles == [(1, 150, "owner"), (2, 150, "triager"), (2, 250, "unknown"),
                  (3, 250, "unknown"), (3, 350, "member"), (4, 150, "unknown")], roles
