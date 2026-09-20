@@ -73,12 +73,13 @@ are not automatically matched against a package graph.
 `rh-pylock-audit/1`, bound to the exact source bytes by SHA-256. PEP 751 records package-to-package relationships for
 auditing but does not record project-root requirements, and those relationships
 are informational. The audit therefore preserves package markers and Python
-version constraints without evaluating them, reports missing or ambiguous
-references, and retains expected hashes for bounded wheel, sdist, and archive
-entries. URL and path locators are represented by SHA-256 fingerprints. It
-retains declared artifact sizes when present, and represents package index URLs
-only by SHA-256 fingerprints. It counts lock fields it does not project and
-does not create a `rh-dep-graph/1` or OSV input.
+version constraints without evaluating them, preserves top-level environment,
+extra, and dependency-group declarations without selecting them, reports
+missing or ambiguous references, and retains expected hashes for bounded wheel,
+sdist, and archive entries. URL and path locators are represented by SHA-256
+fingerprints. It retains declared artifact sizes when present, and represents
+package index URLs only by SHA-256 fingerprints. It counts lock fields it does
+not project and does not create a `rh-dep-graph/1` or OSV input.
 `rh_cli pylock-observe` verifies caller-supplied bytes against expected
 SHA-256, SHA-384, and SHA-512 values, compares the declared size when present,
 and writes a separate

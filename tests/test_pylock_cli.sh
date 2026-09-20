@@ -14,7 +14,17 @@ cat > "$T/pylock.toml" <<'EOF'
 lock-version = '1.0'
 created-by = 'uv'
 requires-python = '>=3.12'
-environments = ["sys_platform == 'win32'", "sys_platform == 'linux'"]
+environments = [
+  "sys_platform == 'win32'",
+  # The marker's single quotes are part of this TOML string.
+  "sys_platform == 'linux'",
+]
+extras = ['speedups', 'docs']
+dependency-groups = [
+  'dev',
+  'test',
+]
+default-groups = ['dev']
 
 [[packages]]
 name = 'attrs'
@@ -105,6 +115,10 @@ assert report["created_by"] == "uv" and report["requires_python"] == ">=3.12", r
 assert report["input_sha256"] == hashlib.sha256(source).hexdigest(), report
 assert report["root_relationship"] == "not_recorded", report
 assert report["dependency_semantics"] == "informational_only", report
+assert report["environments"] == ["sys_platform == 'win32'", "sys_platform == 'linux'"], report
+assert report["extras"] == ["speedups", "docs"], report
+assert report["dependency_groups"] == ["dev", "test"], report
+assert report["default_groups"] == ["dev"], report
 pkgs = report["packages"]
 assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-consumer", "context-consumer", "missing-consumer", "table-context-consumer", "inline-artifact-consumer"], pkgs
 assert pkgs[0]["marker"] == "sys_platform == 'linux' # retained inside string", pkgs[0]
@@ -141,7 +155,7 @@ for locator in ["https://index.example.invalid/simple/", "https://files.example.
 coverage = report["coverage"]
 assert coverage["direct_dependencies"] == "not_recorded" and coverage["markers_evaluated"] is False, coverage
 assert coverage["artifacts_projected"] is False and coverage["artifact_hashes_projected"] is True, coverage
-assert coverage["unprojected_artifact_fields"] == 0 and coverage["unprojected_top_level_fields"] == 1, coverage
+assert coverage["unprojected_artifact_fields"] == 0 and coverage["unprojected_top_level_fields"] == 0, coverage
 assert coverage["unprojected_package_fields"] == 0 and coverage["unprojected_dependency_fields"] == 2, coverage
 assert coverage["unprojected_tables"] == 1, coverage
 print("[pylock] PEP 751 relationships and loss coverage OK")
@@ -197,11 +211,14 @@ EOF
 "$ROOT/build/rh_cli" pylock --input "$T/partial-artifact.toml" --out "$T/partial-artifact.json" >/dev/null
 python3 - "$T/partial-artifact.json" <<'PY'
 import json, sys
-coverage = json.load(open(sys.argv[1]))["coverage"]
-artifact = json.load(open(sys.argv[1]))["packages"][0]["artifacts"][0]
+report = json.load(open(sys.argv[1]))
+coverage = report["coverage"]
+artifact = report["packages"][0]["artifacts"][0]
 assert artifact["size_bytes"] == 128, artifact
 assert coverage["artifact_hashes_projected"] is True, coverage
 assert coverage["unprojected_artifact_fields"] == 0, coverage
+assert report["environments"] == [] and report["extras"] == [], report
+assert report["dependency_groups"] == [] and report["default_groups"] == [], report
 PY
 
 sed "s/size = 1_28/size = -1/" "$T/partial-artifact.toml" > "$T/negative-artifact-size.toml"
@@ -228,6 +245,20 @@ set +e
 rc_empty_index=$?
 set -e
 [[ "$rc_empty_index" -eq 4 ]] || fail "empty package index must fail closed (got $rc_empty_index)"
+
+cat > "$T/duplicate-context-array.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+extras = []
+extras = ['duplicate']
+[[packages]]
+name = 'x'
+EOF
+set +e
+"$ROOT/build/rh_cli" pylock --input "$T/duplicate-context-array.toml" --out "$T/duplicate-context-array.json" >/dev/null 2>&1
+rc_duplicate_context=$?
+set -e
+[[ "$rc_duplicate_context" -eq 4 ]] || fail "duplicate context arrays must fail closed (got $rc_duplicate_context)"
 
 echo "[pylock] local artifact hashes bind to audit and file bytes"
 "$ROOT/build/rh_cli" pylock-observe \

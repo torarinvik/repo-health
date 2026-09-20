@@ -25,6 +25,8 @@ on the real execution path.
   report keeps package markers and Python constraints, marks dependency links
   informational, and never invents a project-root relationship that the format
   does not record; `input_sha256` binds the result to the exact lock bytes.
+  The top-level environment, extra, dependency-group, and default-group arrays are
+  preserved in declaration order without evaluating selection semantics.
   Missing, ambiguous, and source-specific references remain distinct. Bounded
   wheel, sdist, and archive records retain expected hash values and fingerprint
   URL/path locators with SHA-256 without publishing the locators, including

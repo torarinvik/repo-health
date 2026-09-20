@@ -15,6 +15,21 @@ module Pylock:
         const RH_PYLOCK_MAX_ARTIFACTS: i64 = 200000
         const RH_PYLOCK_MAX_HASHES: i64 = 200000
         const RH_PYLOCK_MAX_HASHES_PER_ARTIFACT: i64 = 64
+        const RH_PYLOCK_MAX_CONTEXT_VALUES: i64 = 10000
+
+        struct RhPylockText:
+            start: mutable i64
+            end: mutable i64
+
+        struct RhPylockMetadata:
+            environments: mutable darray[RhPylockText]
+            extras: mutable darray[RhPylockText]
+            dependency_groups: mutable darray[RhPylockText]
+            default_groups: mutable darray[RhPylockText]
+            environments_seen: mutable bool
+            extras_seen: mutable bool
+            dependency_groups_seen: mutable bool
+            default_groups_seen: mutable bool
 
         struct RhPylockPackage:
             name_s: mutable i64
@@ -361,6 +376,7 @@ module Pylock:
             limit: mutable usize = end
             close: usize =
                 while i < limit |i: usize = value_start, data, quote, limit| -> i:
+                    return false if data[i] == 10 or data[i] == 13
                     return false if data[i] == 92
                     break if data[i] == quote
                     i <- i + 1
@@ -376,6 +392,56 @@ module Pylock:
             while next < end and (data[next] == 32 or data[next] == 9) |next, data, end|:
                 next <- next + 1
             next == end
+
+        def rh_pylock_array_trivia(data: mutable darray[u8]&, cursor: mutable usize&) -> void can[Memory.Allocate, Abort.Panic]:
+            while cursor[0] < data.count |cursor, data|:
+                if data[cursor[0]] == 32 or data[cursor[0]] == 9 or data[cursor[0]] == 10 or data[cursor[0]] == 13:
+                    cursor[0] <- cursor[0] + 1
+                elif data[cursor[0]] == 35:
+                    cursor[0] <- while comment < data.count and data[comment] != 10 |comment: usize = cursor[0], data| -> comment:
+                        comment <- comment + 1
+                else:
+                    break
+
+        def rh_pylock_array_line_tail(data: mutable darray[u8]&, close: usize, line_end_out: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            line_end: usize =
+                while i < data.count and data[i] != 10 |i: usize = close + 1, data| -> i:
+                    i <- i + 1
+            cursor: mutable usize = close + 1
+            while cursor < line_end and (data[cursor] == 32 or data[cursor] == 9 or data[cursor] == 13) |cursor, data, line_end|:
+                cursor <- cursor + 1
+            return false if cursor < line_end and data[cursor] != 35
+            line_end_out[0] <- line_end
+            true
+
+        # Project the PEP 751 string-array fields without evaluating their
+        # environment or group semantics. Multiline arrays and TOML comments
+        # are retained; unsupported string escapes fail closed.
+        def rh_pylock_string_array(data: mutable darray[u8]&, pool: mutable darray[u8]&, values: mutable darray[RhPylockText]&, start: usize, close_out: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= data.count or data[start] != 91
+            cursor: mutable usize = start + 1
+            while cursor < data.count |cursor, data, pool, values, close_out|:
+                rh_pylock_array_trivia(data, &cursor)
+                return false if cursor >= data.count
+                if data[cursor] == 93:
+                    close_out[0] <- cursor
+                    return true
+                return false if values.count.i64() >= RH_PYLOCK_MAX_CONTEXT_VALUES
+                value_s: mutable i64 = -1
+                value_e: mutable i64 = -1
+                next: mutable usize = 0
+                return false if not rh_pylock_string(data, pool, cursor, data.count, &value_s, &value_e, &next)
+                values.push(RhPylockText{start: value_s, end: value_e})
+                cursor <- next
+                rh_pylock_array_trivia(data, &cursor)
+                if cursor < data.count and data[cursor] == 44:
+                    cursor <- cursor + 1
+                elif cursor < data.count and data[cursor] == 93:
+                    close_out[0] <- cursor
+                    return true
+                else:
+                    return false
+            false
 
         def rh_pylock_assignment(data: mutable darray[u8]&, start: usize, end: usize, key_s: mutable usize&, key_e: mutable usize&, value_s: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             limit: mutable usize = end
@@ -512,7 +578,7 @@ module Pylock:
                 cursor <- cursor + 1
             square_depth == 0 and quote == 0
 
-        def rh_pylock_parse(data: mutable darray[u8]&, pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, refs: mutable darray[RhPylockReference]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, created_s: mutable i64&, created_e: mutable i64&, python_s: mutable i64&, python_e: mutable i64&, unknown_top: mutable i64&, unknown_package: mutable i64&, unknown_dependency: mutable i64&, unknown_artifact: mutable i64&, unknown_tables: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_pylock_parse(data: mutable darray[u8]&, pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, refs: mutable darray[RhPylockReference]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, metadata: mutable RhPylockMetadata&, created_s: mutable i64&, created_e: mutable i64&, python_s: mutable i64&, python_e: mutable i64&, unknown_top: mutable i64&, unknown_package: mutable i64&, unknown_dependency: mutable i64&, unknown_artifact: mutable i64&, unknown_tables: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if data.count == 0 or data.count > RH_PYLOCK_MAX_BYTES
             section: mutable i64 = 0
             package_index: mutable i64 = -1
@@ -521,7 +587,7 @@ module Pylock:
             packages_seen: mutable bool = false
             lock_version_ok: mutable bool = false
             line_start: mutable usize = 0
-            while line_start <= data.count |line_start, data, pool, packages, refs, artifacts, hashes, created_s, created_e, python_s, python_e, unknown_top, unknown_package, unknown_dependency, unknown_artifact, unknown_tables, section, package_index, reference_index, artifact_index, packages_seen, lock_version_ok|:
+            while line_start <= data.count |line_start, data, pool, packages, refs, artifacts, hashes, metadata, created_s, created_e, python_s, python_e, unknown_top, unknown_package, unknown_dependency, unknown_artifact, unknown_tables, section, package_index, reference_index, artifact_index, packages_seen, lock_version_ok|:
                 line_end: mutable usize =
                     while i < data.count and data[i] != 10 |i: usize = line_start, data| -> i:
                         i <- i + 1
@@ -611,6 +677,38 @@ module Pylock:
                             elif section == 0 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "requires-python"):
                                 return -1 if python_s[0] >= 0
                                 return -1 if not rh_pylock_scalar_string(data, pool, value_s, value_end, &python_s[0], &python_e[0])
+                            elif section == 0 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "environments"):
+                                return -1 if metadata.environments_seen
+                                close: mutable usize = 0
+                                return -1 if not rh_pylock_string_array(data, pool, metadata.environments, value_s, &close)
+                                close_line_end: mutable usize = close
+                                return -1 if not rh_pylock_array_line_tail(data, close, &close_line_end)
+                                metadata.environments_seen <- true
+                                line_end <- close_line_end
+                            elif section == 0 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "extras"):
+                                return -1 if metadata.extras_seen
+                                close2: mutable usize = 0
+                                return -1 if not rh_pylock_string_array(data, pool, metadata.extras, value_s, &close2)
+                                close_line_end2: mutable usize = close2
+                                return -1 if not rh_pylock_array_line_tail(data, close2, &close_line_end2)
+                                metadata.extras_seen <- true
+                                line_end <- close_line_end2
+                            elif section == 0 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "dependency-groups"):
+                                return -1 if metadata.dependency_groups_seen
+                                close3: mutable usize = 0
+                                return -1 if not rh_pylock_string_array(data, pool, metadata.dependency_groups, value_s, &close3)
+                                close_line_end3: mutable usize = close3
+                                return -1 if not rh_pylock_array_line_tail(data, close3, &close_line_end3)
+                                metadata.dependency_groups_seen <- true
+                                line_end <- close_line_end3
+                            elif section == 0 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "default-groups"):
+                                return -1 if metadata.default_groups_seen
+                                close4: mutable usize = 0
+                                return -1 if not rh_pylock_string_array(data, pool, metadata.default_groups, value_s, &close4)
+                                close_line_end4: mutable usize = close4
+                                return -1 if not rh_pylock_array_line_tail(data, close4, &close_line_end4)
+                                metadata.default_groups_seen <- true
+                                line_end <- close_line_end4
                             elif section == 1 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "name"):
                                 pkg: mutable RhPylockPackage = packages[package_index.usize()]
                                 return -1 if pkg.name_s >= 0
@@ -709,6 +807,15 @@ module Pylock:
                 Base::rh_json_escape(out, pool, start.usize(), end.usize())
                 out.push(34)
 
+        def rh_pylock_emit_strings(out: mutable darray[u8]&, pool: darray[u8]&, values: darray[RhPylockText]&) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(91)
+            for index in 0..<values.count |index, values, pool, out|:
+                if index > 0:
+                    out.push(44)
+                value: RhPylockText = values[index]
+                rh_pylock_emit_string(out, pool, value.start, value.end)
+            out.push(93)
+
         def rh_pylock_emit_fingerprint(out: mutable darray[u8]&, pool: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
             if start < 0:
                 Base::rh_push_text(out, "null")
@@ -745,6 +852,7 @@ module Pylock:
             references: mutable darray[RhPylockReference] = []
             artifacts: mutable darray[RhPylockArtifact] = []
             hashes: mutable darray[RhPylockArtifactHash] = []
+            metadata: mutable RhPylockMetadata = RhPylockMetadata{environments: [], extras: [], dependency_groups: [], default_groups: [], environments_seen: false, extras_seen: false, dependency_groups_seen: false, default_groups_seen: false}
             created_s: mutable i64 = -1
             created_e: mutable i64 = -1
             python_s: mutable i64 = -1
@@ -754,7 +862,7 @@ module Pylock:
             unknown_dependency: mutable i64 = 0
             unknown_artifact: mutable i64 = 0
             unknown_tables: mutable i64 = 0
-            return -1 if rh_pylock_parse(data, pool, packages, references, artifacts, hashes, &created_s, &created_e, &python_s, &python_e, &unknown_top, &unknown_package, &unknown_dependency, &unknown_artifact, &unknown_tables) != 0
+            return -1 if rh_pylock_parse(data, pool, packages, references, artifacts, hashes, metadata, &created_s, &created_e, &python_s, &python_e, &unknown_top, &unknown_package, &unknown_dependency, &unknown_artifact, &unknown_tables) != 0
             input_hash: mutable darray[u8] = []
             Sha256::rh_sha256(data, input_hash)
             Base::rh_push_text(out, "{\"schema\":\"rh-pylock-audit/1\",\"format\":\"PEP 751\",\"parser\":\"bounded-core-projection\",\"lock_version\":\"1.0\",\"created_by\":")
@@ -765,6 +873,14 @@ module Pylock:
             Base::rh_push_text(out, "\"")
             Base::rh_push_text(out, ",\"requires_python\":")
             rh_pylock_emit_string(out, pool, python_s, python_e)
+            Base::rh_push_text(out, ",\"environments\":")
+            rh_pylock_emit_strings(out, pool, metadata.environments)
+            Base::rh_push_text(out, ",\"extras\":")
+            rh_pylock_emit_strings(out, pool, metadata.extras)
+            Base::rh_push_text(out, ",\"dependency_groups\":")
+            rh_pylock_emit_strings(out, pool, metadata.dependency_groups)
+            Base::rh_push_text(out, ",\"default_groups\":")
+            rh_pylock_emit_strings(out, pool, metadata.default_groups)
             Base::rh_push_text(out, ",\"root_relationship\":\"not_recorded\",\"dependency_semantics\":\"informational_only\",\"packages\":[")
             artifact_cursor: mutable usize = 0
             hash_cursor: mutable usize = 0
