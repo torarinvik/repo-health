@@ -1250,7 +1250,7 @@ cross-source identity are deferred to M04.
 | 8 | First ten foundational metrics | `implemented` (see table) |
 | 9 | JSON/Markdown report + explain | `implemented` (report.json/md; `rh_cli explain` emits `repo-health-explain/1`) |
 | 10 | Extend to the initial 30–40 metric subset | `implemented` (209 metric definitions are implemented; registry/status agreement and admission lint pass in `tests/test_m00.sh`) |
-| 11 | PostgreSQL ingestion, cursor transaction, and lease tests | `partial` (target migrations and static contract checks exist; the application still uses filesystem ingestion, and live PostgreSQL crash-boundary rehearsal has not run) |
+| 11 | PostgreSQL ingestion, cursor transaction, and lease tests | `partial` (the PostgreSQL 16 migration and live fencing/cursor function rehearsal passed on 2026-09-20 via `RH_PG_MIGRATION=1 bash tests/test_migrations.sh`; the application still uses filesystem ingestion, and database crash/restart boundary tests remain open) |
 | 12 | First forge adapter and controlled-instance fixtures | `implemented` (GitHub normalization, captured workflow events, and controlled connector-instance checks in `tests/test_forge_cli.sh`, `tests/test_forge_events_cli.sh`, and `tests/test_connector_cli.sh`) |
 | 13 | Second forge plus generic self-hosted URL support | `implemented` (GitLab, Gitea, Forgejo, and Bitbucket mappings plus approved self-hosted connector fixtures; `tests/test_m02.sh`, `tests/test_forge_cli.sh`, `tests/test_connector_cli.sh`) |
 | 14 | Package identity and first lockfile parser | `implemented` (Cargo and npm graph parsers with exact contextual resolution; `tests/test_deps_cli.sh`) |
