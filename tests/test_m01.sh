@@ -71,7 +71,8 @@ assert m["activity.active_complete_months"]["value"] == 3, m
 assert m["activity.accepted_changes"]["value"] == 3, m
 assert m["activity.active_months"]["value"] == 3, m
 assert m["contributor.source_accounts"]["value"] == 2, m
-assert len(d["metrics"]) == 37, d
+assert m["coverage.lineage_complete_share"]["value"] == {"num": 1, "den": 1}, m
+assert len(d["metrics"]) == 38, d
 coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "coverage.window_completeness"}
 assert coverage[("coverage.window_completeness", "1.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "1.0.0")]["value"]["den"], coverage
 assert coverage[("coverage.window_completeness", "2.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "2.0.0")]["value"]["den"], coverage
