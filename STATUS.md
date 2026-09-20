@@ -138,7 +138,8 @@ withdrawn excluded from current matches, fixed-only ranges treated as
 vulnerable-from-start per OSV semantics, unsupported ranges unknown),
 canonical `rh-dep-graph/1` JSON with byte-checked goldens.
 Cargo lock resolution now filters by exact locked version and, when present,
-the exact registry/Git source locator. Cargo and npm lock nodes retain source
+the exact registry/Git source locator, including sparse registry sources.
+Cargo and npm lock nodes retain source
 locators as SHA-256 fingerprints while keeping raw locators out of reports;
 the Cargo registry-collision and npm nested-package fixtures verify equal
 name/version coordinates from distinct sources remain separate. A missing
