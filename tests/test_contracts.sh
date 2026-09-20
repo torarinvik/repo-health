@@ -48,7 +48,7 @@ for want in ("dep-graph", "canonical-repo", "bundle-manifest", "report",
              "notify-state", "store-lease-result", "policy-state",
              "corrections-state", "connector-instance", "job-next",
              "job-schedule-result",
-             "reconcile-result", "job-schedule-result",
+             "reconcile-result", "job-schedule-result", "projection-snapshot",
              "worker-plan", "succession-metric", "adapter-manifest-result", "research-conformance", "pilot-review-result", "provider-roles-input", "ecosystem-lookup-result", "forge-events-result"):
     assert want in ids, ("missing contract", want)
 assert d["rules"], "contract rules must be stated"
