@@ -8,11 +8,157 @@
 
 include "./rh_graph.elisa"
 include "./rh_store.elisa"
+include "./rh_json.elisa"
 
 module ProjectionStore:
     private:
-        def rh_projection_snapshot_body(raw: darray[u8]&, projection: Graph::RhProjection&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-            Base::rh_push_text(out, "{\"schema\":\"rh-projection-snapshot/1\",\"projection\":{\"id\":")
+        def rh_projection_snapshot_private(private_ids: darray[i64]&, id: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < private_ids.count |i: usize = 0, private_ids, id|:
+                return true if private_ids[i] == id
+                i <- i + 1
+            false
+
+        def rh_projection_snapshot_optional_i64(raw: darray[u8]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            field: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            return 0 if field < 0
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, field, &ok)
+            return -1 if ok != 1 or value < 0
+            out.push(44)
+            out.push(34)
+            Base::rh_push_text(out, key)
+            Base::rh_push_text(out, "\":")
+            Base::rh_push_decimal_i64(out, value)
+            1
+
+        # Emit only fields consumed by a downstream graph projection. Dropping
+        # unknown fields, unresolved declarations, and advisory witnesses avoids
+        # carrying private or otherwise unreviewed payloads into a public cache.
+        def rh_projection_snapshot_graph(raw: darray[u8]&, private_ids: darray[i64]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            schema: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
+            schema_start: mutable i64 = 0
+            schema_end: mutable i64 = 0
+            return -1 if not Json::rh_json_str_span(nodes, schema, &schema_start, &schema_end)
+            return -1 if not Base::rh_bytes_equal_literal(texts, schema_start, schema_end, "rh-dep-graph/1")
+            ecosystem: i64 = Json::rh_json_obj_get(nodes, texts, root, "ecosystem")
+            ecosystem_start: mutable i64 = 0
+            ecosystem_end: mutable i64 = 0
+            return -1 if not Json::rh_json_str_span(nodes, ecosystem, &ecosystem_start, &ecosystem_end)
+            known_ecosystem: bool = Base::rh_bytes_equal_literal(texts, ecosystem_start, ecosystem_end, "cargo") or Base::rh_bytes_equal_literal(texts, ecosystem_start, ecosystem_end, "npm") or Base::rh_bytes_equal_literal(texts, ecosystem_start, ecosystem_end, "pypi") or Base::rh_bytes_equal_literal(texts, ecosystem_start, ecosystem_end, "go") or Base::rh_bytes_equal_literal(texts, ecosystem_start, ecosystem_end, "rubygems") or Base::rh_bytes_equal_literal(texts, ecosystem_start, ecosystem_end, "composer") or Base::rh_bytes_equal_literal(texts, ecosystem_start, ecosystem_end, "nuget") or Base::rh_bytes_equal_literal(texts, ecosystem_start, ecosystem_end, "maven")
+            return -1 if not known_ecosystem
+            nodes_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "nodes")
+            edges_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "edges")
+            return -1 if nodes_idx < 0 or edges_idx < 0
+            return -1 if nodes[nodes_idx.usize()].kind != Json::RH_JSON_ARR or nodes[edges_idx.usize()].kind != Json::RH_JSON_ARR
+
+            node_array: Json::RhJsonNode = nodes[nodes_idx.usize()]
+            node_map: mutable darray[i64] = []
+            while i < node_array.child_count.usize() |i: usize = 0, node_array, node_map|:
+                node_map.push(-1)
+                i <- i + 1
+            public_count: mutable i64 = 0
+            while child >= 0 |child: i64 = node_array.first_child, source_id: i64 = 0, nodes, texts, raw, private_ids, node_map, public_count|:
+                return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                id_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "id")
+                id_ok: mutable i64 = 0
+                node_id: i64 = Json::rh_json_int(nodes, raw, id_idx, &id_ok)
+                return -1 if id_ok != 1 or node_id != source_id
+                if not ProjectionStore::rh_projection_snapshot_private(private_ids, node_id):
+                    node_map[source_id.usize()] <- public_count
+                    public_count <- public_count + 1
+                source_id <- source_id + 1
+                child <- nodes[child.usize()].next_sibling
+
+            Base::rh_push_text(out, "{\"schema\":\"rh-dep-graph/1\",\"ecosystem\":\"")
+            Base::rh_json_escape(out, texts, ecosystem_start.usize(), ecosystem_end.usize())
+            Base::rh_push_text(out, "\",\"nodes\":[")
+            public_written: mutable i64 = 0
+            while child >= 0 |child: i64 = node_array.first_child, source_id: i64 = 0, nodes, texts, raw, node_map, public_written, out|:
+                public_id: i64 = node_map[source_id.usize()]
+                if public_id >= 0:
+                    return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                    if public_written > 0:
+                        out.push(44)
+                    name_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "name")
+                    name_start: mutable i64 = 0
+                    name_end: mutable i64 = 0
+                    return -1 if not Json::rh_json_str_span(nodes, name_idx, &name_start, &name_end)
+                    version_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "version")
+                    return -1 if version_idx < 0
+                    Base::rh_push_text(out, "{\"id\":")
+                    Base::rh_push_decimal_i64(out, public_id)
+                    Base::rh_push_text(out, ",\"name\":\"")
+                    Base::rh_json_escape(out, texts, name_start.usize(), name_end.usize())
+                    Base::rh_push_text(out, "\",\"version\":")
+                    version: Json::RhJsonNode = nodes[version_idx.usize()]
+                    if version.kind == Json::RH_JSON_NULL:
+                        Base::rh_push_text(out, "null")
+                    elif version.kind == Json::RH_JSON_STR:
+                        version_start: mutable i64 = 0
+                        version_end: mutable i64 = 0
+                        return -1 if not Json::rh_json_str_span(nodes, version_idx, &version_start, &version_end)
+                        out.push(34)
+                        Base::rh_json_escape(out, texts, version_start.usize(), version_end.usize())
+                        out.push(34)
+                    else:
+                        return -1
+                    out.push(125)
+                    public_written <- public_written + 1
+                source_id <- source_id + 1
+                child <- nodes[child.usize()].next_sibling
+
+            Base::rh_push_text(out, "],\"edges\":[")
+            edge_array: Json::RhJsonNode = nodes[edges_idx.usize()]
+            edge_written: mutable i64 = 0
+            while child >= 0 |child: i64 = edge_array.first_child, nodes, texts, raw, node_map, edge_written, out|:
+                return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                from_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "from")
+                to_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "to")
+                from_ok: mutable i64 = 0
+                to_ok: mutable i64 = 0
+                from_id: i64 = Json::rh_json_int(nodes, raw, from_idx, &from_ok)
+                to_id: i64 = Json::rh_json_int(nodes, raw, to_idx, &to_ok)
+                return -1 if from_ok != 1 or to_ok != 1 or from_id < 0 or to_id < 0 or from_id >= node_map.count.i64() or to_id >= node_map.count.i64()
+                public_from: i64 = node_map[from_id.usize()]
+                public_to: i64 = node_map[to_id.usize()]
+                if public_from >= 0 and public_to >= 0:
+                    if edge_written > 0:
+                        out.push(44)
+                    Base::rh_push_text(out, "{\"from\":")
+                    Base::rh_push_decimal_i64(out, public_from)
+                    Base::rh_push_text(out, ",\"to\":")
+                    Base::rh_push_decimal_i64(out, public_to)
+                    scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "scope")
+                    scope_start: mutable i64 = 0
+                    scope_end: mutable i64 = 0
+                    if Json::rh_json_str_span(nodes, scope_idx, &scope_start, &scope_end):
+                        if Base::rh_bytes_equal_literal(texts, scope_start, scope_end, "dev"):
+                            Base::rh_push_text(out, ",\"scope\":\"dev\"")
+                        elif Base::rh_bytes_equal_literal(texts, scope_start, scope_end, "optional"):
+                            Base::rh_push_text(out, ",\"scope\":\"optional\"")
+                        elif Base::rh_bytes_equal_literal(texts, scope_start, scope_end, "peer"):
+                            Base::rh_push_text(out, ",\"scope\":\"peer\"")
+                        else:
+                            Base::rh_push_text(out, ",\"scope\":\"normal\"")
+                    return -1 if ProjectionStore::rh_projection_snapshot_optional_i64(raw, nodes, texts, child, "platform", out) < 0
+                    return -1 if ProjectionStore::rh_projection_snapshot_optional_i64(raw, nodes, texts, child, "introduced", out) < 0
+                    return -1 if ProjectionStore::rh_projection_snapshot_optional_i64(raw, nodes, texts, child, "removed", out) < 0
+                    return -1 if ProjectionStore::rh_projection_snapshot_optional_i64(raw, nodes, texts, child, "first_seen", out) < 0
+                    out.push(125)
+                    edge_written <- edge_written + 1
+                child <- nodes[child.usize()].next_sibling
+            Base::rh_push_text(out, "],\"unresolved\":[],\"advisories\":[]}")
+            0
+
+        def rh_projection_snapshot_body(raw: darray[u8]&, private_ids: darray[i64]&, projection: Graph::RhProjection&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if not projection.public_only
+            graph: mutable darray[u8] = []
+            return -1 if ProjectionStore::rh_projection_snapshot_graph(raw, private_ids, graph) != 0
+            Base::rh_push_text(out, "{\"schema\":\"rh-projection-snapshot/2\",\"projection\":{\"id\":")
             Base::rh_push_decimal_i64(out, projection.id)
             Base::rh_push_text(out, ",\"scope_filter\":")
             Base::rh_push_decimal_i64(out, projection.scope_filter.i64())
@@ -33,8 +179,9 @@ module ProjectionStore:
             Base::rh_push_text(out, ",\"max_depth\":")
             Base::rh_push_decimal_i64(out, projection.max_depth)
             Base::rh_push_text(out, "},\"graph\":")
-            out.extend(bytes_view(raw))
+            out.extend(bytes_view(graph))
             out.push(125)
+            0
 
         def rh_projection_snapshot_path(root: cstr, name: u8&, out: mutable darray[u8]&) -> cstr can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             Base::rh_push_cstr(out, root)
@@ -44,11 +191,11 @@ module ProjectionStore:
             (&out[0]).cast[cstr] can Unsafe.PointerCast
 
     public:
-        # Store a graph and its complete projection manifest as one immutable
+        # Store a public-only graph and its projection manifest as one immutable
         # object. id_out must be empty on entry and receives the snapshot ID.
-        def rh_projection_snapshot_store(root: cstr, raw: darray[u8]&, projection: Graph::RhProjection&, id_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_projection_snapshot_store(root: cstr, raw: darray[u8]&, private_ids: darray[i64]&, projection: Graph::RhProjection&, id_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             body: mutable darray[u8] = []
-            ProjectionStore::rh_projection_snapshot_body(raw, projection, body)
+            return -1 if ProjectionStore::rh_projection_snapshot_body(raw, private_ids, projection, body) != 0
             Store::rh_store_blob(root, body, id_out)
 
         # Load and digest-verify an immutable snapshot. A missing or tampered

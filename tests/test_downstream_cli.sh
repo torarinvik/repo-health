@@ -19,13 +19,13 @@ rm -rf "$T"; mkdir -p "$T"
 
 # Diamond: consumers point at dependencies. 1->2, 1->3, 2->4, 3->4.
 cat > "$T/diamond.json" <<'JSON'
-{"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"iso","version":"1"},{"id":1,"name":"top","version":"1"},{"id":2,"name":"mid-a","version":"1"},{"id":3,"name":"mid-b","version":"1"},{"id":4,"name":"leaf","version":"1"}],"edges":[{"from":1,"to":2,"scope":"normal"},{"from":1,"to":3,"scope":"normal"},{"from":2,"to":4,"scope":"normal"},{"from":3,"to":4,"scope":"normal"}],"unresolved":[],"advisories":[]}
+{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"iso","version":"1"},{"id":1,"name":"top","version":"1"},{"id":2,"name":"mid-a","version":"1"},{"id":3,"name":"mid-b","version":"1"},{"id":4,"name":"leaf","version":"1"}],"edges":[{"from":1,"to":2,"scope":"normal"},{"from":1,"to":3,"scope":"normal"},{"from":2,"to":4,"scope":"normal"},{"from":3,"to":4,"scope":"normal"}],"unresolved":[],"advisories":[]}
 JSON
 
 # Bitemporal edge evidence: introduced/removed are valid time; first_seen is
 # collector knowledge time. The two axes must remain independently queryable.
 cat > "$T/temporal.json" <<'JSON'
-{"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"focus","version":"1"},{"id":1,"name":"known-normal","version":"1"},{"id":2,"name":"late-dev","version":"2"},{"id":3,"name":"removed-normal","version":"3"},{"id":4,"name":"new-normal","version":"4"}],"edges":[{"from":1,"to":0,"scope":"normal","platform":1,"introduced":100,"first_seen":300},{"from":2,"to":0,"scope":"dev","platform":2,"introduced":100,"first_seen":400},{"from":3,"to":0,"scope":"normal","platform":1,"introduced":100,"removed":200,"first_seen":100},{"from":4,"to":0,"scope":"normal","platform":1,"introduced":250,"first_seen":100}],"unresolved":[],"advisories":[]}
+{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"focus","version":"1"},{"id":1,"name":"known-normal","version":"1"},{"id":2,"name":"late-dev","version":"2"},{"id":3,"name":"removed-normal","version":"3"},{"id":4,"name":"new-normal","version":"4"}],"edges":[{"from":1,"to":0,"scope":"normal","platform":1,"introduced":100,"first_seen":300},{"from":2,"to":0,"scope":"dev","platform":2,"introduced":100,"first_seen":400},{"from":3,"to":0,"scope":"normal","platform":1,"introduced":100,"removed":200,"first_seen":100},{"from":4,"to":0,"scope":"normal","platform":1,"introduced":250,"first_seen":100}],"unresolved":[],"advisories":[]}
 JSON
 
 echo "[downstream] valid time, known time, scope, and platform form an explicit v2 projection"
@@ -81,7 +81,7 @@ echo "[downstream] temporal projection snapshot identity OK"
 
 # Cycle: 1->2, 2->1 (plus an isolated node 0).
 cat > "$T/cycle.json" <<'JSON'
-{"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"iso","version":"1"},{"id":1,"name":"a","version":"1"},{"id":2,"name":"b","version":"1"}],"edges":[{"from":1,"to":2,"scope":"normal"},{"from":2,"to":1,"scope":"normal"}],"unresolved":[],"advisories":[]}
+{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"iso","version":"1"},{"id":1,"name":"a","version":"1"},{"id":2,"name":"b","version":"1"}],"edges":[{"from":1,"to":2,"scope":"normal"},{"from":2,"to":1,"scope":"normal"}],"unresolved":[],"advisories":[]}
 JSON
 
 echo "[downstream] diamond direct=2 transitive=3"
@@ -138,6 +138,30 @@ PY
 )
 [[ "$sid_a" != "$sid_c" ]] || fail "changed projection must create a new snapshot ID"
 echo "[downstream] projection snapshot OK"
+
+echo "[downstream] shared snapshot stores only the sanitized public graph"
+cat > "$T/private-snapshot.json" <<'JSON'
+{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"public-root","version":"1","custom":"PUBLIC-UNKNOWN-SECRET"},{"id":1,"name":"PRIVATE-NODE-SECRET","version":"9","token":"PRIVATE-UNKNOWN-SECRET"},{"id":2,"name":"public-leaf","version":null}],"edges":[{"from":1,"to":2,"scope":"normal","custom":"PRIVATE-EDGE-SECRET"},{"from":2,"to":0,"scope":"PUBLIC-SCOPE-UNKNOWN-SECRET","introduced":10,"first_seen":20,"custom":"PUBLIC-EDGE-UNKNOWN-SECRET"}],"unresolved":[{"from":1,"name":"PRIVATE-UNRESOLVED-SECRET"}],"advisories":[{"advisory":"PRIVATE-ADVISORY-SECRET","node":1,"witness":[0,1]}]}
+JSON
+"$ROOT/build/rh_cli" downstream --graph "$T/private-snapshot.json" --subject 0 --out "$T/private-snapshot-report" --private 1 --snapshot-root "$T/private-snapshots" >/dev/null || fail "private snapshot run"
+python3 - "$T/private-snapshot-report/downstream.json" "$T/private-snapshots" <<'PY'
+import json, pathlib, sys
+report = json.load(open(sys.argv[1]))
+snapshot_id = report["projection"]["snapshot_id"]
+snapshot_path = pathlib.Path(sys.argv[2]) / snapshot_id
+raw = snapshot_path.read_text()
+snapshot = json.loads(raw)
+assert snapshot["schema"] == "rh-projection-snapshot/2", snapshot["schema"]
+graph = snapshot["graph"]
+assert [node["id"] for node in graph["nodes"]] == [0, 1], graph["nodes"]
+assert [node["name"] for node in graph["nodes"]] == ["public-root", "public-leaf"], graph["nodes"]
+assert graph["nodes"][1]["version"] is None, graph["nodes"]
+assert graph["edges"] == [{"from": 1, "to": 0, "scope": "normal", "introduced": 10, "first_seen": 20}], graph["edges"]
+assert graph["unresolved"] == [] and graph["advisories"] == [], graph
+for secret in ("PRIVATE-NODE-SECRET", "PRIVATE-UNKNOWN-SECRET", "PRIVATE-EDGE-SECRET", "PRIVATE-UNRESOLVED-SECRET", "PRIVATE-ADVISORY-SECRET", "PUBLIC-UNKNOWN-SECRET", "PUBLIC-EDGE-UNKNOWN-SECRET", "PUBLIC-SCOPE-UNKNOWN-SECRET"):
+    assert secret not in raw, secret
+print("[downstream] public projection snapshot excludes private payloads")
+PY
 
 echo "[downstream] per-metric intrinsic join has its own denominators (R011)"
 cat > "$T/intr.json" <<'JSON'
@@ -274,7 +298,7 @@ rc_time=$?
 rc_scope=$?
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/bad-platform" --platform 0 >/dev/null 2>&1
 rc_platform=$?
-printf '%s' '{"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"a","version":"1"}],"edges":[{"from":0,"to":0,"introduced":100,"removed":99}],"unresolved":[],"advisories":[]}' > "$T/bad-interval.json"
+printf '%s' '{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"a","version":"1"}],"edges":[{"from":0,"to":0,"introduced":100,"removed":99}],"unresolved":[],"advisories":[]}' > "$T/bad-interval.json"
 "$ROOT/build/rh_cli" downstream --graph "$T/bad-interval.json" --subject 0 --out "$T/bad-interval" >/dev/null 2>&1
 rc_interval=$?
 set -e
