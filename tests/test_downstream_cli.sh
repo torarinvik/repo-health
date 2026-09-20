@@ -51,6 +51,7 @@ assert metrics["graph.reverse_reachability_count"]["value"] == 3, metrics
 assert metrics["graph.cyclic_node_share"]["value"] == {"num": 0, "den": 5}, metrics
 assert metrics["graph.traversal_truncated"]["value"] is False, metrics
 assert metrics["graph.scenario_affected_count"]["status"] == "not_applicable", metrics
+assert metrics["downstream_condition.intrinsic_coverage_share"]["status"] == "not_applicable", metrics
 print("[downstream] diamond OK")
 PY
 
@@ -96,6 +97,8 @@ assert intr["dependent_total"] == 3, intr
 got = {c["key"]: c["observed"] for c in intr["covered"]}
 assert got == {"history.months_active": 3, "review.count": 1, "release.count": 1}, got
 assert "independent of downstream inputs" in intr["note"], intr["note"]
+metrics = {m["key"]: m for m in d["metrics"]}
+assert metrics["downstream_condition.intrinsic_coverage_share"]["value"] == {"num": 5, "den": 9}, metrics
 print("[downstream] intrinsic join OK")
 PY
 
