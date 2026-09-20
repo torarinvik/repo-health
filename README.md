@@ -4,8 +4,9 @@ An evidence-first observatory for the health of open-source software
 infrastructure. Reference implementation written in
 [Elisa](https://github.com/zoidbergclawd/elisa).
 
-> **Status: early development.** The foundation (M00) and first scan slice
-> (M01) are in progress. Anything not backed by tested code is marked
+> **Status: early development.** M00 and M01 are implemented; M02–M12 remain
+> in progress with their gates and limitations tracked in
+> [STATUS.md](STATUS.md). Anything not backed by tested code is marked
 > `planned` in [STATUS.md](STATUS.md) — no exceptions.
 
 ## Documentation
@@ -35,7 +36,19 @@ the default checks use local data, while HTTPS fetches need network access.
 
 # Show implemented metrics (explicit subset — never "all 360")
 ./build/rh_cli registry
+
+# Query OSV for one exact package version (this sends those coordinates to OSV)
+./build/rh_cli osv-query --input ./fixtures/packages/osv-query-cargo.json --out ./osv-query/
 ```
+
+`osv-query` accepts `rh-osv-query-input/1` for one supported ecosystem, package
+name, and exact supplied version string. OSV describes its server-side version
+matching as fuzzy, so the request does not guarantee an exact server-side match.
+It contacts only `https://api.osv.dev/v1/query`, retains
+the request, raw response, HTTP status, capture time, and response digest, and
+writes a normalized response that can be supplied to `rh_cli deps --osv`.
+When OSV returns a `next_page_token`, the result is marked `more_available`;
+automatic pagination and queries over every lockfile node are still pending.
 
 ## Repository layout
 

@@ -1,0 +1,105 @@
+# test_osv_query.elisa — deterministic OSV request/response contract checks.
+# Network behavior is tested by tests/test_osv_query_cli.sh with a local fake
+# resolver and curl executable; this harness exercises parsing and semantics.
+include "./rh_base.elisa"
+include "./rh_osv_query.elisa"
+
+def oq_check(ok: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    return if ok
+    fails[0] <- fails[0] + 1
+    message: mutable darray[u8] =
+        message: mutable darray[u8] = []
+        Base::rh_push_text(message, "OSV-QUERY-FAIL ")
+        Base::rh_push_text(message, label)
+        message.push(10)
+        message
+    Base::rh_write_stdout(message)
+
+def oq_query_is(input: u8&, expected: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    raw: mutable darray[u8] = []
+    Base::rh_push_text(raw, input)
+    body: mutable darray[u8] = []
+    return false if OsvQuery::rh_osv_query_build(raw, body) != 0
+    Base::rh_bytes_equal_literal(body, 0, body.count.i64(), expected)
+
+def oq_query_reject(input: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    raw: mutable darray[u8] = []
+    Base::rh_push_text(raw, input)
+    body: mutable darray[u8] = []
+    OsvQuery::rh_osv_query_build(raw, body) != 0
+
+def oq_check_requests(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    oq_check(oq_query_is("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"cargo\",\"name\":\"serde\"},\"version\":\"1.0.0\"}", "{\"package\":{\"ecosystem\":\"crates.io\",\"name\":\"serde\"},\"version\":\"1.0.0\"}"), "map-cargo", fails)
+    oq_check(oq_query_is("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"npm\",\"name\":\"left-pad\"},\"version\":\"1.0.0\"}", "{\"package\":{\"ecosystem\":\"npm\",\"name\":\"left-pad\"},\"version\":\"1.0.0\"}"), "map-npm", fails)
+    oq_check(oq_query_is("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"pypi\",\"name\":\"Django\"},\"version\":\"3.2.1\"}", "{\"package\":{\"ecosystem\":\"PyPI\",\"name\":\"Django\"},\"version\":\"3.2.1\"}"), "map-pypi", fails)
+    oq_check(oq_query_is("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"go\",\"name\":\"golang.org/x/text\"},\"version\":\"v0.3.0\"}", "{\"package\":{\"ecosystem\":\"Go\",\"name\":\"golang.org/x/text\"},\"version\":\"v0.3.0\"}"), "map-go", fails)
+    oq_check(oq_query_is("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"rubygems\",\"name\":\"rack\"},\"version\":\"2.2.0\"}", "{\"package\":{\"ecosystem\":\"RubyGems\",\"name\":\"rack\"},\"version\":\"2.2.0\"}"), "map-rubygems", fails)
+    oq_check(oq_query_is("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"composer\",\"name\":\"symfony/http-foundation\"},\"version\":\"5.4.0\"}", "{\"package\":{\"ecosystem\":\"Packagist\",\"name\":\"symfony/http-foundation\"},\"version\":\"5.4.0\"}"), "map-composer", fails)
+    oq_check(oq_query_is("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"nuget\",\"name\":\"Newtonsoft.Json\"},\"version\":\"13.0.1\"}", "{\"package\":{\"ecosystem\":\"NuGet\",\"name\":\"Newtonsoft.Json\"},\"version\":\"13.0.1\"}"), "map-nuget", fails)
+    oq_check(oq_query_is("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"maven\",\"name\":\"org.example:lib\"},\"version\":\"1.2.3\"}", "{\"package\":{\"ecosystem\":\"Maven\",\"name\":\"org.example:lib\"},\"version\":\"1.2.3\"}"), "map-maven", fails)
+    oq_check(oq_query_is("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"npm\",\"name\":\"left\\\"side\"},\"version\":\"1.0.0\"}", "{\"package\":{\"ecosystem\":\"npm\",\"name\":\"left\\\"side\"},\"version\":\"1.0.0\"}"), "json-escape", fails)
+    return
+
+def oq_check_rejections(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/2\",\"package\":{\"ecosystem\":\"npm\",\"name\":\"x\"},\"version\":\"1\"}"), "reject-version", fails)
+    oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"npm\",\"name\":\"x\",\"extra\":true},\"version\":\"1\"}"), "reject-package-extra", fails)
+    oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/1\",\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"npm\",\"name\":\"x\"},\"version\":\"1\"}"), "reject-duplicate", fails)
+    oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"unknown\",\"name\":\"x\"},\"version\":\"1\"}"), "reject-ecosystem", fails)
+    oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"npm\",\"name\":\"x\"},\"version\":\"\"}"), "reject-empty-version", fails)
+    oq_check(oq_query_reject("{\"schema\":\"rh-osv-query-input/1\",\"package\":{\"ecosystem\":\"npm\",\"name\":\"x\u0001\"},\"version\":\"1\"}"), "reject-control", fails)
+    oversized: mutable darray[u8] = []
+    while oversized.count < 8193 |oversized|:
+        oversized.push(32)
+    body: mutable darray[u8] = []
+    oq_check(OsvQuery::rh_osv_query_build(oversized, body) != 0, "reject-oversized", fails)
+    return
+
+def oq_check_responses(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    raw: mutable darray[u8] = []
+    Base::rh_push_text(raw, "{\"vulns\":[{\"id\":\"GHSA-1\"}],\"next_page_token\":\"page-2\"}")
+    normalized: mutable darray[u8] = []
+    page: mutable i64 = 0
+    rc: i64 = OsvQuery::rh_osv_query_normalize_response(raw, normalized, &page)
+    oq_check(rc == 0 and page == 1, "response-pagination", fails)
+    oq_check(Base::rh_bytes_equal_span(raw, 0, raw.count.i64(), normalized, 0, normalized.count.i64()), "response-retained", fails)
+
+    empty: mutable darray[u8] = []
+    Base::rh_push_text(empty, "{}")
+    empty_out: mutable darray[u8] = []
+    empty_page: mutable i64 = 1
+    empty_rc: i64 = OsvQuery::rh_osv_query_normalize_response(empty, empty_out, &empty_page)
+    oq_check(empty_rc == 0 and empty_page == 0 and Base::rh_bytes_equal_literal(empty_out, 0, empty_out.count.i64(), "{\"vulns\":[]}"), "normalize-empty", fails)
+
+    continuation: mutable darray[u8] = []
+    Base::rh_push_text(continuation, "{\"next_page_token\":\"next\"}")
+    continuation_out: mutable darray[u8] = []
+    continuation_page: mutable i64 = 0
+    continuation_rc: i64 = OsvQuery::rh_osv_query_normalize_response(continuation, continuation_out, &continuation_page)
+    oq_check(continuation_rc == 0 and continuation_page == 1 and Base::rh_bytes_equal_literal(continuation_out, 0, continuation_out.count.i64(), "{\"vulns\":[],\"next_page_token\":\"next\"}"), "normalize-paginated-empty", fails)
+
+    malformed: mutable darray[u8] = []
+    Base::rh_push_text(malformed, "{\"vulns\":{}}")
+    malformed_out: mutable darray[u8] = []
+    malformed_page: mutable i64 = 0
+    oq_check(OsvQuery::rh_osv_query_normalize_response(malformed, malformed_out, &malformed_page) != 0, "reject-bad-vulns", fails)
+    duplicate: mutable darray[u8] = []
+    Base::rh_push_text(duplicate, "{\"vulns\":[],\"vulns\":[]}")
+    duplicate_out: mutable darray[u8] = []
+    duplicate_page: mutable i64 = 0
+    oq_check(OsvQuery::rh_osv_query_normalize_response(duplicate, duplicate_out, &duplicate_page) != 0, "reject-duplicate-vulns", fails)
+    return
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    fails: mutable i64 = 0
+    oq_check_requests(&fails)
+    oq_check_rejections(&fails)
+    oq_check_responses(&fails)
+    if fails == 0:
+        message: mutable darray[u8] =
+            message: mutable darray[u8] = []
+            Base::rh_push_text(message, "OSV QUERY OK")
+            message.push(10)
+            message
+        Base::rh_write_stdout(message)
+        return 0
+    1

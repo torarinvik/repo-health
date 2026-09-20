@@ -51,6 +51,7 @@ compile "$ROOT/src/test_m06b.elisa" test_m06b
 compile "$ROOT/src/test_m07.elisa" test_m07
 compile "$ROOT/src/test_m07_sha.elisa" test_m07_sha
 compile "$ROOT/src/test_m08.elisa" test_m08
+compile "$ROOT/src/test_osv_query.elisa" test_osv_query
 compile "$ROOT/src/test_properties.elisa" test_properties
 compile "$ROOT/src/test_m04_roles.elisa" test_m04_roles
 compile "$ROOT/src/test_m11.elisa" test_m11

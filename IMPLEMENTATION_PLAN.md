@@ -504,7 +504,7 @@ Use each ecosystem's official manifests, lockfile formats, and version semantics
 
 **M03-07: Inventory interchange.** Implement one pinned SPDX or CycloneDX version with schema validation. The second format can follow in M08. Store importer completeness and source provenance. A syntactically valid inventory may still be incomplete.
 
-**M03-08: OSV integration.** Query supported package/version or commit contexts; preserve advisory source IDs, alias assertions, affected ranges, withdrawal status, and feed freshness. Record unknown when version matching is unsupported.
+**M03-08: OSV integration.** Query supported package/version or commit contexts; preserve advisory source IDs, alias assertions, affected ranges, withdrawal status, and feed freshness. Record unknown when version matching is unsupported. The bounded `rh_cli osv-query` path now POSTs one package plus the exact supplied version string to the fixed OSV `/v1/query` endpoint and retains its request, raw response, HTTP status, capture time, response digest, and a matcher-ready response. OSV documents its version matching as fuzzy, so the submitted coordinate does not guarantee an exact server-side match; this query path records capture time but does not establish feed freshness. A returned `next_page_token` is retained and reported as `more_available`; it is never described as complete. Automated queries across every resolved lockfile node, commit queries, and pagination continuation remain open. (Paper §10; [P13].)
 
 **M03-09: Optional data enrichment.** Integrate deps.dev only through a source adapter that records coverage and origin. The local graph remains useful if the enrichment service is unavailable. [P02] [P03]
 
@@ -1775,6 +1775,7 @@ These sources were checked while preparing the design on 2026-09-18. Revalidate 
 [P10]: https://reproducible-builds.org/docs/definition/ "Reproducible Builds definition"
 [P11]: https://www.postgresql.org/docs/current/explicit-locking.html "PostgreSQL transactional locking primitives"
 [P12]: https://ecosyste.ms/ "ecosyste.ms optional data and tooling services"
+[P13]: https://google.github.io/osv.dev/post-v1-query/ "OSV exact-version query request, response, and pagination contract"
 
 | Reference | Implementation use |
 |---|---|

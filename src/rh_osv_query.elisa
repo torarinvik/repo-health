@@ -1,0 +1,147 @@
+# rh_osv_query.elisa — bounded OSV package/version request and response contract.
+#
+# The request submits one package and exact version string. OSV's matching is
+# fuzzy, so the supplied version does not guarantee an exact server-side match.
+# Network transport is kept in rh_git's fixed OSV endpoint wrapper; this module
+# owns only the public input/output contract and never performs I/O.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_package.elisa"
+
+module OsvQuery:
+    private:
+        const RH_OSV_QUERY_MAX_INPUT: i64 = 8192
+        const RH_OSV_QUERY_MAX_TEXT: i64 = 256
+
+        # Return a unique object member, -1 when absent, or -2 when duplicated.
+        def rh_osv_query_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if obj < 0 or nodes[obj.usize()].kind != Json::RH_JSON_OBJ
+            width: usize = strlen(key)
+            found: mutable i64 = -1
+            while child >= 0 |child: i64 = nodes[obj.usize()].first_child, nodes, texts, key, width, found|:
+                key_node: Json::RhJsonNode = nodes[child.usize()]
+                value: i64 = key_node.next_sibling
+                return -2 if value < 0
+                if key_node.kind == Json::RH_JSON_STR and key_node.text_end - key_node.text_start == width.i64():
+                    same: bool =
+                        while k < width |same: bool = true, k: usize = 0, texts, key| -> same:
+                            if texts[(key_node.text_start.usize() + k)] != key[k]:
+                                same <- false
+                            k <- k + 1
+                    if same:
+                        return -2 if found >= 0
+                        found <- value
+                child <- nodes[value.usize()].next_sibling
+            found
+
+        def rh_osv_query_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_osv_query_ecosystem(texts: darray[u8]&, start: i64, end: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return Package::RH_ECO_CARGO.i64() if rh_osv_query_eq(texts, start, end, "cargo")
+            return Package::RH_ECO_NPM.i64() if rh_osv_query_eq(texts, start, end, "npm")
+            return Package::RH_ECO_PYPI.i64() if rh_osv_query_eq(texts, start, end, "pypi")
+            return Package::RH_ECO_GO.i64() if rh_osv_query_eq(texts, start, end, "go")
+            return Package::RH_ECO_RUBYGEMS.i64() if rh_osv_query_eq(texts, start, end, "rubygems")
+            return Package::RH_ECO_COMPOSER.i64() if rh_osv_query_eq(texts, start, end, "composer")
+            return Package::RH_ECO_NUGET.i64() if rh_osv_query_eq(texts, start, end, "nuget")
+            return Package::RH_ECO_MAVEN.i64() if rh_osv_query_eq(texts, start, end, "maven")
+            -1
+
+        def rh_osv_query_clean_text(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or end <= start or end - start > RH_OSV_QUERY_MAX_TEXT
+            while i < end |i: i64 = start, texts, end|:
+                return false if texts[i.usize()] < 32 or texts[i.usize()] == 127
+                i <- i + 1
+            true
+
+        def rh_osv_query_fields(nodes: darray[Json::RhJsonNode]&, obj: i64, fields: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if obj < 0 or nodes[obj.usize()].kind != Json::RH_JSON_OBJ
+            nodes[obj.usize()].child_count == fields * 2
+
+        def rh_osv_query_span(nodes: darray[Json::RhJsonNode]&, value: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if value < 0 or nodes[value.usize()].kind != Json::RH_JSON_STR
+            node: Json::RhJsonNode = nodes[value.usize()]
+            return false if node.text_end <= node.text_start
+            start_out[0] <- node.text_start
+            end_out[0] <- node.text_end
+            true
+
+        def rh_osv_query_make_request(texts: darray[u8]&, name_s: i64, name_e: i64, version_s: i64, version_e: i64, ecosystem: u8, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "{\"package\":{\"ecosystem\":\"")
+            Base::rh_push_text(out, Package::rh_osv_ecosystem(ecosystem))
+            Base::rh_push_text(out, "\",\"name\":\"")
+            Base::rh_json_escape(out, texts, name_s.usize(), name_e.usize())
+            Base::rh_push_text(out, "\"},\"version\":\"")
+            Base::rh_json_escape(out, texts, version_s.usize(), version_e.usize())
+            Base::rh_push_text(out, "\"}")
+
+    public:
+        # Read the public rh-osv-query-input/1 contract and build OSV's v1/query
+        # body. Returns 0 on success; malformed/unknown/ambiguous input is -1.
+        def rh_osv_query_build(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count.i64() > RH_OSV_QUERY_MAX_INPUT
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or not rh_osv_query_fields(nodes, root, 3)
+            schema: i64 = rh_osv_query_member(nodes, texts, root, "schema")
+            package: i64 = rh_osv_query_member(nodes, texts, root, "package")
+            version: i64 = rh_osv_query_member(nodes, texts, root, "version")
+            return -1 if schema < 0 or package < 0 or version < 0
+            schema_s: mutable i64 = -1
+            schema_e: mutable i64 = -1
+            return -1 if not rh_osv_query_span(nodes, schema, &schema_s, &schema_e)
+            return -1 if not rh_osv_query_eq(texts, schema_s, schema_e, "rh-osv-query-input/1")
+            return -1 if not rh_osv_query_fields(nodes, package, 2)
+            name: i64 = rh_osv_query_member(nodes, texts, package, "name")
+            ecosystem: i64 = rh_osv_query_member(nodes, texts, package, "ecosystem")
+            return -1 if name < 0 or ecosystem < 0
+            name_s: mutable i64 = -1
+            name_e: mutable i64 = -1
+            ecosystem_s: mutable i64 = -1
+            ecosystem_e: mutable i64 = -1
+            version_s: mutable i64 = -1
+            version_e: mutable i64 = -1
+            return -1 if not rh_osv_query_span(nodes, name, &name_s, &name_e)
+            return -1 if not rh_osv_query_span(nodes, ecosystem, &ecosystem_s, &ecosystem_e)
+            return -1 if not rh_osv_query_span(nodes, version, &version_s, &version_e)
+            return -1 if not rh_osv_query_clean_text(texts, name_s, name_e)
+            return -1 if not rh_osv_query_clean_text(texts, version_s, version_e)
+            eco: i64 = rh_osv_query_ecosystem(texts, ecosystem_s, ecosystem_e)
+            return -1 if eco < 0
+            rh_osv_query_make_request(texts, name_s, name_e, version_s, version_e, eco.u8(), out)
+            0
+
+        # Validate an API response and produce a response usable by the existing
+        # offline matcher. OSV omits `vulns` for no matches; normalize only that
+        # empty form while retaining the raw response separately at the caller.
+        # `next_page_token` remains in the normalized response and sets page_out.
+        def rh_osv_query_normalize_response(raw: darray[u8]&, out: mutable darray[u8]&, page_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            page_out[0] <- 0
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            vulns: i64 = rh_osv_query_member(nodes, texts, root, "vulns")
+            token: i64 = rh_osv_query_member(nodes, texts, root, "next_page_token")
+            return -1 if vulns == -2 or token == -2
+            return -1 if vulns >= 0 and nodes[vulns.usize()].kind != Json::RH_JSON_ARR
+            if token >= 0:
+                return -1 if nodes[token.usize()].kind != Json::RH_JSON_STR
+                return -1 if nodes[token.usize()].text_end <= nodes[token.usize()].text_start
+                page_out[0] <- 1
+            if vulns >= 0:
+                while i < raw.count |i: usize = 0, raw, out|:
+                    out.push(raw[i])
+                    i <- i + 1
+                return 0
+            Base::rh_push_text(out, "{\"vulns\":[]")
+            if token >= 0:
+                node: Json::RhJsonNode = nodes[token.usize()]
+                Base::rh_push_text(out, ",\"next_page_token\":\"")
+                Base::rh_json_escape(out, texts, node.text_start.usize(), node.text_end.usize())
+                out.push(34)
+            out.push(125)
+            0

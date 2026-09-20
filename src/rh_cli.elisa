@@ -23,6 +23,7 @@ include "./rh_json.elisa"
 include "./rh_continuity.elisa"
 include "./rh_continuity_scan.elisa"
 include "./rh_package.elisa"
+include "./rh_osv_query.elisa"
 include "./rh_depsdev.elisa"
 include "./rh_ecosystem_lookup.elisa"
 include "./rh_adapter_manifest.elisa"
@@ -106,6 +107,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli continuity --bundle <manifest> --out <dir>")
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
+    rh_cli_err("       rh_cli osv-query --input <rh-osv-query-input/1> --out <dir>")
     rh_cli_err("       rh_cli depsdev (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli ecosystem lookup --input <captured-lookup.json> --out <file>")
     rh_cli_err("       rh_cli adapter-manifest --input <file> --out <file>")
@@ -788,6 +790,13 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dov_idx], true, slots[dr_idx], false) if dov_idx >= 0
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dou_idx], true) if dou_idx >= 0
         return rh_do_deps(slots[dr_idx], slots[do_idx], slots[dr_idx], false, slots[dr_idx], false)
+    if Base::rh_streq(cmd, "osv-query"):
+        return rh_cli_usage(2) if argc != 6
+        osv_input_flag: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        osv_out_flag: u8& = slots[4].cast[u8&] can Unsafe.PointerCast
+        return rh_cli_usage(2) if not Base::rh_streq(osv_input_flag, "--input")
+        return rh_cli_usage(2) if not Base::rh_streq(osv_out_flag, "--out")
+        return rh_do_osv_query(slots[3], slots[5])
     if Base::rh_streq(cmd, "depsdev"):
         dvi_idx, dvu_idx, dvo_idx =
             while ddv < argc |dvi_idx: i64 = -1, dvu_idx: i64 = -1, dvo_idx: i64 = -1, ddv: i64 = 2, slots| -> dvi_idx, dvu_idx, dvo_idx:
@@ -3377,6 +3386,111 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         i <- i + 1
     done.push(10)
     Base::rh_write_stdout(done)
+    0
+
+# --- M03-08 OSV exact package/version query adapter. ---
+# The query body is constrained by rh-osv-query-input/1 and POSTed only to
+# the fixed api.osv.dev/v1/query endpoint. Raw response, HTTP code, stderr, and
+# a normalized response for `deps --osv` are retained in the output directory.
+def rh_do_osv_query(input_path: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out):
+        rh_cli_err("osv-query: rejected path argument (allowlist)")
+        return 3
+    if Git::rh_ensure_dir(out) != 0:
+        rh_cli_err("osv-query: cannot create output directory")
+        return 4
+    request_path: mutable darray[u8] = []
+    raw_path: mutable darray[u8] = []
+    response_path: mutable darray[u8] = []
+    code_path: mutable darray[u8] = []
+    err_path: mutable darray[u8] = []
+    result_path: mutable darray[u8] = []
+    return 4 if not rh_out_path(out, "osv-query-request.json", request_path)
+    return 4 if not rh_out_path(out, "osv-query-response.raw.json", raw_path)
+    return 4 if not rh_out_path(out, "osv-query-response.json", response_path)
+    return 4 if not rh_out_path(out, "osv-query-http-status.txt", code_path)
+    return 4 if not rh_out_path(out, "osv-query.err", err_path)
+    return 4 if not rh_out_path(out, "osv-query-result.json", result_path)
+    request_path.push(0)
+    raw_path.push(0)
+    response_path.push(0)
+    code_path.push(0)
+    err_path.push(0)
+    result_path.push(0)
+    request_ptr: cstr = (&request_path[0]).cast[cstr] can Unsafe.PointerCast
+    raw_ptr: cstr = (&raw_path[0]).cast[cstr] can Unsafe.PointerCast
+    response_ptr: cstr = (&response_path[0]).cast[cstr] can Unsafe.PointerCast
+    code_ptr: cstr = (&code_path[0]).cast[cstr] can Unsafe.PointerCast
+    err_ptr: cstr = (&err_path[0]).cast[cstr] can Unsafe.PointerCast
+    result_ptr: cstr = (&result_path[0]).cast[cstr] can Unsafe.PointerCast
+    _ = remove_file(request_ptr)
+    _ = remove_file(raw_ptr)
+    _ = remove_file(response_ptr)
+    _ = remove_file(code_ptr)
+    _ = remove_file(err_ptr)
+    _ = remove_file(result_ptr)
+    input_size: i64 = Base::rh_file_size(input_path)
+    if input_size <= 0 or input_size > 8192:
+        rh_cli_err("osv-query: input is empty or exceeds the 8192-byte contract bound")
+        return 3
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(input_path, raw) != input_size:
+        rh_cli_err("osv-query: cannot read bounded query input")
+        return 4
+    request: mutable darray[u8] = []
+    if OsvQuery::rh_osv_query_build(raw, request) != 0:
+        rh_cli_err("osv-query: malformed or unsupported rh-osv-query-input/1")
+        return 3
+
+    request.push(10)
+    if not Base::rh_io_write(request_ptr, request):
+        rh_cli_err("osv-query: cannot retain request evidence")
+        return 4
+    fetch_rc: i64 = Git::rh_run_osv_query(request_ptr, raw_ptr, code_ptr, err_ptr)
+    if fetch_rc != 0:
+        rh_cli_err("osv-query: bounded transport failed; inspect raw transport evidence")
+        return 4
+    code: mutable darray[u8] = []
+    if Base::rh_io_read(code_ptr, code) < 0 or code.count != 3:
+        rh_cli_err("osv-query: HTTP status is missing or malformed")
+        return 4
+    if code[0] != 50 or code[1] != 48 or code[2] != 48:
+        rh_cli_err("osv-query: OSV returned non-200; inspect retained HTTP evidence")
+        return 4
+    response_raw: mutable darray[u8] = []
+    if Base::rh_io_read(raw_ptr, response_raw) < 0 or response_raw.count.i64() > Git::RH_FETCH_MAX_BYTES:
+        rh_cli_err("osv-query: cannot read bounded response evidence")
+        return 4
+    response: mutable darray[u8] = []
+    page: mutable i64 = 0
+    if OsvQuery::rh_osv_query_normalize_response(response_raw, response, &page) != 0:
+        rh_cli_err("osv-query: malformed OSV response; raw response retained")
+        return 4
+    if not Base::rh_io_write(response_ptr, response):
+        rh_cli_err("osv-query: cannot write normalized OSV response")
+        return 4
+    response_hash: mutable darray[u8] = []
+    Sha256::rh_sha256(response_raw, response_hash)
+    return 4 if response_hash.count != 64
+    response_hash_bytes: u8& = (&response_hash[0]).cast[u8&] can Unsafe.PointerCast
+    captured_at: i64 = Base::rh_now()
+    result: mutable darray[u8] =
+        result: mutable darray[u8] = []
+        Base::rh_push_text(result, "{\"schema\":\"rh-osv-query-result/1\",\"endpoint\":\"https://api.osv.dev/v1/query\",\"captured_at_epoch\":")
+        if captured_at >= 0:
+            Base::rh_push_decimal_i64(result, captured_at)
+        else:
+            Base::rh_push_text(result, "null")
+        Base::rh_push_text(result, ",\"http_status\":200,\"state\":\"collected\",\"pagination\":\"")
+        Base::rh_push_text(result, "more_available" if page == 1 else "complete")
+        Base::rh_push_text(result, "\",\"request_file\":\"osv-query-request.json\",\"response_file\":\"osv-query-response.json\",\"raw_response_file\":\"osv-query-response.raw.json\",\"raw_response_sha256\":\"")
+        Base::rh_push_raw(result, response_hash_bytes, response_hash.count)
+        Base::rh_push_text(result, "\"}\n")
+        result
+    if not Base::rh_io_write(result_ptr, result):
+        rh_cli_err("osv-query: cannot write result envelope")
+        return 4
+    rh_cli_out("osv-query: captured response for the supplied package/version")
     0
 
 # --- M03-09 deps.dev enrichment adapter. ---

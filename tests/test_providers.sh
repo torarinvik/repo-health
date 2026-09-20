@@ -42,7 +42,32 @@ assert "popularity/safety" in cs["failure_mode"] or "claim" in cs["failure_mode"
 dd = by["deps-dev"]
 assert dd["lifecycle"] == "not_enabled", dd
 assert "not enabled here" in dd["failure_mode"], dd
+osv = by["osv-data"]
+assert osv["lifecycle"] == "active", osv
+assert any("exact package/version" in u for u in osv["used_for"]), osv
+assert "more_available" in osv["failure_mode"] and "unknown" in osv["failure_mode"], osv
+assert "bulk lockfile" in osv["assumption"] and "pagination continuation" in osv["assumption"], osv
+assert "fuzzi" in osv["assumption"] and "feed freshness" in osv["assumption"], osv
+assert "public redistribution is not enabled" in osv["rights"], osv
 print("[providers] lifecycle honesty OK")
+PY
+
+echo "[providers] OSV live scope matches the source review"
+python3 - "$reg" "$ROOT/ops/source-review-register.json" <<'PY'
+import json, sys
+provider = json.load(open(sys.argv[1]))
+source = json.load(open(sys.argv[2]))
+osv = {x["id"]: x for x in provider["dependencies"]}["osv-data"]
+src = {x["id"]: x for x in source["sources"]}["osv-data"]
+assert src["base_url"] == "https://api.osv.dev/v1/query", src
+assert src["capabilities"] == ["exact_package_version_query"], src
+assert "bulk_lockfile_queries" in src["unauthorized"], src
+assert "pagination_continuation" in src["unauthorized"], src
+assert "uniform_underlying_data_license" in src["unsupported"], src
+assert "feed_freshness" in src["unsupported"], src
+assert "source IDs and links" in osv["rights"], osv
+assert src["redistribution"] == "none", src
+print("[providers] bounded OSV source scope OK")
 PY
 
 echo "[providers] failure modes state stale/unknown, not silent success"

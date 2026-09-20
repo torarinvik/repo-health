@@ -702,6 +702,34 @@ module Git:
             cmd.push(0)
             cmd
 
+        # Build the one permitted JSON POST request. The URL is not a caller
+        # argument: the public wrapper below fixes it to OSV's query endpoint.
+        def rh_osv_post_command(url: cstr, request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            cmd: mutable darray[u8] = []
+            Base::rh_push_text(cmd, "curl --disable -sS --noproxy '*' --proto '=https' --max-redirs 0")
+            Base::rh_push_text(cmd, " --resolve ")
+            rh_push_quoted(cmd, (&pin[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(cmd, " --max-time ")
+            Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_SECS)
+            Base::rh_push_text(cmd, " --max-filesize ")
+            Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_BYTES)
+            Base::rh_push_text(cmd, " -H 'User-Agent: repo-health-m03' -H 'Content-Type: application/json' --data-binary ")
+            request_arg: mutable darray[u8] = []
+            request_arg.push(64)
+            Base::rh_push_cstr(request_arg, request_file)
+            request_arg.push(0)
+            rh_push_quoted(cmd, (&request_arg[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(cmd, " -o ")
+            rh_push_quoted(cmd, body_file)
+            Base::rh_push_text(cmd, " -w '%{http_code}' > ")
+            rh_push_quoted(cmd, code_file)
+            Base::rh_push_text(cmd, " 2> ")
+            rh_push_quoted(cmd, err_file)
+            Base::rh_push_text(cmd, " ")
+            rh_push_quoted(cmd, url)
+            cmd.push(0)
+            cmd
+
     public:
         # Run a bounded HTTPS/file fetch for forge APIs (M02-05 transport).
         # Policy, all enforced before and during the call (S002/S003/S012):
@@ -729,6 +757,26 @@ module Git:
                 return -1 if not rh_prepare_https_pin(url, err_file, pin)
             transport: i64 =
                 cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin)
+                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+                block_result
+            transport
+
+        # Run a single bounded JSON package/version query to OSV. The endpoint
+        # is fixed here, so this POST cannot be redirected to a caller URL. DNS
+        # answers are validated as a complete public set and pinned; curl config,
+        # proxies, redirects, oversized bodies, and long hangs are rejected.
+        # Returns curl's process status; callers must separately require HTTP 200.
+        def rh_run_osv_query(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            url: cstr = "https://api.osv.dev/v1/query"
+            return -1 if not rh_arg_safe(request_file)
+            return -1 if not rh_arg_safe(body_file)
+            return -1 if not rh_arg_safe(code_file)
+            return -1 if not rh_arg_safe(err_file)
+            return -1 if not rh_fetch_guard(url)
+            pin: mutable darray[u8] = []
+            return -1 if not rh_prepare_https_pin(url, err_file, pin)
+            transport: i64 =
+                cmd: mutable darray[u8] = rh_osv_post_command(url, request_file, body_file, code_file, err_file, pin)
                 block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
                 block_result
             transport
