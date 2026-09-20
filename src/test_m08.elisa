@@ -361,6 +361,46 @@ def check_pep440(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, 
     t8check(Pep440::rh_pep440_cmp(pp("1.0"), pp("")) == 2, "pep-cmp-invalid-returns-2", fails)
     return
 
+def check_pep440_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    valid_output: bool =
+        version: Pep440::RhPep440 = Pep440::rh_pep440_parse(raw, 0, raw.count.i64())
+        version.ok == 0 or (version.ok == 1 and version.epoch >= 0 and version.n >= 1 and version.n <= Pep440::RH_PEP_MAX_REL and version.r0 >= 0 and version.r1 >= 0 and version.r2 >= 0 and version.r3 >= 0 and version.r4 >= 0 and version.r5 >= 0 and version.r6 >= 0 and version.r7 >= 0 and version.pre_num >= 0 and version.post >= -1 and version.local >= -1)
+    t8check(valid_output, "pep440-fuzz-structured-result", fails)
+    return
+
+def check_pep440_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    corpus: mutable darray[u8] = []
+    Base::rh_push_text(corpus, "2!1.0rc1.post2.dev3+local.1")
+    while trial < 96 |trial: i64 = 0, rng: i64 = 3162277, corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < corpus.count |copied: usize = 0, corpus, fuzzed|:
+            fuzzed.push(corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_pep440_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+
+    alphabet: mutable darray[u8] = [33, 43, 45, 46, 95, 48, 49, 50, 51, 57, 97, 98, 99, 100, 101, 102, 105, 108, 111, 112, 114, 115, 116, 118, 122]
+    while trial < 128 |trial: i64 = 0, rng: i64 = 3678794, alphabet, fails|:
+        rng <- (rng * 48271) % 2147483647
+        byte_count: usize = (1 + rng % 96).usize()
+        fuzzed: mutable darray[u8] = []
+        while pos < byte_count |pos: usize = 0, rng, alphabet, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            choice: usize = (rng % alphabet.count.i64()).usize()
+            fuzzed.push(alphabet[choice])
+            pos <- pos + 1
+        check_pep440_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+    return
+
 def check_trailers(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     body: mutable darray[u8] = []
     Base::rh_push_text(body, "Add zero handling\n\nSigned-off-by: Dev One\nReviewed-by: Reviewer A <a@example.org>\nAcked-by: Reviewer B <b@example.org>\nFixes: deadbeef\nLink: https://example.invalid/1\n\nnot a trailer line\n")
@@ -637,6 +677,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_patch(&fails)
     check_release_feed(&fails)
     check_pep440(&fails)
+    check_pep440_fuzz(&fails)
     check_hg_reject(&fails)
     check_hg_bounds(&fails)
     check_hg_fuzz(&fails)
