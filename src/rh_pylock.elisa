@@ -606,6 +606,14 @@ module Pylock:
                 reference.source_editable_seen <- true
             elif reference.source_kind == 2 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "subdirectory"):
                 return false if reference.source_subdirectory_s >= 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &reference.source_subdirectory_s, &reference.source_subdirectory_e)
+            elif reference.source_kind == 3 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "url"):
+                return false if reference.source_locator_kind != 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &reference.source_locator_s, &reference.source_locator_e) or reference.source_locator_s == reference.source_locator_e
+                reference.source_locator_kind <- 1
+            elif reference.source_kind == 3 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "path"):
+                return false if reference.source_locator_kind != 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &reference.source_locator_s, &reference.source_locator_e) or reference.source_locator_s == reference.source_locator_e
+                reference.source_locator_kind <- 2
+            elif reference.source_kind == 3 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "subdirectory"):
+                return false if reference.source_subdirectory_s >= 0 or not rh_pylock_scalar_string(data, pool, value_s, value_end, &reference.source_subdirectory_s, &reference.source_subdirectory_e)
             else:
                 reference.context <- 1
                 unknown_out[0] <- unknown_out[0] + 1
@@ -666,8 +674,8 @@ module Pylock:
             key_e: mutable usize = end
             value_s: mutable usize = start
             return false if not rh_pylock_assignment(data, start, end, &key_s, &key_e, &value_s)
-            if Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "vcs") or Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "directory"):
-                source_kind: u8 = 1 if Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "vcs") else 2
+            if Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "vcs") or Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "directory") or Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "archive"):
+                source_kind: u8 = 1 if Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "vcs") else 2 if Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "directory") else 3
                 return rh_pylock_inline_reference_source(data, pool, value_s, end, source_kind, reference, unknown_out)
             elif not Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "name") and not Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "version"):
                 reference.context <- 1
@@ -901,8 +909,15 @@ module Pylock:
                         refs[reference_index.usize()] <- directory_reference
                         artifact_index <- -1
                         section <- 13
+                    elif Base::rh_bytes_equal_literal(data, trimmed_start.i64(), trimmed_end.i64(), "[packages.dependencies.archive]"):
+                        return -1 if reference_index < 0 or section != 2 or refs[reference_index.usize()].source_kind != 0
+                        archive_reference: mutable RhPylockReference = refs[reference_index.usize()]
+                        archive_reference.source_kind <- 3
+                        refs[reference_index.usize()] <- archive_reference
+                        artifact_index <- -1
+                        section <- 14
                     elif data[trimmed_start] == 91:
-                        if (section == 2 or section == 12 or section == 13) and reference_index >= 0:
+                        if (section == 2 or section == 12 or section == 13 or section == 14) and reference_index >= 0:
                             nested_ref: mutable RhPylockReference = refs[reference_index.usize()]
                             nested_ref.context <- 1
                             refs[reference_index.usize()] <- nested_ref
@@ -911,7 +926,7 @@ module Pylock:
                         reference_index <- -1
                         artifact_index <- -1
                         unknown_tables[0] <- unknown_tables[0] + 1
-                    elif section == 0 or section == 1 or section == 2 or section == 3 or section == 4 or section == 5 or section == 6 or section == 7 or section == 8 or section == 10 or section == 11 or section == 12 or section == 13:
+                    elif section == 0 or section == 1 or section == 2 or section == 3 or section == 4 or section == 5 or section == 6 or section == 7 or section == 8 or section == 10 or section == 11 or section == 12 or section == 13 or section == 14:
                         key_s: mutable usize = trimmed_start
                         key_e: mutable usize = trimmed_end
                         value_s: mutable usize = trimmed_start
@@ -1022,7 +1037,7 @@ module Pylock:
                                 ref: mutable RhPylockReference = refs[reference_index.usize()]
                                 return -1 if not rh_pylock_reference_field(data, pool, trimmed_start, trimmed_end, &ref, unknown_dependency)
                                 refs[reference_index.usize()] <- ref
-                            elif (section == 12 or section == 13) and reference_index >= 0:
+                            elif (section == 12 or section == 13 or section == 14) and reference_index >= 0:
                                 ref_source: mutable RhPylockReference = refs[reference_index.usize()]
                                 return -1 if not rh_pylock_reference_source_field(data, pool, trimmed_start, trimmed_end, &ref_source, unknown_dependency)
                                 refs[reference_index.usize()] <- ref_source
@@ -1145,7 +1160,7 @@ module Pylock:
 
         def rh_pylock_emit_reference_source(out: mutable darray[u8]&, pool: darray[u8]&, reference: mutable RhPylockReference) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"kind\":\"")
-            Base::rh_push_text(out, "vcs" if reference.source_kind == 1 else "directory")
+            Base::rh_push_text(out, "vcs" if reference.source_kind == 1 else "directory" if reference.source_kind == 2 else "archive")
             Base::rh_push_text(out, "\",\"vcs_type\":")
             rh_pylock_emit_string(out, pool, reference.source_type_s, reference.source_type_e)
             Base::rh_push_text(out, ",\"source_kind\":")
@@ -1165,8 +1180,29 @@ module Pylock:
             rh_pylock_emit_string(out, pool, reference.source_subdirectory_s, reference.source_subdirectory_e)
             out.push(125)
 
-        def rh_pylock_source_matches(pool: darray[u8]&, package: mutable RhPylockPackage, reference: mutable RhPylockReference) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_pylock_archive_source_matches(pool: darray[u8]&, package_index: i64, artifacts: darray[RhPylockArtifact]&, reference: mutable RhPylockReference) -> bool can[Memory.Allocate, Abort.Panic]:
+            owner_index: mutable i64 = package_index
+            low: mutable usize = 0
+            high: mutable usize = artifacts.count
+            while low < high |low, high, artifacts, owner_index|:
+                middle: usize = low + (high - low) / 2
+                if artifacts[middle].owner < owner_index:
+                    low <- middle + 1
+                else:
+                    high <- middle
+            first_artifact: usize = low
+            for artifact_index in first_artifact..<artifacts.count |artifact_index, artifacts, pool, package_index, reference|:
+                artifact: RhPylockArtifact = artifacts[artifact_index]
+                break if artifact.owner != package_index
+                if artifact.kind == 3:
+                    return false if reference.source_locator_kind != 0 and (artifact.locator_kind != reference.source_locator_kind or not rh_pylock_equal(pool, artifact.locator_s, artifact.locator_e, reference.source_locator_s, reference.source_locator_e))
+                    return false if reference.source_subdirectory_s >= 0 and not rh_pylock_equal(pool, artifact.subdirectory_s, artifact.subdirectory_e, reference.source_subdirectory_s, reference.source_subdirectory_e)
+                    return true
+            false
+
+        def rh_pylock_source_matches(pool: darray[u8]&, package_index: i64, package: mutable RhPylockPackage, artifacts: darray[RhPylockArtifact]&, reference: mutable RhPylockReference) -> bool can[Memory.Allocate, Abort.Panic]:
             return true if reference.source_kind == 0
+            return rh_pylock_archive_source_matches(pool, package_index, artifacts, reference) if reference.source_kind == 3
             return false if package.source_kind != reference.source_kind
             return false if reference.source_type_s >= 0 and not rh_pylock_equal(pool, package.source_type_s, package.source_type_e, reference.source_type_s, reference.source_type_e)
             return false if reference.source_locator_kind != 0 and (package.source_locator_kind != reference.source_locator_kind or not rh_pylock_equal(pool, package.source_locator_s, package.source_locator_e, reference.source_locator_s, reference.source_locator_e))
@@ -1176,13 +1212,13 @@ module Pylock:
             return false if reference.source_editable_seen and package.source_editable != reference.source_editable
             true
 
-        def rh_pylock_target(pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, reference: mutable RhPylockReference, target_out: mutable i64&) -> u8 can[Memory.Allocate, Abort.Panic]:
+        def rh_pylock_target(pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, artifacts: darray[RhPylockArtifact]&, reference: mutable RhPylockReference, target_out: mutable i64&) -> u8 can[Memory.Allocate, Abort.Panic]:
             return 3 if reference.context == 1
             candidates, target =
                 for i in 0..<packages.count |count: i64 = 0, target: i64 = -1, i, packages, pool, reference| -> count, target:
                     candidate: RhPylockPackage = packages[i]
                     if rh_pylock_name_eq(pool, candidate.name_s, candidate.name_e, reference.name_s, reference.name_e):
-                        if (reference.version_s < 0 or (candidate.version_s >= 0 and rh_pylock_equal(pool, candidate.version_s, candidate.version_e, reference.version_s, reference.version_e))) and rh_pylock_source_matches(pool, candidate, reference):
+                        if (reference.version_s < 0 or (candidate.version_s >= 0 and rh_pylock_equal(pool, candidate.version_s, candidate.version_e, reference.version_s, reference.version_e))) and rh_pylock_source_matches(pool, i.i64(), candidate, artifacts, reference):
                             count <- count + 1
                             target <- i.i64()
             target_out[0] <- target
@@ -1258,7 +1294,7 @@ module Pylock:
                             out.push(44)
                         first <- false
                         target: mutable i64 = -1
-                        state: u8 = rh_pylock_target(pool, packages, reference, &target)
+                        state: u8 = rh_pylock_target(pool, packages, artifacts, reference, &target)
                         Base::rh_push_text(out, "{\"name\":")
                         rh_pylock_emit_string(out, pool, reference.name_s, reference.name_e)
                         Base::rh_push_text(out, ",\"version\":")

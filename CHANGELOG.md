@@ -39,8 +39,8 @@ on the real execution path.
   requested revision, source subdirectory, and a fingerprint of the URL/path
   locator. `[packages.directory]` records retain a path fingerprint, editable
   flag (defaulting to `false`), and source subdirectory. Locators remain private.
-  VCS and directory dependency selectors narrow package candidates by their
-  supplied source fields; unknown selector fields remain context-only.
+  VCS, directory, and archive dependency selectors narrow package candidates by
+  their supplied source fields; unknown selector fields remain context-only.
   Environment/group selection, complete artifact projection, and unsupported
   fields remain counted as gaps.
   `rh_cli pylock-observe` now verifies supplied local bytes against SHA-256,

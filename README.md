@@ -84,8 +84,9 @@ time. Archive `subdirectory` metadata identifies the package root inside the
 archive. VCS sources retain their VCS type, exact commit ID, optional requested
 revision, and subdirectory; directory sources retain their editable flag and
 subdirectory. VCS and directory locators appear only as SHA-256 fingerprints.
-VCS and directory dependency selectors narrow package candidates using the
-source fields they provide; unknown selector fields remain `context`. It counts
+VCS, directory, and archive dependency selectors narrow package candidates
+using the source fields they provide; unknown selector fields remain
+`context`. It counts
 lock fields it does not project and does not create a
 `rh-dep-graph/1` or OSV input.
 `rh_cli pylock-observe` verifies caller-supplied bytes against expected

@@ -178,6 +178,38 @@ dependencies = [{name = 'private', vcs = {url = 'https://example.invalid/private
 [[packages]]
 name = 'name-only-private-consumer'
 dependencies = [{name = 'private'}]
+
+[[packages]]
+name = 'archived'
+[packages.archive]
+path = 'vendor/archived-source.zip'
+subdirectory = 'project'
+[packages.archive.hashes]
+sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
+[[packages]]
+name = 'archived'
+[packages.archive]
+path = 'vendor/other-source.zip'
+subdirectory = 'project'
+[packages.archive.hashes]
+sha256 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+[[packages]]
+name = 'archive-consumer'
+dependencies = [{name = 'archived', archive = {path = 'vendor/archived-source.zip', subdirectory = 'project'}}]
+
+[[packages]]
+name = 'table-archive-consumer'
+[[packages.dependencies]]
+name = 'archived'
+[packages.dependencies.archive]
+path = 'vendor/archived-source.zip'
+subdirectory = 'project'
+
+[[packages]]
+name = 'name-only-archive-consumer'
+dependencies = [{name = 'archived'}]
 EOF
 
 "$ROOT/build/rh_cli" pylock --input "$T/pylock.toml" --out "$T/result.json" | grep -q 'PEP 751 audit emitted' || fail "command did not emit audit"
@@ -197,7 +229,7 @@ assert report["extras"] == ["speedups", "docs"], report
 assert report["dependency_groups"] == ["dev", "test"], report
 assert report["default_groups"] == ["dev"], report
 pkgs = report["packages"]
-assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-consumer", "context-consumer", "missing-consumer", "table-context-consumer", "inline-artifact-consumer", "git-library", "editable-library", "locked-library", "local-git-library", "private", "private", "editable-library", "directory-consumer", "unknown-source-consumer", "name-only-private-consumer"], pkgs
+assert [p["name"] for p in pkgs] == ["attrs", "attrs", "cattrs", "ambiguous-consumer", "context-consumer", "missing-consumer", "table-context-consumer", "inline-artifact-consumer", "git-library", "editable-library", "locked-library", "local-git-library", "private", "private", "editable-library", "directory-consumer", "unknown-source-consumer", "name-only-private-consumer", "archived", "archived", "archive-consumer", "table-archive-consumer", "name-only-archive-consumer"], pkgs
 assert pkgs[0]["marker"] == "sys_platform == 'linux' # retained inside string", pkgs[0]
 assert pkgs[0]["index_sha256"] == hashlib.sha256(b"https://index.example.invalid/simple/").hexdigest(), pkgs[0]
 assert pkgs[1]["index_sha256"] is None, pkgs[1]
@@ -212,6 +244,11 @@ assert pkgs[6]["dependencies"][1]["resolution"] == "resolved" and pkgs[6]["depen
 assert pkgs[15]["dependencies"][0]["resolution"] == "resolved" and pkgs[15]["dependencies"][0]["target"] == 9, pkgs[15]
 assert pkgs[16]["dependencies"][0]["resolution"] == "context", pkgs[16]
 assert pkgs[17]["dependencies"][0]["resolution"] == "ambiguous", pkgs[17]
+assert pkgs[20]["dependencies"][0]["target"] == 18 and pkgs[20]["dependencies"][0]["resolution"] == "resolved", pkgs[20]
+assert pkgs[20]["dependencies"][0]["source"]["kind"] == "archive", pkgs[20]
+assert pkgs[20]["dependencies"][0]["source"]["source_sha256"] == hashlib.sha256(b"vendor/archived-source.zip").hexdigest(), pkgs[20]
+assert pkgs[21]["dependencies"][0]["target"] == 18 and pkgs[21]["dependencies"][0]["resolution"] == "resolved", pkgs[21]
+assert pkgs[22]["dependencies"][0]["resolution"] == "ambiguous", pkgs[22]
 assert [a["kind"] for a in pkgs[0]["artifacts"]] == ["wheel", "wheel", "sdist"], pkgs[0]["artifacts"]
 assert pkgs[0]["artifacts"][0]["hashes"] == [
     {"algorithm": "sha256", "value": "a" * 64},
@@ -255,7 +292,7 @@ assert pkgs[11]["source"]["kind"] == "vcs" and pkgs[11]["source"]["source_kind"]
 assert pkgs[11]["source"]["source_sha256"] == hashlib.sha256(b"../git/local-library").hexdigest(), pkgs[11]
 assert pkgs[11]["source"]["requested_revision"] is None and pkgs[11]["source"]["commit_id"] == "89abcdef0123456789abcdef0123456789abcdef", pkgs[11]
 serialized = json.dumps(report)
-for locator in ["https://index.example.invalid/simple/", "https://files.example.invalid/attrs-25.1.0.whl", "https://files.example.invalid/inline.whl", "vendor/inline-alt.whl", "vendor/context-consumer-1.0.0.zip", "https://git.example.invalid/team/library.git", "https://example.invalid/private", "../workspace/editable-library", "../workspace/alternate-library", "vendor/locked-library", "../git/local-library"]:
+for locator in ["https://index.example.invalid/simple/", "https://files.example.invalid/attrs-25.1.0.whl", "https://files.example.invalid/inline.whl", "vendor/inline-alt.whl", "vendor/context-consumer-1.0.0.zip", "https://git.example.invalid/team/library.git", "https://example.invalid/private", "../workspace/editable-library", "../workspace/alternate-library", "vendor/locked-library", "../git/local-library", "vendor/archived-source.zip", "vendor/other-source.zip"]:
     assert locator not in serialized, report
 coverage = report["coverage"]
 assert coverage["direct_dependencies"] == "not_recorded" and coverage["markers_evaluated"] is False, coverage
