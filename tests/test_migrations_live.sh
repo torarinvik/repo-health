@@ -12,6 +12,11 @@ fail() { echo "[migrations-live] FAIL: $1" >&2; exit 1; }
 cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+if [[ "${RH_PG_MIGRATION:-0}" != "1" ]]; then
+  echo "[migrations-live] skipped (RH_PG_MIGRATION!=1)"
+  exit 0
+fi
+
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 docker info >/dev/null 2>&1 || fail "docker daemon is unavailable"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "image is unavailable: $IMAGE"
