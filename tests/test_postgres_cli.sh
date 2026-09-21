@@ -87,6 +87,13 @@ RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
   RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=partial \
   "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-partial-empty-input.json" --out "$T/ingest-partial-empty-result.json" >/dev/null \
   || fail "partial PostgreSQL collection with no durable pages"
+for status in failed canceled; do
+  cp "$ROOT/fixtures/postgres/ingest-$status-input.json" "$T/ingest-$status-input.json"
+  RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+    RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT="$status" \
+    "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-$status-input.json" --out "$T/ingest-$status-result.json" >/dev/null \
+    || fail "$status PostgreSQL collection outcome"
+done
 
 mkdir -p "$T/evidence"
 printf 'hello evidence\n' > "$T/evidence-source.txt"
@@ -157,13 +164,15 @@ for mode in failure oversize invalid_refs truncated_refs unsorted_refs; do
 done
 echo "[postgres-cli] evidence GC preserves references and fails closed on incomplete snapshots"
 
-python3 - "$T" "$ROOT/fixtures/postgres/ingest-output.json" "$ROOT/fixtures/postgres/ingest-partial-output.json" "$ROOT/fixtures/postgres/evidence-references-result.json" "$ROOT/fixtures/postgres/evidence-gc-result.json" <<'PY'
+python3 - "$T" "$ROOT/fixtures/postgres/ingest-output.json" "$ROOT/fixtures/postgres/ingest-partial-output.json" "$ROOT/fixtures/postgres/ingest-failed-output.json" "$ROOT/fixtures/postgres/ingest-canceled-output.json" "$ROOT/fixtures/postgres/evidence-references-result.json" "$ROOT/fixtures/postgres/evidence-gc-result.json" <<'PY'
 import json, os, sys
 root = sys.argv[1]
 expected_ingest = json.load(open(sys.argv[2]))
 expected_partial = json.load(open(sys.argv[3]))
-expected_references = json.load(open(sys.argv[4]))
-expected_gc = json.load(open(sys.argv[5]))
+expected_failed = json.load(open(sys.argv[4]))
+expected_canceled = json.load(open(sys.argv[5]))
+expected_references = json.load(open(sys.argv[6]))
+expected_gc = json.load(open(sys.argv[7]))
 def read(name):
     with open(os.path.join(root, name)) as f:
         return json.load(f)
@@ -197,6 +206,8 @@ assert read("ingest-result.json") == expected_ingest
 assert read("ingest-partial-result.json") == expected_partial
 partial_empty = read("ingest-partial-empty-result.json")
 assert partial_empty["status"] == "partial" and partial_empty["pages"] == [] and partial_empty["fencing_token"] == 1, partial_empty
+assert read("ingest-failed-result.json") == expected_failed
+assert read("ingest-canceled-result.json") == expected_canceled
 not_claimed = read("ingest-not-claimed.json")
 assert not_claimed["status"] == "not_claimed" and not_claimed["pages"] == [] and not_claimed["fencing_token"] == 0, not_claimed
 assert not_claimed["schema"] == "rh-postgres-ingest-result/1" and not_claimed["operation"] == "ingest", not_claimed
@@ -215,7 +226,7 @@ assert read("evidence-references-result.json") == expected_references
 assert read("evidence-gc-result.json") == expected_gc
 all_output = "".join(open(os.path.join(root, p)).read() for p in os.listdir(root) if p.endswith(".json"))
 assert "never-emit-this" not in all_output
-print("[postgres-cli] verified source/run setup, complete/partial PostgreSQL ingest, enqueue/targeted claim, evidence registration/reference discovery/cleanup, page commits, job lifecycle, and bounded reports OK")
+print("[postgres-cli] verified source/run setup, complete/partial/failed/canceled PostgreSQL ingest, enqueue/targeted claim, evidence registration/reference discovery/cleanup, page commits, job lifecycle, and bounded reports OK")
 PY
 
 printf 'X' >> "$T/evidence/$stored_name"

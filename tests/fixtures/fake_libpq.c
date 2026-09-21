@@ -127,6 +127,14 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "00000000-0000-0000-0000-000000000020", "00000000-0000-0000-0000-000000000021", "1",
         "succeeded", "partial", "partial", "{\"issues\":\"partial\",\"reason\":\"rate_limit\"}", "partial", "rate_limit", "2026-09-21T00:03:30Z"
     };
+    static const char *ingest_failed_finish_values[10] = {
+        "00000000-0000-0000-0000-000000000020", "00000000-0000-0000-0000-000000000021", "1",
+        "failed", "failed", "unknown", "{\"issues\":\"unavailable\",\"reason\":\"authorization\"}", "authorization", "authorization", "2026-09-21T00:03:30Z"
+    };
+    static const char *ingest_canceled_finish_values[10] = {
+        "00000000-0000-0000-0000-000000000020", "00000000-0000-0000-0000-000000000021", "1",
+        "canceled", "canceled", "unknown", "{\"issues\":\"partial\",\"reason\":\"canceled\"}", "canceled", "canceled", "2026-09-21T00:03:30Z"
+    };
     const char *operation = getenv("RH_FAKE_PG_OPERATION");
     const char *mode = getenv("RH_FAKE_PG_EXPECT");
     const char **expected = page_values;
@@ -196,7 +204,9 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             expected_count = 14;
             prefix = "SELECT public.rh_commit_collection_page_events(";
         } else if (query != NULL && strncmp(query, "SELECT public.rh_finish_collection_job(", strlen("SELECT public.rh_finish_collection_job(")) == 0) {
-            expected = mode != NULL && strcmp(mode, "partial") == 0 ? ingest_partial_finish_values : ingest_finish_values;
+            expected = mode != NULL && strcmp(mode, "partial") == 0 ? ingest_partial_finish_values :
+                mode != NULL && strcmp(mode, "failed") == 0 ? ingest_failed_finish_values :
+                mode != NULL && strcmp(mode, "canceled") == 0 ? ingest_canceled_finish_values : ingest_finish_values;
             expected_count = 10;
             prefix = "SELECT public.rh_finish_collection_job(";
         }
