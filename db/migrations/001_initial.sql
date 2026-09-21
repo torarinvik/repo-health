@@ -807,6 +807,69 @@ BEGIN
 END;
 $$;
 
+-- Queue a collection run with an immutable run binding. The worker performs
+-- acquisition outside this transaction, then commits pages under the lease.
+CREATE FUNCTION rh_enqueue_collection_job(
+    p_run_id uuid,
+    p_job_id uuid,
+    p_priority integer,
+    p_next_attempt_at timestamptz,
+    p_created_at timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_source_instance_id uuid;
+    v_visibility_scope rh_visibility_scope;
+    v_run_status text;
+    v_existing_job job%ROWTYPE;
+BEGIN
+    SELECT r.source_instance_id, s.visibility_scope, r.status
+    INTO v_source_instance_id, v_visibility_scope, v_run_status
+    FROM collection_run AS r
+    JOIN source_instance AS s ON s.id = r.source_instance_id
+    WHERE r.id = p_run_id
+    FOR UPDATE OF r, s;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'collection run does not exist: %', p_run_id;
+    END IF;
+
+    SELECT * INTO v_existing_job
+    FROM job
+    WHERE id = p_job_id
+    FOR UPDATE;
+    IF FOUND THEN
+        IF v_existing_job.source_instance_id IS DISTINCT FROM v_source_instance_id
+           OR v_existing_job.kind IS DISTINCT FROM 'collection'
+           OR v_existing_job.visibility_scope IS DISTINCT FROM v_visibility_scope
+           OR v_existing_job.priority IS DISTINCT FROM p_priority
+           OR v_existing_job.next_attempt_at IS DISTINCT FROM p_next_attempt_at
+           OR v_existing_job.created_at IS DISTINCT FROM p_created_at
+           OR v_existing_job.input_manifest IS DISTINCT FROM jsonb_build_object('collection_run_id', p_run_id::text) THEN
+            RAISE EXCEPTION 'collection job identity is already registered with different immutable metadata';
+        END IF;
+        RETURN false;
+    END IF;
+
+    IF v_run_status IS DISTINCT FROM 'running' THEN
+        RAISE EXCEPTION 'collection run is not running: %', p_run_id;
+    END IF;
+    IF p_created_at > p_next_attempt_at THEN
+        RAISE EXCEPTION 'collection job cannot be scheduled before its creation time';
+    END IF;
+
+    INSERT INTO job (
+        id, source_instance_id, kind, visibility_scope, state, priority,
+        next_attempt_at, created_at, input_manifest
+    ) VALUES (
+        p_job_id, v_source_instance_id, 'collection', v_visibility_scope,
+        'queued', p_priority, p_next_attempt_at, p_created_at,
+        jsonb_build_object('collection_run_id', p_run_id::text)
+    );
+    RETURN true;
+END;
+$$;
+
 -- These methods keep claims and cursor advancement short, fenced, and
 -- idempotent. Network fetches and parsing stay outside the transaction.
 CREATE FUNCTION rh_claim_next_job(

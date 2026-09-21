@@ -40,7 +40,7 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_collection_page_events"} <= functions
+assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_enqueue_collection_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_collection_page_events"} <= functions
 assert clean.lstrip().startswith("BEGIN;") and clean.rstrip().endswith("COMMIT;")
 assert "FOR UPDATE SKIP LOCKED" in clean
 assert "fencing_token" in clean and "lease_expires_at" in clean

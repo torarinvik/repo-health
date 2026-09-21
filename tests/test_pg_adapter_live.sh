@@ -34,12 +34,14 @@ CONNINFO="host=127.0.0.1 port=$PORT dbname=repo_health user=postgres password=re
 mkdir -p "$TMP_DIR/evidence"
 run_cli() {
   local input="$1" output="$2"
+  local safe_input="$TMP_DIR/command.json"
+  cp "$input" "$safe_input" || fail "copy command fixture"
   if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
     RH_DATABASE_URL="$CONNINFO" RH_EVIDENCE_ROOT="$TMP_DIR/evidence" RH_LIBPQ_PATH="$RH_LIBPQ_PATH" \
-      "$ROOT/build/rh_cli" postgres --input "$input" --out "$output" >/dev/null
+      "$ROOT/build/rh_cli" postgres --input "$safe_input" --out "$output" >/dev/null
   else
     env -u RH_LIBPQ_PATH RH_DATABASE_URL="$CONNINFO" RH_EVIDENCE_ROOT="$TMP_DIR/evidence" \
-      "$ROOT/build/rh_cli" postgres --input "$input" --out "$output" >/dev/null
+      "$ROOT/build/rh_cli" postgres --input "$safe_input" --out "$output" >/dev/null
   fi
 }
 run_cli "$ROOT/fixtures/postgres/begin-collection-run-command.json" "$TMP_DIR/run-started.json" || fail "CLI source and run registration"
@@ -86,4 +88,23 @@ PY
 event_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM canonical_event WHERE source_object_id = 'issue:live' AND evidence_id = '00000000-0000-0000-0000-000000000006'::uuid AND actor_account_id = '00000000-0000-0000-0000-000000000007'::uuid")"
 actor_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM account WHERE source_native_id = 'alice'")"
 [[ "$event_count" == "1" && "$actor_count" == "1" ]] || fail "registered evidence event and actor did not commit exactly once"
-echo "[pg-adapter-live] source/run setup, page replay, evidence registration, actor linkage, fenced job lifecycle, and empty-queue claim OK"
+
+run_cli "$ROOT/fixtures/postgres/enqueue-collection-job-command.json" "$TMP_DIR/job-enqueued.json" || fail "enqueue collection job through libpq adapter"
+run_cli "$ROOT/fixtures/postgres/enqueue-collection-job-command.json" "$TMP_DIR/job-duplicate.json" || fail "replay collection job through libpq adapter"
+run_cli "$ROOT/fixtures/postgres/claim-job-command.json" "$TMP_DIR/job-claimed.json" || fail "claim enqueued collection job through libpq adapter"
+run_cli "$ROOT/fixtures/postgres/finish-enqueued-collection-job-command.json" "$TMP_DIR/job-finished.json" || fail "finish enqueued collection run through libpq adapter"
+python3 - "$TMP_DIR" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+def read(name):
+    with open(os.path.join(root, name)) as stream:
+        return json.load(stream)
+assert read("job-enqueued.json")["status"] == "enqueued"
+assert read("job-duplicate.json")["status"] == "duplicate"
+claimed = read("job-claimed.json")
+assert claimed["job_id"] == "00000000-0000-0000-0000-00000000000a" and claimed["fencing_token"] == 1, claimed
+assert read("job-finished.json")["status"] == "applied"
+PY
+run_state="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT r.status || ':' || j.state || ':' || a.outcome FROM collection_run r JOIN job j ON j.input_manifest->>'collection_run_id' = r.id::text JOIN job_attempt a ON a.job_id = j.id WHERE r.id = '00000000-0000-0000-0000-000000000003'::uuid AND j.id = '00000000-0000-0000-0000-00000000000a'::uuid AND a.fencing_token = 1")"
+[[ "$run_state" == "succeeded:succeeded:ok" ]] || fail "enqueued run, job, and attempt did not finish together: $run_state"
+echo "[pg-adapter-live] source/run setup, enqueue/claim/finish, page replay, evidence registration, actor linkage, and fenced job lifecycle OK"

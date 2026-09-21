@@ -41,7 +41,9 @@ and the opt-in real-database path in `tests/test_pg_adapter_live.sh`
 content-addressed blob under `RH_EVIDENCE_ROOT`, computes SHA-256 metadata,
 and registers it idempotently. Event pages can register typed subjects and source-scoped actor accounts
 atomically and reject immutable-metadata conflicts. Source/run setup is available
-through `rh_cli postgres begin_collection_run`; blob distribution and wiring into
+through `rh_cli postgres begin_collection_run`, with idempotent collection-job
+enqueue bound to the run and source visibility; the live rehearsal claims and
+finishes the queued collection job. Blob distribution and wiring into
 `rh_cli ingest` remain open. The PostgreSQL adapter now also exposes
 `finish_collection_job`, which marks the
 collection run, job, and attempt terminal atomically under the current unexpired
@@ -1312,7 +1314,7 @@ cross-source identity are deferred to M04.
 | 8 | First ten foundational metrics | `implemented` (see table) |
 | 9 | JSON/Markdown report + explain | `implemented` (report.json/md; `rh_cli explain` emits `repo-health-explain/1`) |
 | 10 | Extend to the initial 30–40 metric subset | `implemented` (209 metric definitions are implemented; registry/status agreement and admission lint pass in `tests/test_m00.sh`) |
-| 11 | PostgreSQL ingestion, cursor transaction, and lease tests | `partial` (the PostgreSQL 16 migration rehearsal covers idempotent source/run initialization and conflict rejection, evidence metadata registration and conflict rejection, atomic subject/actor/event/page/cursor commit, run-mismatched, stale-token, and expired-token page rejection, stale/expired job-finish rejection, duplicate absorption, malformed-page rollback, fenced jobs, and complete-only cursor advancement; `rh_cli postgres` exposes parameterized source/run, evidence, page/event-page, and job methods with ABI and command-path coverage, while shared-blob distribution, ingestion wiring, and database crash/restart boundary tests remain open) |
+| 11 | PostgreSQL ingestion, cursor transaction, and lease tests | `partial` (the PostgreSQL 16 migration rehearsal covers idempotent source/run and collection-job enqueue/replay, conflicting metadata rejection, enqueue/claim/atomic finish, evidence registration, atomic subject/actor/event/page/cursor commit, run-mismatched and stale/expired lease rejection, duplicate absorption, malformed-page rollback, and complete-only cursor advancement; `rh_cli postgres` exposes parameterized source/run, enqueue, evidence, page/event-page, and job methods with ABI and command-path coverage, while shared-blob distribution, active-ingest wiring, and database crash/restart boundary tests remain open) |
 | 12 | First forge adapter and controlled-instance fixtures | `implemented` (GitHub normalization, captured workflow events, and controlled connector-instance checks in `tests/test_forge_cli.sh`, `tests/test_forge_events_cli.sh`, and `tests/test_connector_cli.sh`) |
 | 13 | Second forge plus generic self-hosted URL support | `implemented` (GitLab, Gitea, Forgejo, and Bitbucket mappings plus approved self-hosted connector fixtures; `tests/test_m02.sh`, `tests/test_forge_cli.sh`, `tests/test_connector_cli.sh`) |
 | 14 | Package identity and first lockfile parser | `implemented` (Cargo and npm graph parsers with exact contextual resolution; `tests/test_deps_cli.sh`) |

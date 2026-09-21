@@ -311,5 +311,60 @@ BEGIN
 END $$;
 SQL
 
-echo "[migrations-live] source/run, lease-reclaim audit, stale/expired fencing, atomic run finish, and rollback boundaries OK"
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
+DO $$
+DECLARE c record;
+BEGIN
+  IF NOT rh_begin_collection_run(
+    '00000000-0000-0000-0000-000000000001', 'github', 'https://api.github.com',
+    'public', 1, '2026-01-01T00:00:00Z',
+    '00000000-0000-0000-0000-00000000000a', 'releases', 'github', '1.0.0',
+    NULL, NULL, '2026-01-04T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'collection run for enqueue rehearsal was not started';
+  END IF;
+  IF NOT rh_enqueue_collection_job(
+    '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-00000000000b',
+    7, '2026-01-04T00:00:00Z', '2026-01-04T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'collection job was not enqueued';
+  END IF;
+  IF rh_enqueue_collection_job(
+    '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-00000000000b',
+    7, '2026-01-04T00:00:00Z', '2026-01-04T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'exact collection job retry was not absorbed';
+  END IF;
+  BEGIN
+    PERFORM rh_enqueue_collection_job(
+      '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-00000000000b',
+      8, '2026-01-04T00:00:00Z', '2026-01-04T00:00:00Z'
+    );
+    RAISE EXCEPTION 'conflicting collection job metadata was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('collection job identity is already registered with different immutable metadata' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+
+  SELECT * INTO c FROM rh_claim_next_job('worker-ingest', '2026-01-04T00:00:01Z', 60);
+  IF c.job_id <> '00000000-0000-0000-0000-00000000000b'::uuid OR c.fencing_token <> 1 THEN
+    RAISE EXCEPTION 'enqueued collection job was not claimable: %', c;
+  END IF;
+  IF NOT rh_finish_collection_job(
+    '00000000-0000-0000-0000-00000000000a', c.job_id, c.fencing_token,
+    'succeeded', 'succeeded', 'empty', '{"releases":"empty"}'::jsonb,
+    'ok', NULL, '2026-01-04T00:00:02Z'
+  ) THEN
+    RAISE EXCEPTION 'claimed collection job did not finish its run';
+  END IF;
+  IF (SELECT state FROM job WHERE id = c.job_id) <> 'succeeded'
+     OR (SELECT status FROM collection_run WHERE id = '00000000-0000-0000-0000-00000000000a'::uuid) <> 'succeeded'
+     OR (SELECT outcome FROM job_attempt WHERE job_id = c.job_id AND fencing_token = c.fencing_token) <> 'ok' THEN
+    RAISE EXCEPTION 'enqueued collection lifecycle did not persist terminal state';
+  END IF;
+END $$;
+SQL
+
+echo "[migrations-live] source/run, enqueue/claim/finish, lease-reclaim audit, stale/expired fencing, and rollback boundaries OK"
 echo "test_migrations_live OK"

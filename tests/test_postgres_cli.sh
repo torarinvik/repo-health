@@ -32,6 +32,8 @@ run_ok() {
 
 run_ok begin_run committed begin-collection-run
 run_ok begin_run duplicate begin-collection-run
+run_ok enqueue committed enqueue-collection-job
+run_ok enqueue duplicate enqueue-collection-job
 run_ok page committed page-commit
 run_ok page duplicate page-commit
 run_ok page_events committed page-events
@@ -69,6 +71,8 @@ def read(name):
         return json.load(f)
 assert read("begin-collection-run-committed.json")["status"] == "started"
 assert read("begin-collection-run-duplicate.json")["status"] == "duplicate"
+assert read("enqueue-collection-job-committed.json")["status"] == "enqueued"
+assert read("enqueue-collection-job-duplicate.json")["status"] == "duplicate"
 assert read("page-commit-committed.json")["status"] == "committed"
 assert read("page-commit-duplicate.json")["status"] == "duplicate"
 assert read("page-events-committed.json")["operation"] == "page_commit_events"
@@ -99,7 +103,7 @@ duplicate = read("register-evidence-duplicate.json")
 assert duplicate["status"] == "duplicate" and duplicate["digest_value"] == registered["digest_value"]
 all_output = "".join(open(os.path.join(root, p)).read() for p in os.listdir(root) if p.endswith(".json"))
 assert "never-emit-this" not in all_output
-print("[postgres-cli] verified evidence registration, event-page commit, page commit, claim, heartbeat, finish, and bounded reports OK")
+print("[postgres-cli] verified source/run initialization, collection-job enqueue, evidence registration, page commits, claim, heartbeat, finish, and bounded reports OK")
 PY
 
 printf 'X' >> "$T/evidence/$stored_name"

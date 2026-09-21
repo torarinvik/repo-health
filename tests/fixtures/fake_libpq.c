@@ -66,6 +66,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     static const char *claim_values[3] = {
         "worker-a", "2026-01-01T00:01:00Z", "60"
     };
+    static const char *enqueue_values[5] = {
+        "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-00000000000a",
+        "5", "2026-01-01T00:01:00Z", "2026-01-01T00:00:00Z"
+    };
     static const char *begin_run_values[13] = {
         "00000000-0000-0000-0000-000000000001", "github", "https://api.github.com",
         "public", "1", "2026-01-01T00:00:00Z", "00000000-0000-0000-0000-000000000003",
@@ -95,6 +99,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = claim_values;
         expected_count = 3;
         prefix = "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job(";
+    } else if (operation != NULL && strcmp(operation, "enqueue") == 0) {
+        expected = enqueue_values;
+        expected_count = 5;
+        prefix = "SELECT public.rh_enqueue_collection_job(";
     } else if (operation != NULL && strcmp(operation, "page_events") == 0) {
         expected = page_events_values;
         expected_count = 14;

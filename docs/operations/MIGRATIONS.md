@@ -35,9 +35,12 @@ locator. The `register_evidence` operation reads a blob from the
 configured `RH_EVIDENCE_ROOT`, verifies its FNV-1a content-addressed name,
 computes SHA-256 metadata, and idempotently registers that metadata through
 `rh_register_evidence_object`; the blob remains in the evidence directory.
+The `enqueue_collection_job` operation binds a queued job to an existing
+running collection run, derives its visibility from the source, and absorbs
+exact retries while rejecting changed job metadata.
 Event rows reference registered subjects, accounts, and evidence-object rows. It binds values through
 `PQexecParams`, applies a five-second connection timeout, and reports separate
-committed/duplicate, claimed/empty, and applied/fenced outcomes; transport or
+committed/duplicate, enqueued, claimed/empty, and applied/fenced outcomes; transport or
 query failures exit without writing a result. Supply
 the connection string through `RH_DATABASE_URL`; it is not accepted in command
 input or emitted in result files. Set `RH_LIBPQ_PATH` when
@@ -48,8 +51,9 @@ Remote connection strings should use `sslmode=verify-full` and a
 trusted root certificate. The mock ABI gate is `tests/test_pg_adapter.sh`; set
 `RH_PG_ADAPTER=1` and optionally `RH_LIBPQ_PATH` to run these operations
 against an ephemeral PostgreSQL instance with `tests/test_pg_adapter_live.sh`;
-that rehearsal drives the CLI from local blob verification through evidence
-registration to an event-page commit that references the registered evidence.
+that rehearsal drives source/run registration, collection-job enqueue/replay,
+claim and atomic finish, plus local blob verification, evidence registration,
+and an event-page commit that references the registered evidence.
 The CLI command contract and failure gates are covered by
 `tests/test_postgres_cli.sh`.
 
