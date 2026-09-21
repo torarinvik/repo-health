@@ -178,13 +178,15 @@ module Store:
         # name lists are validated before any deletion, so malformed or path-like
         # entries cannot cause partial cleanup or escape the evidence directory.
         # Registration must still be serialized with deletion by a future caller.
-        # Referenced objects are never touched. deleted_out counts removals
-        # (already-absent candidates count as removed). Returns -1 for bad inputs.
+        # Referenced objects are never touched. deleted_out counts successful
+        # unlinks. Returns -1 for bad inputs or filesystem failures.
         def rh_store_gc(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             deleted_out[0] <- 0
             return -1 if Base::rh_cstr_len_c(evidence_dir) == 0 or Base::rh_cstr_len_c(evidence_dir) > 4096
             return -1 if not rh_store_names_valid(candidates) or not rh_store_names_valid(referenced)
-            while start < candidates.count |start: usize = 0, candidates, referenced, evidence_dir, deleted_out|:
+            directory_fd: i32 = open(evidence_dir, 0)
+            return -1 if directory_fd < 0
+            while start < candidates.count |start: usize = 0, candidates, referenced, evidence_dir, deleted_out, directory_fd|:
                 stop: i64 = Base::rh_find_byte(candidates, start, 10)
                 line_end: mutable usize = stop.usize() if stop >= 0 else candidates.count
                 if line_end > start:
@@ -199,12 +201,19 @@ module Store:
                             k <- k + 1
                         path.push(0)
                         pp: u8& = (&path[0]).cast[u8&] can Unsafe.PointerCast
-                        _ = unlink(pp)
+                        removed: i32 = unlink(pp)
+                        if removed != 0:
+                            _ = fsync(directory_fd)
+                            _ = close(directory_fd)
+                            return -1
                         deleted_out[0] <- deleted_out[0] + 1
                 if stop < 0:
                     start <- candidates.count
                 else:
                     start <- stop.usize() + 1
+            synced: i32 = fsync(directory_fd)
+            closed: i32 = close(directory_fd)
+            return -1 if synced != 0 or closed != 0
             0
 
         # Delete one evidence blob by name (M07-08 deletion drill). Idempotent:
