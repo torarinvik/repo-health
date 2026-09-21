@@ -67,6 +67,7 @@ assert "staged normalization requires a succeeded complete or empty run" in clea
 assert "staged normalized event does not match a complete evidence-bearing source page" in clean
 assert "staged normalized event does not match a retained source record" in clean
 assert "staged normalization identity is already committed with different output metadata" in clean
+assert "staged normalization replay differs from its committed canonical event payload" in clean
 assert "json_build_array(v_scope_hash, v_native_id)::text" in clean
 assert "collector_label is opaque" in sql
 assert "ON CONFLICT (" in clean and "DO NOTHING" in clean

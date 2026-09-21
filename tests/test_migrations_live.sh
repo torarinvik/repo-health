@@ -686,6 +686,18 @@ BEGIN
   BEGIN
     PERFORM rh_commit_staged_normalization(
       '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000040',
+      'e710b485a90d96b174e4aa09d874bc24f77e5722588a0a4212571a2b9dd8f042',
+      'f00b322743316bc9459a25fb7aecd0690d614a3b25a83b76972c2d9d1cbfbefb',
+      '28fd63073eaf26a97de86ab4dc6027e69f33217858102da590ba4c1095308d26',
+      'rh-forge-events/1', 1700000000, jsonb_set(events, '{0,status}', '"open"'::jsonb)
+    );
+    RAISE EXCEPTION 'replay with a forged matching digest and changed payload was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('replay differs from its committed canonical event payload' IN SQLERRM) = 0 THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM rh_commit_staged_normalization(
+      '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000040',
       'a710b485a90d96b174e4aa09d874bc24f77e5722588a0a4212571a2b9dd8f042',
       'f00b322743316bc9459a25fb7aecd0690d614a3b25a83b76972c2d9d1cbfbefb', repeat('1', 64),
       'rh-forge-events/1', 1700000000,

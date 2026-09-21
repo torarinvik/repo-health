@@ -1441,6 +1441,7 @@ BEGIN
         RAISE EXCEPTION 'staged normalized events contain duplicate object identities';
     END IF;
 
+    v_source_revision := 'staged-normalization/1:' || p_input_sha256 || ':' || p_configuration_sha256;
     SELECT output_sha256, normalizer_version, captured_at, event_count
       INTO v_existing_output_sha256, v_existing_normalizer_version,
            v_existing_captured_at, v_existing_event_count
@@ -1457,10 +1458,49 @@ BEGIN
            OR v_existing_event_count IS DISTINCT FROM v_event_count THEN
             RAISE EXCEPTION 'staged normalization identity is already committed with different output metadata';
         END IF;
+        IF (SELECT count(*) FROM canonical_event AS event
+             WHERE event.source_instance_id = p_source_id
+               AND event.source_revision = v_source_revision) <> v_event_count THEN
+            RAISE EXCEPTION 'staged normalization manifest does not match its committed canonical event set';
+        END IF;
+        FOR v_event IN SELECT value FROM jsonb_array_elements(p_events) AS events(value) LOOP
+            v_kind := v_event->>'kind';
+            v_native_id := v_event->>'native_id';
+            v_object_type := CASE v_kind
+                WHEN 'issues' THEN 'issue'
+                WHEN 'proposals' THEN 'proposal'
+                WHEN 'reviews' THEN 'review'
+                ELSE 'release'
+            END;
+            v_page_number := (v_event->'staged_origin'->>'page_number')::integer;
+            v_evidence_id := (v_event->'staged_origin'->>'evidence_id')::uuid;
+            SELECT p.scope_hash INTO v_scope_hash
+              FROM collection_page AS p
+             WHERE p.collection_run_id = p_run_id AND p.page_number = v_page_number;
+            v_source_object_id := json_build_array(v_scope_hash, v_native_id)::text;
+            v_subject_id := md5(p_source_id::text || ':' || v_object_type || ':' ||
+                octet_length(v_scope_hash)::text || ':' || v_scope_hash || ':' || v_native_id)::uuid;
+            PERFORM 1 FROM canonical_event AS event
+             WHERE event.source_instance_id = p_source_id
+               AND event.source_object_type = v_object_type
+               AND event.source_object_id = v_source_object_id
+               AND event.source_revision = v_source_revision
+               AND event.event_kind = 'state_observation'
+               AND event.subject_id = v_subject_id
+               AND event.actor_account_id IS NULL
+               AND event.occurred_at IS NULL
+               AND event.observed_at = to_timestamp(p_captured_at)
+               AND event.time_basis = 'observation'
+               AND event.evidence_id = v_evidence_id
+               AND event.parser_version = p_normalizer_version
+               AND event.payload = v_event;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'staged normalization replay differs from its committed canonical event payload';
+            END IF;
+        END LOOP;
         RETURN false;
     END IF;
 
-    v_source_revision := 'staged-normalization/1:' || p_input_sha256 || ':' || p_configuration_sha256;
     FOR v_event IN SELECT value FROM jsonb_array_elements(p_events) AS events(value) LOOP
         v_kind := v_event->>'kind';
         v_native_id := v_event->>'native_id';
