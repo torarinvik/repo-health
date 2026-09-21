@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Replay committed PostgreSQL GitHub issue and proposal rows through rh-forge-events/1.
+# Replay committed PostgreSQL forge stage rows through rh-forge-events/1.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-T="/tmp/rh-staged-github-issues"
-fail() { echo "[staged-github] FAIL: $1" >&2; exit 1; }
+T="/tmp/rh-staged-forge"
+fail() { echo "[staged-forge] FAIL: $1" >&2; exit 1; }
 
-echo "[staged-github] build"
+echo "[staged-forge] build"
 bash "$ROOT/tools/build.sh" >/dev/null
 [[ -x "$ROOT/build/rh_cli" ]] || fail "rh_cli not built"
 rm -rf "$T"; mkdir -p "$T"
@@ -14,15 +14,31 @@ cp "$ROOT/fixtures/postgres/staged-github-issues-output.json" "$T/expected.json"
 cp "$ROOT/fixtures/postgres/staged-github-proposals-input.json" "$T/proposals-input.json"
 cp "$ROOT/fixtures/postgres/staged-github-reviews-input.json" "$T/reviews-input.json"
 cp "$ROOT/fixtures/postgres/staged-github-releases-input.json" "$T/releases-input.json"
+cp "$ROOT/fixtures/postgres/staged-gitlab-issues-input.json" "$T/gitlab-issues-input.json"
 
-echo "[staged-github] replay binds the exact stage input and preserves provenance"
+echo "[staged-forge] replay binds the exact stage input and preserves provenance"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/input.json" --out "$T/output.json" >/dev/null || fail "valid staged rows"
 python3 - "$T/output.json" "$T/expected.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2])), "result differs from checked-in replay"
 PY
 
-echo "[staged-github] explicit release binding normalizes published releases"
+echo "[staged-forge] GitLab issue identity and status pass through the provider adapter"
+"$ROOT/build/rh_cli" staged-normalize --input "$T/gitlab-issues-input.json" --out "$T/gitlab-issues-output.json" >/dev/null || fail "valid staged GitLab issues"
+python3 - "$T/gitlab-issues-input.json" "$T/gitlab-issues-output.json" "$ROOT/fixtures/postgres/staged-gitlab-issues-output.json" <<'PY'
+import hashlib, json, sys
+got = json.load(open(sys.argv[2]))
+expected = json.load(open(sys.argv[3]))
+assert got == expected, (got, expected)
+assert got["input_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), got
+assert got["provider"] == "gitlab" and got["canonical_capability"] == "issues", got
+n = got["normalized"]
+assert n["provider"] == "gitlab" and "scope" not in n, n
+assert n["capabilities"]["issues"]["count"] == 1, n["capabilities"]
+assert n["events"][0]["native_id"] == "gitlab:12" and n["events"][0]["status"] == "opened", n["events"]
+PY
+
+echo "[staged-forge] explicit release binding normalizes published releases"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/releases-input.json" --out "$T/releases-output.json" >/dev/null || fail "valid staged releases"
 python3 - "$T/releases-input.json" "$T/releases-output.json" "$ROOT/fixtures/postgres/staged-github-releases-output.json" <<'PY'
 import hashlib, json, sys
@@ -57,7 +73,7 @@ PY
 "$ROOT/build/rh_cli" staged-normalize --input "$T/input.json" --out "$T/replay.json" >/dev/null || fail "deterministic replay"
 cmp -s "$T/output.json" "$T/replay.json" || fail "replay changed output bytes"
 
-echo "[staged-github] explicit pull-request binding normalizes proposals"
+echo "[staged-forge] explicit pull-request binding normalizes proposals"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/proposals-input.json" --out "$T/proposals-output.json" >/dev/null || fail "valid staged pull requests"
 python3 - "$T/proposals-input.json" "$T/proposals-output.json" "$ROOT/fixtures/postgres/staged-github-proposals-output.json" <<'PY'
 import hashlib, json, sys
@@ -72,7 +88,7 @@ assert n["events"][0]["kind"] == "proposals" and n["events"][0]["native_id"] == 
 assert n["capabilities"]["issues"]["status"] == "not_attempted", n["capabilities"]
 PY
 
-echo "[staged-github] review inputs require and preserve pull-request scope"
+echo "[staged-forge] review inputs require and preserve pull-request scope"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/reviews-input.json" --out "$T/reviews-output.json" >/dev/null || fail "valid scoped reviews"
 python3 - "$T/reviews-input.json" "$T/reviews-output.json" "$ROOT/fixtures/postgres/staged-github-reviews-output.json" <<'PY'
 import hashlib, json, sys
@@ -87,7 +103,7 @@ assert n["capabilities"]["reviews"]["status"] == "observed" and n["capabilities"
 assert n["events"][0]["kind"] == "reviews" and n["events"][0]["native_id"] == "github:91" and n["events"][0]["pull_request"] == 17, n["events"]
 PY
 
-echo "[staged-github] committed empty pages remain observed empty"
+echo "[staged-forge] committed empty pages remain observed empty"
 python3 - "$T/input.json" "$T/empty.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -103,7 +119,7 @@ issues = d["normalized"]["capabilities"]["issues"]
 assert issues["status"] == "observed" and issues["count"] == 0 and issues["rejected"] == 0, issues
 PY
 
-echo "[staged-github] uncommitted, partial, misbound, and malformed rows fail closed"
+echo "[staged-forge] uncommitted, partial, misbound, and malformed rows fail closed"
 python3 - "$T/input.json" "$T" <<'PY'
 import copy, json, os, sys
 base = json.load(open(sys.argv[1]))
@@ -116,20 +132,22 @@ d = copy.deepcopy(base); d["pages"][0]["records"][0]["record_ordinal"] = 1; case
 d = copy.deepcopy(base); d["pages"][0]["records"][0]["raw_payload"] = "[]"; cases["non-object-payload"] = d
 d = copy.deepcopy(base); d["canonical_capability"] = "proposals"; cases["schema-capability-mismatch"] = d
 d = json.load(open(os.path.join(out, "reviews-input.json"))); d["scope"].pop("pull_request"); cases["review-scope-missing"] = d
+d = json.load(open(os.path.join(out, "gitlab-issues-input.json"))); d["scope"] = {"repository": "group/project"}; cases["gitlab-github-scope-confusion"] = d
 for name, value in cases.items():
     with open(os.path.join(out, name + ".json"), "w", encoding="utf-8") as f:
         json.dump(value, f, separators=(",", ":"))
 PY
-for name in uncommitted partial misbound ordinal non-object-payload schema-capability-mismatch review-scope-missing; do
+for name in uncommitted partial misbound ordinal non-object-payload schema-capability-mismatch review-scope-missing gitlab-github-scope-confusion; do
   if "$ROOT/build/rh_cli" staged-normalize --input "$T/$name.json" --out "$T/$name.out" >/dev/null 2>&1; then
     fail "$name stage input was accepted"
   fi
   [[ ! -e "$T/$name.out" ]] || fail "$name wrote an output despite rejection"
 done
 
-grep -q "rh-postgres-staged-github-issues-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "issue input contract token missing"
-grep -q "rh-postgres-staged-github-proposals-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "proposal input contract token missing"
-grep -q "rh-postgres-staged-github-reviews-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "review input contract token missing"
-grep -q "rh-postgres-staged-github-releases-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "release input contract token missing"
-grep -q "rh-postgres-staged-normalize-result/1" "$ROOT/src/rh_staged_github.elisa" || fail "result contract token missing"
-echo "test_staged_github_cli OK"
+grep -q "rh-postgres-staged-github-issues-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "issue input contract token missing"
+grep -q "rh-postgres-staged-github-proposals-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "proposal input contract token missing"
+grep -q "rh-postgres-staged-github-reviews-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "review input contract token missing"
+grep -q "rh-postgres-staged-github-releases-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "release input contract token missing"
+grep -q "rh-postgres-staged-gitlab-issues-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "GitLab input contract token missing"
+grep -q "rh-postgres-staged-normalize-result/1" "$ROOT/src/rh_staged_forge.elisa" || fail "result contract token missing"
+echo "test_staged_forge_cli OK"
