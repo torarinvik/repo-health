@@ -18,6 +18,52 @@ echo "[connector] build"
 bash "$ROOT/tools/build.sh" >/dev/null
 [[ -x "$ROOT/build/rh_cli" ]] || fail "rh_cli not built"
 
+echo "[connector] runtime capability tables match the checked-in manifests"
+python3 - "$ROOT" <<'PY'
+import glob, json, os, subprocess, sys, tempfile
+root = sys.argv[1]
+binary = os.path.join(root, "build", "rh_cli")
+manifests = {}
+for path in glob.glob(os.path.join(root, "connectors", "manifests", "*.json")):
+    manifest = json.load(open(path))
+    manifests[manifest["connector_id"]] = manifest
+
+implemented = {"github", "gitlab", "gitea", "forgejo", "bitbucket"}
+assert implemented <= manifests.keys(), (implemented, manifests.keys())
+
+def runtime_label(capability, declaration):
+    if declaration in {"unsupported", "unsupported-no-traffic-api"}:
+        return "unsupported"
+    if capability == "history" and declaration == "generic-git":
+        return "read"
+    if declaration == "read":
+        return "read"
+    if declaration == "authorized-only":
+        return "authorized-only"
+    if declaration == "authorized-14-day-window":
+        return "windowed"
+    if declaration == "unauthorized-in-m02-slice":
+        return "unauthorized"
+    raise AssertionError((capability, declaration))
+
+with tempfile.TemporaryDirectory(prefix="rh-connector-manifest-") as tmp:
+    for connector in sorted(implemented):
+        manifest = manifests[connector]
+        instance = os.path.join(tmp, connector + ".json")
+        output = os.path.join(tmp, connector + ".out")
+        with open(instance, "w") as f:
+            json.dump({"schema": "rh-connector-instance/1", "connector_id": connector,
+                       "base_url": "https://manifest-check.example.org", "approved": True}, f)
+        subprocess.run([binary, "connector", "check", "--instance", instance, "--out", output],
+                       check=True, stdout=subprocess.DEVNULL)
+        result = json.load(open(output))
+        assert result["connector_id"] == connector, result
+        expected = {cap: runtime_label(cap, declaration)
+                    for cap, declaration in manifest["capabilities"].items()}
+        assert result["capabilities"] == expected, (connector, result["capabilities"], expected)
+print("[connector] manifest/runtime parity OK:", ", ".join(sorted(implemented)))
+PY
+
 rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT"/fixtures/connectors/instance-*.json "$T"/
 

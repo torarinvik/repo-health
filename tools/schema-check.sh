@@ -47,6 +47,11 @@ def check_obj(obj, spec, ctx):
     for k, allowed in spec.get("enum", {}).items():
         if k in obj:
             assert obj[k] in allowed, (ctx, "bad enum", k, obj[k], allowed)
+    for k, item_type in spec.get("item_types", {}).items():
+        if k in obj:
+            assert isinstance(obj[k], list), (ctx, "bad list", k)
+            for i, value in enumerate(obj[k]):
+                assert type_ok(value, item_type), (ctx, "bad item type", k, i, type(value), item_type)
     additional_type = spec.get("additional_properties")
     if additional_type is not None:
         known = set(spec.get("types", {}))

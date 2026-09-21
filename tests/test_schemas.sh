@@ -45,6 +45,35 @@ fi
 rm -f "$ROOT/connectors/manifests/_bad_negative.json"
 echo "[schemas] negative control OK"
 
+echo "[schemas] connector scope entries and capability states are constrained"
+python3 - "$ROOT" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+doc = json.load(open(os.path.join(root, "connectors", "manifests", "github.json")))
+doc["auth_scopes"] = [42]
+with open(os.path.join(root, "connectors", "manifests", "_bad_scope.json"), "w") as f:
+    json.dump(doc, f)
+PY
+if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+  rm -f "$ROOT/connectors/manifests/_bad_scope.json"
+  fail "checker accepted a non-string authentication scope"
+fi
+rm -f "$ROOT/connectors/manifests/_bad_scope.json"
+python3 - "$ROOT" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+doc = json.load(open(os.path.join(root, "connectors", "manifests", "github.json")))
+doc["capabilities"]["traffic"] = "maybe"
+with open(os.path.join(root, "connectors", "manifests", "_bad_capability.json"), "w") as f:
+    json.dump(doc, f)
+PY
+if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+  rm -f "$ROOT/connectors/manifests/_bad_capability.json"
+  fail "checker accepted an undeclared capability state"
+fi
+rm -f "$ROOT/connectors/manifests/_bad_capability.json"
+echo "[schemas] connector manifest contract OK"
+
 echo "[schemas] publisher-specific attestation fields must stay strings"
 pylock_fixture="$ROOT/fixtures/packages/pylock-audit-result.json"
 pylock_backup="$tmp/pylock-audit-result.json"
