@@ -33,9 +33,9 @@ done
 for pid in "${pids[@]}"; do
   wait "$pid" || fail "concurrent put $pid"
 done
-[[ "$(find "$T/race" -type f | wc -l | tr -d ' ')" -eq 1 ]] || fail "concurrent puts left multiple published objects"
+[[ "$(find "$T/race" -type f ! -name '.rh-evidence.lock' | wc -l | tr -d ' ')" -eq 1 ]] || fail "concurrent puts left multiple published objects"
 [[ -z "$(find "$T/race" -name '*.stage.*' -print -quit)" ]] || fail "concurrent puts left a staging object"
-race_name="$(basename "$(find "$T/race" -type f -print -quit)")"
+race_name="$(basename "$(find "$T/race" -type f ! -name '.rh-evidence.lock' -print -quit)")"
 "$ROOT/build/rh_cli" store verify --root "$T/race" --name "$race_name" >/dev/null || fail "concurrent published blob does not verify"
 
 echo "[store] verify a stored blob; missing name fails closed"

@@ -3,15 +3,54 @@ include "./rh_observation.elisa"
 
 extern mkstemp(template: cstr) -> i32
 extern link(existing: cstr, published: cstr) -> i32
-extern open(path: cstr, flags: i32) -> i32
+extern open(path: cstr, flags: i32, mode: i32) -> i32
 extern fsync(fd: i32) -> i32
 extern close(fd: i32) -> i32
+extern flock(fd: i32, operation: i32) -> i32
+extern fchmod(fd: i32, mode: i32) -> i32
 
 module Store:
     private:
         const RH_LS_AVAILABLE: i64 = 6
+        const RH_STORE_LOCK_EXCLUSIVE: i32 = 2
+        const RH_STORE_LOCK_RELEASE: i32 = 8
+        static if ELISA_TARGET_OS_MACOS:
+            const RH_STORE_OPEN_CREATE: i32 = 512
+        static elif ELISA_TARGET_OS_LINUX:
+            const RH_STORE_OPEN_CREATE: i32 = 64
+        static else:
+            const RH_STORE_OPEN_CREATE: i32 = 0
 
     public:
+        # Hold one advisory lock shared by every local process using this root.
+        # The file remains in the root so a shared filesystem carries the lock.
+        def rh_store_guard_acquire(root: cstr, fd_out: mutable i32&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Unsafe.PointerCast]:
+            fd_out[0] <- -1
+            return -1 if Base::rh_cstr_len_c(root) == 0 or Base::rh_cstr_len_c(root) > 4096 or RH_STORE_OPEN_CREATE == 0
+            lock_path: mutable darray[u8] = []
+            Base::rh_push_cstr(lock_path, root)
+            Base::rh_push_text(lock_path, "/.rh-evidence.lock")
+            lock_path.push(0)
+            lock_ptr: cstr = (&lock_path[0]).cast[cstr] can Unsafe.PointerCast
+            fd: mutable i32 = open(lock_ptr, 2 | RH_STORE_OPEN_CREATE, 384)
+            fd <- open(lock_ptr, 0, 0) if fd < 0
+            return -1 if fd < 0
+            if fchmod(fd, 384) != 0:
+                _ = close(fd)
+                return -1
+            if flock(fd, RH_STORE_LOCK_EXCLUSIVE) != 0:
+                _ = close(fd)
+                return -1
+            fd_out[0] <- fd
+            0
+
+        def rh_store_guard_release(fd: i32) -> i64 can[Blocking.IO]:
+            return -1 if fd < 0
+            unlocked: i32 = flock(fd, RH_STORE_LOCK_RELEASE)
+            closed: i32 = close(fd)
+            return -1 if unlocked != 0 or closed != 0
+            0
+
         # rh_store.elisa — durable filesystem ingestion store (M02-01/02/03/06/07).
         # The first native PostgreSQL page-commit method lives in rh_postgres;
         # this remains the active event and lease backend until full wiring lands.
@@ -57,7 +96,8 @@ module Store:
         # atomic no-clobber hard link and sync the directory. Concurrent retries
         # converge on one immutable object; a different object at the same digest
         # fails closed. hex_out is appended to and must be empty on entry.
-        def rh_store_blob(root: cstr, data: mutable darray[u8]&, hex_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    private:
+        def rh_store_blob_unlocked(root: cstr, data: mutable darray[u8]&, hex_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             rh_digest_hex(data, hex_out)
             published_path: mutable darray[u8] =
                 path: mutable darray[u8] = []
@@ -95,7 +135,7 @@ module Store:
             if close(fd) != 0:
                 _ = unlink((&stage_path[0]).cast[u8&] can Unsafe.PointerCast)
                 return -1
-            directory_fd: i32 = open(root, 0)
+            directory_fd: i32 = open(root, 0, 0)
             if directory_fd < 0:
                 _ = unlink((&stage_path[0]).cast[u8&] can Unsafe.PointerCast)
                 return -1
@@ -113,6 +153,15 @@ module Store:
             closed_directory: i32 = close(directory_fd)
             return 0 if same and synced_existing == 0 and closed_directory == 0
             -1
+
+    public:
+        def rh_store_blob(root: cstr, data: mutable darray[u8]&, hex_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            guard_fd: mutable i32 = -1
+            return -1 if Store::rh_store_guard_acquire(root, &guard_fd) != 0
+            stored: i64 = Store::rh_store_blob_unlocked(root, data, hex_out)
+            released: i64 = Store::rh_store_guard_release(guard_fd)
+            return -1 if stored != 0 or released != 0
+            stored
 
         # Verify a stored blob recomputes to its name. False when missing or
         # corrupt: publication from it is blocked (M02-02).
@@ -172,21 +221,22 @@ module Store:
                 start <- end + 1 if stop >= 0 else names.count
             true
 
-    public:
+    private:
         # Orphan cleanup (F033): delete every candidate blob whose name is NOT in
         # the referenced set. The candidate and referenced sets are supplied by the
         # caller (newline-separated names) because this slice has no directory
         # listing; the operation itself is real and verifies by unlink. Both full
         # name lists are validated before any deletion, so malformed or path-like
         # entries cannot cause partial cleanup or escape the evidence directory.
-        # Registration must still be serialized with deletion by a future caller.
+        # A database caller must hold the same root guard across reference
+        # discovery and deletion, and registration must acquire it before verify.
         # Referenced objects are never touched. deleted_out counts successful
         # unlinks. Returns -1 for bad inputs or filesystem failures.
-        def rh_store_gc(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_store_gc_unlocked(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             deleted_out[0] <- 0
             return -1 if Base::rh_cstr_len_c(evidence_dir) == 0 or Base::rh_cstr_len_c(evidence_dir) > 4096
             return -1 if not rh_store_names_valid(candidates) or not rh_store_names_valid(referenced)
-            directory_fd: i32 = open(evidence_dir, 0)
+            directory_fd: i32 = open(evidence_dir, 0, 0)
             return -1 if directory_fd < 0
             while start < candidates.count |start: usize = 0, candidates, referenced, evidence_dir, deleted_out, directory_fd|:
                 stop: i64 = Base::rh_find_byte(candidates, start, 10)
@@ -217,6 +267,20 @@ module Store:
             closed: i32 = close(directory_fd)
             return -1 if synced != 0 or closed != 0
             0
+
+    public:
+        # Caller-held form keeps the root guarded across reference discovery and
+        # deletion. The caller must acquire and release the matching root guard.
+        def rh_store_gc_under_guard(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            Store::rh_store_gc_unlocked(evidence_dir, candidates, referenced, deleted_out)
+
+        def rh_store_gc(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            guard_fd: mutable i32 = -1
+            return -1 if Store::rh_store_guard_acquire(evidence_dir, &guard_fd) != 0
+            deleted: i64 = Store::rh_store_gc_under_guard(evidence_dir, candidates, referenced, deleted_out)
+            released: i64 = Store::rh_store_guard_release(guard_fd)
+            return -1 if deleted != 0 or released != 0
+            deleted
 
         # Delete one evidence blob by name (M07-08 deletion drill). Idempotent:
         # deleting an already-absent blob is success. Returns 0, or -1 on an empty
