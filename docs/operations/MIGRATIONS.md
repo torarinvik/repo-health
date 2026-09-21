@@ -22,6 +22,7 @@ subject and source-scoped actor metadata; the transaction inserts new entities
 and accounts or checks exact immutable replays before inserting event rows.
 Conflicting metadata, expired leases, and stale tokens roll back the page and
 cursor. The adapter also performs fenced job claim, heartbeat, and finish.
+Job completion checks both the current fencing token and an unexpired lease.
 Source/run retries succeed only when the supplied immutable metadata
 matches the existing rows. Source base URLs must be absolute and contain no
 credentials, query, fragment, or whitespace; credentials stay in their separate

@@ -113,6 +113,9 @@ BEGIN
   IF rh_finish_job(c.job_id, c.fencing_token - 1, 'succeeded', '2026-01-01T00:00:20Z') THEN
     RAISE EXCEPTION 'stale finish was accepted';
   END IF;
+  IF rh_finish_job(c.job_id, c.fencing_token, 'failed', '2026-01-01T00:02:00Z', 'expired', NULL) THEN
+    RAISE EXCEPTION 'expired finish was accepted';
+  END IF;
   IF NOT rh_finish_job(c.job_id, c.fencing_token, 'succeeded', '2026-01-01T00:00:20Z', 'ok', NULL) THEN
     RAISE EXCEPTION 'current finish was refused';
   END IF;
@@ -271,5 +274,5 @@ BEGIN
 END $$;
 SQL
 
-echo "[migrations-live] source/run, metadata, stale/expired page fencing, replay, and rollback boundaries OK"
+echo "[migrations-live] source/run, metadata, stale/expired job and page fencing, replay, and rollback boundaries OK"
 echo "test_migrations_live OK"

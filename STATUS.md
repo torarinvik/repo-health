@@ -29,7 +29,8 @@ contract (55 typed PostgreSQL tables, visibility/source-scoped constraints,
 evidence and graph indexes, fenced lease/cursor SQL methods) with the static
 `tests/test_migrations.sh` contract gate; the opt-in
 `RH_PG_MIGRATION=1 tests/test_migrations_live.sh` rehearsal applies
-the migration to PostgreSQL 16 and exercises run-mismatched, stale, and expired page fencing, terminal finish,
+the migration to PostgreSQL 16 and exercises run-mismatched, stale/expired page
+fencing, stale/expired job finish, terminal finish,
 complete-only cursor advancement, evidence registration replay/conflict, and
 duplicate-page idempotence. Dynamically loaded `libpq` methods register
 verified evidence metadata, commit fenced collection/event pages, and claim/heartbeat/finish
@@ -1305,7 +1306,7 @@ cross-source identity are deferred to M04.
 | 8 | First ten foundational metrics | `implemented` (see table) |
 | 9 | JSON/Markdown report + explain | `implemented` (report.json/md; `rh_cli explain` emits `repo-health-explain/1`) |
 | 10 | Extend to the initial 30–40 metric subset | `implemented` (209 metric definitions are implemented; registry/status agreement and admission lint pass in `tests/test_m00.sh`) |
-| 11 | PostgreSQL ingestion, cursor transaction, and lease tests | `partial` (the PostgreSQL 16 migration rehearsal covers idempotent source/run initialization and conflict rejection, evidence metadata registration and conflict rejection, atomic subject/actor/event/page/cursor commit, run-mismatched, stale-token, and expired-token page rejection, duplicate absorption, malformed-page rollback, fenced jobs, and complete-only cursor advancement; `rh_cli postgres` exposes parameterized source/run, evidence, page/event-page, and job methods with ABI and command-path coverage, while shared-blob distribution, ingestion wiring, and database crash/restart boundary tests remain open) |
+| 11 | PostgreSQL ingestion, cursor transaction, and lease tests | `partial` (the PostgreSQL 16 migration rehearsal covers idempotent source/run initialization and conflict rejection, evidence metadata registration and conflict rejection, atomic subject/actor/event/page/cursor commit, run-mismatched, stale-token, and expired-token page rejection, stale/expired job-finish rejection, duplicate absorption, malformed-page rollback, fenced jobs, and complete-only cursor advancement; `rh_cli postgres` exposes parameterized source/run, evidence, page/event-page, and job methods with ABI and command-path coverage, while shared-blob distribution, ingestion wiring, and database crash/restart boundary tests remain open) |
 | 12 | First forge adapter and controlled-instance fixtures | `implemented` (GitHub normalization, captured workflow events, and controlled connector-instance checks in `tests/test_forge_cli.sh`, `tests/test_forge_events_cli.sh`, and `tests/test_connector_cli.sh`) |
 | 13 | Second forge plus generic self-hosted URL support | `implemented` (GitLab, Gitea, Forgejo, and Bitbucket mappings plus approved self-hosted connector fixtures; `tests/test_m02.sh`, `tests/test_forge_cli.sh`, `tests/test_connector_cli.sh`) |
 | 14 | Package identity and first lockfile parser | `implemented` (Cargo and npm graph parsers with exact contextual resolution; `tests/test_deps_cli.sh`) |

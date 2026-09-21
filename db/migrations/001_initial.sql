@@ -882,7 +882,10 @@ BEGIN
 
     UPDATE job
     SET state = p_state, lease_expires_at = NULL, finished_at = p_now
-    WHERE id = p_job_id AND state = 'running' AND fencing_token = p_fencing_token;
+    WHERE id = p_job_id
+      AND state = 'running'
+      AND fencing_token = p_fencing_token
+      AND lease_expires_at > p_now;
 
     IF NOT FOUND THEN
         RETURN false;
