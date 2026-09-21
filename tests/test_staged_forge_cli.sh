@@ -45,6 +45,46 @@ assert got["normalized"]["events"][0]["native_id"].startswith(provider + ":"), g
 PY
 done
 
+echo "[staged-forge] generic provider tokens cover only their declared capability matrix"
+python3 - "$ROOT/build/rh_cli" "$T" <<'PY'
+import json, os, subprocess, sys
+cli, tmp = sys.argv[1:]
+matrix = [(provider, capability) for provider in ("gitea", "forgejo") for capability in ("issues", "proposals", "releases")]
+matrix += [("bitbucket", capability) for capability in ("issues", "proposals")]
+for index, (provider, capability) in enumerate(matrix, 1):
+    label = f"{provider}-{capability}-matrix-v1"
+    native_id = 700 + index
+    if capability == "releases":
+        payload = {"id": native_id, "created_at": 1699000000 + index, "tag_name": f"v{index}.0.0"}
+    else:
+        id_key = "id" if provider == "bitbucket" else "number"
+        payload = {id_key: native_id, "state": "open", "created_at": 1699000000 + index}
+    envelope = {
+        "schema": "rh-postgres-staged-forge-events-input/1",
+        "source_id": f"source-{provider}-matrix",
+        "collection_run_id": f"run-{provider}-matrix-{index}",
+        "provider": provider,
+        "captured_at": 1700010000,
+        "authorization": {"state": "unknown"},
+        "collector_label": label,
+        "canonical_capability": capability,
+        "pages": [{"page_number": 0, "committed": True, "completeness": "complete", "records": [{"record_ordinal": 0, "collector_label": label, "raw_payload": json.dumps(payload, separators=(",", ":"))}]}],
+    }
+    input_path = os.path.join(tmp, f"matrix-{provider}-{capability}.json")
+    output_path = input_path + ".out"
+    with open(input_path, "w", encoding="utf-8") as f:
+        json.dump(envelope, f, separators=(",", ":"))
+    subprocess.run([cli, "staged-normalize", "--input", input_path, "--out", output_path], check=True, stdout=subprocess.DEVNULL)
+    got = json.load(open(output_path))
+    assert got["provider"] == provider and got["canonical_capability"] == capability, got
+    normalized = got["normalized"]
+    cap = normalized["capabilities"][capability]
+    assert cap["status"] == "observed" and cap["count"] == 1 and cap["rejected"] == 0, cap
+    event = normalized["events"][0]
+    assert event["kind"] == capability and event["native_id"] == f"{provider}:{native_id}", event
+    assert all(normalized["capabilities"][other]["status"] == "not_attempted" for other in ("issues", "proposals", "reviews", "releases") if other != capability), normalized["capabilities"]
+PY
+
 echo "[staged-forge] GitLab merge-request identity and merged state stay native"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/gitlab-proposals-input.json" --out "$T/gitlab-proposals-output.json" >/dev/null || fail "valid staged GitLab merge requests"
 python3 - "$T/gitlab-proposals-input.json" "$T/gitlab-proposals-output.json" "$ROOT/fixtures/postgres/staged-gitlab-proposals-output.json" <<'PY'
@@ -185,11 +225,13 @@ d = json.load(open(os.path.join(out, "reviews-input.json"))); d["scope"].pop("pu
 d = json.load(open(os.path.join(out, "gitlab-issues-input.json"))); d["scope"] = {"repository": "group/project"}; cases["gitlab-github-scope-confusion"] = d
 d = json.load(open(os.path.join(out, "bitbucket-issues-input.json"))); d["canonical_capability"] = "releases"; cases["unsupported-bitbucket-releases"] = d
 d = json.load(open(os.path.join(out, "gitea-issues-input.json"))); d["canonical_capability"] = "reviews"; cases["unsupported-gitea-reviews"] = d
+d = json.load(open(os.path.join(out, "gitea-issues-input.json"))); d["provider"] = "github"; cases["generic-github-token"] = d
+d = json.load(open(os.path.join(out, "gitea-issues-input.json"))); d["provider"] = "gitlab"; cases["generic-gitlab-token"] = d
 for name, value in cases.items():
     with open(os.path.join(out, name + ".json"), "w", encoding="utf-8") as f:
         json.dump(value, f, separators=(",", ":"))
 PY
-for name in uncommitted partial misbound ordinal non-object-payload schema-capability-mismatch review-scope-missing gitlab-github-scope-confusion unsupported-bitbucket-releases unsupported-gitea-reviews; do
+for name in uncommitted partial misbound ordinal non-object-payload schema-capability-mismatch review-scope-missing gitlab-github-scope-confusion unsupported-bitbucket-releases unsupported-gitea-reviews generic-github-token generic-gitlab-token; do
   if "$ROOT/build/rh_cli" staged-normalize --input "$T/$name.json" --out "$T/$name.out" >/dev/null 2>&1; then
     fail "$name stage input was accepted"
   fi
