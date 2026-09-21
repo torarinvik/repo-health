@@ -23,13 +23,18 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "image is unavailable: $IM
 
 echo "[migrations-live] start $IMAGE"
 docker run --rm -d --name "$CONTAINER" -e POSTGRES_PASSWORD=repo-health-test -e POSTGRES_DB=repo_health "$IMAGE" >/dev/null || fail "container start"
+ready_checks=0
 for _ in $(seq 1 60); do
   if docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1; then
-    break
+    ready_checks=$((ready_checks + 1))
+    [[ "$ready_checks" -ge 3 ]] && break
+  else
+    ready_checks=0
   fi
   sleep 1
 done
-docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1 || fail "postgres did not become ready"
+[[ "$ready_checks" -ge 3 ]] || fail "postgres did not become ready"
+docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1 || fail "postgres stopped after becoming ready"
 
 docker cp "$ROOT/db/migrations/001_initial.sql" "$CONTAINER:/tmp/001_initial.sql" || fail "copy migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/001_initial.sql >/dev/null || fail "apply migration"
@@ -310,6 +315,37 @@ BEGIN
   END IF;
 END $$;
 SQL
+
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "seed malformed storage key"
+DO $$
+BEGIN
+  IF NOT rh_register_evidence_object(
+    '00000000-0000-0000-0000-000000000011', 'public', repeat('b', 64), 18,
+    'application/json', 'not-a-content-address', 'standard', 'captured', '2026-01-01T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'malformed storage key seed was not registered';
+  END IF;
+END $$;
+SQL
+reference_query="$(python3 - "$ROOT/src/rh_postgres.elisa" <<'PY'
+import re, sys
+source = open(sys.argv[1], encoding="utf-8").read()
+query = re.search(r'Postgres::rh_pg_text_query\(conninfo, "([^\"]+)", out\)', source)
+if query is None:
+    raise SystemExit("fixed evidence reference query is missing")
+print(query.group(1))
+PY
+)"
+reference_snapshot="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "$reference_query")"
+python3 - "$reference_snapshot" <<'PY'
+import json, sys
+snapshot = json.loads(sys.argv[1])
+assert snapshot == {
+    "storage_keys": ["fnv1a64:aaaaaaaaaaaaaaaa"], "invalid_count": 1,
+    "truncated": False, "count": 1,
+}, snapshot
+PY
+echo "[migrations-live] bounded evidence reference query reports valid keys and malformed rows"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
 DO $$

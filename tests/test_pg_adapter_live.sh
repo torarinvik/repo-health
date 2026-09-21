@@ -20,11 +20,18 @@ trap cleanup EXIT
 
 bash "$ROOT/tools/build.sh" >/dev/null
 docker run --rm -d --name "$CONTAINER" -e POSTGRES_PASSWORD=repo-health-test -e POSTGRES_DB=repo_health -p 127.0.0.1::5432 "$IMAGE" >/dev/null || fail "start PostgreSQL"
+ready_checks=0
 for _ in $(seq 1 60); do
-  docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1 && break
+  if docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1; then
+    ready_checks=$((ready_checks + 1))
+    [[ "$ready_checks" -ge 3 ]] && break
+  else
+    ready_checks=0
+  fi
   sleep 1
 done
-docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1 || fail "PostgreSQL did not become ready"
+[[ "$ready_checks" -ge 3 ]] || fail "PostgreSQL did not become ready"
+docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1 || fail "PostgreSQL stopped after becoming ready"
 docker cp "$ROOT/db/migrations/001_initial.sql" "$CONTAINER:/tmp/001_initial.sql" >/dev/null || fail "copy migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/001_initial.sql >/dev/null || fail "apply migration"
 
@@ -84,6 +91,17 @@ stored_name="$("$ROOT/build/rh_cli" store put --root "$TMP_DIR/evidence" --file 
 [[ "$stored_name" == "f5e19178d3ff184e" ]] || fail "content-addressed evidence fixture changed"
 run_cli "$ROOT/fixtures/postgres/register-evidence-command.json" "$TMP_DIR/evidence-registered.json" || fail "CLI evidence registration"
 run_cli "$ROOT/fixtures/postgres/register-evidence-command.json" "$TMP_DIR/evidence-duplicate.json" || fail "CLI evidence replay"
+run_cli "$ROOT/fixtures/postgres/evidence-references-command.json" "$TMP_DIR/evidence-references.json" || fail "CLI evidence reference discovery"
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "seed malformed storage key"
+INSERT INTO evidence_object (
+    id, visibility_scope, digest_algorithm, digest_value, media_type,
+    byte_length, storage_key, retention_class, transformation_kind, created_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000010', 'public', 'sha256', repeat('b', 64),
+    'application/json', 18, 'malformed-storage-key', 'standard', 'captured', '2026-01-01T00:00:00Z'
+);
+SQL
+run_cli "$ROOT/fixtures/postgres/evidence-references-command.json" "$TMP_DIR/evidence-references-invalid.json" || fail "CLI malformed-key reference discovery"
 run_cli "$ROOT/fixtures/postgres/page-events-evidence-command.json" "$TMP_DIR/events-committed.json" || fail "CLI event page with registered evidence"
 run_cli "$ROOT/fixtures/postgres/page-events-evidence-command.json" "$TMP_DIR/events-duplicate.json" || fail "CLI event page replay"
 python3 - "$TMP_DIR" <<'PY'
@@ -94,6 +112,19 @@ def read(name):
         return json.load(stream)
 assert read("evidence-registered.json")["status"] == "registered"
 assert read("evidence-duplicate.json")["status"] == "duplicate"
+references = read("evidence-references.json")
+assert references == {
+    "schema": "rh-postgres-result/1", "operation": "evidence_references", "status": "listed",
+    "reference_snapshot": {
+        "storage_keys": ["fnv1a64:f5e19178d3ff184e"], "invalid_count": 0,
+        "truncated": False, "count": 1,
+    },
+}, references
+invalid_references = read("evidence-references-invalid.json")["reference_snapshot"]
+assert invalid_references == {
+    "storage_keys": ["fnv1a64:f5e19178d3ff184e"], "invalid_count": 1,
+    "truncated": False, "count": 1,
+}, invalid_references
 assert read("events-committed.json")["status"] == "committed"
 assert read("events-duplicate.json")["status"] == "duplicate"
 PY
@@ -131,4 +162,4 @@ ingest_state="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c 
 [[ "$ingest_state" == "succeeded:succeeded:ok" ]] || fail "normalized ingest did not finalize the run, job, and attempt atomically: $ingest_state"
 ingest_event_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM canonical_event WHERE source_object_id = 'issue:postgres-ingest-live' AND evidence_id = '00000000-0000-0000-0000-000000000006'::uuid")"
 [[ "$ingest_event_count" == "1" ]] || fail "normalized ingest event did not commit exactly once"
-echo "[pg-adapter-live] source/run setup, enqueue/claim/finish, page replay, evidence registration, actor linkage, and end-to-end normalized PostgreSQL ingest OK"
+echo "[pg-adapter-live] source/run setup, enqueue/claim/finish, page replay, evidence reference discovery, actor linkage, and end-to-end normalized PostgreSQL ingest OK"
