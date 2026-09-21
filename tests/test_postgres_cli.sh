@@ -80,14 +80,16 @@ RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
   RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=evidence_references RH_FAKE_PG_EXPECT=listed \
   "$ROOT/build/rh_cli" postgres --input "$T/evidence-references-command.json" \
     --out "$T/evidence-references-result.json" >/dev/null || fail "database evidence reference discovery"
-if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
-    RH_FAKE_PG_OPERATION=evidence_references RH_FAKE_PG_EXPECT=failure \
-    "$ROOT/build/rh_cli" postgres --input "$T/evidence-references-command.json" \
-      --out "$T/evidence-references-failure.json" >/dev/null 2>&1; then
-  fail "database evidence reference query failure accepted"
-fi
-[[ ! -e "$T/evidence-references-failure.json" ]] || fail "failed evidence reference query wrote a result"
-echo "[postgres-cli] evidence reference query failures fail closed"
+for mode in failure oversize; do
+  if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+      RH_FAKE_PG_OPERATION=evidence_references RH_FAKE_PG_EXPECT="$mode" \
+      "$ROOT/build/rh_cli" postgres --input "$T/evidence-references-command.json" \
+        --out "$T/evidence-references-$mode.json" >/dev/null 2>&1; then
+    fail "database evidence reference $mode accepted"
+  fi
+  [[ ! -e "$T/evidence-references-$mode.json" ]] || fail "$mode evidence reference query wrote a result"
+done
+echo "[postgres-cli] evidence reference query failures and oversized results fail closed"
 
 python3 - "$T" "$ROOT/fixtures/postgres/ingest-output.json" "$ROOT/fixtures/postgres/evidence-references-result.json" <<'PY'
 import json, os, sys

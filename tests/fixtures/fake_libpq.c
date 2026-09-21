@@ -250,6 +250,11 @@ char *PQgetvalue(void *handle, int row, int column) {
     return (char *)result.value;
 }
 int PQgetlength(void *handle, int row, int column) {
+    const char *operation = getenv("RH_FAKE_PG_OPERATION");
+    const char *mode = getenv("RH_FAKE_PG_EXPECT");
+    if (handle == &result && operation != NULL && strcmp(operation, "evidence_references") == 0 &&
+        mode != NULL && strcmp(mode, "oversize") == 0)
+        return 4194305;
     return (int)strlen(PQgetvalue(handle, row, column));
 }
 void PQclear(void *handle) { (void)handle; }
