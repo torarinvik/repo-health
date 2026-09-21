@@ -17,7 +17,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/a.json" <<'JSON'
-{"schema":"rh-identity-input/1","actor_count":5,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1},{"a":1,"b":2,"state":"accepted","revision_added":2},{"a":3,"b":0,"state":"rejected","revision_added":3}],"actor_kinds":["human","human","unresolved","bot_known","service_known"],"actor_kind_sources":["provider","provider","unknown","provider","project"],"actors":[{"source":"github","source_instance":"github.com/acme","native_object_id":"repo-1","display_name":"shared","aliases":[{"value":"old-name","observed_at":100}]},{"source":"github","source_instance":"github.com/acme","native_object_id":"repo-2","display_name":"other","aliases":[]},{"source":"gitlab","source_instance":"gitlab.com/acme","native_object_id":"repo-1","display_name":"shared","aliases":[]},{"source":"github","source_instance":"github.com/acme","native_object_id":"bot-1","display_name":"bot","aliases":[]},{"source":"github","source_instance":"github.com/acme","native_object_id":"service-1","display_name":"automation service","aliases":[]}]}
+{"schema":"rh-identity-input/1","actor_count":5,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1},{"a":1,"b":2,"state":"accepted","revision_added":2},{"a":3,"b":0,"state":"rejected","revision_added":3}],"actor_kinds":["human","human","unresolved","bot_known","service_known"],"actor_kind_sources":["provider","provider","unknown","provider","project"],"actor_kind_observed_at":[1700000000,null,1700000200,1700000300,1700000400],"actors":[{"source":"github","source_instance":"github.com/acme","native_object_id":"repo-1","display_name":"shared","aliases":[{"value":"old-name","observed_at":100}]},{"source":"github","source_instance":"github.com/acme","native_object_id":"repo-2","display_name":"other","aliases":[]},{"source":"gitlab","source_instance":"gitlab.com/acme","native_object_id":"repo-1","display_name":"shared","aliases":[]},{"source":"github","source_instance":"github.com/acme","native_object_id":"bot-1","display_name":"bot","aliases":[]},{"source":"github","source_instance":"github.com/acme","native_object_id":"service-1","display_name":"automation service","aliases":[]}]}
 JSON
 cat > "$T/b.json" <<'JSON'
 {"schema":"rh-identity-input/1","actor_count":4,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1},{"a":1,"b":2,"state":"revoked","revision_added":4},{"a":3,"b":0,"state":"rejected","revision_added":3}]}
@@ -36,7 +36,10 @@ assert d["clusters"] == [[0, 1, 2], [3], [4]], d["clusters"]
 assert d["cluster_id_by_actor"] == [0, 0, 0, 3, 4], d["cluster_id_by_actor"]
 assert d["actor_kinds"] == {"human": 2, "bot_known": 1, "service_known": 1, "unresolved": 1}, d["actor_kinds"]
 assert d["actor_kind_sources"] == {"provider": 3, "project": 1, "operator": 0, "unknown": 1}, d["actor_kind_sources"]
-assert d["actor_classifications"][4] == {"actor_id": 4, "kind": "service_known", "source": "project"}, d["actor_classifications"]
+assert d["actor_kind_observation_times"] == {"observed": 4, "unknown": 1}, d["actor_kind_observation_times"]
+assert d["actor_classifications"][0] == {"actor_id": 0, "kind": "human", "source": "provider", "observed_at": 1700000000}, d["actor_classifications"]
+assert d["actor_classifications"][1] == {"actor_id": 1, "kind": "human", "source": "provider", "observed_at": None}, d["actor_classifications"]
+assert d["actor_classifications"][4] == {"actor_id": 4, "kind": "service_known", "source": "project", "observed_at": 1700000400}, d["actor_classifications"]
 assert d["actors"][0]["source_instance"] == "github.com/acme", d
 assert d["actors"][0]["aliases"] == [{"value": "old-name", "observed_at": 100}], d
 assert d["actors"][0]["display_name"] == d["actors"][2]["display_name"] and d["actors"][0]["source_instance"] != d["actors"][2]["source_instance"], d
@@ -99,10 +102,16 @@ printf '{"schema":"rh-identity-input/1","actor_count":2,"links":[],"actor_kinds"
 "$ROOT/build/rh_cli" identity --input "$T/badkindsource.json" --out "$T/x" >/dev/null 2>&1; rc_kind_source=$?
 printf '{"schema":"rh-identity-input/1","actor_count":2,"links":[],"actor_kinds":["human","unresolved"],"actor_kind_sources":["project"]}' > "$T/badkindsourcecount.json"
 "$ROOT/build/rh_cli" identity --input "$T/badkindsourcecount.json" --out "$T/x" >/dev/null 2>&1; rc_kind_source_count=$?
+printf '{"schema":"rh-identity-input/1","actor_count":2,"links":[],"actor_kinds":["human","unresolved"],"actor_kind_observed_at":[1]}' > "$T/badkindtimecount.json"
+"$ROOT/build/rh_cli" identity --input "$T/badkindtimecount.json" --out "$T/x" >/dev/null 2>&1; rc_kind_time_count=$?
+printf '{"schema":"rh-identity-input/1","actor_count":1,"links":[],"actor_kinds":["human"],"actor_kind_observed_at":[-1]}' > "$T/badkindtime.json"
+"$ROOT/build/rh_cli" identity --input "$T/badkindtime.json" --out "$T/x" >/dev/null 2>&1; rc_kind_time=$?
+printf '{"schema":"rh-identity-input/1","actor_count":1,"links":[],"actor_kind_observed_at":[1]}' > "$T/kindtimewithoutkind.json"
+"$ROOT/build/rh_cli" identity --input "$T/kindtimewithoutkind.json" --out "$T/x" >/dev/null 2>&1; rc_kind_time_without_kind=$?
 "$ROOT/build/rh_cli" identity --input "$T/badnative.json" --out "$T/x" >/dev/null 2>&1; rc_native_duplicate=$?
 "$ROOT/build/rh_cli" identity --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_state" "$rc_actor" "$rc_kind" "$rc_kind_source" "$rc_kind_source_count" "$rc_native_duplicate" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_state" "$rc_actor" "$rc_kind" "$rc_kind_source" "$rc_kind_source_count" "$rc_kind_time_count" "$rc_kind_time" "$rc_kind_time_without_kind" "$rc_native_duplicate" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed identity input must exit 4 (got $rc)"
 done
 

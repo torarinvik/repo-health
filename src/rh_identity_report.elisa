@@ -130,6 +130,10 @@ module IdentityReport:
             unresolved: mutable i64 = 0
             kinds: mutable darray[u8] = []
             kind_sources: mutable darray[u8] = []
+            kind_observed_at: mutable darray[i64] = []
+            kind_time_present: mutable darray[u8] = []
+            kind_time_observed: mutable i64 = 0
+            kind_time_unknown: mutable i64 = 0
             kind_source_provider: mutable i64 = 0
             kind_source_project: mutable i64 = 0
             kind_source_operator: mutable i64 = 0
@@ -167,8 +171,32 @@ module IdentityReport:
                     while kind_sources.count < actor_count.usize() |kind_sources, actor_count|:
                         kind_sources.push(Identity::RH_ACTOR_SOURCE_UNKNOWN)
                 Identity::rh_actor_kind_sources(kind_sources, &kind_source_provider, &kind_source_project, &kind_source_operator, &kind_source_unknown)
+
+                observed_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "actor_kind_observed_at")
+                if observed_idx >= 0:
+                    return -1 if nodes[observed_idx.usize()].kind != Json::RH_JSON_ARR
+                    while observed_node >= 0 |observed_node: i64 = nodes[observed_idx.usize()].first_child, nodes, raw, kind_observed_at, kind_time_present, kind_time_observed, kind_time_unknown|:
+                        if nodes[observed_node.usize()].kind == Json::RH_JSON_NULL:
+                            kind_observed_at.push(0)
+                            kind_time_present.push(0)
+                            kind_time_unknown <- kind_time_unknown + 1
+                        else:
+                            time_ok: mutable i64 = 0
+                            observed_at: i64 = Json::rh_json_int(nodes, raw, observed_node, &time_ok)
+                            return -1 if time_ok == 0 or observed_at < 0
+                            kind_observed_at.push(observed_at)
+                            kind_time_present.push(1)
+                            kind_time_observed <- kind_time_observed + 1
+                        observed_node <- nodes[observed_node.usize()].next_sibling
+                    return -1 if kind_observed_at.count.i64() != actor_count
+                else:
+                    while kind_observed_at.count < actor_count.usize() |kind_observed_at, kind_time_present, kind_time_unknown, actor_count|:
+                        kind_observed_at.push(0)
+                        kind_time_present.push(0)
+                        kind_time_unknown <- kind_time_unknown + 1
             else:
                 return -1 if Json::rh_json_obj_get(nodes, texts, root, "actor_kind_sources") >= 0
+                return -1 if Json::rh_json_obj_get(nodes, texts, root, "actor_kind_observed_at") >= 0
 
             # Optional source-native actor metadata. When present, this is an
             # immutable namespace/alias ledger: display names never identify actors,
@@ -266,8 +294,12 @@ module IdentityReport:
                 Base::rh_push_decimal_i64(out, kind_source_operator)
                 Base::rh_push_text(out, ",\"unknown\":")
                 Base::rh_push_decimal_i64(out, kind_source_unknown)
+                Base::rh_push_text(out, "},\"actor_kind_observation_times\":{\"observed\":")
+                Base::rh_push_decimal_i64(out, kind_time_observed)
+                Base::rh_push_text(out, ",\"unknown\":")
+                Base::rh_push_decimal_i64(out, kind_time_unknown)
                 Base::rh_push_text(out, "},\"actor_classifications\":[")
-                while classification_idx < actor_count |classification_idx: i64 = 0, actor_count, kinds, kind_sources, out|:
+                while classification_idx < actor_count |classification_idx: i64 = 0, actor_count, kinds, kind_sources, kind_observed_at, kind_time_present, out|:
                     out.push(44) if classification_idx > 0
                     Base::rh_push_text(out, "{\"actor_id\":")
                     Base::rh_push_decimal_i64(out, classification_idx)
@@ -275,7 +307,12 @@ module IdentityReport:
                     Base::rh_push_text(out, IdentityReport::rh_ir_actor_kind_label(kinds[classification_idx.usize()]))
                     Base::rh_push_text(out, "\",\"source\":\"")
                     Base::rh_push_text(out, Identity::rh_actor_kind_source_label(kind_sources[classification_idx.usize()]))
-                    Base::rh_push_text(out, "\"}")
+                    Base::rh_push_text(out, "\",\"observed_at\":")
+                    if kind_time_present[classification_idx.usize()] > 0:
+                        Base::rh_push_decimal_i64(out, kind_observed_at[classification_idx.usize()])
+                    else:
+                        Base::rh_push_text(out, "null")
+                    Base::rh_push_text(out, "}")
                     classification_idx <- classification_idx + 1
                 Base::rh_push_text(out, "]")
             if actors.count.i64() > 0:
