@@ -17,6 +17,9 @@ cp "$ROOT/fixtures/postgres/staged-github-releases-input.json" "$T/releases-inpu
 cp "$ROOT/fixtures/postgres/staged-gitlab-issues-input.json" "$T/gitlab-issues-input.json"
 cp "$ROOT/fixtures/postgres/staged-gitlab-proposals-input.json" "$T/gitlab-proposals-input.json"
 cp "$ROOT/fixtures/postgres/staged-gitlab-releases-input.json" "$T/gitlab-releases-input.json"
+cp "$ROOT/fixtures/postgres/staged-forge-events-gitea-issues-input.json" "$T/gitea-issues-input.json"
+cp "$ROOT/fixtures/postgres/staged-forge-events-forgejo-proposals-input.json" "$T/forgejo-proposals-input.json"
+cp "$ROOT/fixtures/postgres/staged-forge-events-bitbucket-issues-input.json" "$T/bitbucket-issues-input.json"
 
 echo "[staged-forge] replay binds the exact stage input and preserves provenance"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/input.json" --out "$T/output.json" >/dev/null || fail "valid staged rows"
@@ -24,6 +27,23 @@ python3 - "$T/output.json" "$T/expected.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2])), "result differs from checked-in replay"
 PY
+
+echo "[staged-forge] generic input keeps Gitea, Forgejo, and Bitbucket identities distinct"
+for provider_capability in gitea-issues forgejo-proposals bitbucket-issues; do
+  input="$T/$provider_capability-input.json"
+  output="$T/$provider_capability-output.json"
+  expected="$ROOT/fixtures/postgres/staged-forge-events-$provider_capability-output.json"
+  "$ROOT/build/rh_cli" staged-normalize --input "$input" --out "$output" >/dev/null || fail "valid $provider_capability stage"
+  python3 - "$input" "$output" "$expected" "$provider_capability" <<'PY'
+import hashlib, json, sys
+got = json.load(open(sys.argv[2]))
+assert got == json.load(open(sys.argv[3])), (got, sys.argv[3])
+assert got["input_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), got
+provider, capability = sys.argv[4].split("-")
+assert got["provider"] == provider and got["canonical_capability"] == capability, got
+assert got["normalized"]["events"][0]["native_id"].startswith(provider + ":"), got["normalized"]["events"]
+PY
+done
 
 echo "[staged-forge] GitLab merge-request identity and merged state stay native"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/gitlab-proposals-input.json" --out "$T/gitlab-proposals-output.json" >/dev/null || fail "valid staged GitLab merge requests"
@@ -163,11 +183,13 @@ d = copy.deepcopy(base); d["pages"][0]["records"][0]["raw_payload"] = "[]"; case
 d = copy.deepcopy(base); d["canonical_capability"] = "proposals"; cases["schema-capability-mismatch"] = d
 d = json.load(open(os.path.join(out, "reviews-input.json"))); d["scope"].pop("pull_request"); cases["review-scope-missing"] = d
 d = json.load(open(os.path.join(out, "gitlab-issues-input.json"))); d["scope"] = {"repository": "group/project"}; cases["gitlab-github-scope-confusion"] = d
+d = json.load(open(os.path.join(out, "bitbucket-issues-input.json"))); d["canonical_capability"] = "releases"; cases["unsupported-bitbucket-releases"] = d
+d = json.load(open(os.path.join(out, "gitea-issues-input.json"))); d["canonical_capability"] = "reviews"; cases["unsupported-gitea-reviews"] = d
 for name, value in cases.items():
     with open(os.path.join(out, name + ".json"), "w", encoding="utf-8") as f:
         json.dump(value, f, separators=(",", ":"))
 PY
-for name in uncommitted partial misbound ordinal non-object-payload schema-capability-mismatch review-scope-missing gitlab-github-scope-confusion; do
+for name in uncommitted partial misbound ordinal non-object-payload schema-capability-mismatch review-scope-missing gitlab-github-scope-confusion unsupported-bitbucket-releases unsupported-gitea-reviews; do
   if "$ROOT/build/rh_cli" staged-normalize --input "$T/$name.json" --out "$T/$name.out" >/dev/null 2>&1; then
     fail "$name stage input was accepted"
   fi
@@ -181,5 +203,6 @@ grep -q "rh-postgres-staged-github-releases-input/1" "$ROOT/src/rh_staged_forge.
 grep -q "rh-postgres-staged-gitlab-issues-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "GitLab input contract token missing"
 grep -q "rh-postgres-staged-gitlab-proposals-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "GitLab proposal contract token missing"
 grep -q "rh-postgres-staged-gitlab-releases-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "GitLab release contract token missing"
+grep -q "rh-postgres-staged-forge-events-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "generic forge events contract token missing"
 grep -q "rh-postgres-staged-normalize-result/1" "$ROOT/src/rh_staged_forge.elisa" || fail "result contract token missing"
 echo "test_staged_forge_cli OK"
