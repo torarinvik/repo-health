@@ -287,6 +287,7 @@ if [[ "$url" == *"/issues?"* ]]; then
 elif [[ "$url" == *"/reviews?"* ]]; then
   body="$RH_CURL_REVIEWS_PAGE1"
   [[ "$url" != *'page=2' ]] || body="$RH_CURL_PAGE2"
+  [[ "$url" != *'page=3' ]] || body="$RH_CURL_PAGE3"
 elif [[ "$url" == *"/pulls?"* ]]; then
   body="$RH_CURL_PULLS_PAGE1"
   [[ "$url" != *'page=2' ]] || body="$RH_CURL_PAGE2"
@@ -399,14 +400,55 @@ grep -Fxq 'header = "Authorization: Bearer ghp_review_fixture"' "$T/reviews-curl
 for evidence in "$T"/reviews.out.github-reviews-pr-*; do
   [[ ! -f "$evidence" ]] || ! grep -Fq 'ghp_review_fixture' "$evidence" || fail "review token leaked into evidence"
 done
+
+echo "[forge-events] scoped review cursor resumes at the exact numeric page"
+python3 - "$T/review-full-page.json" "$T/review-page-3.json" <<'PY'
+import json, sys
+review = {"state":"COMMENTED", "submitted_at":"2023-11-14T22:13:20Z", "updated_at":"2023-11-15T22:13:20Z", "html_url":"https://github.com/example/project/pull/7#pullrequestreview-1"}
+json.dump([dict(review, id=n, html_url=f"https://github.com/example/project/pull/7#pullrequestreview-{n}") for n in range(1, 101)], open(sys.argv[1], "w", encoding="utf-8"), separators=(",", ":"))
+json.dump([dict(review, id=101, html_url="https://github.com/example/project/pull/7#pullrequestreview-101")], open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+rm -f "$T/review-page-2.out" "$T/review-page-2.out.github-"* "$T/review-page-2-curl.args"
+PATH="$T/bin:$PATH" RH_CURL_REVIEWS_PAGE1="$T/live-empty.json" RH_CURL_PAGE2="$T/review-full-page.json" RH_CURL_PAGE3="$T/live-empty.json" \
+  RH_CURL_LOG="$T/review-page-2-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --github-repo example/project --review-pull 7 --review-page 2 --max-pages 1 --out "$T/review-page-2.out" >/dev/null || fail "review page-2 continuation"
+python3 - "$T/review-page-2.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["scope"] == {"pull_request":7}, d
+assert d["capabilities"]["reviews"]["count"] == 100, d["capabilities"]
+assert d["pagination"]["reviews"] == {"next":"page=3", "complete":False}, d["pagination"]
+assert (t / "review-page-2.out.github-reviews-pr-7-page-2.url").read_text().strip().endswith("/reviews?per_page=100&page=2")
+assert "page=2" in open(t / "review-page-2-curl.args").read(), open(t / "review-page-2-curl.args").read()
+print("[forge-events] review page-2 cursor and scope preserved")
+PY
+rm -f "$T/review-page-3.out" "$T/review-page-3.out.github-"* "$T/review-page-3-curl.args"
+PATH="$T/bin:$PATH" RH_CURL_REVIEWS_PAGE1="$T/live-empty.json" RH_CURL_PAGE2="$T/live-empty.json" RH_CURL_PAGE3="$T/review-page-3.json" \
+  RH_CURL_LOG="$T/review-page-3-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --github-repo example/project --review-pull 7 --review-page 3 --max-pages 1 --out "$T/review-page-3.out" >/dev/null || fail "review page-3 continuation"
+python3 - "$T/review-page-3.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["capabilities"]["reviews"]["count"] == 1, d["capabilities"]
+assert d["events"][0]["native_id"] == "github:101", d["events"]
+assert d["pagination"]["reviews"] == {"next":None, "complete":True}, d["pagination"]
+assert (t / "review-page-3.out.github-reviews-pr-7-page-3.url").read_text().strip().endswith("/reviews?per_page=100&page=3")
+assert "page=3" in open(t / "review-page-3-curl.args").read(), open(t / "review-page-3-curl.args").read()
+print("[forge-events] review cursor continuation terminates on a short page")
+PY
+
 set +e
 PATH="$T/bin:$PATH" RH_CURL_LOG="$T/invalid-route-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
   "$ROOT/build/rh_cli" forge events --github-repo 'example/../project' --out "$T/invalid-route.out" >/dev/null 2>&1
 rc_route=$?
 "$ROOT/build/rh_cli" forge events --github-repo example/project --max-pages 11 --out "$T/invalid-pages.out" >/dev/null 2>&1
 rc_pages=$?
+"$ROOT/build/rh_cli" forge events --github-repo example/project --review-page 2 --out "$T/invalid-review-page.out" >/dev/null 2>&1
+rc_review_page=$?
 set -e
-[[ "$rc_route" -eq 4 && "$rc_pages" -eq 2 ]] || fail "unsafe repo or page bound was accepted (route=$rc_route pages=$rc_pages)"
+[[ "$rc_route" -eq 4 && "$rc_pages" -eq 2 && "$rc_review_page" -eq 2 ]] || fail "unsafe repo or page bound was accepted (route=$rc_route pages=$rc_pages review-page=$rc_review_page)"
 [[ ! -e "$T/invalid-route-curl.args" && ! -e "$T/invalid-route.out" ]] || fail "invalid repository reached transport or wrote a result"
 
 echo "test_forge_events_cli OK"
