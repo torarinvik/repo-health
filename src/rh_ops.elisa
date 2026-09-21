@@ -295,7 +295,169 @@ module Ops:
             if st.tokens < policy.capacity:
                 st.tokens <- st.tokens + 1
 
+        # Build a portable, bounded transfer package from a verified backup
+        # manifest. The package is transport-neutral; its FNV checks detect
+        # accidental damage but do not authenticate the sender.
+        def rh_transfer_export(evidence_root: cstr, manifest_path: cstr, bundle_path: cstr) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            manifest: mutable darray[u8] = []
+            return false if Base::rh_io_read(manifest_path, manifest) < 0
+            return false if not rh_backup_header_ok(manifest) or not rh_transfer_manifest_sorted(manifest)
+            return false if Base::rh_streq(manifest_path, bundle_path)
+            bundle: mutable darray[u8] =
+                bundle: mutable darray[u8] = []
+                Base::rh_push_text(bundle, "rh-evidence-transfer/1 fnv1a-64-hex\n")
+                bundle
+            while start < manifest.count |start: usize = rh_backup_header_end(manifest), manifest, evidence_root, bundle_path, bundle|:
+                stop: i64 = Base::rh_find_byte(manifest, start, 10)
+                line_end: usize = stop.usize() if stop >= 0 else manifest.count
+                name: mutable darray[u8] = []
+                rh_backup_copy_span(manifest, start, line_end, name)
+                name.push(0)
+                name_cstr: cstr = (&name[0]).cast[cstr] can Unsafe.PointerCast
+                source_buffer: mutable darray[u8] = []
+                source_path: cstr = rh_backup_path_cstr(evidence_root, name_cstr, source_buffer)
+                return false if Base::rh_streq(bundle_path, source_path)
+                blob: mutable darray[u8] = []
+                return false if Base::rh_io_read(source_path, blob) < 0
+                return false if not Store::rh_store_blob_content_matches(name_cstr, blob)
+                Base::rh_push_text(bundle, "blob ")
+                rh_backup_copy_span(name, 0, 16, bundle)
+                bundle.push(32)
+                Base::rh_push_decimal_i64(bundle, blob.count.i64())
+                bundle.push(10)
+                return false if bundle.count >= RH_TRANSFER_MAX_BYTES
+                return false if blob.count > RH_TRANSFER_MAX_BYTES - bundle.count - 1.usize()
+                bundle.extend(bytes_view(blob))
+                bundle.push(10)
+                start <- manifest.count if stop < 0 else stop.usize() + 1
+            Base::rh_io_write(bundle_path, bundle)
+
+        # Import validates the complete package before publishing any object.
+        # Publication is atomic and no-clobber per blob, so a storage failure
+        # halfway through can be retried safely with the same package.
+        def rh_transfer_import(dest_root: cstr, bundle_path: cstr, imported_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            imported_out[0] <- 0
+            bundle: mutable darray[u8] = []
+            return -1 if Base::rh_io_read(bundle_path, bundle) < 0
+            return -1 if not rh_transfer_bundle_valid(bundle, imported_out)
+            imported_out[0] <- 0
+            cursor: mutable usize = rh_transfer_header_end()
+            while cursor < bundle.count |cursor, bundle, dest_root, imported_out|:
+                name: mutable darray[u8] = []
+                data_start: mutable usize = 0
+                data_end: mutable usize = 0
+                state: i64 = rh_transfer_next(bundle, cursor, name, &data_start, &data_end)
+                return -1 if state != 1
+                blob: mutable darray[u8] = []
+                rh_backup_copy_span(bundle, data_start, data_end, blob)
+                stored_name: mutable darray[u8] = []
+                return -1 if Store::rh_store_blob(dest_root, blob, stored_name) != 0
+                return -1 if stored_name.count != 16 or not Base::rh_bytes_equal_span(stored_name, 0, 16, name, 0, 16)
+                imported_out[0] <- imported_out[0] + 1
+            0
+
     private:
+        const RH_TRANSFER_MAX_BYTES: usize = 67108864
+
+        # `rh-evidence-transfer/1` frames each blob as one ASCII header line
+        # (`blob <16-hex-name> <decimal-length>`) followed by exactly that many
+        # bytes and one LF delimiter. Length framing preserves arbitrary bytes.
+        def rh_transfer_header_ok(raw: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            expected: mutable darray[u8] = []
+            Base::rh_push_text(expected, "rh-evidence-transfer/1 fnv1a-64-hex\n")
+            Base::rh_bytes_equal_span(raw, 0, expected.count.i64(), expected, 0, expected.count.i64())
+
+        def rh_transfer_header_end() -> usize can[Memory.Allocate, Abort.Panic]:
+            expected: mutable darray[u8] = []
+            Base::rh_push_text(expected, "rh-evidence-transfer/1 fnv1a-64-hex\n")
+            expected.count.usize()
+
+        # Decode one framed record. Returns 1 for a record, 0 at clean EOF, and
+        # -1 for malformed framing. The name output includes a trailing NUL.
+        def rh_transfer_next(raw: darray[u8]&, cursor: mutable usize&, name_out: mutable darray[u8]&, data_start_out: mutable usize&, data_end_out: mutable usize&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if cursor[0] == raw.count
+            return -1 if cursor[0] > raw.count or name_out.count != 0
+            line_start: usize = cursor[0]
+            line_break: i64 = Base::rh_find_byte(raw, line_start, 10)
+            return -1 if line_break < 0
+            line_end: usize = line_break.usize()
+            return -1 if line_end - line_start < 23
+            prefix: mutable darray[u8] = []
+            Base::rh_push_text(prefix, "blob ")
+            while k < prefix.count.usize() |k: usize = 0, raw, line_start, prefix|:
+                return -1 if raw[line_start + k] != prefix[k]
+                k <- k + 1
+            name_start: usize = line_start + 5.usize()
+            name_end: usize = name_start + 16.usize()
+            return -1 if raw[name_end] != 32
+            while i < name_end |i: usize = name_start, raw, name_out, name_end|:
+                b: u8 = raw[i]
+                return -1 if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
+                name_out.push(b)
+                i <- i + 1
+            size_start: usize = name_end + 1.usize()
+            return -1 if size_start >= line_end
+            return -1 if line_end - size_start > 1 and raw[size_start] == 48
+            size_bytes: mutable darray[u8] = []
+            rh_backup_copy_span(raw, size_start, line_end, size_bytes)
+            size: usize =
+                while digit_index < size_bytes.count.usize() |size: mutable usize = 0, digit_index: usize = 0, size_bytes| -> size:
+                    digit: u8 = size_bytes[digit_index]
+                    return -1 if digit < 48 or digit > 57
+                    value: usize = (digit - 48).usize()
+                    return -1 if size > (RH_TRANSFER_MAX_BYTES - value) / 10.usize()
+                    size <- size * 10.usize() + value
+                    digit_index <- digit_index + 1
+            return -1 if size > RH_TRANSFER_MAX_BYTES
+            data_start: usize = line_end + 1.usize()
+            return -1 if data_start > raw.count or size >= raw.count - data_start
+            data_end: usize = data_start + size
+            return -1 if raw[data_end] != 10
+            name_out.push(0)
+            data_start_out[0] <- data_start
+            data_end_out[0] <- data_end
+            cursor[0] <- data_end + 1.usize()
+            1
+
+        def rh_transfer_name_after(name: darray[u8]&, previous: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if previous.count == 0
+            while i < 16.usize() |i: usize = 0, name, previous|:
+                return true if name[i] > previous[i]
+                return false if name[i] < previous[i]
+                i <- i + 1
+            false
+
+        def rh_transfer_manifest_sorted(manifest: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            previous: mutable darray[u8] = []
+            while start < manifest.count |start: usize = rh_backup_header_end(manifest), manifest, previous|:
+                stop: i64 = Base::rh_find_byte(manifest, start, 10)
+                line_end: usize = stop.usize() if stop >= 0 else manifest.count
+                current: mutable darray[u8] = []
+                rh_backup_copy_span(manifest, start, line_end, current)
+                return false if not rh_transfer_name_after(current, previous)
+                previous <- current
+                start <- manifest.count if stop < 0 else stop.usize() + 1
+            true
+
+        def rh_transfer_bundle_valid(raw: darray[u8]&, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            count_out[0] <- 0
+            return false if raw.count > RH_TRANSFER_MAX_BYTES or not rh_transfer_header_ok(raw)
+            previous: mutable darray[u8] = []
+            cursor: mutable usize = rh_transfer_header_end()
+            while cursor < raw.count |cursor, raw, previous, count_out|:
+                name: mutable darray[u8] = []
+                data_start: mutable usize = 0
+                data_end: mutable usize = 0
+                state: i64 = rh_transfer_next(raw, cursor, name, &data_start, &data_end)
+                return false if state != 1 or not rh_transfer_name_after(name, previous)
+                name_cstr: cstr = (&name[0]).cast[cstr] can Unsafe.PointerCast
+                blob: mutable darray[u8] = []
+                rh_backup_copy_span(raw, data_start, data_end, blob)
+                return false if not Store::rh_store_blob_content_matches(name_cstr, blob)
+                previous <- name
+                count_out[0] <- count_out[0] + 1
+            true
+
         def rh_backup_path_cstr(root: cstr, name: u8&, buf: mutable darray[u8]&) -> cstr can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_cstr(buf, root)
             buf.push(47)

@@ -139,6 +139,8 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli ops backup --root <dir> --manifest <path> --names <file>")
     rh_cli_err("       rh_cli ops verify --root <dir> --manifest <path>")
     rh_cli_err("       rh_cli ops restore --root <dir> --dest <dir> --manifest <path>")
+    rh_cli_err("       rh_cli ops export --root <dir> --manifest <path> --out <bundle>")
+    rh_cli_err("       rh_cli ops import --dest <dir> --input <bundle>")
     rh_cli_err("       rh_cli ops monitor --input <file> --out <file> | ops quota --input <file> --out <file>")
     rh_cli_err("       rh_cli pilot-review --input <file> --out <file>")
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
@@ -1481,6 +1483,12 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         if Base::rh_streq(sub12, "quota"):
             return rh_cli_usage(2) if oin_idx < 0 or oo_idx < 0
             return rh_do_ops_quota(slots[oin_idx], slots[oo_idx])
+        if Base::rh_streq(sub12, "export"):
+            return rh_cli_usage(2) if or_idx < 0 or om_idx < 0 or oo_idx < 0
+            return rh_do_ops_export(slots[or_idx], slots[om_idx], slots[oo_idx])
+        if Base::rh_streq(sub12, "import"):
+            return rh_cli_usage(2) if od_idx < 0 or oin_idx < 0
+            return rh_do_ops_import(slots[od_idx], slots[oin_idx])
         return rh_cli_usage(2) if or_idx < 0 or om_idx < 0
         if Base::rh_streq(sub12, "backup"):
             return rh_cli_usage(2) if on_idx < 0
@@ -5775,6 +5783,40 @@ def rh_do_ops_backup(root: cstr, manifest: cstr, names_file: cstr) -> i32 can[Me
         rh_cli_err("ops: cannot write backup manifest")
         return 4
     rh_cli_out("ops: backup manifest written")
+    0
+
+# Export verified evidence into a portable file that operators can copy through
+# their existing authenticated transport between hosts.
+def rh_do_ops_export(root: cstr, manifest: cstr, bundle: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(root) or not Git::rh_arg_safe(manifest) or not Git::rh_arg_safe(bundle):
+        rh_cli_err("rejected ops argument (allowlist)")
+        return 3
+    if not Ops::rh_transfer_export(root, manifest, bundle):
+        rh_cli_err("ops: cannot create verified evidence package (fail closed)")
+        return 4
+    rh_cli_out("ops export: package written")
+    0
+
+# Import validates every framed object before publishing any of them. If the
+# filesystem fails during publication, rerunning the same package is safe.
+def rh_do_ops_import(dest: cstr, bundle: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(dest) or not Git::rh_arg_safe(bundle):
+        rh_cli_err("rejected ops argument (allowlist)")
+        return 3
+    if Git::rh_ensure_dir(dest) != 0:
+        rh_cli_err("ops: cannot create import destination")
+        return 4
+    imported: mutable i64 = 0
+    if Ops::rh_transfer_import(dest, bundle, &imported) != 0:
+        rh_cli_err("ops: cannot import evidence package (fail closed)")
+        return 4
+    done: mutable darray[u8] =
+        done: mutable darray[u8] = []
+        Base::rh_push_text(done, "ops import: imported=")
+        Base::rh_push_decimal_i64(done, imported)
+        done.push(10)
+        done
+    Base::rh_write_stdout(done)
     0
 
 # Verify every object named in a manifest: present+digest-verified vs

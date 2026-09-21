@@ -115,4 +115,39 @@ for rc in "$rc1" "$rc2" "$rc3" "$rc4"; do
   [[ "$rc" -eq 4 ]] || fail "missing input must exit 4 (got $rc)"
 done
 
+echo "[store] portable transfer crosses isolated store roots"
+mkdir -p "$T/transfer-source"
+printf 'binary\0evidence\nwith newline\n' > "$T/transfer-a.bin"
+printf 'second transfer object\n' > "$T/transfer-b.bin"
+transfer_a="$("$ROOT/build/rh_cli" store put --root "$T/transfer-source" --file "$T/transfer-a.bin" | awk '{print $3}')"
+transfer_b="$("$ROOT/build/rh_cli" store put --root "$T/transfer-source" --file "$T/transfer-b.bin" | awk '{print $3}')"
+printf '%s\n%s\n' "$transfer_a" "$transfer_b" | sort > "$T/transfer-names.txt"
+"$ROOT/build/rh_cli" ops backup --root "$T/transfer-source" --manifest "$T/transfer.manifest" --names "$T/transfer-names.txt" >/dev/null || fail "transfer backup manifest"
+"$ROOT/build/rh_cli" ops export --root "$T/transfer-source" --manifest "$T/transfer.manifest" --out "$T/evidence.bundle" >/dev/null || fail "portable export"
+grep -a -q "rh-evidence-transfer/1 fnv1a-64-hex" "$T/evidence.bundle" || fail "transfer package version header"
+"$ROOT/build/rh_cli" ops import --dest "$T/transfer-destination" --input "$T/evidence.bundle" | grep -q "imported=2" || fail "portable import count"
+for n in "$transfer_a" "$transfer_b"; do
+  "$ROOT/build/rh_cli" store verify --root "$T/transfer-destination" --name "$n" >/dev/null || fail "transferred blob $n does not verify"
+done
+cmp "$T/transfer-a.bin" "$T/transfer-destination/$transfer_a" || fail "binary transfer changed NUL/newline bytes"
+cmp "$T/transfer-b.bin" "$T/transfer-destination/$transfer_b" || fail "text transfer changed bytes"
+"$ROOT/build/rh_cli" ops import --dest "$T/transfer-destination" --input "$T/evidence.bundle" | grep -q "imported=2" || fail "repeated portable import"
+
+echo "[store] damaged package is rejected before publishing any object"
+cp "$T/evidence.bundle" "$T/damaged.bundle"
+bundle_size="$(wc -c < "$T/damaged.bundle" | tr -d ' ')"
+printf X | dd of="$T/damaged.bundle" bs=1 seek="$((bundle_size - 2))" conv=notrunc status=none
+set +e
+"$ROOT/build/rh_cli" ops import --dest "$T/damaged-destination" --input "$T/damaged.bundle" >/dev/null 2>&1
+rc_damaged=$?
+set -e
+[[ "$rc_damaged" -eq 4 ]] || fail "damaged package must fail closed (got $rc_damaged)"
+for n in "$transfer_a" "$transfer_b"; do
+  set +e
+  "$ROOT/build/rh_cli" store verify --root "$T/damaged-destination" --name "$n" >/dev/null 2>&1
+  rc_unpublished=$?
+  set -e
+  [[ "$rc_unpublished" -eq 5 ]] || fail "damaged package partially published $n"
+done
+
 echo "test_store_cli OK"

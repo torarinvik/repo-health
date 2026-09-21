@@ -147,3 +147,23 @@ Trigger: scheduled drill, or recovery after corruption/loss.
    backup is not evidence.
 6. Record: backup manifest, present/missing/corrupt counts, restored
    count, sample replay result, date and operator.
+
+## 8. Moving evidence between hosts
+
+1. Create a sorted backup manifest on the source host and verify that every
+   listed blob is present and intact.
+2. Export it with `rh_cli ops export --root <source-store> --manifest <manifest> --out <bundle>`.
+   Export refuses missing or corrupt blobs and packages larger than the
+   standard 64 MiB file bound.
+3. Copy the bundle through the organization's authenticated and encrypted
+   transfer channel.
+4. Import it on the destination host with
+   `rh_cli ops import --dest <destination-store> --input <bundle>`, then verify
+   the imported object names.
+5. If a filesystem error interrupts publication, rerun the same import. Each
+   blob is published atomically and conflicting destination content is kept.
+
+The `rh-evidence-transfer/1` package preserves arbitrary bytes and checks every
+blob against its FNV-1a-64 name before publishing. FNV detects accidental
+corruption; the package does not authenticate its sender or encrypt its
+contents. Protect it in transit and at rest with the chosen transport.
