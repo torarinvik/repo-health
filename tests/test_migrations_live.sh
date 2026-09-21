@@ -163,27 +163,28 @@ END $$;
 
 DO $$
 DECLARE
-  event_page jsonb := '[{"source_object_type":"issue","source_object_id":"issue:7","source_revision":"rev-1","event_kind":"created","subject_id":"00000000-0000-0000-0000-000000000005","actor_account_id":null,"occurred_at":"2026-01-01T00:00:30Z","observed_at":"2026-01-01T00:03:00Z","time_basis":"event","evidence_id":"00000000-0000-0000-0000-000000000006","parser_version":"fixture/1","payload":{"state":"open"}}]'::jsonb;
+  event_page jsonb := '[{"source_object_type":"issue","source_object_id":"issue:7","source_revision":"rev-1","event_kind":"created","subject_id":"00000000-0000-0000-0000-000000000005","actor_account_id":"00000000-0000-0000-0000-000000000007","occurred_at":"2026-01-01T00:00:30Z","observed_at":"2026-01-01T00:03:00Z","time_basis":"event","evidence_id":"00000000-0000-0000-0000-000000000006","parser_version":"fixture/1","payload":{"state":"open"}}]'::jsonb;
   event_subjects jsonb := '[{"id":"00000000-0000-0000-0000-000000000005","entity_kind":"issue","visibility_scope":"public","created_at":"2026-01-01T00:00:00Z"}]'::jsonb;
+  event_actors jsonb := '[{"id":"00000000-0000-0000-0000-000000000007","source_native_id":"alice","account_kind":"human","display_name":"Alice Example","raw_identity_evidence_id":null,"visibility_scope":"public"}]'::jsonb;
 BEGIN
-  IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 1, 'scope-events', NULL, '{"page":2}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, '2026-01-01T00:03:00Z') THEN
+  IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 1, 'scope-events', NULL, '{"page":2}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-01T00:03:00Z') THEN
     RAISE EXCEPTION 'event page was refused';
   END IF;
-  IF rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 1, 'scope-events', NULL, '{"page":99}'::jsonb, 'complete', 1, NULL, jsonb_set(event_page, '{0,source_object_id}', '"issue:8"'::jsonb), event_subjects, '2026-01-01T00:03:30Z') THEN
+  IF rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 1, 'scope-events', NULL, '{"page":99}'::jsonb, 'complete', 1, NULL, jsonb_set(event_page, '{0,source_object_id}', '"issue:8"'::jsonb), event_subjects, event_actors, '2026-01-01T00:03:30Z') THEN
     RAISE EXCEPTION 'duplicate page was accepted';
   END IF;
   IF (SELECT count(*) FROM canonical_event WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid) <> 1
      OR (SELECT last_page_number FROM collection_cursor WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid AND capability = 'issues' AND scope_hash = 'scope-events') <> 1 THEN
     RAISE EXCEPTION 'duplicate page changed event or cursor state';
   END IF;
-  IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 2, 'scope-events', '{"page":2}'::jsonb, '{"page":3}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, '2026-01-01T00:04:00Z') THEN
+  IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 2, 'scope-events', '{"page":2}'::jsonb, '{"page":3}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-01T00:04:00Z') THEN
     RAISE EXCEPTION 'replayed event page was refused';
   END IF;
   IF (SELECT count(*) FROM canonical_event WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid) <> 1 THEN
     RAISE EXCEPTION 'source-native event replay was not absorbed';
   END IF;
   BEGIN
-    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, '[{"id":"00000000-0000-0000-0000-000000000005","entity_kind":"issue","visibility_scope":"public","created_at":"2026-01-02T00:00:00Z"}]'::jsonb, '2026-01-01T00:04:30Z');
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, '[{"id":"00000000-0000-0000-0000-000000000005","entity_kind":"issue","visibility_scope":"public","created_at":"2026-01-02T00:00:00Z"}]'::jsonb, event_actors, '2026-01-01T00:04:30Z');
     RAISE EXCEPTION 'conflicting subject metadata was accepted';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('different immutable metadata' IN SQLERRM) = 0 THEN
@@ -191,10 +192,26 @@ BEGIN
     END IF;
   END;
   BEGIN
-    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, '[{"source_object_type":"issue"}]'::jsonb, event_subjects, '2026-01-01T00:05:00Z');
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, '[{"id":"00000000-0000-0000-0000-000000000007","source_native_id":"alice","account_kind":"human","display_name":"Alicia Example","raw_identity_evidence_id":null,"visibility_scope":"public"}]'::jsonb, '2026-01-01T00:04:45Z');
+    RAISE EXCEPTION 'conflicting actor metadata was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('page actor identity is already registered with different immutable metadata' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  BEGIN
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, '[{"source_object_type":"issue"}]'::jsonb, event_subjects, event_actors, '2026-01-01T00:05:00Z');
     RAISE EXCEPTION 'malformed event page committed';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('page event is missing a required typed field' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  BEGIN
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, '[{"id":"00000000-0000-0000-0000-000000000007"}]'::jsonb, '2026-01-01T00:05:15Z');
+    RAISE EXCEPTION 'malformed page actor committed';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('page actor is missing a required typed field' IN SQLERRM) = 0 THEN
       RAISE;
     END IF;
   END;
@@ -205,8 +222,12 @@ BEGIN
   IF (SELECT count(*) FROM entity WHERE id = '00000000-0000-0000-0000-000000000005'::uuid) <> 1 THEN
     RAISE EXCEPTION 'page subject was not registered exactly once';
   END IF;
+  IF (SELECT count(*) FROM account WHERE id = '00000000-0000-0000-0000-000000000007'::uuid) <> 1
+     OR (SELECT actor_account_id FROM canonical_event WHERE source_object_id = 'issue:7') <> '00000000-0000-0000-0000-000000000007'::uuid THEN
+    RAISE EXCEPTION 'page actor was not registered and linked exactly once';
+  END IF;
 END $$;
 SQL
 
-echo "[migrations-live] source/run, evidence, canonical event commit, duplicate replay, and rollback boundaries OK"
+echo "[migrations-live] source/run, evidence, subject/actor registration, event replay, and rollback boundaries OK"
 echo "test_migrations_live OK"

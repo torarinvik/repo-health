@@ -974,6 +974,7 @@ CREATE FUNCTION rh_commit_collection_page_events(
     p_evidence_id uuid,
     p_events jsonb,
     p_subjects jsonb,
+    p_actors jsonb,
     p_now timestamptz
 ) RETURNS boolean
 LANGUAGE plpgsql
@@ -990,6 +991,16 @@ DECLARE
     v_subject_visibility rh_visibility_scope;
     v_subject_created_at timestamptz;
     v_existing_entity entity%ROWTYPE;
+    v_actor jsonb;
+    v_actor_count integer;
+    v_actor_id uuid;
+    v_actor_native_id text;
+    v_actor_kind text;
+    v_actor_display_name text;
+    v_actor_evidence_id uuid;
+    v_actor_visibility rh_visibility_scope;
+    v_actor_matches integer;
+    v_existing_account account%ROWTYPE;
 BEGIN
     IF p_completeness IS NULL OR p_completeness NOT IN ('complete', 'empty') THEN
         RAISE EXCEPTION 'a partial page cannot advance a durable cursor';
@@ -1010,6 +1021,13 @@ BEGIN
     v_subject_count := jsonb_array_length(p_subjects);
     IF v_subject_count > 10000 THEN
         RAISE EXCEPTION 'page subject count exceeds the bounded record limit';
+    END IF;
+    IF p_actors IS NULL OR jsonb_typeof(p_actors) <> 'array' THEN
+        RAISE EXCEPTION 'page actors must be a JSON array';
+    END IF;
+    v_actor_count := jsonb_array_length(p_actors);
+    IF v_actor_count > 10000 THEN
+        RAISE EXCEPTION 'page actor count exceeds the bounded record limit';
     END IF;
 
     SELECT source_instance_id, capability
@@ -1068,6 +1086,66 @@ BEGIN
                OR v_existing_entity.visibility_scope IS DISTINCT FROM v_subject_visibility
                OR v_existing_entity.created_at IS DISTINCT FROM v_subject_created_at THEN
                 RAISE EXCEPTION 'page subject identity is already registered with different immutable metadata';
+            END IF;
+        END IF;
+    END LOOP;
+
+    FOR v_actor IN SELECT value FROM jsonb_array_elements(p_actors) AS actors(value) LOOP
+        IF jsonb_typeof(v_actor) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(v_actor->'id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_actor->'source_native_id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_actor->'account_kind') IS DISTINCT FROM 'string'
+           OR (jsonb_typeof(v_actor->'display_name') IS DISTINCT FROM 'string'
+               AND jsonb_typeof(v_actor->'display_name') IS DISTINCT FROM 'null')
+           OR (jsonb_typeof(v_actor->'raw_identity_evidence_id') IS DISTINCT FROM 'string'
+               AND jsonb_typeof(v_actor->'raw_identity_evidence_id') IS DISTINCT FROM 'null')
+           OR jsonb_typeof(v_actor->'visibility_scope') IS DISTINCT FROM 'string' THEN
+            RAISE EXCEPTION 'page actor is missing a required typed field';
+        END IF;
+        IF COALESCE(v_actor->>'id', '') = '' OR COALESCE(v_actor->>'source_native_id', '') = ''
+           OR v_actor->>'account_kind' NOT IN ('human', 'bot', 'service', 'organization', 'unknown') THEN
+            RAISE EXCEPTION 'page actor identity or account kind is invalid';
+        END IF;
+        IF jsonb_typeof(v_actor->'raw_identity_evidence_id') = 'string'
+           AND COALESCE(v_actor->>'raw_identity_evidence_id', '') = '' THEN
+            RAISE EXCEPTION 'page actor evidence identity must be non-empty or null';
+        END IF;
+
+        v_actor_id := (v_actor->>'id')::uuid;
+        v_actor_native_id := v_actor->>'source_native_id';
+        v_actor_kind := v_actor->>'account_kind';
+        v_actor_display_name := v_actor->>'display_name';
+        v_actor_evidence_id := NULLIF(v_actor->>'raw_identity_evidence_id', '')::uuid;
+        v_actor_visibility := (v_actor->>'visibility_scope')::rh_visibility_scope;
+        INSERT INTO account (
+            id, source_instance_id, source_native_id, account_kind, display_name,
+            raw_identity_evidence_id, visibility_scope
+        ) VALUES (
+            v_actor_id, v_source_instance_id, v_actor_native_id, v_actor_kind,
+            v_actor_display_name, v_actor_evidence_id, v_actor_visibility
+        ) ON CONFLICT DO NOTHING;
+
+        IF NOT FOUND THEN
+            SELECT count(*) INTO v_actor_matches FROM account
+            WHERE id = v_actor_id
+               OR (source_instance_id = v_source_instance_id AND source_native_id = v_actor_native_id);
+            IF v_actor_matches <> 1 THEN
+                RAISE EXCEPTION 'page actor identity conflict could not be resolved';
+            END IF;
+            SELECT * INTO v_existing_account FROM account
+            WHERE id = v_actor_id
+               OR (source_instance_id = v_source_instance_id AND source_native_id = v_actor_native_id);
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'page actor identity conflict could not be read';
+            END IF;
+            IF v_existing_account.id IS DISTINCT FROM v_actor_id
+               OR v_existing_account.source_instance_id IS DISTINCT FROM v_source_instance_id
+               OR v_existing_account.source_native_id IS DISTINCT FROM v_actor_native_id
+               OR v_existing_account.account_kind IS DISTINCT FROM v_actor_kind
+               OR v_existing_account.display_name IS DISTINCT FROM v_actor_display_name
+               OR v_existing_account.raw_identity_evidence_id IS DISTINCT FROM v_actor_evidence_id
+               OR v_existing_account.visibility_scope IS DISTINCT FROM v_actor_visibility THEN
+                RAISE EXCEPTION 'page actor identity is already registered with different immutable metadata';
             END IF;
         END IF;
     END LOOP;

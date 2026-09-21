@@ -47,8 +47,11 @@ assert "fencing_token" in clean and "lease_expires_at" in clean
 assert "ON CONFLICT (collection_run_id, page_number) DO NOTHING" in clean
 assert "jsonb_array_elements(p_events)" in clean
 assert "jsonb_array_elements(p_subjects)" in clean
+assert "jsonb_array_elements(p_actors)" in clean
 assert "page subjects must be a JSON array" in clean
+assert "page actors must be a JSON array" in clean
 assert "page subject identity is already registered with different immutable metadata" in clean
+assert "page actor identity is already registered with different immutable metadata" in clean
 assert "source instance identity is already registered with different immutable metadata" in clean
 assert "collection run identity is already registered with different immutable metadata" in clean
 assert "source base URL must be absolute and free of credentials, query, fragment, and whitespace" in clean
