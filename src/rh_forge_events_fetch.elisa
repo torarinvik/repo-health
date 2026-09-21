@@ -4,6 +4,7 @@ include "./rh_base.elisa"
 include "./rh_forge_events.elisa"
 include "./rh_git.elisa"
 include "./rh_json.elisa"
+include "./rh_roles_provider.elisa"
 
 module ForgeEventsFetch:
     private:
@@ -212,3 +213,32 @@ module ForgeEventsFetch:
             ForgeEventsFetch::rh_fef_push_pagination(capture, complete == 1, next_page)
             Base::rh_push_text(capture, ",\"releases\":{\"next\":null,\"complete\":false}}}")
             ForgeEvents::rh_forge_events_report(capture, out)
+
+        # The collaborators route is permission-bearing and requires an
+        # explicit token. Keep the returned repository scope and page completeness
+        # attached to the normalized role input.
+        def rh_roles_github_live(repository: cstr, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
+            token: u8&? = getenv("RH_GITHUB_TOKEN")
+            return -1 if token == null
+            token_ptr: cstr = token.cast[cstr] can Unsafe.PointerCast
+            return -1 if Base::rh_cstr_len_c(token_ptr) == 0
+            members: mutable darray[u8] = []
+            member_total: mutable i64 = 0
+            byte_total: mutable i64 = 0
+            complete: mutable i64 = 0
+            next_page: mutable i64 = 1
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, "collaborators?affiliation=all&per_page=100&page=", "collaborators", max_pages, evidence_base, members, &member_total, &byte_total, &complete, &next_page)
+            captured_at: i64 = Base::rh_now()
+            return -1 if captured_at < 0
+            capture: mutable darray[u8] = []
+            Base::rh_push_text(capture, "{\"schema\":\"rh-provider-roles-input/1\",\"provider\":\"github\",\"captured_at\":")
+            Base::rh_push_decimal_i64(capture, captured_at)
+            Base::rh_push_text(capture, ",\"authorization\":{\"state\":\"authorized\"},\"scope\":{\"repository\":\"")
+            Base::rh_push_cstr(capture, repository)
+            Base::rh_push_text(capture, "\"},\"members\":[")
+            capture.extend(bytes_view(members))
+            Base::rh_push_text(capture, "],\"pagination\":")
+            ForgeEventsFetch::rh_fef_push_pagination(capture, complete == 1, next_page)
+            capture.push(125)
+            RolesProvider::rh_roles_provider_import(capture, out)

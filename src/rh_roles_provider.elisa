@@ -48,6 +48,27 @@ module RolesProvider:
             present_out[0] <- 1
             true
 
+        def rh_rp_repository_char(byte: u8) -> bool:
+            (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95
+
+        def rh_rp_repository_valid(texts: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if s < 0 or e <= s or e - s < 3 or e - s > 201
+            slash: mutable i64 = -1
+            while i < e |i: i64 = s, e, texts, slash|:
+                byte: u8 = texts[i.usize()]
+                if byte == 47:
+                    return false if slash >= 0
+                    slash <- i
+                else:
+                    return false if not RolesProvider::rh_rp_repository_char(byte)
+                i <- i + 1
+            return false if slash <= s or slash + 1 >= e
+            owner_dot: bool = slash == s + 1 and texts[s.usize()] == 46
+            owner_dotdot: bool = slash == s + 2 and texts[s.usize()] == 46 and texts[(s + 1).usize()] == 46
+            repo_dot: bool = slash + 2 == e and texts[(slash + 1).usize()] == 46
+            repo_dotdot: bool = slash + 3 == e and texts[(slash + 1).usize()] == 46 and texts[(slash + 2).usize()] == 46
+            not owner_dot and not owner_dotdot and not repo_dot and not repo_dotdot
+
         def rh_rp_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, obj, key), &ok_out[0])
 
@@ -152,11 +173,23 @@ module RolesProvider:
                 return -1 if not RolesProvider::rh_rp_optional_cursor(nodes, texts, pagination, "next", &next_s, &next_e, &next_present)
                 complete <- Json::rh_json_obj_get(nodes, texts, pagination, "complete")
                 return -1 if complete < 0 or nodes[complete.usize()].kind != Json::RH_JSON_BOOL
+            scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scope")
+            scope_present: bool = scope_idx >= 0
+            scope_repository_s: mutable i64 = 0
+            scope_repository_e: mutable i64 = 0
+            if scope_present:
+                return -1 if not github or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
+                return -1 if not RolesProvider::rh_rp_str(nodes, texts, scope_idx, "repository", &scope_repository_s, &scope_repository_e)
+                return -1 if not RolesProvider::rh_rp_repository_valid(texts, scope_repository_s, scope_repository_e)
             Base::rh_push_text(out, "{\"schema\":\"rh-roles-input/1\",\"provider\":\"")
             Base::rh_json_escape(out, texts, provider_s.usize(), provider_e.usize())
             Base::rh_push_text(out, "\",\"authorization\":{\"state\":\"")
             Base::rh_push_text(out, RolesProvider::rh_rp_auth_label(auth_state))
             Base::rh_push_text(out, "\"}")
+            if scope_present:
+                Base::rh_push_text(out, ",\"scope\":{\"repository\":\"")
+                Base::rh_json_escape(out, texts, scope_repository_s.usize(), scope_repository_e.usize())
+                Base::rh_push_text(out, "\"}")
             if pagination_present:
                 Base::rh_push_text(out, ",\"pagination\":{\"next\":")
                 if next_present == 1:
@@ -169,6 +202,9 @@ module RolesProvider:
                 Base::rh_push_text(out, "true") if Json::rh_json_is_true(nodes, raw, complete)
                 Base::rh_push_text(out, "false") if not Json::rh_json_is_true(nodes, raw, complete)
                 out.push(125)
+                Base::rh_push_text(out, ",\"permission_inventory_complete\":")
+                Base::rh_push_text(out, "true") if Json::rh_json_is_true(nodes, raw, complete)
+                Base::rh_push_text(out, "false") if not Json::rh_json_is_true(nodes, raw, complete)
             Base::rh_push_text(out, ",\"declarations\":[")
             declarations: mutable darray[RhProviderDeclaration] = []
             arr: Json::RhJsonNode = nodes[members.usize()]

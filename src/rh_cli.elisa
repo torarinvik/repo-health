@@ -162,7 +162,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli pep440 --input <file> --out <file>")
     rh_cli_err("       rh_cli privacy --input <file> --out <file>")
     rh_cli_err("       rh_cli roles (--input <file> | --url <https-or-file-url>) --out <file>")
-    rh_cli_err("       rh_cli roles-import --input <provider-permissions.json> --out <file>")
+    rh_cli_err("       rh_cli roles-import (--input <provider-permissions.json> | --github-repo <owner/repo>) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli roles-publish --input <file> --out <file>")
     rh_cli_err("       rh_cli experimental --input <file> --out <file>")
     rh_cli_err("       rh_cli render --report <report.json> --out <file.html>")
@@ -2132,8 +2132,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
             return rh_do_roles("", slots[rlo_idx], slots[rlu_idx], true)
         return rh_do_roles(slots[rl_idx], slots[rlo_idx], "", false)
     if Base::rh_streq(cmd, "roles-import"):
-        rii_idx, rio_idx =
-            while riq < argc |rii_idx: i64 = -1, rio_idx: i64 = -1, riq: i64 = 2, slots| -> rii_idx, rio_idx:
+        rii_idx, rio_idx, rig_idx, rim_idx =
+            while riq < argc |rii_idx: i64 = -1, rio_idx: i64 = -1, rig_idx: i64 = -1, rim_idx: i64 = -1, riq: i64 = 2, slots| -> rii_idx, rio_idx, rig_idx, rim_idx:
                 ari: u8& = slots[riq].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(ari, "--input"):
                     if riq + 1 < argc:
@@ -2147,11 +2147,32 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         rio_idx <- riq
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(ari, "--github-repo"):
+                    if riq + 1 < argc:
+                        riq <- riq + 1
+                        rig_idx <- riq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(ari, "--max-pages"):
+                    if riq + 1 < argc:
+                        riq <- riq + 1
+                        rim_idx <- riq
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 riq <- riq + 1
-        return rh_cli_usage(2) if rii_idx < 0 or rio_idx < 0
-        return rh_do_roles_import(slots[rii_idx], slots[rio_idx])
+        return rh_cli_usage(2) if rio_idx < 0 or (rii_idx < 0 and rig_idx < 0) or (rii_idx >= 0 and rig_idx >= 0) or (rim_idx >= 0 and rig_idx < 0)
+        if rii_idx >= 0:
+            return rh_cli_usage(2) if rim_idx >= 0
+            return rh_do_roles_import(slots[rii_idx], slots[rio_idx])
+        max_pages: mutable i64 = 4
+        if rim_idx >= 0:
+            max_page_ok: mutable i64 = 0
+            parsed_pages: i64 = rh_parse_cstr_int(slots[rim_idx], &max_page_ok)
+            return rh_cli_usage(2) if max_page_ok == 0 or parsed_pages < 1 or parsed_pages > 10
+            max_pages <- parsed_pages
+        return rh_do_roles_import_github(slots[rig_idx], slots[rio_idx], max_pages)
     if Base::rh_streq(cmd, "roles-publish"):
         rpi_idx, rpo_idx =
             while rpq < argc |rpi_idx: i64 = -1, rpo_idx: i64 = -1, rpq: i64 = 2, slots| -> rpi_idx, rpo_idx:
@@ -7558,6 +7579,27 @@ def rh_do_roles_import(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloc
         rh_cli_err("roles-import: cannot write --out")
         return 4
     rh_cli_out("roles-import: ok")
+    0
+
+def rh_do_roles_import_github(repository: cstr, out_path: cstr, max_pages: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected roles-import output path (allowlist)")
+        return 3
+    body: mutable darray[u8] = []
+    if ForgeEventsFetch::rh_roles_github_live(repository, max_pages, out_path, body) != 0:
+        rh_cli_err("roles-import: GitHub collaborator collection failed (requires RH_GITHUB_TOKEN; see page evidence)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] =
+        op: mutable darray[u8] = []
+        Base::rh_push_cstr(op, out_path)
+        op.push(0)
+        op
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(opp, body):
+        rh_cli_err("roles-import: cannot write --out")
+        return 4
+    rh_cli_out("roles-import: GitHub collaborator snapshot collected")
     0
 
 # --- M04 restricted role publication path. ---

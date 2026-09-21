@@ -102,8 +102,126 @@ python3 - "$T/paginated.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["pagination"] == {"next": "members-page-2", "complete": False}, d
+assert d["permission_inventory_complete"] is False, d
 print("[roles-provider] pagination cursor + completion state OK")
 PY
+
+echo "[roles-provider] authenticated GitHub collaborator snapshot preserves scope and completeness"
+mkdir -p "$T/bin"
+python3 - "$T/collaborators-short.json" "$T/collaborators-full.json" <<'PY'
+import json, sys
+short = [
+    {"id": 7101, "login": "owner-login", "role_name": "admin", "permissions": {"admin": True}},
+    {"id": 7102, "login": "maintainer-login", "role_name": "maintain", "permissions": {"maintain": True}},
+    {"id": 7103, "login": "custom-login", "role_name": "custom-reviewer", "permissions": {"push": True}},
+]
+full = [{"id": 8000 + i, "login": f"collaborator-{i}", "role_name": "read", "permissions": {"pull": True}} for i in range(100)]
+json.dump(short, open(sys.argv[1], "w"), separators=(",", ":"))
+json.dump(full, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+cat > "$T/bin/python3" <<'SH'
+#!/usr/bin/env bash
+printf '140.82.114.5\n'
+SH
+cat > "$T/bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >> "$RH_CURL_LOG"
+body_out=""
+url=""
+config_stdin=0
+while (($#)); do
+  case "$1" in
+    -o) body_out="$2"; shift 2 ;;
+    --config) [[ "$2" == "-" ]] || exit 20; config_stdin=1; shift 2 ;;
+    *) url="$1"; shift ;;
+  esac
+done
+[[ -n "$body_out" && -n "$url" ]]
+if [[ "$config_stdin" == "1" ]]; then cat > "$RH_CURL_CONFIG_LOG"; fi
+body="$RH_CURL_COLLABORATORS_PAGE1"
+[[ "$url" != *'page=2' ]] || body="$RH_CURL_EMPTY_PAGE"
+cp "$body" "$body_out"
+printf '%s' 200
+SH
+chmod +x "$T/bin/python3" "$T/bin/curl"
+rm -f "$T/github-live.json" "$T/github-live.json.github-collaborators-page-"* "$T/roles-curl.args" "$T/roles-curl.config"
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_COLLABORATORS_PAGE1="$T/collaborators-short.json" RH_CURL_EMPTY_PAGE="$T/collaborators-short.json" \
+  RH_CURL_LOG="$T/roles-curl.args" RH_CURL_CONFIG_LOG="$T/roles-curl.config" \
+  "$ROOT/build/rh_cli" roles-import --github-repo example/project --max-pages 2 --out "$T/github-live.json" >/dev/null || fail "GitHub collaborator fetch"
+python3 - "$T/github-live.json" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["schema"] == "rh-roles-input/1", d
+assert d["authorization"] == {"state": "authorized"}, d
+assert d["scope"] == {"repository": "example/project"}, d
+assert d["pagination"] == {"next": None, "complete": True}, d
+assert d["permission_inventory_complete"] is True, d
+assert [x["role"] for x in d["declarations"]] == ["owner", "maintainer", "unknown"], d
+assert [x["actor_id"] for x in d["declarations"]] == [7101, 7102, 7103], d
+assert all(login not in open(sys.argv[1]).read() for login in ("owner-login", "maintainer-login", "custom-login"))
+url = (t / "github-live.json.github-collaborators-page-1.url").read_text().strip()
+assert url == "https://api.github.com/repos/example/project/collaborators?affiliation=all&per_page=100&page=1", url
+assert (t / "github-live.json.github-collaborators-page-1.status").read_text() == "200"
+print("[roles-provider] authenticated GitHub scope, roles, and complete inventory OK")
+PY
+grep -Fxq 'header = "Authorization: Bearer ghp_roles_fixture"' "$T/roles-curl.config" || fail "permission token header absent from curl stdin config"
+! grep -Fq 'ghp_roles_fixture' "$T/roles-curl.args" || fail "permission token leaked into curl arguments"
+! grep -Fq 'ghp_roles_fixture' "$T/github-live.json.github-collaborators-page-1.json" || fail "permission token leaked into raw evidence"
+python3 - "$T/github-live.json" "$T/github-live-ready.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["as_of"] = d["declarations"][0]["declared_at"]
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" roles --input "$T/github-live-ready.json" --out "$T/github-live-result.json" >/dev/null || fail "scoped roles report"
+python3 - "$T/github-live-result.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["scope"] == {"repository": "example/project"}, d
+coverage = next(x for x in d["metrics"] if x["key"] == "maintainer.permission_inventory_coverage")
+assert coverage["status"] == "observed" and coverage["value"] == {"num": 3, "den": 3}, coverage
+print("[roles-provider] scoped permission coverage reaches the role report")
+PY
+
+echo "[roles-provider] page cap keeps incomplete permission coverage explicit"
+rm -f "$T/github-partial.json" "$T/github-partial.json.github-collaborators-page-"* "$T/roles-partial-curl.args" "$T/roles-partial-curl.config"
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_COLLABORATORS_PAGE1="$T/collaborators-full.json" RH_CURL_EMPTY_PAGE="$T/collaborators-short.json" \
+  RH_CURL_LOG="$T/roles-partial-curl.args" RH_CURL_CONFIG_LOG="$T/roles-partial-curl.config" \
+  "$ROOT/build/rh_cli" roles-import --github-repo example/project --max-pages 1 --out "$T/github-partial.json" >/dev/null || fail "partial GitHub collaborator fetch"
+python3 - "$T/github-partial.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["pagination"] == {"next": "page=2", "complete": False}, d
+assert d["permission_inventory_complete"] is False, d
+assert len(d["declarations"]) == 100, d
+print("[roles-provider] page cap emits a continuation cursor without claiming coverage")
+PY
+python3 - "$T/github-partial.json" "$T/github-partial-ready.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["as_of"] = d["declarations"][0]["declared_at"]
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" roles --input "$T/github-partial-ready.json" --out "$T/github-partial-result.json" >/dev/null || fail "partial scoped roles report"
+python3 - "$T/github-partial-result.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+assert m["maintainer.permission_inventory_coverage"]["status"] == "unsupported", m
+assert m["maintainer.permission_inventory_coverage"]["reason"] == "permission-inventory-completeness-not-supplied", m
+print("[roles-provider] partial collaborator page cannot claim permission coverage")
+PY
+
+echo "[roles-provider] live permission fetch requires an explicit token"
+rm -f "$T/no-token.out" "$T/no-token-curl.args"
+set +e
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="" RH_CURL_LOG="$T/no-token-curl.args" RH_CURL_CONFIG_LOG="$T/no-token-curl.config" \
+  "$ROOT/build/rh_cli" roles-import --github-repo example/project --out "$T/no-token.out" >/dev/null 2>&1
+rc_no_token=$?
+set -e
+[[ "$rc_no_token" -eq 4 && ! -e "$T/no-token-curl.args" && ! -e "$T/no-token.out" ]] || fail "permission fetch proceeded without an explicit token"
 
 echo "[roles-provider] malformed input fails closed"
 set +e
