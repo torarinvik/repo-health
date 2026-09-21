@@ -90,10 +90,12 @@ module StagedGithub:
             return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
             issues_input: bool = StagedGithub::rh_sgi_field_is(nodes, texts, root, "schema", "rh-postgres-staged-github-issues-input/1", 1, 64) and StagedGithub::rh_sgi_field_is(nodes, texts, root, "canonical_capability", "issues", 1, 32)
             proposals_input: bool = StagedGithub::rh_sgi_field_is(nodes, texts, root, "schema", "rh-postgres-staged-github-proposals-input/1", 1, 64) and StagedGithub::rh_sgi_field_is(nodes, texts, root, "canonical_capability", "proposals", 1, 32)
+            reviews_input: bool = StagedGithub::rh_sgi_field_is(nodes, texts, root, "schema", "rh-postgres-staged-github-reviews-input/1", 1, 64) and StagedGithub::rh_sgi_field_is(nodes, texts, root, "canonical_capability", "reviews", 1, 32)
             releases_input: bool = StagedGithub::rh_sgi_field_is(nodes, texts, root, "schema", "rh-postgres-staged-github-releases-input/1", 1, 64) and StagedGithub::rh_sgi_field_is(nodes, texts, root, "canonical_capability", "releases", 1, 32)
-            return -1 if not issues_input and not proposals_input and not releases_input
+            return -1 if not issues_input and not proposals_input and not reviews_input and not releases_input
             is_issues: bool = issues_input
             is_proposals: bool = proposals_input
+            is_reviews: bool = reviews_input
             is_releases: bool = releases_input
             capability_start: mutable i64 = 0
             capability_end: mutable i64 = 0
@@ -121,6 +123,11 @@ module StagedGithub:
             repository_start: mutable i64 = 0
             repository_end: mutable i64 = 0
             return -1 if not StagedGithub::rh_sgi_span(nodes, texts, scope_index, "repository", &repository_start, &repository_end, 1, 512)
+            pull_request: mutable i64 = 0
+            if is_reviews:
+                return -1 if not StagedGithub::rh_sgi_int(nodes, texts, raw, scope_index, "pull_request", 1, 2147483647, &pull_request)
+            else:
+                return -1 if Json::rh_json_obj_get(nodes, texts, scope_index, "pull_request") >= 0
             pages_index: i64 = Json::rh_json_obj_get(nodes, texts, root, "pages")
             return -1 if pages_index < 0 or nodes[pages_index.usize()].kind != Json::RH_JSON_ARR or nodes[pages_index.usize()].child_count == 0 or nodes[pages_index.usize()].child_count > RH_SGI_MAX_PAGES
             pages: mutable darray[RhSgiPage] = []
@@ -174,18 +181,29 @@ module StagedGithub:
             StagedGithub::rh_sgi_emit_text(forge_input, texts, authorization_start, authorization_end)
             Base::rh_push_text(forge_input, "},\"scope\":{\"repository\":")
             StagedGithub::rh_sgi_emit_text(forge_input, texts, repository_start, repository_end)
+            if is_reviews:
+                Base::rh_push_text(forge_input, ",\"pull_request\":")
+                Base::rh_push_decimal_i64(forge_input, pull_request)
             Base::rh_push_text(forge_input, "},")
-            StagedGithub::rh_sgi_emit_text(forge_input, texts, capability_start, capability_end)
-            Base::rh_push_text(forge_input, ":[")
+            if is_reviews:
+                Base::rh_push_text(forge_input, "\"reviews_by_pull\":[{\"pull_number\":")
+                Base::rh_push_decimal_i64(forge_input, pull_request)
+                Base::rh_push_text(forge_input, ",\"reviews\":[")
+            else:
+                StagedGithub::rh_sgi_emit_text(forge_input, texts, capability_start, capability_end)
+                Base::rh_push_text(forge_input, ":[")
             while index < records.count |index: usize = 0, records, forge_input, texts|:
                 forge_input.push(44) if index > 0
                 StagedGithub::rh_sgi_copy(texts, records[index].payload_start, records[index].payload_end, forge_input)
                 index <- index + 1
-            Base::rh_push_text(forge_input, "],\"capability_states\":{")
+            Base::rh_push_text(forge_input, "]}]" if is_reviews else "]")
+            Base::rh_push_text(forge_input, ",\"capability_states\":{")
             if is_issues:
                 Base::rh_push_text(forge_input, "\"proposals\":\"not_attempted\",\"reviews\":\"not_attempted\",\"releases\":\"not_attempted\"")
             elif is_proposals:
                 Base::rh_push_text(forge_input, "\"issues\":\"not_attempted\",\"reviews\":\"not_attempted\",\"releases\":\"not_attempted\"")
+            elif is_reviews:
+                Base::rh_push_text(forge_input, "\"issues\":\"not_attempted\",\"proposals\":\"not_attempted\",\"releases\":\"not_attempted\"")
             else:
                 Base::rh_push_text(forge_input, "\"issues\":\"not_attempted\",\"proposals\":\"not_attempted\",\"reviews\":\"not_attempted\"")
             Base::rh_push_text(forge_input, "}}")

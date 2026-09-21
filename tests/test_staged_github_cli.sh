@@ -12,6 +12,7 @@ rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/postgres/staged-github-issues-input.json" "$T/input.json"
 cp "$ROOT/fixtures/postgres/staged-github-issues-output.json" "$T/expected.json"
 cp "$ROOT/fixtures/postgres/staged-github-proposals-input.json" "$T/proposals-input.json"
+cp "$ROOT/fixtures/postgres/staged-github-reviews-input.json" "$T/reviews-input.json"
 cp "$ROOT/fixtures/postgres/staged-github-releases-input.json" "$T/releases-input.json"
 
 echo "[staged-github] replay binds the exact stage input and preserves provenance"
@@ -71,6 +72,21 @@ assert n["events"][0]["kind"] == "proposals" and n["events"][0]["native_id"] == 
 assert n["capabilities"]["issues"]["status"] == "not_attempted", n["capabilities"]
 PY
 
+echo "[staged-github] review inputs require and preserve pull-request scope"
+"$ROOT/build/rh_cli" staged-normalize --input "$T/reviews-input.json" --out "$T/reviews-output.json" >/dev/null || fail "valid scoped reviews"
+python3 - "$T/reviews-input.json" "$T/reviews-output.json" "$ROOT/fixtures/postgres/staged-github-reviews-output.json" <<'PY'
+import hashlib, json, sys
+got = json.load(open(sys.argv[2]))
+expected = json.load(open(sys.argv[3]))
+assert got == expected, (got, expected)
+assert got["input_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), got
+assert got["canonical_capability"] == "reviews", got
+n = got["normalized"]
+assert n["scope"] == {"repository": "example/project", "pull_request": 17}, n["scope"]
+assert n["capabilities"]["reviews"]["status"] == "observed" and n["capabilities"]["reviews"]["count"] == 1, n
+assert n["events"][0]["kind"] == "reviews" and n["events"][0]["native_id"] == "github:91" and n["events"][0]["pull_request"] == 17, n["events"]
+PY
+
 echo "[staged-github] committed empty pages remain observed empty"
 python3 - "$T/input.json" "$T/empty.json" <<'PY'
 import json, sys
@@ -99,11 +115,12 @@ d = copy.deepcopy(base); d["pages"][0]["records"][0]["collector_label"] = "other
 d = copy.deepcopy(base); d["pages"][0]["records"][0]["record_ordinal"] = 1; cases["ordinal"] = d
 d = copy.deepcopy(base); d["pages"][0]["records"][0]["raw_payload"] = "[]"; cases["non-object-payload"] = d
 d = copy.deepcopy(base); d["canonical_capability"] = "proposals"; cases["schema-capability-mismatch"] = d
+d = json.load(open(os.path.join(out, "reviews-input.json"))); d["scope"].pop("pull_request"); cases["review-scope-missing"] = d
 for name, value in cases.items():
     with open(os.path.join(out, name + ".json"), "w", encoding="utf-8") as f:
         json.dump(value, f, separators=(",", ":"))
 PY
-for name in uncommitted partial misbound ordinal non-object-payload schema-capability-mismatch; do
+for name in uncommitted partial misbound ordinal non-object-payload schema-capability-mismatch review-scope-missing; do
   if "$ROOT/build/rh_cli" staged-normalize --input "$T/$name.json" --out "$T/$name.out" >/dev/null 2>&1; then
     fail "$name stage input was accepted"
   fi
@@ -112,6 +129,7 @@ done
 
 grep -q "rh-postgres-staged-github-issues-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "issue input contract token missing"
 grep -q "rh-postgres-staged-github-proposals-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "proposal input contract token missing"
+grep -q "rh-postgres-staged-github-reviews-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "review input contract token missing"
 grep -q "rh-postgres-staged-github-releases-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "release input contract token missing"
 grep -q "rh-postgres-staged-normalize-result/1" "$ROOT/src/rh_staged_github.elisa" || fail "result contract token missing"
 echo "test_staged_github_cli OK"
