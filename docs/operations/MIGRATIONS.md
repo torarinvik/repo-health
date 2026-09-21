@@ -26,6 +26,8 @@ the matching attempt in one transaction after checking the same run binding and
 unexpired token. Generic `finish_job` refuses collection jobs so their run state
 cannot remain open. The adapter also performs fenced job claim, heartbeat, and
 generic job finish.
+Generic claim takes the highest-priority runnable job; `claim_collection_job`
+targets one queued or expired collection job, leaving other queue items intact.
 Reclaiming an expired job closes its unfinished prior attempt as
 `lease_expired` before issuing the next fencing token.
 Source/run retries succeed only when the supplied immutable metadata

@@ -875,7 +875,8 @@ $$;
 CREATE FUNCTION rh_claim_next_job(
     p_worker_id text,
     p_now timestamptz,
-    p_lease_seconds integer
+    p_lease_seconds integer,
+    p_job_id uuid DEFAULT NULL
 ) RETURNS TABLE (job_id uuid, fencing_token bigint, lease_expires_at timestamptz)
 LANGUAGE sql
 AS $$
@@ -884,6 +885,8 @@ AS $$
         FROM job AS j
         WHERE (j.state = 'queued' OR (j.state = 'running' AND j.lease_expires_at <= p_now))
           AND j.next_attempt_at <= p_now
+          AND (p_job_id IS NULL OR j.id = p_job_id)
+          AND (p_job_id IS NULL OR j.kind = 'collection')
         ORDER BY j.priority DESC, j.next_attempt_at, j.created_at, j.id
         FOR UPDATE SKIP LOCKED
         LIMIT 1

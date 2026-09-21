@@ -317,10 +317,10 @@ module Postgres:
             params.push(now)
             Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_finish_collection_job($1::uuid, $2::uuid, $3::bigint, $4::text, $5::text, $6::text, $7::jsonb, NULLIF($8, '')::text, NULLIF($9, '')::text, $10::timestamptz)", params)
 
-        # Claim at most one runnable job through SKIP LOCKED. Returns 1 with
-        # NUL-terminated id/expiry and a fencing token, 0 when the queue is empty,
-        # or -1 for a connection or result error.
-        def rh_pg_claim_next_job(conninfo: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, job_id_out: mutable darray[u8]&, fencing_token_out: mutable i64&, lease_expires_at_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+    private:
+        # Claim through SKIP LOCKED, optionally binding the claim to one
+        # collection job. Returns 1 with its lease, 0 when no job is runnable.
+        def rh_pg_claim_job(conninfo: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, target_job_id: cstr, job_id_out: mutable darray[u8]&, fencing_token_out: mutable i64&, lease_expires_at_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             job_id_out <- []
             fencing_token_out[0] <- 0
             lease_expires_at_out <- []
@@ -365,8 +365,9 @@ module Postgres:
             params.push(worker_id)
             params.push(now)
             params.push(lease_ptr)
+            params.push(target_job_id)
             param_values: void& = (&params[0]).cast[void&] can Unsafe.PointerCast
-            query_result: void&? = exec_params(conn, "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job($1::text, $2::timestamptz, $3::integer)", 3, null, param_values, null, null, 0)
+            query_result: void&? = exec_params(conn, "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job($1::text, $2::timestamptz, $3::integer, NULLIF($4, '')::uuid)", 4, null, param_values, null, null, 0)
             result_code: mutable i64 = -1
             if query_result != null:
                 result: void& = query_result
@@ -403,3 +404,14 @@ module Postgres:
             finish(conn)
             _ = rh_pg_dlclose(library)
             result_code
+
+    public:
+        # Claim the highest-priority runnable job in the queue.
+        def rh_pg_claim_next_job(conninfo: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, job_id_out: mutable darray[u8]&, fencing_token_out: mutable i64&, lease_expires_at_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            Postgres::rh_pg_claim_job(conninfo, worker_id, now, lease_seconds, "", job_id_out, fencing_token_out, lease_expires_at_out)
+
+        # Claim only the named queued/expired collection job. Other queued jobs
+        # remain untouched when the requested job is not runnable.
+        def rh_pg_claim_collection_job(conninfo: cstr, job_id: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, job_id_out: mutable darray[u8]&, fencing_token_out: mutable i64&, lease_expires_at_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if Base::rh_cstr_len_c(job_id) == 0 or Base::rh_cstr_len_c(job_id) > 64
+            Postgres::rh_pg_claim_job(conninfo, worker_id, now, lease_seconds, job_id, job_id_out, fencing_token_out, lease_expires_at_out)

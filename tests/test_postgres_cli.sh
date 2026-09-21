@@ -48,6 +48,8 @@ run_ok finish_collection committed finish-collection-job
 run_ok finish_collection duplicate finish-collection-job
 run_ok claim committed claim-job
 run_ok claim duplicate claim-job
+run_ok claim_collection committed claim-collection-job
+run_ok claim_collection duplicate claim-collection-job
 
 mkdir -p "$T/evidence"
 printf 'hello evidence\n' > "$T/evidence-source.txt"
@@ -91,6 +93,10 @@ assert claim["status"] == "claimed" and claim["fencing_token"] == 5, claim
 assert claim["job_id"] == "00000000-0000-0000-0000-000000000004", claim
 assert claim["lease_expires_at"] == "2026-01-01 00:02:00+00", claim
 assert read("claim-job-duplicate.json")["status"] == "empty"
+specific_claim = read("claim-collection-job-committed.json")
+assert specific_claim["status"] == "claimed" and specific_claim["fencing_token"] == 1, specific_claim
+assert specific_claim["job_id"] == "00000000-0000-0000-0000-00000000000a", specific_claim
+assert read("claim-collection-job-duplicate.json")["status"] == "empty"
 registered = read("register-evidence-committed.json")
 assert registered == {
     "schema": "rh-postgres-result/1", "operation": "register_evidence",
@@ -103,7 +109,7 @@ duplicate = read("register-evidence-duplicate.json")
 assert duplicate["status"] == "duplicate" and duplicate["digest_value"] == registered["digest_value"]
 all_output = "".join(open(os.path.join(root, p)).read() for p in os.listdir(root) if p.endswith(".json"))
 assert "never-emit-this" not in all_output
-print("[postgres-cli] verified source/run initialization, collection-job enqueue, evidence registration, page commits, claim, heartbeat, finish, and bounded reports OK")
+print("[postgres-cli] verified source/run initialization, collection-job enqueue and targeted claim, evidence registration, page commits, generic claim, heartbeat, finish, and bounded reports OK")
 PY
 
 printf 'X' >> "$T/evidence/$stored_name"

@@ -356,25 +356,37 @@ module PostgresReport:
                 Base::rh_push_text(out, "\"}")
                 return 0
 
-            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "claim_job"):
+            claim_collection: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "claim_collection_job")
+            if claim_collection or PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "claim_job"):
                 worker_s: mutable i64 = 0
                 worker_e: mutable i64 = 0
+                job_s: mutable i64 = 0
+                job_e: mutable i64 = 0
                 now_s: mutable i64 = 0
                 now_e: mutable i64 = 0
                 return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "worker_id", &worker_s, &worker_e, false) or worker_e - worker_s > 256
+                return -1 if claim_collection and not PostgresReport::rh_pg_report_span(nodes, texts, root, "job_id", &job_s, &job_e, false)
                 return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "now", &now_s, &now_e, false)
                 lease_seconds: mutable i64 = 0
                 return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "lease_seconds", 1, 86400, &lease_seconds)
                 worker_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, worker_s, worker_e)
+                requested_job_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, job_s, job_e) if claim_collection else []
                 now: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, now_s, now_e)
                 job_id: mutable darray[u8] = []
                 fencing_token: mutable i64 = 0
                 lease_expires: mutable darray[u8] = []
                 worker_ptr: cstr = (&worker_id[0]).cast[cstr] can Unsafe.PointerCast
+                requested_job_ptr: cstr = (&requested_job_id[0]).cast[cstr] can Unsafe.PointerCast if claim_collection else ""
                 now_ptr: cstr = (&now[0]).cast[cstr] can Unsafe.PointerCast
-                claimed: i64 = Postgres::rh_pg_claim_next_job(conninfo, worker_ptr, now_ptr, lease_seconds, job_id, &fencing_token, lease_expires)
+                claimed: i64 =
+                    if claim_collection:
+                        Postgres::rh_pg_claim_collection_job(conninfo, requested_job_ptr, worker_ptr, now_ptr, lease_seconds, job_id, &fencing_token, lease_expires)
+                    else:
+                        Postgres::rh_pg_claim_next_job(conninfo, worker_ptr, now_ptr, lease_seconds, job_id, &fencing_token, lease_expires)
                 return -1 if claimed < 0
-                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_job\",\"status\":\"")
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"")
+                Base::rh_push_text(out, "claim_collection_job" if claim_collection else "claim_job")
+                Base::rh_push_text(out, "\",\"status\":\"")
                 if claimed == 0:
                     Base::rh_push_text(out, "empty\"}")
                 else:

@@ -91,7 +91,7 @@ actor_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "
 
 run_cli "$ROOT/fixtures/postgres/enqueue-collection-job-command.json" "$TMP_DIR/job-enqueued.json" || fail "enqueue collection job through libpq adapter"
 run_cli "$ROOT/fixtures/postgres/enqueue-collection-job-command.json" "$TMP_DIR/job-duplicate.json" || fail "replay collection job through libpq adapter"
-run_cli "$ROOT/fixtures/postgres/claim-job-command.json" "$TMP_DIR/job-claimed.json" || fail "claim enqueued collection job through libpq adapter"
+run_cli "$ROOT/fixtures/postgres/claim-collection-job-command.json" "$TMP_DIR/job-claimed.json" || fail "targeted claim of enqueued collection job through libpq adapter"
 run_cli "$ROOT/fixtures/postgres/finish-enqueued-collection-job-command.json" "$TMP_DIR/job-finished.json" || fail "finish enqueued collection run through libpq adapter"
 python3 - "$TMP_DIR" <<'PY'
 import json, os, sys

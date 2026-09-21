@@ -347,9 +347,12 @@ BEGIN
     END IF;
   END;
 
-  SELECT * INTO c FROM rh_claim_next_job('worker-ingest', '2026-01-04T00:00:01Z', 60);
+  INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, created_at)
+  VALUES ('00000000-0000-0000-0000-00000000000c', '00000000-0000-0000-0000-000000000001', 'maintenance', 'public', 'queued', 99, '2026-01-04T00:00:00Z', '2026-01-04T00:00:00Z');
+
+  SELECT * INTO c FROM rh_claim_next_job('worker-ingest', '2026-01-04T00:00:01Z', 60, '00000000-0000-0000-0000-00000000000b');
   IF c.job_id <> '00000000-0000-0000-0000-00000000000b'::uuid OR c.fencing_token <> 1 THEN
-    RAISE EXCEPTION 'enqueued collection job was not claimable: %', c;
+    RAISE EXCEPTION 'targeted claim did not select the requested collection job: %', c;
   END IF;
   IF NOT rh_finish_collection_job(
     '00000000-0000-0000-0000-00000000000a', c.job_id, c.fencing_token,
@@ -360,7 +363,8 @@ BEGIN
   END IF;
   IF (SELECT state FROM job WHERE id = c.job_id) <> 'succeeded'
      OR (SELECT status FROM collection_run WHERE id = '00000000-0000-0000-0000-00000000000a'::uuid) <> 'succeeded'
-     OR (SELECT outcome FROM job_attempt WHERE job_id = c.job_id AND fencing_token = c.fencing_token) <> 'ok' THEN
+     OR (SELECT outcome FROM job_attempt WHERE job_id = c.job_id AND fencing_token = c.fencing_token) <> 'ok'
+     OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-00000000000c'::uuid) <> 'queued' THEN
     RAISE EXCEPTION 'enqueued collection lifecycle did not persist terminal state';
   END IF;
 END $$;

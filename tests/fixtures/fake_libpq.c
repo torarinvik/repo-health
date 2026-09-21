@@ -9,6 +9,9 @@ static FakeResult result = { 2, 1, 1, "t" };
 static const char *claim_cells[3] = {
     "00000000-0000-0000-0000-000000000004", "5", "2026-01-01 00:02:00+00"
 };
+static const char *claim_collection_cells[3] = {
+    "00000000-0000-0000-0000-00000000000a", "1", "2026-01-01 00:02:00+00"
+};
 
 void *PQconnectdbParams(const char *const *keywords, const char *const *values, int expand_dbname) {
     if (keywords == NULL || values == NULL || expand_dbname != 1 ||
@@ -63,8 +66,11 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "succeeded", "succeeded", "complete", "{\"issues\":\"observed\"}", "ok", "",
         "2026-01-01T00:06:00Z"
     };
-    static const char *claim_values[3] = {
-        "worker-a", "2026-01-01T00:01:00Z", "60"
+    static const char *claim_values[4] = {
+        "worker-a", "2026-01-01T00:01:00Z", "60", ""
+    };
+    static const char *claim_collection_values[4] = {
+        "worker-a", "2026-01-01T00:01:00Z", "60", "00000000-0000-0000-0000-00000000000a"
     };
     static const char *enqueue_values[5] = {
         "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-00000000000a",
@@ -97,7 +103,11 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         prefix = "SELECT public.rh_finish_collection_job(";
     } else if (operation != NULL && strcmp(operation, "claim") == 0) {
         expected = claim_values;
-        expected_count = 3;
+        expected_count = 4;
+        prefix = "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job(";
+    } else if (operation != NULL && strcmp(operation, "claim_collection") == 0) {
+        expected = claim_collection_values;
+        expected_count = 4;
         prefix = "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job(";
     } else if (operation != NULL && strcmp(operation, "enqueue") == 0) {
         expected = enqueue_values;
@@ -123,7 +133,7 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         if (values[i] == NULL || strcmp(values[i], expected[i]) != 0)
             return NULL;
     const char *mode = getenv("RH_FAKE_PG_EXPECT");
-    if (operation != NULL && strcmp(operation, "claim") == 0) {
+    if (operation != NULL && (strcmp(operation, "claim") == 0 || strcmp(operation, "claim_collection") == 0)) {
         result.columns = 3;
         result.rows = mode != NULL && strcmp(mode, "duplicate") == 0 ? 0 : 1;
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
@@ -151,7 +161,12 @@ int PQgetisnull(void *handle, int row, int column) {
 char *PQgetvalue(void *handle, int row, int column) {
     if (handle != &result || row != 0 || column < 0 || column >= result.columns)
         return "";
-    return result.columns == 3 ? (char *)claim_cells[column] : (char *)result.value;
+    if (result.columns == 3) {
+        const char *operation = getenv("RH_FAKE_PG_OPERATION");
+        const char **cells = operation != NULL && strcmp(operation, "claim_collection") == 0 ? claim_collection_cells : claim_cells;
+        return (char *)cells[column];
+    }
+    return (char *)result.value;
 }
 int PQgetlength(void *handle, int row, int column) {
     return (int)strlen(PQgetvalue(handle, row, column));
