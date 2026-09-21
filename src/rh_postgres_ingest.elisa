@@ -4,6 +4,7 @@ include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_temporal.elisa"
 include "./rh_postgres.elisa"
+include "./rh_postgres_report.elisa"
 
 module PostgresIngest:
     private:
@@ -254,7 +255,7 @@ module PostgresIngest:
     public:
         # This accepts already-normalized provider pages. Acquisition and
         # normalization stay outside the short database transactions.
-        def rh_postgres_ingest_report(raw: darray[u8]&, conninfo: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_postgres_ingest_report(raw: darray[u8]&, conninfo: cstr, evidence_root: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             return -1 if raw.count == 0 or raw.count > RH_PI_MAX_BYTES
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
@@ -376,6 +377,10 @@ module PostgresIngest:
                 count: mutable i64 = 0
                 PostgresIngest::rh_pi_json_root(texts, coverage_start, coverage_end, Json::RH_JSON_OBJ, &count)
             return -1 if not coverage_valid
+            evidence_objects_index: i64 = PostgresIngest::rh_pi_get(nodes, texts, root, "evidence_objects")
+            if evidence_objects_index >= 0:
+                return -1 if nodes[evidence_objects_index.usize()].kind != Json::RH_JSON_ARR or nodes[evidence_objects_index.usize()].child_count > RH_PI_MAX_PAGES
+                return -1 if nodes[evidence_objects_index.usize()].child_count > 0 and Base::rh_cstr_len_c(evidence_root) == 0
             pages_index: i64 = PostgresIngest::rh_pi_get(nodes, texts, root, "pages")
             return -1 if pages_index < 0 or nodes[pages_index.usize()].kind != Json::RH_JSON_ARR or nodes[pages_index.usize()].child_count == 0 or nodes[pages_index.usize()].child_count > RH_PI_MAX_PAGES
             expected_page: mutable i64 = 0
@@ -441,6 +446,9 @@ module PostgresIngest:
                 expected_page <- expected_page + 1
                 page <- nodes[page.usize()].next_sibling
             return -1 if (complete_pages == 0 and not PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "empty")) or (complete_pages > 0 and not PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "complete"))
+
+            if evidence_objects_index >= 0 and nodes[evidence_objects_index.usize()].child_count > 0:
+                return -1 if PostgresReport::rh_postgres_register_ingest_evidence(raw, conninfo, evidence_root) != 0
 
             started: i64 =
                 source_id: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, source_start, source_end)

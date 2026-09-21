@@ -178,7 +178,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli lineage --input <file> --out <file>")
     rh_cli_err("       rh_cli population --input <file> --out <file>")
     rh_cli_err("       rh_cli ingest --root <dir> --input <file> --out <file>")
-    rh_cli_err("       rh_cli ingest --postgres --input <rh-postgres-ingest-input/1> --out <file>  (RH_DATABASE_URL)")
+    rh_cli_err("       rh_cli ingest --postgres --root <store-dir> --input <rh-postgres-ingest-input/1> --out <file>  (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli postgres --input <rh-postgres-command/1> --out <file>  (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli drilldown --input <file> --out <file>")
     rh_cli_err("       rh_cli role-grain --input <file> --out <file>")
@@ -2461,8 +2461,10 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 else:
                     return rh_cli_usage(2)
                 iiq <- iiq + 1
-        return rh_cli_usage(2) if ii_idx < 0 or io_idx < 0 or (postgres_ingest and ir_idx >= 0) or (not postgres_ingest and ir_idx < 0)
-        return rh_do_postgres_ingest(slots[ii_idx], slots[io_idx]) if postgres_ingest
+        return rh_cli_usage(2) if ii_idx < 0 or io_idx < 0 or (not postgres_ingest and ir_idx < 0)
+        if postgres_ingest:
+            return rh_do_postgres_ingest(slots[ir_idx], slots[ii_idx], slots[io_idx]) if ir_idx >= 0
+            return rh_do_postgres_ingest("", slots[ii_idx], slots[io_idx])
         return rh_do_ingest(slots[ir_idx], slots[ii_idx], slots[io_idx])
     if Base::rh_streq(cmd, "postgres"):
         postgres_input_idx, postgres_out_idx =
@@ -7990,8 +7992,8 @@ def rh_do_postgres(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
 
 # --- M02 research conformance execution path. ---
 # Replays bounded pages through the real event/index, cursor, and lease store.
-def rh_do_postgres_ingest(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+def rh_do_postgres_ingest(store_root: cstr, input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if (Base::rh_cstr_len_c(store_root) > 0 and not Git::rh_arg_safe(store_root)) or not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected PostgreSQL ingest argument (allowlist)")
         return 3
     database_url: u8&? = getenv("RH_DATABASE_URL")
@@ -8009,8 +8011,14 @@ def rh_do_postgres_ingest(input_path: cstr, out_path: cstr) -> i32 can[Memory.Al
         rh_cli_err("postgres ingest: cannot read --input")
         return 4
     conninfo: cstr = database_url.cast[cstr] can Unsafe.PointerCast
+    evidence_root: mutable darray[u8] = []
+    if Base::rh_cstr_len_c(store_root) > 0:
+        Base::rh_push_cstr(evidence_root, store_root)
+        Base::rh_push_text(evidence_root, "/evidence")
+        evidence_root.push(0)
+    evidence_root_ptr: cstr = "" if evidence_root.count == 0 else (&evidence_root[0]).cast[cstr] can Unsafe.PointerCast
     body: mutable darray[u8] = []
-    if PostgresIngest::rh_postgres_ingest_report(raw, conninfo, body) != 0:
+    if PostgresIngest::rh_postgres_ingest_report(raw, conninfo, evidence_root_ptr, body) != 0:
         rh_cli_err("postgres ingest: normalized page execution failed (fail closed)")
         return 4
     body.push(10)

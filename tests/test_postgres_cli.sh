@@ -52,13 +52,25 @@ run_ok claim_collection committed claim-collection-job
 run_ok claim_collection duplicate claim-collection-job
 
 cp "$ROOT/fixtures/postgres/ingest-input.json" "$T/ingest-input.json"
+mkdir -p "$T/evidence"
+printf 'hello evidence\n' > "$T/evidence-source.txt"
+stored_name="$("$ROOT/build/rh_cli" store put --root "$T/evidence" --file "$T/evidence-source.txt" | awk '{print $3}')"
+[[ "$stored_name" == "f5e19178d3ff184e" ]] || fail "normalized ingest evidence fixture changed"
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/no-root-evidence-connected" \
+    "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-input.json" \
+      --out "$T/no-root-evidence-result.json" >/dev/null 2>&1; then
+  fail "normalized ingest accepted local evidence descriptors without a store root"
+fi
+[[ ! -e "$T/no-root-evidence-connected" ]] || fail "missing evidence root connected to PostgreSQL"
+[[ ! -e "$T/no-root-evidence-result.json" ]] || fail "missing evidence root wrote a result"
 RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
   RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=committed \
-  "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-input.json" --out "$T/ingest-result.json" >/dev/null \
+  "$ROOT/build/rh_cli" ingest --postgres --root "$T" --input "$T/ingest-input.json" --out "$T/ingest-result.json" >/dev/null \
   || fail "normalized PostgreSQL page ingest"
 RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
   RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=duplicate \
-  "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-input.json" --out "$T/ingest-not-claimed.json" >/dev/null \
+  "$ROOT/build/rh_cli" ingest --postgres --root "$T" --input "$T/ingest-input.json" --out "$T/ingest-not-claimed.json" >/dev/null \
   || fail "normalized PostgreSQL ingest replay without a runnable lease"
 
 mkdir -p "$T/evidence"
@@ -229,7 +241,7 @@ json.dump(value, open(sys.argv[2], "w"))
 PY
 if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
     RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/malformed-connected" \
-    "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-malformed.json" \
+    "$ROOT/build/rh_cli" ingest --postgres --root "$T" --input "$T/ingest-malformed.json" \
       --out "$T/ingest-malformed-result.json" >/dev/null 2>&1; then
   fail "malformed normalized page batch accepted"
 fi
@@ -245,7 +257,7 @@ json.dump(value, open(sys.argv[2], "w"))
 PY
 if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
     RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/invalid-event-connected" \
-    "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-invalid-event.json" \
+    "$ROOT/build/rh_cli" ingest --postgres --root "$T" --input "$T/ingest-invalid-event.json" \
       --out "$T/ingest-invalid-event-result.json" >/dev/null 2>&1; then
   fail "malformed normalized event accepted"
 fi
@@ -259,10 +271,33 @@ json.dump(value, open(sys.argv[2], "w"))
 PY
 if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
     RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/invalid-time-connected" \
-    "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-invalid-time.json" \
+    "$ROOT/build/rh_cli" ingest --postgres --root "$T" --input "$T/ingest-invalid-time.json" \
       --out "$T/ingest-invalid-time-result.json" >/dev/null 2>&1; then
   fail "invalid normalized page timestamp accepted"
 fi
 [[ ! -e "$T/invalid-time-connected" ]] || fail "invalid timestamp connected to PostgreSQL before validation"
 [[ ! -e "$T/ingest-invalid-time-result.json" ]] || fail "invalid timestamp wrote a result"
-echo "[postgres-cli] page records, timestamps, and lease bounds are preflighted before PostgreSQL"
+mkdir -p "$T/missing-store/evidence"
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/missing-evidence-connected" \
+    "$ROOT/build/rh_cli" ingest --postgres --root "$T/missing-store" --input "$T/ingest-input.json" \
+      --out "$T/missing-evidence-result.json" >/dev/null 2>&1; then
+  fail "normalized ingest accepted a missing local evidence object"
+fi
+[[ ! -e "$T/missing-evidence-connected" ]] || fail "missing local evidence connected to PostgreSQL"
+[[ ! -e "$T/missing-evidence-result.json" ]] || fail "missing local evidence wrote a result"
+python3 - "$T/ingest-input.json" "$T/ingest-invalid-evidence.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+value["evidence_objects"][0]["blob_name"] = "../outside"
+json.dump(value, open(sys.argv[2], "w"))
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/invalid-evidence-connected" \
+    "$ROOT/build/rh_cli" ingest --postgres --root "$T" --input "$T/ingest-invalid-evidence.json" \
+      --out "$T/invalid-evidence-result.json" >/dev/null 2>&1; then
+  fail "normalized ingest accepted an invalid evidence object name"
+fi
+[[ ! -e "$T/invalid-evidence-connected" ]] || fail "invalid evidence descriptor connected to PostgreSQL"
+[[ ! -e "$T/invalid-evidence-result.json" ]] || fail "invalid evidence descriptor wrote a result"
+echo "[postgres-cli] page, evidence, timestamp, and lease inputs are preflighted before PostgreSQL"

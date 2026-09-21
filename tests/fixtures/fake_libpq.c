@@ -169,7 +169,11 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected_count = 9;
         prefix = "SELECT public.rh_register_evidence_object(";
     } else if (operation != NULL && strcmp(operation, "ingest") == 0) {
-        if (query != NULL && strncmp(query, "SELECT public.rh_begin_collection_run(", strlen("SELECT public.rh_begin_collection_run(")) == 0) {
+        if (query != NULL && strncmp(query, "SELECT public.rh_register_evidence_object(", strlen("SELECT public.rh_register_evidence_object(")) == 0) {
+            expected = evidence_values;
+            expected_count = 9;
+            prefix = "SELECT public.rh_register_evidence_object(";
+        } else if (query != NULL && strncmp(query, "SELECT public.rh_begin_collection_run(", strlen("SELECT public.rh_begin_collection_run(")) == 0) {
             expected = ingest_begin_values;
             expected_count = 13;
             prefix = "SELECT public.rh_begin_collection_run(";

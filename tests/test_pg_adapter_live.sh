@@ -57,10 +57,10 @@ run_postgres_ingest() {
   cp "$ROOT/fixtures/postgres/ingest-input.json" "$safe_input" || fail "copy normalized ingest fixture"
   if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
     RH_DATABASE_URL="$CONNINFO" RH_LIBPQ_PATH="$RH_LIBPQ_PATH" \
-      "$ROOT/build/rh_cli" ingest --postgres --input "$safe_input" --out "$output" >/dev/null
+      "$ROOT/build/rh_cli" ingest --postgres --root "$TMP_DIR" --input "$safe_input" --out "$output" >/dev/null
   else
     env -u RH_LIBPQ_PATH RH_DATABASE_URL="$CONNINFO" \
-      "$ROOT/build/rh_cli" ingest --postgres --input "$safe_input" --out "$output" >/dev/null
+      "$ROOT/build/rh_cli" ingest --postgres --root "$TMP_DIR" --input "$safe_input" --out "$output" >/dev/null
   fi
 }
 run_cli "$ROOT/fixtures/postgres/begin-collection-run-command.json" "$TMP_DIR/run-started.json" || fail "CLI source and run registration"
