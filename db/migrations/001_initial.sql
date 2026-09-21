@@ -117,6 +117,23 @@ CREATE TABLE collection_page (
     UNIQUE (collection_run_id, page_number)
 );
 
+-- Retain provider objects before normalization. collector_label is opaque
+-- adapter-supplied context, not a source-native identity or deduplication key.
+CREATE TABLE staged_source_record (
+    collection_run_id uuid NOT NULL,
+    page_number integer NOT NULL,
+    record_ordinal integer NOT NULL CHECK (record_ordinal >= 0),
+    collector_label text NOT NULL CHECK (length(collector_label) BETWEEN 1 AND 4096),
+    raw_payload text NOT NULL CHECK (octet_length(raw_payload) BETWEEN 1 AND 1048576),
+    captured_at timestamptz NOT NULL,
+    PRIMARY KEY (collection_run_id, page_number, record_ordinal),
+    FOREIGN KEY (collection_run_id, page_number)
+        REFERENCES collection_page(collection_run_id, page_number)
+);
+
+CREATE INDEX staged_source_record_run_page
+    ON staged_source_record (collection_run_id, page_number, record_ordinal);
+
 CREATE TABLE collection_cursor (
     id uuid PRIMARY KEY,
     source_instance_id uuid NOT NULL REFERENCES source_instance(id),
@@ -1146,6 +1163,96 @@ BEGIN
                   updated_at = EXCLUDED.updated_at
     WHERE collection_cursor.last_page_number < EXCLUDED.last_page_number;
 
+    RETURN true;
+END;
+$$;
+
+-- Persist an acquired page verbatim before normalization, using the same
+-- fenced page/cursor transaction as normalized ingestion. The adapter label
+-- remains a hint; only a normalizer may establish canonical event identity.
+CREATE FUNCTION rh_commit_staged_collection_page(
+    p_run_id uuid,
+    p_job_id uuid,
+    p_fencing_token bigint,
+    p_page_number integer,
+    p_scope_hash text,
+    p_cursor_before jsonb,
+    p_cursor_after jsonb,
+    p_completeness text,
+    p_evidence_id uuid,
+    p_records jsonb,
+    p_now timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_record jsonb;
+    v_record_count integer;
+    v_ordinal integer := 0;
+    v_total_raw_bytes integer := 0;
+    v_label text;
+    v_raw_payload text;
+    v_raw_object jsonb;
+BEGIN
+    IF p_records IS NULL OR jsonb_typeof(p_records) IS DISTINCT FROM 'array' THEN
+        RAISE EXCEPTION 'staged page records must be a JSON array';
+    END IF;
+    v_record_count := jsonb_array_length(p_records);
+    IF v_record_count > 10000 THEN
+        RAISE EXCEPTION 'staged page record count exceeds the bounded record limit';
+    END IF;
+    IF octet_length(p_records::text) > 8388608 THEN
+        RAISE EXCEPTION 'staged page envelope exceeds the bounded byte limit';
+    END IF;
+
+    FOR v_record IN SELECT value FROM jsonb_array_elements(p_records) AS records(value) LOOP
+        IF jsonb_typeof(v_record) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(v_record->'collector_label') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_record->'raw_payload') IS DISTINCT FROM 'string' THEN
+            RAISE EXCEPTION 'staged record is missing its collector label or raw payload';
+        END IF;
+        v_label := v_record->>'collector_label';
+        v_raw_payload := v_record->>'raw_payload';
+        IF length(v_label) < 1 OR length(v_label) > 4096 THEN
+            RAISE EXCEPTION 'staged record collector label is outside the bounded range';
+        END IF;
+        IF octet_length(v_raw_payload) < 1 OR octet_length(v_raw_payload) > 1048576 THEN
+            RAISE EXCEPTION 'staged record raw payload is outside the bounded range';
+        END IF;
+        v_total_raw_bytes := v_total_raw_bytes + octet_length(v_raw_payload);
+        IF v_total_raw_bytes > 4194304 THEN
+            RAISE EXCEPTION 'staged page raw payload bytes exceed the bounded aggregate limit';
+        END IF;
+        BEGIN
+            v_raw_object := v_raw_payload::jsonb;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE EXCEPTION 'staged record raw payload must be valid JSON';
+        END;
+        IF jsonb_typeof(v_raw_object) IS DISTINCT FROM 'object' THEN
+            RAISE EXCEPTION 'staged record raw payload must be a JSON object';
+        END IF;
+    END LOOP;
+
+    IF NOT rh_commit_collection_page(
+        p_run_id, p_job_id, p_fencing_token, p_page_number, p_scope_hash,
+        p_cursor_before, p_cursor_after, p_completeness, v_record_count,
+        p_evidence_id, p_now
+    ) THEN
+        RETURN false;
+    END IF;
+
+    FOR v_record IN SELECT value FROM jsonb_array_elements(p_records) AS records(value) LOOP
+        v_label := v_record->>'collector_label';
+        v_raw_payload := v_record->>'raw_payload';
+        INSERT INTO staged_source_record (
+            collection_run_id, page_number, record_ordinal,
+            collector_label, raw_payload, captured_at
+        ) VALUES (
+            p_run_id, p_page_number, v_ordinal,
+            v_label, v_raw_payload, p_now
+        );
+        v_ordinal := v_ordinal + 1;
+    END LOOP;
     RETURN true;
 END;
 $$;

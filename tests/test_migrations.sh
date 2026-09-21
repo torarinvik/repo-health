@@ -24,6 +24,7 @@ functions = set(re.findall(r"CREATE FUNCTION\s+([a-z_][a-z0-9_]*)", clean, re.I)
 required_tables = {
     "source_instance", "capability_observation", "credential_reference",
     "collection_run", "collection_page", "collection_cursor", "job", "job_attempt",
+    "staged_source_record",
     "entity", "project", "repository", "repository_location", "repository_snapshot",
     "revision", "revision_membership", "ref_observation", "account",
     "actor_cluster_revision", "identity_assertion", "role_assertion",
@@ -40,7 +41,7 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_enqueue_collection_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_collection_page_events"} <= functions
+assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_enqueue_collection_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_collection_page_events"} <= functions
 assert clean.lstrip().startswith("BEGIN;") and clean.rstrip().endswith("COMMIT;")
 assert "FOR UPDATE SKIP LOCKED" in clean
 assert "fencing_token" in clean and "lease_expires_at" in clean
@@ -58,6 +59,10 @@ assert "source base URL must be absolute and free of credentials, query, fragmen
 assert "evidence digest must be a lowercase SHA-256 value" in clean
 assert "evidence digest is already registered with different immutable metadata" in clean
 assert "page event count does not match the declared bounded record count" in clean
+assert "staged record raw payload must be valid JSON" in clean
+assert "staged page raw payload bytes exceed the bounded aggregate limit" in clean
+assert "staged page envelope exceeds the bounded byte limit" in clean
+assert "collector_label is opaque" in sql
 assert "ON CONFLICT (" in clean and "DO NOTHING" in clean
 assert "a partial page cannot advance a durable cursor" in clean
 assert "collection page lease is stale, expired, or belongs to another source" in clean

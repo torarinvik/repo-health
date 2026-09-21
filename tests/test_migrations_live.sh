@@ -179,6 +179,7 @@ DECLARE
   event_page jsonb := '[{"source_object_type":"issue","source_object_id":"issue:7","source_revision":"rev-1","event_kind":"created","subject_id":"00000000-0000-0000-0000-000000000005","actor_account_id":"00000000-0000-0000-0000-000000000007","occurred_at":"2026-01-01T00:00:30Z","observed_at":"2026-01-01T00:03:00Z","time_basis":"event","evidence_id":"00000000-0000-0000-0000-000000000006","parser_version":"fixture/1","payload":{"state":"open"}}]'::jsonb;
   event_subjects jsonb := '[{"id":"00000000-0000-0000-0000-000000000005","entity_kind":"issue","visibility_scope":"public","created_at":"2026-01-01T00:00:00Z"}]'::jsonb;
   event_actors jsonb := '[{"id":"00000000-0000-0000-0000-000000000007","source_native_id":"alice","account_kind":"human","display_name":"Alice Example","raw_identity_evidence_id":null,"visibility_scope":"public"}]'::jsonb;
+  oversized_records jsonb := '[]'::jsonb;
   reclaimed record;
 BEGIN
   IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 1, 'scope-events', NULL, '{"page":2}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-01T00:03:00Z') THEN
@@ -282,6 +283,88 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM collection_page WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND scope_hash IN ('scope-stale', 'scope-unbound', 'scope-expired')) THEN
     RAISE EXCEPTION 'stale simple page left a page row';
+  END IF;
+  IF NOT rh_commit_staged_collection_page(
+    '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2,
+    3, 'scope-staged', NULL, '{"cursor":"raw-page-3"}'::jsonb, 'complete', NULL,
+    '[{"collector_label":"issue:raw-a","raw_payload":"{\"id\":\"issue:raw-a\",\"state\":\"open\"}"},{"collector_label":"issue:raw-b","raw_payload":"{\"id\":\"issue:raw-b\",\"state\":\"closed\"}"}]'::jsonb,
+    '2026-01-03T00:00:25Z'
+  ) THEN
+    RAISE EXCEPTION 'complete raw page was not staged';
+  END IF;
+  IF rh_commit_staged_collection_page(
+    '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2,
+    3, 'scope-staged', NULL, '{"cursor":"changed"}'::jsonb, 'complete', NULL,
+    '[{"collector_label":"issue:raw-c","raw_payload":"{\"id\":\"issue:raw-c\"}"}]'::jsonb,
+    '2026-01-03T00:00:26Z'
+  ) THEN
+    RAISE EXCEPTION 'duplicate staged page was accepted';
+  END IF;
+  BEGIN
+    PERFORM rh_commit_staged_collection_page(
+      '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2,
+      4, 'scope-staged-partial', NULL, '{"cursor":"partial"}'::jsonb, 'partial', NULL,
+      '[]'::jsonb, '2026-01-03T00:00:26Z'
+    );
+    RAISE EXCEPTION 'partial raw page advanced a cursor';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('partial page cannot advance' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  BEGIN
+    PERFORM rh_commit_staged_collection_page(
+      '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2,
+      4, 'scope-staged-invalid', NULL, '{"cursor":"invalid"}'::jsonb, 'complete', NULL,
+      '[{"collector_label":"broken","raw_payload":"not-json"}]'::jsonb,
+      '2026-01-03T00:00:26Z'
+    );
+    RAISE EXCEPTION 'invalid staged payload committed';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('staged record raw payload must be valid JSON' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  BEGIN
+    PERFORM rh_commit_staged_collection_page(
+      '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1,
+      5, 'scope-staged-stale', NULL, '{"cursor":"stale"}'::jsonb, 'complete', NULL,
+      '[{"collector_label":"issue:stale","raw_payload":"{\"id\":\"issue:stale\"}"}]'::jsonb,
+      '2026-01-03T00:00:26Z'
+    );
+    RAISE EXCEPTION 'stale worker staged a raw page';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('collection page lease is stale' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  IF (SELECT count(*) FROM staged_source_record WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND page_number = 3) <> 2
+     OR (SELECT raw_payload FROM staged_source_record WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND page_number = 3 AND record_ordinal = 0) <> '{"id":"issue:raw-a","state":"open"}'
+     OR EXISTS (SELECT 1 FROM collection_page WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND page_number IN (4, 5))
+     OR EXISTS (SELECT 1 FROM staged_source_record WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND page_number IN (4, 5)) THEN
+    RAISE EXCEPTION 'staged raw page replay, byte preservation, or rollback invariant failed';
+  END IF;
+  FOR record_number IN 1..5 LOOP
+    oversized_records := oversized_records || jsonb_build_array(jsonb_build_object(
+      'collector_label', 'bulk-' || record_number::text,
+      'raw_payload', '{"value":"' || repeat('x', 900000) || '"}'
+    ));
+  END LOOP;
+  BEGIN
+    PERFORM rh_commit_staged_collection_page(
+      '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2,
+      6, 'scope-staged-oversized', NULL, '{"cursor":"oversized"}'::jsonb, 'complete', NULL,
+      oversized_records, '2026-01-03T00:00:27Z'
+    );
+    RAISE EXCEPTION 'oversized staged page was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('staged page raw payload bytes exceed the bounded aggregate limit' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  IF EXISTS (SELECT 1 FROM collection_page WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND page_number = 6)
+     OR EXISTS (SELECT 1 FROM staged_source_record WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND page_number = 6) THEN
+    RAISE EXCEPTION 'oversized staged page left partial state';
   END IF;
   IF (SELECT count(*) FROM entity WHERE id = '00000000-0000-0000-0000-000000000005'::uuid) <> 1 THEN
     RAISE EXCEPTION 'page subject was not registered exactly once';
