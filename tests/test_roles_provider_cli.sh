@@ -108,7 +108,7 @@ PY
 
 echo "[roles-provider] authenticated GitHub collaborator snapshot preserves scope and completeness"
 mkdir -p "$T/bin"
-python3 - "$T/collaborators-short.json" "$T/collaborators-full.json" <<'PY'
+python3 - "$T/collaborators-short.json" "$T/collaborators-full.json" "$T/collaborators-page-2.json" "$T/collaborators-page-3.json" <<'PY'
 import json, sys
 short = [
     {"id": 7101, "login": "owner-login", "role_name": "admin", "permissions": {"admin": True}},
@@ -116,8 +116,15 @@ short = [
     {"id": 7103, "login": "custom-login", "role_name": "custom-reviewer", "permissions": {"push": True}},
 ]
 full = [{"id": 8000 + i, "login": f"collaborator-{i}", "role_name": "read", "permissions": {"pull": True}} for i in range(100)]
+page2 = [{"id": 8100 + i, "login": f"later-collaborator-{i}", "role_name": "read", "permissions": {"pull": True}} for i in range(100)]
+page3 = [
+    {"id": 8100, "login": "later-collaborator-0", "role_name": "admin", "permissions": {"admin": True}},
+    {"id": 9001, "login": "new-collaborator", "role_name": "triage", "permissions": {"triage": True}},
+]
 json.dump(short, open(sys.argv[1], "w"), separators=(",", ":"))
 json.dump(full, open(sys.argv[2], "w"), separators=(",", ":"))
+json.dump(page2, open(sys.argv[3], "w"), separators=(",", ":"))
+json.dump(page3, open(sys.argv[4], "w"), separators=(",", ":"))
 PY
 cat > "$T/bin/python3" <<'SH'
 #!/usr/bin/env bash
@@ -140,13 +147,14 @@ done
 [[ -n "$body_out" && -n "$url" ]]
 if [[ "$config_stdin" == "1" ]]; then cat > "$RH_CURL_CONFIG_LOG"; fi
 body="$RH_CURL_COLLABORATORS_PAGE1"
-[[ "$url" != *'page=2' ]] || body="$RH_CURL_EMPTY_PAGE"
+[[ "$url" != *'page=2' ]] || body="$RH_CURL_COLLABORATORS_PAGE2"
+[[ "$url" != *'page=3' ]] || body="$RH_CURL_COLLABORATORS_PAGE3"
 cp "$body" "$body_out"
 printf '%s' 200
 SH
 chmod +x "$T/bin/python3" "$T/bin/curl"
 rm -f "$T/github-live.json" "$T/github-live.json.github-collaborators-page-"* "$T/roles-curl.args" "$T/roles-curl.config"
-PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_COLLABORATORS_PAGE1="$T/collaborators-short.json" RH_CURL_EMPTY_PAGE="$T/collaborators-short.json" \
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_COLLABORATORS_PAGE1="$T/collaborators-short.json" RH_CURL_COLLABORATORS_PAGE2="$T/collaborators-page-2.json" RH_CURL_COLLABORATORS_PAGE3="$T/collaborators-page-3.json" \
   RH_CURL_LOG="$T/roles-curl.args" RH_CURL_CONFIG_LOG="$T/roles-curl.config" \
   "$ROOT/build/rh_cli" roles-import --github-repo example/project --max-pages 2 --out "$T/github-live.json" >/dev/null || fail "GitHub collaborator fetch"
 python3 - "$T/github-live.json" "$T" <<'PY'
@@ -158,6 +166,7 @@ assert d["authorization"] == {"state": "authorized"}, d
 assert d["scope"] == {"repository": "example/project"}, d
 assert d["pagination"] == {"next": None, "complete": True}, d
 assert d["permission_inventory_complete"] is True, d
+assert d["pages_fetched"] == 1, d
 assert [x["role"] for x in d["declarations"]] == ["owner", "maintainer", "unknown"], d
 assert [x["actor_id"] for x in d["declarations"]] == [7101, 7102, 7103], d
 assert all(login not in open(sys.argv[1]).read() for login in ("owner-login", "maintainer-login", "custom-login"))
@@ -187,7 +196,7 @@ PY
 
 echo "[roles-provider] page cap keeps incomplete permission coverage explicit"
 rm -f "$T/github-partial.json" "$T/github-partial.json.github-collaborators-page-"* "$T/roles-partial-curl.args" "$T/roles-partial-curl.config"
-PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_COLLABORATORS_PAGE1="$T/collaborators-full.json" RH_CURL_EMPTY_PAGE="$T/collaborators-short.json" \
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_COLLABORATORS_PAGE1="$T/collaborators-full.json" RH_CURL_COLLABORATORS_PAGE2="$T/collaborators-page-2.json" RH_CURL_COLLABORATORS_PAGE3="$T/collaborators-page-3.json" \
   RH_CURL_LOG="$T/roles-partial-curl.args" RH_CURL_CONFIG_LOG="$T/roles-partial-curl.config" \
   "$ROOT/build/rh_cli" roles-import --github-repo example/project --max-pages 1 --out "$T/github-partial.json" >/dev/null || fail "partial GitHub collaborator fetch"
 python3 - "$T/github-partial.json" <<'PY'
@@ -195,9 +204,104 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["pagination"] == {"next": "page=2", "complete": False}, d
 assert d["permission_inventory_complete"] is False, d
+assert d["pages_fetched"] == 1, d
 assert len(d["declarations"]) == 100, d
 print("[roles-provider] page cap emits a continuation cursor without claiming coverage")
 PY
+
+echo "[roles-provider] continuation validates scope and merges pages by provider actor id"
+python3 - "$T/github-partial.json" "$T/github-wrong-scope.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["scope"]["repository"] = "other/project"
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+rm -f "$T/github-wrong-scope.out" "$T/wrong-scope-curl.args"
+set +e
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_LOG="$T/wrong-scope-curl.args" RH_CURL_CONFIG_LOG="$T/wrong-scope-curl.config" \
+  "$ROOT/build/rh_cli" roles-import --github-repo example/project --resume-from "$T/github-wrong-scope.json" --out "$T/github-wrong-scope.out" >/dev/null 2>&1
+rc_wrong_scope=$?
+set -e
+[[ "$rc_wrong_scope" -eq 4 && ! -e "$T/wrong-scope-curl.args" && ! -e "$T/github-wrong-scope.out" ]] || fail "resume crossed repository scope"
+python3 - "$T/github-partial.json" "$T/github-bad-cursor.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["pagination"]["next"] = "page=2&state=all"
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+rm -f "$T/github-bad-cursor.out" "$T/bad-cursor-curl.args"
+set +e
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_LOG="$T/bad-cursor-curl.args" RH_CURL_CONFIG_LOG="$T/bad-cursor-curl.config" \
+  "$ROOT/build/rh_cli" roles-import --github-repo example/project --resume-from "$T/github-bad-cursor.json" --out "$T/github-bad-cursor.out" >/dev/null 2>&1
+rc_bad_cursor=$?
+set -e
+[[ "$rc_bad_cursor" -eq 4 && ! -e "$T/bad-cursor-curl.args" && ! -e "$T/github-bad-cursor.out" ]] || fail "resume accepted a nonnumeric cursor"
+python3 - "$T/github-partial.json" "$T/github-skipped-cursor.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["pagination"]["next"] = "page=3"
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+rm -f "$T/github-skipped-cursor.out" "$T/skipped-cursor-curl.args"
+set +e
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_LOG="$T/skipped-cursor-curl.args" RH_CURL_CONFIG_LOG="$T/skipped-cursor-curl.config" \
+  "$ROOT/build/rh_cli" roles-import --github-repo example/project --resume-from "$T/github-skipped-cursor.json" --out "$T/github-skipped-cursor.out" >/dev/null 2>&1
+rc_skipped_cursor=$?
+set -e
+[[ "$rc_skipped_cursor" -eq 4 && ! -e "$T/skipped-cursor-curl.args" && ! -e "$T/github-skipped-cursor.out" ]] || fail "resume skipped an uncaptured page"
+rm -f "$T/github-resume-page-2.json" "$T/github-resume-page-2.json.github-collaborators-page-"* "$T/roles-resume-page-2-curl.args" "$T/roles-resume-page-2-curl.config"
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_COLLABORATORS_PAGE1="$T/collaborators-short.json" RH_CURL_COLLABORATORS_PAGE2="$T/collaborators-page-2.json" RH_CURL_COLLABORATORS_PAGE3="$T/collaborators-page-3.json" \
+  RH_CURL_LOG="$T/roles-resume-page-2-curl.args" RH_CURL_CONFIG_LOG="$T/roles-resume-page-2-curl.config" \
+  "$ROOT/build/rh_cli" roles-import --github-repo example/project --resume-from "$T/github-partial.json" --max-pages 1 --out "$T/github-resume-page-2.json" >/dev/null || fail "resume GitHub collaborator page 2"
+python3 - "$T/github-partial.json" "$T/github-resume-page-2.json" <<'PY'
+import json, sys
+previous = json.load(open(sys.argv[1]))
+d = json.load(open(sys.argv[2]))
+assert d["pagination"] == {"next": "page=3", "complete": False}, d
+assert d["permission_inventory_complete"] is False, d
+assert d["pages_fetched"] == 2, d
+assert len(d["declarations"]) == 200, d
+assert next(x for x in d["declarations"] if x["actor_id"] == 8100)["role"] == "member", d
+assert next(x for x in d["declarations"] if x["actor_id"] == 8000)["declared_at"] == next(x for x in previous["declarations"] if x["actor_id"] == 8000)["declared_at"], d
+print("[roles-provider] resumed page advances the cursor and retains earlier declarations")
+PY
+grep -Fxq 'https://api.github.com/repos/example/project/collaborators?affiliation=all&per_page=100&page=2' "$T/roles-resume-page-2-curl.args" || fail "resume did not fetch cursor page 2"
+! grep -Fxq 'https://api.github.com/repos/example/project/collaborators?affiliation=all&per_page=100&page=1' "$T/roles-resume-page-2-curl.args" || fail "resume restarted from page 1"
+rm -f "$T/github-resume-complete.json" "$T/github-resume-complete.json.github-collaborators-page-"* "$T/roles-resume-page-3-curl.args" "$T/roles-resume-page-3-curl.config"
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_COLLABORATORS_PAGE1="$T/collaborators-short.json" RH_CURL_COLLABORATORS_PAGE2="$T/collaborators-page-2.json" RH_CURL_COLLABORATORS_PAGE3="$T/collaborators-page-3.json" \
+  RH_CURL_LOG="$T/roles-resume-page-3-curl.args" RH_CURL_CONFIG_LOG="$T/roles-resume-page-3-curl.config" \
+  "$ROOT/build/rh_cli" roles-import --github-repo example/project --resume-from "$T/github-resume-page-2.json" --max-pages 1 --out "$T/github-resume-complete.json" >/dev/null || fail "resume GitHub collaborator page 3"
+python3 - "$T/github-resume-complete.json" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["pagination"] == {"next": None, "complete": True}, d
+assert d["permission_inventory_complete"] is True, d
+assert d["pages_fetched"] == 3, d
+assert len(d["declarations"]) == 201, d
+assert next(x for x in d["declarations"] if x["actor_id"] == 8100)["role"] == "owner", d
+assert next(x for x in d["declarations"] if x["actor_id"] == 9001)["role"] == "triager", d
+assert (t / "github-resume-complete.json.github-collaborators-page-3.status").read_text() == "200"
+print("[roles-provider] final short page completes the merged permission inventory")
+PY
+grep -Fxq 'https://api.github.com/repos/example/project/collaborators?affiliation=all&per_page=100&page=3' "$T/roles-resume-page-3-curl.args" || fail "resume did not fetch cursor page 3"
+python3 - "$T/github-resume-complete.json" "$T/github-resume-ready.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["as_of"] = max(x["declared_at"] for x in d["declarations"])
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" roles --input "$T/github-resume-ready.json" --out "$T/github-resume-result.json" >/dev/null || fail "resumed scoped roles report"
+python3 - "$T/github-resume-result.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+assert d["scope"] == {"repository": "example/project"}, d
+assert m["maintainer.permission_inventory_coverage"]["status"] == "observed", m
+assert m["maintainer.permission_inventory_coverage"]["value"] == {"num": 201, "den": 201}, m
+print("[roles-provider] resumed coverage reaches the report with scope intact")
+PY
+
 python3 - "$T/github-partial.json" "$T/github-partial-ready.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))

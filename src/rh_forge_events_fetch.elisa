@@ -80,11 +80,14 @@ module ForgeEventsFetch:
         def rh_fef_http_200(status: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
             status.count == 3 and status[0] == 50 and status[1] == 48 and status[2] == 48
 
-        def rh_fef_fetch_pages(repository: cstr, endpoint: cstr, capability: cstr, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            page_number: mutable i64 = 1
+        def rh_fef_fetch_pages_from(repository: cstr, endpoint: cstr, capability: cstr, start_page: i64, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return false if start_page < 1 or max_pages < 1 or start_page > 2147483640 or max_pages > RH_FEF_MAX_PAGES
+            last_page: i64 = start_page + max_pages - 1
+            return false if last_page < start_page
+            page_number: mutable i64 = start_page
             pages_fetched: mutable i64 = 0
             complete: mutable bool = false
-            while page_number <= max_pages and not complete |page_number, pages_fetched, complete, records, item_total, byte_total, repository, endpoint, capability, evidence_base|:
+            while page_number <= last_page and not complete |page_number, last_page, pages_fetched, complete, records, item_total, byte_total, repository, endpoint, capability, evidence_base|:
                 url: mutable darray[u8] = []
                 Base::rh_push_text(url, "https://api.github.com/repos/")
                 Base::rh_push_cstr(url, repository)
@@ -120,6 +123,9 @@ module ForgeEventsFetch:
             complete_out[0] <- 1 if complete else 0
             next_page_out[0] <- page_number
             pages_fetched > 0
+
+        def rh_fef_fetch_pages(repository: cstr, endpoint: cstr, capability: cstr, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint, capability, 1, max_pages, evidence_base, records, &item_total[0], &byte_total[0], &complete_out[0], &next_page_out[0])
 
         def rh_fef_push_pagination(out: mutable darray[u8]&, complete: bool, next_page: i64) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"next\":")
@@ -217,18 +223,22 @@ module ForgeEventsFetch:
         # The collaborators route is permission-bearing and requires an
         # explicit token. Keep the returned repository scope and page completeness
         # attached to the normalized role input.
-        def rh_roles_github_live(repository: cstr, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_roles_github_live(repository: cstr, max_pages: i64, evidence_base: cstr, previous: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
             token: u8&? = getenv("RH_GITHUB_TOKEN")
             return -1 if token == null
             token_ptr: cstr = token.cast[cstr] can Unsafe.PointerCast
             return -1 if Base::rh_cstr_len_c(token_ptr) == 0
+            start_page: mutable i64 = 1
+            previous_pages: mutable i64 = 0
+            if previous.count > 0:
+                return -1 if RolesProvider::rh_roles_provider_next_page(previous, repository, &start_page, &previous_pages) != 0
             members: mutable darray[u8] = []
             member_total: mutable i64 = 0
             byte_total: mutable i64 = 0
             complete: mutable i64 = 0
             next_page: mutable i64 = 1
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, "collaborators?affiliation=all&per_page=100&page=", "collaborators", max_pages, evidence_base, members, &member_total, &byte_total, &complete, &next_page)
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages_from(repository, "collaborators?affiliation=all&per_page=100&page=", "collaborators", start_page, max_pages, evidence_base, members, &member_total, &byte_total, &complete, &next_page)
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             capture: mutable darray[u8] = []
@@ -240,5 +250,14 @@ module ForgeEventsFetch:
             capture.extend(bytes_view(members))
             Base::rh_push_text(capture, "],\"pagination\":")
             ForgeEventsFetch::rh_fef_push_pagination(capture, complete == 1, next_page)
+            segment_pages: i64 = next_page - start_page + (1 if complete == 1 else 0)
+            return -1 if segment_pages < 1 or segment_pages > max_pages
+            pages_fetched: i64 = previous_pages + segment_pages
+            Base::rh_push_text(capture, ",\"pages_fetched\":")
+            Base::rh_push_decimal_i64(capture, pages_fetched)
             capture.push(125)
+            if previous.count > 0:
+                latest: mutable darray[u8] = []
+                return -1 if RolesProvider::rh_roles_provider_import(capture, latest) != 0
+                return RolesProvider::rh_roles_provider_merge(previous, latest, repository, out)
             RolesProvider::rh_roles_provider_import(capture, out)

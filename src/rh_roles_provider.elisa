@@ -11,6 +11,7 @@ include "./rh_json.elisa"
 include "./rh_roles.elisa"
 
 const RH_ROLES_PROVIDER_MAX_MEMBERS: i64 = 10000
+const RH_ROLES_PROVIDER_MAX_RESUME_PAGES: i64 = 10
 
 struct RhProviderDeclaration:
     actor: i64
@@ -69,6 +70,115 @@ module RolesProvider:
             repo_dotdot: bool = slash + 3 == e and texts[(slash + 1).usize()] == 46 and texts[(slash + 2).usize()] == 46
             not owner_dot and not owner_dotdot and not repo_dot and not repo_dotdot
 
+        def rh_rp_cstr_eq(texts: darray[u8]&, s: i64, e: i64, value: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            length: usize = Base::rh_cstr_len_c(value)
+            return false if s < 0 or e - s != length.i64()
+            while i < length.i64() |i: i64 = 0, e, s, length, value, texts|:
+                return false if texts[(s + i).usize()] != value[i.usize()]
+                i <- i + 1
+            true
+
+        def rh_rp_cursor_page(texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if s < 0 or e - s < 6
+            return -1 if texts[s.usize()] != 112 or texts[(s + 1).usize()] != 97 or texts[(s + 2).usize()] != 103 or texts[(s + 3).usize()] != 101 or texts[(s + 4).usize()] != 61
+            cursor_start: i64 = s + 5
+            return -1 if e <= cursor_start
+            page: mutable i64 = 0
+            while i < e |i: i64 = cursor_start, e, texts, page|:
+                byte: u8 = texts[i.usize()]
+                return -1 if byte < 48 or byte > 57
+                digit: i64 = (byte - 48).i64()
+                return -1 if page > (2147483640 - digit) / 10
+                page <- page * 10 + digit
+                i <- i + 1
+            return -1 if page < 2
+            page
+
+        def rh_rp_roles_snapshot_valid(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, repository: cstr, require_cursor: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return false if not RolesProvider::rh_rp_str(nodes, texts, root, "schema", &schema_s, &schema_e) or not RolesProvider::rh_rp_eq(texts, schema_s, schema_e, "rh-roles-input/1")
+            provider_s: mutable i64 = 0
+            provider_e: mutable i64 = 0
+            return false if not RolesProvider::rh_rp_str(nodes, texts, root, "provider", &provider_s, &provider_e) or not RolesProvider::rh_rp_eq(texts, provider_s, provider_e, "github")
+            auth: i64 = Json::rh_json_obj_get(nodes, texts, root, "authorization")
+            return false if auth < 0 or nodes[auth.usize()].kind != Json::RH_JSON_OBJ
+            auth_s: mutable i64 = 0
+            auth_e: mutable i64 = 0
+            return false if not RolesProvider::rh_rp_str(nodes, texts, auth, "state", &auth_s, &auth_e) or not RolesProvider::rh_rp_eq(texts, auth_s, auth_e, "authorized")
+            scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scope")
+            return false if scope_idx < 0 or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
+            scope_s: mutable i64 = 0
+            scope_e: mutable i64 = 0
+            return false if not RolesProvider::rh_rp_str(nodes, texts, scope_idx, "repository", &scope_s, &scope_e) or not RolesProvider::rh_rp_repository_valid(texts, scope_s, scope_e) or not RolesProvider::rh_rp_cstr_eq(texts, scope_s, scope_e, repository)
+            pagination: i64 = Json::rh_json_obj_get(nodes, texts, root, "pagination")
+            return false if pagination < 0 or nodes[pagination.usize()].kind != Json::RH_JSON_OBJ
+            cursor_s: mutable i64 = 0
+            cursor_e: mutable i64 = 0
+            cursor_present: mutable i64 = 0
+            return false if not RolesProvider::rh_rp_optional_cursor(nodes, texts, pagination, "next", &cursor_s, &cursor_e, &cursor_present)
+            complete: i64 = Json::rh_json_obj_get(nodes, texts, pagination, "complete")
+            return false if complete < 0 or nodes[complete.usize()].kind != Json::RH_JSON_BOOL
+            inventory_complete: i64 = Json::rh_json_obj_get(nodes, texts, root, "permission_inventory_complete")
+            return false if inventory_complete < 0 or nodes[inventory_complete.usize()].kind != Json::RH_JSON_BOOL
+            complete_value: bool = Json::rh_json_is_true(nodes, raw, complete)
+            inventory_value: bool = Json::rh_json_is_true(nodes, raw, inventory_complete)
+            return false if complete_value != inventory_value
+            return false if require_cursor and (complete_value or inventory_value or cursor_present == 0)
+            return false if not complete_value and cursor_present == 0
+            return false if complete_value and cursor_present != 0
+            members: i64 = Json::rh_json_obj_get(nodes, texts, root, "declarations")
+            return false if members < 0 or nodes[members.usize()].kind != Json::RH_JSON_ARR or nodes[members.usize()].child_count > RH_ROLES_PROVIDER_MAX_MEMBERS
+            true
+
+        def rh_rp_read_normalized_declarations(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, declarations: mutable darray[RhProviderDeclaration]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            members: i64 = Json::rh_json_obj_get(nodes, texts, root, "declarations")
+            return false if members < 0 or nodes[members.usize()].kind != Json::RH_JSON_ARR
+            member_array: Json::RhJsonNode = nodes[members.usize()]
+            while member >= 0 |member: i64 = member_array.first_child, nodes, raw, texts, declarations|:
+                return false if nodes[member.usize()].kind != Json::RH_JSON_OBJ
+                actor_ok: mutable i64 = 0
+                actor: i64 = RolesProvider::rh_rp_int(nodes, raw, texts, member, "actor_id", &actor_ok)
+                return false if actor_ok == 0 or actor < 0
+                role_s: mutable i64 = 0
+                role_e: mutable i64 = 0
+                return false if not RolesProvider::rh_rp_str(nodes, texts, member, "role", &role_s, &role_e)
+                role: u8 = Roles::rh_role_parse_role(texts, role_s, role_e)
+                permission_ok: mutable i64 = 0
+                permission: i64 = RolesProvider::rh_rp_int(nodes, raw, texts, member, "permission", &permission_ok)
+                return false if permission_ok == 0 or permission < 0 or permission > 255
+                source_s: mutable i64 = 0
+                source_e: mutable i64 = 0
+                return false if not RolesProvider::rh_rp_str(nodes, texts, member, "source", &source_s, &source_e) or not RolesProvider::rh_rp_eq(texts, source_s, source_e, "provider")
+                declared_ok: mutable i64 = 0
+                declared_at: i64 = RolesProvider::rh_rp_int(nodes, raw, texts, member, "declared_at", &declared_ok)
+                return false if declared_ok == 0 or declared_at < 0
+                declaration: RhProviderDeclaration = RhProviderDeclaration{actor: actor, role: role, permission: permission.u8(), declared_at: declared_at}
+                existing: i64 = RolesProvider::rh_rp_existing(declarations, actor)
+                if existing >= 0:
+                    declarations[existing.usize()] <- declaration
+                else:
+                    return false if declarations.count >= RH_ROLES_PROVIDER_MAX_MEMBERS
+                    declarations.push(declaration)
+                member <- nodes[member.usize()].next_sibling
+            true
+
+        def rh_rp_emit_normalized_declarations(out: mutable darray[u8]&, declarations: darray[RhProviderDeclaration]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while i < declarations.count.i64() |i: i64 = 0, declarations, out|:
+                out.push(44) if i > 0
+                declaration: RhProviderDeclaration = declarations[i.usize()]
+                Base::rh_push_text(out, "{\"actor_id\":")
+                Base::rh_push_decimal_i64(out, declaration.actor)
+                Base::rh_push_text(out, ",\"role\":\"")
+                Base::rh_push_text(out, Roles::rh_role_label(declaration.role))
+                Base::rh_push_text(out, "\",\"permission\":")
+                Base::rh_push_decimal_i64(out, declaration.permission.i64())
+                Base::rh_push_text(out, ",\"source\":\"provider\",\"declared_at\":")
+                Base::rh_push_decimal_i64(out, declaration.declared_at)
+                Base::rh_push_text(out, "}")
+                i <- i + 1
+
         def rh_rp_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, obj, key), &ok_out[0])
 
@@ -126,6 +236,82 @@ module RolesProvider:
             -1
 
     public:
+        # Resume only an authenticated, incomplete GitHub snapshot for the same
+        # repository. The opaque cursor is constrained to the numeric page form
+        # emitted by this adapter before it is used in a fixed route.
+        def rh_roles_provider_next_page(raw: darray[u8]&, repository: cstr, start_page_out: mutable i64&, pages_fetched_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count > 4194304
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if not RolesProvider::rh_rp_roles_snapshot_valid(nodes, raw, texts, root, repository, true)
+            pagination: i64 = Json::rh_json_obj_get(nodes, texts, root, "pagination")
+            cursor_s: mutable i64 = 0
+            cursor_e: mutable i64 = 0
+            cursor_present: mutable i64 = 0
+            return -1 if not RolesProvider::rh_rp_optional_cursor(nodes, texts, pagination, "next", &cursor_s, &cursor_e, &cursor_present) or cursor_present == 0
+            page: i64 = RolesProvider::rh_rp_cursor_page(texts, cursor_s, cursor_e)
+            return -1 if page < 2
+            pages_ok: mutable i64 = 0
+            pages_fetched: i64 = RolesProvider::rh_rp_int(nodes, raw, texts, root, "pages_fetched", &pages_ok)
+            return -1 if pages_ok == 0 or pages_fetched < 1 or pages_fetched >= 10000 or page != pages_fetched + 1
+            start_page_out[0] <- page
+            pages_fetched_out[0] <- pages_fetched
+            0
+
+        # Merge a newly fetched page segment into the earlier normalized
+        # snapshot. New observations replace matching provider actor IDs while
+        # untouched declarations retain their original observation time.
+        def rh_roles_provider_merge(previous: darray[u8]&, latest: darray[u8]&, repository: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if previous.count > 4194304 or latest.count > 4194304
+            previous_nodes: mutable darray[Json::RhJsonNode] = []
+            previous_texts: mutable darray[u8] = []
+            previous_root: i64 = Json::rh_json_parse(previous, previous_nodes, previous_texts)
+            return -1 if not RolesProvider::rh_rp_roles_snapshot_valid(previous_nodes, previous, previous_texts, previous_root, repository, true)
+            latest_nodes: mutable darray[Json::RhJsonNode] = []
+            latest_texts: mutable darray[u8] = []
+            latest_root: i64 = Json::rh_json_parse(latest, latest_nodes, latest_texts)
+            return -1 if not RolesProvider::rh_rp_roles_snapshot_valid(latest_nodes, latest, latest_texts, latest_root, repository, false)
+            latest_pagination: i64 = Json::rh_json_obj_get(latest_nodes, latest_texts, latest_root, "pagination")
+            next_s: mutable i64 = 0
+            next_e: mutable i64 = 0
+            next_present: mutable i64 = 0
+            return -1 if not RolesProvider::rh_rp_optional_cursor(latest_nodes, latest_texts, latest_pagination, "next", &next_s, &next_e, &next_present)
+            complete_idx: i64 = Json::rh_json_obj_get(latest_nodes, latest_texts, latest_pagination, "complete")
+            complete: bool = Json::rh_json_is_true(latest_nodes, latest, complete_idx)
+            previous_pages_ok: mutable i64 = 0
+            previous_pages: i64 = RolesProvider::rh_rp_int(previous_nodes, previous, previous_texts, previous_root, "pages_fetched", &previous_pages_ok)
+            latest_pages_ok: mutable i64 = 0
+            latest_pages: i64 = RolesProvider::rh_rp_int(latest_nodes, latest, latest_texts, latest_root, "pages_fetched", &latest_pages_ok)
+            return -1 if previous_pages_ok == 0 or latest_pages_ok == 0 or previous_pages < 1 or latest_pages <= previous_pages or latest_pages - previous_pages > RH_ROLES_PROVIDER_MAX_RESUME_PAGES
+            if not complete:
+                latest_cursor_page: i64 = RolesProvider::rh_rp_cursor_page(latest_texts, next_s, next_e)
+                return -1 if latest_cursor_page != latest_pages + 1
+            declarations: mutable darray[RhProviderDeclaration] = []
+            return -1 if not RolesProvider::rh_rp_read_normalized_declarations(previous_nodes, previous, previous_texts, previous_root, declarations)
+            return -1 if not RolesProvider::rh_rp_read_normalized_declarations(latest_nodes, latest, latest_texts, latest_root, declarations)
+            Base::rh_push_text(out, "{\"schema\":\"rh-roles-input/1\",\"provider\":\"github\",\"authorization\":{\"state\":\"authorized\"},\"scope\":{\"repository\":\"")
+            Base::rh_push_cstr(out, repository)
+            Base::rh_push_text(out, "\"},\"pagination\":{\"next\":")
+            if next_present == 1:
+                out.push(34)
+                Base::rh_json_escape(out, latest_texts, next_s.usize(), next_e.usize())
+                out.push(34)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"complete\":")
+            Base::rh_push_text(out, "true") if complete
+            Base::rh_push_text(out, "false") if not complete
+            Base::rh_push_text(out, "},\"permission_inventory_complete\":")
+            Base::rh_push_text(out, "true") if complete
+            Base::rh_push_text(out, "false") if not complete
+            Base::rh_push_text(out, ",\"pages_fetched\":")
+            Base::rh_push_decimal_i64(out, latest_pages)
+            Base::rh_push_text(out, ",\"declarations\":[")
+            RolesProvider::rh_rp_emit_normalized_declarations(out, declarations)
+            Base::rh_push_text(out, "]}")
+            0
+
         # Provider input shape:
         # {schema, provider: github|gitlab, authorization:{state},
         #  captured_at: unix-seconds, members:[provider records]}
@@ -181,6 +367,17 @@ module RolesProvider:
                 return -1 if not github or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
                 return -1 if not RolesProvider::rh_rp_str(nodes, texts, scope_idx, "repository", &scope_repository_s, &scope_repository_e)
                 return -1 if not RolesProvider::rh_rp_repository_valid(texts, scope_repository_s, scope_repository_e)
+            pages_fetched_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "pages_fetched")
+            pages_fetched_present: bool = pages_fetched_idx >= 0
+            pages_fetched: mutable i64 = 0
+            if pages_fetched_present:
+                pages_ok: mutable i64 = 0
+                pages_fetched <- Json::rh_json_int(nodes, raw, pages_fetched_idx, &pages_ok)
+                return -1 if not github or not scope_present or auth_state != 1 or not pagination_present or pages_ok == 0 or pages_fetched < 1 or pages_fetched >= 10000
+                if complete >= 0 and not Json::rh_json_is_true(nodes, raw, complete):
+                    cursor_page: i64 = RolesProvider::rh_rp_cursor_page(texts, next_s, next_e)
+                    return -1 if next_present == 0 or cursor_page != pages_fetched + 1
+                return -1 if complete >= 0 and Json::rh_json_is_true(nodes, raw, complete) and next_present != 0
             Base::rh_push_text(out, "{\"schema\":\"rh-roles-input/1\",\"provider\":\"")
             Base::rh_json_escape(out, texts, provider_s.usize(), provider_e.usize())
             Base::rh_push_text(out, "\",\"authorization\":{\"state\":\"")
@@ -205,6 +402,9 @@ module RolesProvider:
                 Base::rh_push_text(out, ",\"permission_inventory_complete\":")
                 Base::rh_push_text(out, "true") if Json::rh_json_is_true(nodes, raw, complete)
                 Base::rh_push_text(out, "false") if not Json::rh_json_is_true(nodes, raw, complete)
+            if pages_fetched_present:
+                Base::rh_push_text(out, ",\"pages_fetched\":")
+                Base::rh_push_decimal_i64(out, pages_fetched)
             Base::rh_push_text(out, ",\"declarations\":[")
             declarations: mutable darray[RhProviderDeclaration] = []
             arr: Json::RhJsonNode = nodes[members.usize()]
