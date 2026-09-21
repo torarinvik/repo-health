@@ -281,6 +281,28 @@ module Postgres:
             params.push(error_kind)
             Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_finish_job($1::uuid, $2::bigint, $3::text, $4::timestamptz, NULLIF($5, '')::text, NULLIF($6, '')::text)", params)
 
+        # Finish a collection run and its collection job under one current,
+        # unexpired lease. PostgreSQL commits both terminal states together.
+        def rh_pg_finish_collection_job(conninfo: cstr, run_id: cstr, job_id: cstr, fencing_token: i64, job_state: cstr, run_status: cstr, completeness: cstr, coverage_details: cstr, now: cstr, outcome: cstr, error_kind: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if fencing_token <= 0 or Base::rh_cstr_len_c(coverage_details) > 1048576
+            return -1 if not Base::rh_streq(job_state, "succeeded") and not Base::rh_streq(job_state, "failed") and not Base::rh_streq(job_state, "dead_letter") and not Base::rh_streq(job_state, "canceled")
+            return -1 if not Base::rh_streq(run_status, "succeeded") and not Base::rh_streq(run_status, "partial") and not Base::rh_streq(run_status, "failed") and not Base::rh_streq(run_status, "canceled")
+            return -1 if not Base::rh_streq(completeness, "complete") and not Base::rh_streq(completeness, "partial") and not Base::rh_streq(completeness, "empty") and not Base::rh_streq(completeness, "unknown")
+            token_text: mutable darray[u8] = Postgres::rh_pg_decimal(fencing_token)
+            token_ptr: cstr = (&token_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(run_id)
+            params.push(job_id)
+            params.push(token_ptr)
+            params.push(job_state)
+            params.push(run_status)
+            params.push(completeness)
+            params.push(coverage_details)
+            params.push(outcome)
+            params.push(error_kind)
+            params.push(now)
+            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_finish_collection_job($1::uuid, $2::uuid, $3::bigint, $4::text, $5::text, $6::text, $7::jsonb, NULLIF($8, '')::text, NULLIF($9, '')::text, $10::timestamptz)", params)
+
         # Claim at most one runnable job through SKIP LOCKED. Returns 1 with
         # NUL-terminated id/expiry and a fencing token, 0 when the queue is empty,
         # or -1 for a connection or result error.

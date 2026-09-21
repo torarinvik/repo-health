@@ -94,9 +94,11 @@ BEGIN
   END;
 END $$;
 INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, created_at)
-VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'queued', 10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'maintenance', 'public', 'queued', 10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
 INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, attempt_count, fencing_token, worker_id, lease_expires_at, created_at, input_manifest)
 VALUES ('00000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'running', 1, '2026-01-01T00:00:00Z', 1, 1, 'worker-page', '2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z', '{"collection_run_id":"00000000-0000-0000-0000-000000000003"}');
+INSERT INTO job_attempt (id, job_id, attempt_number, fencing_token, worker_id, started_at)
+VALUES ('00000000-0000-0000-0000-000000000009', '00000000-0000-0000-0000-000000000008', 1, 1, 'worker-page', '2026-01-01T00:00:00Z');
 DO $$
 DECLARE c record;
 BEGIN
@@ -233,6 +235,8 @@ BEGIN
   UPDATE job SET fencing_token = 2,
                  input_manifest = '{"collection_run_id":"00000000-0000-0000-0000-000000000003"}'::jsonb
   WHERE id = '00000000-0000-0000-0000-000000000008'::uuid;
+  INSERT INTO job_attempt (id, job_id, attempt_number, fencing_token, worker_id, started_at)
+  VALUES ('00000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-000000000008', 2, 2, 'worker-page-reclaimed', '2026-01-01T00:05:00Z');
   BEGIN
     PERFORM rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 1, 'scope-stale', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-01T00:05:30Z');
     RAISE EXCEPTION 'stale page lease advanced a cursor';
@@ -271,8 +275,32 @@ BEGIN
      OR (SELECT actor_account_id FROM canonical_event WHERE source_object_id = 'issue:7') <> '00000000-0000-0000-0000-000000000007'::uuid THEN
     RAISE EXCEPTION 'page actor was not registered and linked exactly once';
   END IF;
+  IF rh_finish_job('00000000-0000-0000-0000-000000000008', 2, 'succeeded', '2026-01-01T00:06:00Z', 'ok', NULL) THEN
+    RAISE EXCEPTION 'generic finish bypassed collection run finalization';
+  END IF;
+  IF rh_finish_collection_job('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 'succeeded', 'succeeded', 'complete', '{"issues":"observed"}'::jsonb, 'ok', NULL, '2026-01-03T00:00:00Z') THEN
+    RAISE EXCEPTION 'expired collection job finished its run';
+  END IF;
+  IF (SELECT status FROM collection_run WHERE id = '00000000-0000-0000-0000-000000000003'::uuid) <> 'running'
+     OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000008'::uuid) <> 'running'
+     OR (SELECT finished_at FROM job_attempt WHERE id = '00000000-0000-0000-0000-000000000010'::uuid) IS NOT NULL THEN
+    RAISE EXCEPTION 'expired collection finish partially changed durable state';
+  END IF;
+  IF NOT rh_finish_collection_job('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 'succeeded', 'succeeded', 'complete', '{"issues":"observed"}'::jsonb, 'ok', NULL, '2026-01-01T00:06:00Z') THEN
+    RAISE EXCEPTION 'current collection job failed to finish its run';
+  END IF;
+  IF rh_finish_collection_job('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 'succeeded', 'succeeded', 'complete', '{"issues":"observed"}'::jsonb, 'ok', NULL, '2026-01-01T00:06:00Z') THEN
+    RAISE EXCEPTION 'terminal collection run finish was not fenced';
+  END IF;
+  IF (SELECT status FROM collection_run WHERE id = '00000000-0000-0000-0000-000000000003'::uuid) <> 'succeeded'
+     OR (SELECT completeness FROM collection_run WHERE id = '00000000-0000-0000-0000-000000000003'::uuid) <> 'complete'
+     OR (SELECT coverage_details FROM collection_run WHERE id = '00000000-0000-0000-0000-000000000003'::uuid) <> '{"issues":"observed"}'::jsonb
+     OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000008'::uuid) <> 'succeeded'
+     OR (SELECT finished_at FROM job_attempt WHERE id = '00000000-0000-0000-0000-000000000010'::uuid) <> '2026-01-01T00:06:00Z'::timestamptz THEN
+    RAISE EXCEPTION 'collection and job terminal states did not commit together';
+  END IF;
 END $$;
 SQL
 
-echo "[migrations-live] source/run, metadata, stale/expired job and page fencing, replay, and rollback boundaries OK"
+echo "[migrations-live] source/run, metadata, stale/expired fencing, atomic run finish, replay, and rollback boundaries OK"
 echo "test_migrations_live OK"

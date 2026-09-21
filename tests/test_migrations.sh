@@ -40,7 +40,7 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_commit_collection_page", "rh_commit_collection_page_events"} <= functions
+assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_collection_page_events"} <= functions
 assert clean.lstrip().startswith("BEGIN;") and clean.rstrip().endswith("COMMIT;")
 assert "FOR UPDATE SKIP LOCKED" in clean
 assert "fencing_token" in clean and "lease_expires_at" in clean
@@ -63,6 +63,9 @@ assert "a partial page cannot advance a durable cursor" in clean
 assert "collection page lease is stale, expired, or belongs to another source" in clean
 assert "fencing_token = p_fencing_token" in clean and "lease_expires_at > p_now" in clean
 assert "input_manifest->>'collection_run_id' = p_run_id::text" in clean
+assert "kind <> 'collection'" in clean and "kind = 'collection'" in clean
+assert "collection job state and run status are inconsistent" in clean
+assert "collection job attempt was not found for the current fencing token" in clean
 assert "UPDATE job" in clean and "fencing_token = p_fencing_token" in clean
 
 for ref in re.findall(r"\bREFERENCES\s+([a-z_][a-z0-9_]*)", clean, re.I):

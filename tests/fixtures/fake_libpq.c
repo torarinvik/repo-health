@@ -58,6 +58,11 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "00000000-0000-0000-0000-000000000002", "4", "dead_letter",
         "2026-01-01T00:02:00Z", "retry-exhausted", "malformed"
     };
+    static const char *finish_collection_values[10] = {
+        "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000008", "1",
+        "succeeded", "succeeded", "complete", "{\"issues\":\"observed\"}", "ok", "",
+        "2026-01-01T00:06:00Z"
+    };
     static const char *claim_values[3] = {
         "worker-a", "2026-01-01T00:01:00Z", "60"
     };
@@ -82,6 +87,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = finish_values;
         expected_count = 6;
         prefix = "SELECT public.rh_finish_job(";
+    } else if (operation != NULL && strcmp(operation, "finish_collection") == 0) {
+        expected = finish_collection_values;
+        expected_count = 10;
+        prefix = "SELECT public.rh_finish_collection_job(";
     } else if (operation != NULL && strcmp(operation, "claim") == 0) {
         expected = claim_values;
         expected_count = 3;

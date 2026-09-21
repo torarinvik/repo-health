@@ -883,6 +883,7 @@ BEGIN
     UPDATE job
     SET state = p_state, lease_expires_at = NULL, finished_at = p_now
     WHERE id = p_job_id
+      AND kind <> 'collection'
       AND state = 'running'
       AND fencing_token = p_fencing_token
       AND lease_expires_at > p_now;
@@ -894,6 +895,93 @@ BEGIN
     UPDATE job_attempt
     SET finished_at = p_now, outcome = p_outcome, error_kind = p_error_kind
     WHERE job_id = p_job_id AND fencing_token = p_fencing_token;
+    RETURN true;
+END;
+$$;
+
+-- Collection runs and their owning jobs finish together. This keeps a run from
+-- appearing terminal while its lease is still active, or after that lease has
+-- expired and may belong to a later worker.
+CREATE FUNCTION rh_finish_collection_job(
+    p_run_id uuid,
+    p_job_id uuid,
+    p_fencing_token bigint,
+    p_job_state text,
+    p_run_status text,
+    p_completeness text,
+    p_coverage_details jsonb,
+    p_outcome text,
+    p_error_kind text,
+    p_now timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_source_instance_id uuid;
+    v_job_source_instance_id uuid;
+BEGIN
+    IF p_job_state IS NULL OR p_job_state NOT IN ('succeeded', 'failed', 'dead_letter', 'canceled') THEN
+        RAISE EXCEPTION 'invalid terminal job state: %', p_job_state;
+    END IF;
+    IF p_run_status IS NULL OR p_run_status NOT IN ('succeeded', 'partial', 'failed', 'canceled') THEN
+        RAISE EXCEPTION 'invalid terminal collection run status: %', p_run_status;
+    END IF;
+    IF p_completeness IS NULL OR p_completeness NOT IN ('complete', 'partial', 'empty', 'unknown') THEN
+        RAISE EXCEPTION 'invalid terminal collection completeness: %', p_completeness;
+    END IF;
+    IF p_coverage_details IS NULL OR jsonb_typeof(p_coverage_details) <> 'object'
+       OR octet_length(p_coverage_details::text) > 1048576 THEN
+        RAISE EXCEPTION 'collection coverage details must be a bounded JSON object';
+    END IF;
+    IF (p_run_status = 'succeeded' AND p_completeness NOT IN ('complete', 'empty'))
+       OR (p_run_status = 'partial' AND p_completeness NOT IN ('partial', 'unknown'))
+       OR (p_run_status IN ('failed', 'canceled') AND p_completeness NOT IN ('partial', 'unknown')) THEN
+        RAISE EXCEPTION 'collection run status and completeness are inconsistent';
+    END IF;
+    IF (p_job_state = 'succeeded' AND p_run_status NOT IN ('succeeded', 'partial'))
+       OR (p_job_state IN ('failed', 'dead_letter') AND p_run_status <> 'failed')
+       OR (p_job_state = 'canceled' AND p_run_status <> 'canceled') THEN
+        RAISE EXCEPTION 'collection job state and run status are inconsistent';
+    END IF;
+
+    SELECT source_instance_id INTO v_source_instance_id
+    FROM collection_run
+    WHERE id = p_run_id AND status = 'running'
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    SELECT source_instance_id INTO v_job_source_instance_id
+    FROM job
+    WHERE id = p_job_id
+      AND kind = 'collection'
+      AND state = 'running'
+      AND fencing_token = p_fencing_token
+      AND lease_expires_at > p_now
+      AND input_manifest->>'collection_run_id' = p_run_id::text
+    FOR UPDATE;
+    IF NOT FOUND OR v_job_source_instance_id IS DISTINCT FROM v_source_instance_id THEN
+        RETURN false;
+    END IF;
+
+    UPDATE collection_run
+    SET status = p_run_status,
+        completeness = p_completeness,
+        coverage_details = p_coverage_details,
+        finished_at = p_now
+    WHERE id = p_run_id AND status = 'running';
+
+    UPDATE job
+    SET state = p_job_state, lease_expires_at = NULL, finished_at = p_now
+    WHERE id = p_job_id AND state = 'running' AND fencing_token = p_fencing_token;
+
+    UPDATE job_attempt
+    SET finished_at = p_now, outcome = p_outcome, error_kind = p_error_kind
+    WHERE job_id = p_job_id AND fencing_token = p_fencing_token;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'collection job attempt was not found for the current fencing token';
+    END IF;
     RETURN true;
 END;
 $$;
@@ -935,6 +1023,7 @@ BEGIN
     SELECT source_instance_id INTO v_job_source_instance_id
     FROM job
     WHERE id = p_job_id
+      AND kind = 'collection'
       AND state = 'running'
       AND fencing_token = p_fencing_token
       AND lease_expires_at > p_now
@@ -1062,6 +1151,7 @@ BEGIN
     SELECT source_instance_id INTO v_job_source_instance_id
     FROM job
     WHERE id = p_job_id
+      AND kind = 'collection'
       AND state = 'running'
       AND fencing_token = p_fencing_token
       AND lease_expires_at > p_now

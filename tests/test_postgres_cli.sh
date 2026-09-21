@@ -42,6 +42,8 @@ run_ok heartbeat committed heartbeat-job
 run_ok heartbeat duplicate heartbeat-job
 run_ok finish committed finish-job
 run_ok finish duplicate finish-job
+run_ok finish_collection committed finish-collection-job
+run_ok finish_collection duplicate finish-collection-job
 run_ok claim committed claim-job
 run_ok claim duplicate claim-job
 
@@ -78,6 +80,8 @@ assert read("heartbeat-job-committed.json")["status"] == "applied"
 assert read("heartbeat-job-duplicate.json")["status"] == "fenced"
 assert read("finish-job-committed.json")["status"] == "applied"
 assert read("finish-job-duplicate.json")["status"] == "fenced"
+assert read("finish-collection-job-committed.json")["status"] == "applied"
+assert read("finish-collection-job-duplicate.json")["status"] == "fenced"
 claim = read("claim-job-committed.json")
 assert claim["status"] == "claimed" and claim["fencing_token"] == 5, claim
 assert claim["job_id"] == "00000000-0000-0000-0000-000000000004", claim

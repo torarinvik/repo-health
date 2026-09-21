@@ -42,8 +42,13 @@ content-addressed blob under `RH_EVIDENCE_ROOT`, computes SHA-256 metadata,
 and registers it idempotently. Event pages can register typed subjects and source-scoped actor accounts
 atomically and reject immutable-metadata conflicts. Source/run setup is available
 through `rh_cli postgres begin_collection_run`; blob distribution and wiring into
-`rh_cli ingest` remain open. Capability
-manifests
+`rh_cli ingest` remain open. The PostgreSQL adapter now also exposes
+`finish_collection_job`, which marks the
+collection run, job, and attempt terminal atomically under the current unexpired
+lease; generic finish cannot bypass collection finalization, and page commits
+require collection jobs; the migration rehearsal verifies expiry rejection and
+replay fencing.
+Capability manifests
 (5 connectors), bounded JSON parser, ISO8601, fetch guard + curl transport, GitHub/GitLab/Gitea/Forgejo
 normalizers with goldens, per-capability status mapping, durable
 filesystem store (content-addressed blobs with exclusive staging, atomic
