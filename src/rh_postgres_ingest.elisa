@@ -242,6 +242,37 @@ module PostgresIngest:
             count_out[0] <- rows[root.usize()].child_count
             true
 
+        def rh_pi_staged_records_valid(texts: darray[u8]&, start: i64, end: i64, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            return false if end <= start or end - start > 8388608
+            raw: mutable darray[u8] = []
+            while offset < end - start |offset: i64 = 0, raw, texts, start, end|:
+                raw.push(texts[(start + offset).usize()])
+                offset <- offset + 1
+            rows: mutable darray[Json::RhJsonNode] = []
+            decoded: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, rows, decoded)
+            return false if root < 0 or rows[root.usize()].kind != Json::RH_JSON_ARR or rows[root.usize()].child_count > RH_PI_MAX_RECORDS
+            total_payload_bytes: mutable i64 = 0
+            while row >= 0 |row: i64 = rows[root.usize()].first_child, rows, decoded, total_payload_bytes|:
+                return false if rows[row.usize()].kind != Json::RH_JSON_OBJ
+                return false if not PostgresIngest::rh_pi_string_field(rows, decoded, row, "collector_label", 1, 4096)
+                return false if not PostgresIngest::rh_pi_string_field(rows, decoded, row, "raw_payload", 1, 1048576)
+                payload_index: i64 = PostgresIngest::rh_pi_get(rows, decoded, row, "raw_payload")
+                payload_node: Json::RhJsonNode = rows[payload_index.usize()]
+                total_payload_bytes <- total_payload_bytes + payload_node.text_end - payload_node.text_start
+                return false if total_payload_bytes > 4194304
+                payload: mutable darray[u8] = []
+                while offset < payload_node.text_end - payload_node.text_start |offset: i64 = 0, payload, decoded, payload_node|:
+                    payload.push(decoded[(payload_node.text_start + offset).usize()])
+                    offset <- offset + 1
+                payload_nodes: mutable darray[Json::RhJsonNode] = []
+                payload_texts: mutable darray[u8] = []
+                payload_root: i64 = Json::rh_json_parse(payload, payload_nodes, payload_texts)
+                return false if payload_root < 0 or payload_nodes[payload_root.usize()].kind != Json::RH_JSON_OBJ
+                row <- rows[row.usize()].next_sibling
+            count_out[0] <- rows[root.usize()].child_count
+            true
+
         def rh_pi_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
             out.push(34)
             Base::rh_json_escape(out, texts, start.usize(), end.usize())
@@ -253,8 +284,8 @@ module PostgresIngest:
             out.push(34)
 
     public:
-        # This accepts already-normalized provider pages. Acquisition and
-        # normalization stay outside the short database transactions.
+        # This accepts normalized pages and explicitly marked raw-stage pages.
+        # Acquisition and normalization stay outside short database transactions.
         def rh_postgres_ingest_report(raw: darray[u8]&, conninfo: cstr, evidence_root: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             return -1 if raw.count == 0 or raw.count > RH_PI_MAX_BYTES
             nodes: mutable darray[Json::RhJsonNode] = []
@@ -417,6 +448,10 @@ module PostgresIngest:
                 after_end: mutable i64 = 0
                 completeness_start: mutable i64 = 0
                 completeness_end: mutable i64 = 0
+                record_mode_start: mutable i64 = 0
+                record_mode_end: mutable i64 = 0
+                staged_records_start: mutable i64 = 0
+                staged_records_end: mutable i64 = 0
                 evidence_start: mutable i64 = 0
                 evidence_end: mutable i64 = 0
                 events_start: mutable i64 = 0
@@ -431,6 +466,16 @@ module PostgresIngest:
                 return -1 if not PostgresIngest::rh_pi_span(nodes, texts, page, "cursor_after", &after_start, &after_end, false)
                 return -1 if not PostgresIngest::rh_pi_span(nodes, texts, page, "completeness", &completeness_start, &completeness_end, false)
                 return -1 if not PostgresIngest::rh_pi_eq(texts, completeness_start, completeness_end, "complete") and not PostgresIngest::rh_pi_eq(texts, completeness_start, completeness_end, "empty")
+                record_mode_index: i64 = PostgresIngest::rh_pi_get(nodes, texts, page, "record_mode")
+                if record_mode_index >= 0:
+                    return -1 if not Json::rh_json_str_span(nodes, record_mode_index, &record_mode_start, &record_mode_end)
+                    return -1 if not PostgresIngest::rh_pi_eq(texts, record_mode_start, record_mode_end, "normalized") and not PostgresIngest::rh_pi_eq(texts, record_mode_start, record_mode_end, "staged")
+                staged_records_index: i64 = PostgresIngest::rh_pi_get(nodes, texts, page, "staged_records_json")
+                staged_page: bool = record_mode_index >= 0 and PostgresIngest::rh_pi_eq(texts, record_mode_start, record_mode_end, "staged")
+                return -1 if staged_page and staged_records_index < 0
+                return -1 if not staged_page and staged_records_index >= 0
+                if staged_page:
+                    return -1 if not PostgresIngest::rh_pi_span(nodes, texts, page, "staged_records_json", &staged_records_start, &staged_records_end, false)
                 return -1 if not PostgresIngest::rh_pi_span(nodes, texts, page, "evidence_id", &evidence_start, &evidence_end, true)
                 return -1 if not PostgresIngest::rh_pi_span(nodes, texts, page, "events_json", &events_start, &events_end, false)
                 return -1 if not PostgresIngest::rh_pi_span(nodes, texts, page, "subjects_json", &subjects_start, &subjects_end, false)
@@ -446,9 +491,23 @@ module PostgresIngest:
                     count: mutable i64 = 0
                     valid: bool = PostgresIngest::rh_pi_rows_valid(texts, events_start, events_end, RH_PI_ROWS_EVENTS, &count)
                     count, valid
-                return -1 if not events_valid or events_count != record_count
-                return -1 if not PostgresIngest::rh_pi_rows_valid(texts, subjects_start, subjects_end, RH_PI_ROWS_SUBJECTS, &discard_count)
-                return -1 if not PostgresIngest::rh_pi_rows_valid(texts, actors_start, actors_end, RH_PI_ROWS_ACTORS, &discard_count)
+                return -1 if not events_valid
+                if staged_page:
+                    staged_record_count: mutable i64 = 0
+                    return -1 if not PostgresIngest::rh_pi_staged_records_valid(texts, staged_records_start, staged_records_end, &staged_record_count) or staged_record_count != record_count
+                    return -1 if events_count != 0
+                else:
+                    return -1 if events_count != record_count
+                subjects_count, subjects_valid =
+                    count: mutable i64 = 0
+                    valid: bool = PostgresIngest::rh_pi_rows_valid(texts, subjects_start, subjects_end, RH_PI_ROWS_SUBJECTS, &count)
+                    count, valid
+                actors_count, actors_valid =
+                    count: mutable i64 = 0
+                    valid: bool = PostgresIngest::rh_pi_rows_valid(texts, actors_start, actors_end, RH_PI_ROWS_ACTORS, &count)
+                    count, valid
+                return -1 if not subjects_valid or not actors_valid
+                return -1 if staged_page and (subjects_count != 0 or actors_count != 0)
                 return -1 if before_end > before_start and not PostgresIngest::rh_pi_json_root(texts, before_start, before_end, Json::RH_JSON_OBJ, &discard_count)
                 return -1 if not PostgresIngest::rh_pi_json_root(texts, after_start, after_end, Json::RH_JSON_OBJ, &discard_count)
                 return -1 if evidence_end > evidence_start and not PostgresIngest::rh_pi_uuid(texts, evidence_start, evidence_end)
@@ -545,6 +604,8 @@ module PostgresIngest:
                 after_end: mutable i64 = 0
                 completeness_start: mutable i64 = 0
                 completeness_end: mutable i64 = 0
+                staged_records_start: mutable i64 = 0
+                staged_records_end: mutable i64 = 0
                 evidence_start: mutable i64 = 0
                 evidence_end: mutable i64 = 0
                 events_start: mutable i64 = 0
@@ -564,6 +625,10 @@ module PostgresIngest:
                 _ = PostgresIngest::rh_pi_span(nodes, texts, page, "subjects_json", &subjects_start, &subjects_end, false)
                 _ = PostgresIngest::rh_pi_span(nodes, texts, page, "actors_json", &actors_start, &actors_end, false)
                 _ = PostgresIngest::rh_pi_span(nodes, texts, page, "committed_at", &committed_at_start, &committed_at_end, false)
+                record_mode_index: i64 = PostgresIngest::rh_pi_get(nodes, texts, page, "record_mode")
+                staged_page: bool = record_mode_index >= 0 and PostgresIngest::rh_pi_eq(texts, nodes[record_mode_index.usize()].text_start, nodes[record_mode_index.usize()].text_end, "staged")
+                if staged_page:
+                    _ = PostgresIngest::rh_pi_span(nodes, texts, page, "staged_records_json", &staged_records_start, &staged_records_end, false)
                 record_count: mutable i64 = 0
                 _ = PostgresIngest::rh_pi_int(nodes, raw, texts, page, "record_count", 0, RH_PI_MAX_RECORDS, &record_count)
                 committed: i64 =
@@ -574,9 +639,6 @@ module PostgresIngest:
                     cursor_after: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, after_start, after_end)
                     completeness: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, completeness_start, completeness_end)
                     evidence_id: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, evidence_start, evidence_end)
-                    events: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, events_start, events_end)
-                    subjects: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, subjects_start, subjects_end)
-                    actors: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, actors_start, actors_end)
                     committed_at: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, committed_at_start, committed_at_end)
                     run_id_ptr: cstr = (&run_id[0]).cast[cstr] can Unsafe.PointerCast
                     job_id_ptr: cstr = (&job_id[0]).cast[cstr] can Unsafe.PointerCast
@@ -585,11 +647,19 @@ module PostgresIngest:
                     cursor_after_ptr: cstr = (&cursor_after[0]).cast[cstr] can Unsafe.PointerCast
                     completeness_ptr: cstr = (&completeness[0]).cast[cstr] can Unsafe.PointerCast
                     evidence_id_ptr: cstr = (&evidence_id[0]).cast[cstr] can Unsafe.PointerCast
-                    events_ptr: cstr = (&events[0]).cast[cstr] can Unsafe.PointerCast
-                    subjects_ptr: cstr = (&subjects[0]).cast[cstr] can Unsafe.PointerCast
-                    actors_ptr: cstr = (&actors[0]).cast[cstr] can Unsafe.PointerCast
                     committed_at_ptr: cstr = (&committed_at[0]).cast[cstr] can Unsafe.PointerCast
-                    Postgres::rh_pg_commit_collection_page_events(conninfo, run_id_ptr, job_id_ptr, fencing_token, page_number, scope_hash_ptr, cursor_before_ptr, cursor_after_ptr, completeness_ptr, record_count, evidence_id_ptr, events_ptr, subjects_ptr, actors_ptr, committed_at_ptr)
+                    if staged_page:
+                        records: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, staged_records_start, staged_records_end)
+                        records_ptr: cstr = (&records[0]).cast[cstr] can Unsafe.PointerCast
+                        Postgres::rh_pg_commit_staged_collection_page(conninfo, run_id_ptr, job_id_ptr, fencing_token, page_number, scope_hash_ptr, cursor_before_ptr, cursor_after_ptr, completeness_ptr, evidence_id_ptr, records_ptr, committed_at_ptr)
+                    else:
+                        events: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, events_start, events_end)
+                        subjects: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, subjects_start, subjects_end)
+                        actors: mutable darray[u8] = PostgresIngest::rh_pi_text(texts, actors_start, actors_end)
+                        events_ptr: cstr = (&events[0]).cast[cstr] can Unsafe.PointerCast
+                        subjects_ptr: cstr = (&subjects[0]).cast[cstr] can Unsafe.PointerCast
+                        actors_ptr: cstr = (&actors[0]).cast[cstr] can Unsafe.PointerCast
+                        Postgres::rh_pg_commit_collection_page_events(conninfo, run_id_ptr, job_id_ptr, fencing_token, page_number, scope_hash_ptr, cursor_before_ptr, cursor_after_ptr, completeness_ptr, record_count, evidence_id_ptr, events_ptr, subjects_ptr, actors_ptr, committed_at_ptr)
                 return -1 if committed < 0
                 if page_number > 0:
                     out.push(44)
@@ -597,7 +667,10 @@ module PostgresIngest:
                 Base::rh_push_decimal_i64(out, page_number)
                 Base::rh_push_text(out, ",\"status\":\"")
                 Base::rh_push_text(out, "committed" if committed == 1 else "duplicate")
-                Base::rh_push_text(out, "\"}")
+                Base::rh_push_text(out, "\"")
+                if staged_page:
+                    Base::rh_push_text(out, ",\"record_mode\":\"staged\"")
+                Base::rh_push_text(out, "}")
                 page <- nodes[page.usize()].next_sibling
 
             finish_result: i64 =

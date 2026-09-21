@@ -112,10 +112,11 @@ The CLI command contract and failure gates are covered by
 - There is no automatic migration runner; migrations are operator-led using
   the runbooks.
 - The active `rh_cli ingest` path still uses the filesystem store. PostgreSQL
-  can register evidence metadata and commit normalized event pages and job
-  leases through `rh_cli postgres`; shared-blob distribution and transactional
-  ingestion wiring remain open. Filesystem fencing continues to govern the
-  active ingest runtime.
+  can register evidence metadata and commit normalized event pages or bounded
+  raw staged pages under job leases through `rh_cli ingest --postgres`; staged
+  pages do not infer event identities, and normalization replay wiring remains
+  open. Shared-blob distribution also remains open. Filesystem fencing
+  continues to govern the active filesystem ingest runtime.
 - No migration has been performed across a format change in this repository
   yet; the rules above are the contract, and the first real migration must
   add a rehearsal to `tests/`.

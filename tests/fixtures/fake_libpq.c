@@ -58,6 +58,12 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "scope ' ; SELECT pg_sleep(60); --", "", "{\"page\":8}", "complete",
         "0", "", "[]", "[]", "[]", "2026-01-01T00:01:00Z"
     };
+    static const char *page_staged_values[11] = {
+        "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002", "4", "7",
+        "scope ' ; SELECT pg_sleep(60); --", "", "{\"page\":8}", "complete", "",
+        "[{\"collector_label\":\"legacy:7\",\"raw_payload\":\"{\\\"id\\\":\\\"legacy:7\\\"}\"}]",
+        "2026-01-01T00:01:00Z"
+    };
     static const char *page_events_subjects_values[14] = {
         "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004", "1", "1", "pg-adapter-live-events",
         "", "{\"page\":2}", "complete", "1", "",
@@ -119,6 +125,12 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "[{\"id\":\"00000000-0000-0000-0000-000000000007\",\"source_native_id\":\"alice\",\"account_kind\":\"human\",\"display_name\":\"Alice Example\",\"raw_identity_evidence_id\":null,\"visibility_scope\":\"public\"}]",
         "2026-09-21T00:03:00Z"
     };
+    static const char *ingest_staged_page_values[11] = {
+        "00000000-0000-0000-0000-000000000020", "00000000-0000-0000-0000-000000000021", "1", "0",
+        "postgres-ingest-live", "", "{\"page\":1}", "complete", "",
+        "[{\"collector_label\":\"issue:raw-1\",\"raw_payload\":\"{\\\"id\\\":\\\"issue:raw-1\\\",\\\"state\\\":\\\"open\\\"}\"}]",
+        "2026-09-21T00:03:00Z"
+    };
     static const char *ingest_finish_values[10] = {
         "00000000-0000-0000-0000-000000000020", "00000000-0000-0000-0000-000000000021", "1",
         "succeeded", "succeeded", "complete", "{\"issues\":\"observed\"}", "ok", "", "2026-09-21T00:03:30Z"
@@ -177,6 +189,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = page_events_subjects_values;
         expected_count = 14;
         prefix = "SELECT public.rh_commit_collection_page_events(";
+    } else if (operation != NULL && strcmp(operation, "page_staged") == 0) {
+        expected = page_staged_values;
+        expected_count = 11;
+        prefix = "SELECT public.rh_commit_staged_collection_page(";
     } else if (operation != NULL && strcmp(operation, "evidence") == 0) {
         expected = evidence_values;
         expected_count = 9;
@@ -203,6 +219,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             expected = ingest_page_values;
             expected_count = 14;
             prefix = "SELECT public.rh_commit_collection_page_events(";
+        } else if (query != NULL && strncmp(query, "SELECT public.rh_commit_staged_collection_page(", strlen("SELECT public.rh_commit_staged_collection_page(")) == 0) {
+            expected = ingest_staged_page_values;
+            expected_count = 11;
+            prefix = "SELECT public.rh_commit_staged_collection_page(";
         } else if (query != NULL && strncmp(query, "SELECT public.rh_finish_collection_job(", strlen("SELECT public.rh_finish_collection_job(")) == 0) {
             expected = mode != NULL && strcmp(mode, "partial") == 0 ? ingest_partial_finish_values :
                 mode != NULL && strcmp(mode, "failed") == 0 ? ingest_failed_finish_values :

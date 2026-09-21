@@ -308,6 +308,30 @@ module Postgres:
             params.push(now)
             Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_commit_collection_page_events($1::uuid, $2::uuid, $3::bigint, $4::integer, $5::text, NULLIF($6, '')::jsonb, $7::jsonb, $8::text, $9::integer, NULLIF($10, '')::uuid, $11::jsonb, COALESCE(NULLIF($12, '')::jsonb, '[]'::jsonb), COALESCE(NULLIF($13, '')::jsonb, '[]'::jsonb), $14::timestamptz)", params)
 
+        # Stage one raw provider page without assigning source-native event
+        # identity. PostgreSQL preserves each bounded JSON object and advances
+        # the page cursor in the same fenced transaction.
+        def rh_pg_commit_staged_collection_page(conninfo: cstr, run_id: cstr, job_id: cstr, fencing_token: i64, page_number: i64, scope_hash: cstr, cursor_before: cstr, cursor_after: cstr, completeness: cstr, evidence_id: cstr, records_json: cstr, now: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if fencing_token <= 0 or page_number < 0 or Base::rh_cstr_len_c(records_json) == 0 or Base::rh_cstr_len_c(records_json) > 8388608
+            return -1 if not Base::rh_streq(completeness, "complete") and not Base::rh_streq(completeness, "empty")
+            token_text: mutable darray[u8] = Postgres::rh_pg_decimal(fencing_token)
+            page_text: mutable darray[u8] = Postgres::rh_pg_decimal(page_number)
+            token_ptr: cstr = (&token_text[0]).cast[cstr] can Unsafe.PointerCast
+            page_ptr: cstr = (&page_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(run_id)
+            params.push(job_id)
+            params.push(token_ptr)
+            params.push(page_ptr)
+            params.push(scope_hash)
+            params.push(cursor_before)
+            params.push(cursor_after)
+            params.push(completeness)
+            params.push(evidence_id)
+            params.push(records_json)
+            params.push(now)
+            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_commit_staged_collection_page($1::uuid, $2::uuid, $3::bigint, $4::integer, $5::text, NULLIF($6, '')::jsonb, $7::jsonb, $8::text, NULLIF($9, '')::uuid, $10::jsonb, $11::timestamptz)", params)
+
         # Register SHA-256 evidence metadata after the caller has verified its
         # immutable blob. Returns 1 for a new identity, 0 for an exact replay,
         # and -1 for a database error or conflicting metadata.

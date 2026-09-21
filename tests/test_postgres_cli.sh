@@ -72,6 +72,11 @@ RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
   RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=duplicate \
   "$ROOT/build/rh_cli" ingest --postgres --root "$T" --input "$T/ingest-input.json" --out "$T/ingest-not-claimed.json" >/dev/null \
   || fail "normalized PostgreSQL ingest replay without a runnable lease"
+cp "$ROOT/fixtures/postgres/ingest-staged-input.json" "$T/ingest-staged-input.json"
+RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+  RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=committed \
+  "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-staged-input.json" --out "$T/ingest-staged-result.json" >/dev/null \
+  || fail "staged PostgreSQL page ingest"
 cp "$ROOT/fixtures/postgres/ingest-partial-input.json" "$T/ingest-partial-input.json"
 RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
   RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=partial \
@@ -164,15 +169,16 @@ for mode in failure oversize invalid_refs truncated_refs unsorted_refs; do
 done
 echo "[postgres-cli] evidence GC preserves references and fails closed on incomplete snapshots"
 
-python3 - "$T" "$ROOT/fixtures/postgres/ingest-output.json" "$ROOT/fixtures/postgres/ingest-partial-output.json" "$ROOT/fixtures/postgres/ingest-failed-output.json" "$ROOT/fixtures/postgres/ingest-canceled-output.json" "$ROOT/fixtures/postgres/evidence-references-result.json" "$ROOT/fixtures/postgres/evidence-gc-result.json" <<'PY'
+python3 - "$T" "$ROOT/fixtures/postgres/ingest-output.json" "$ROOT/fixtures/postgres/ingest-staged-output.json" "$ROOT/fixtures/postgres/ingest-partial-output.json" "$ROOT/fixtures/postgres/ingest-failed-output.json" "$ROOT/fixtures/postgres/ingest-canceled-output.json" "$ROOT/fixtures/postgres/evidence-references-result.json" "$ROOT/fixtures/postgres/evidence-gc-result.json" <<'PY'
 import json, os, sys
 root = sys.argv[1]
 expected_ingest = json.load(open(sys.argv[2]))
-expected_partial = json.load(open(sys.argv[3]))
-expected_failed = json.load(open(sys.argv[4]))
-expected_canceled = json.load(open(sys.argv[5]))
-expected_references = json.load(open(sys.argv[6]))
-expected_gc = json.load(open(sys.argv[7]))
+expected_staged = json.load(open(sys.argv[3]))
+expected_partial = json.load(open(sys.argv[4]))
+expected_failed = json.load(open(sys.argv[5]))
+expected_canceled = json.load(open(sys.argv[6]))
+expected_references = json.load(open(sys.argv[7]))
+expected_gc = json.load(open(sys.argv[8]))
 def read(name):
     with open(os.path.join(root, name)) as f:
         return json.load(f)
@@ -203,6 +209,7 @@ assert specific_claim["status"] == "claimed" and specific_claim["fencing_token"]
 assert specific_claim["job_id"] == "00000000-0000-0000-0000-00000000000a", specific_claim
 assert read("claim-collection-job-duplicate.json")["status"] == "empty"
 assert read("ingest-result.json") == expected_ingest
+assert read("ingest-staged-result.json") == expected_staged
 assert read("ingest-partial-result.json") == expected_partial
 partial_empty = read("ingest-partial-empty-result.json")
 assert partial_empty["status"] == "partial" and partial_empty["pages"] == [] and partial_empty["fencing_token"] == 1, partial_empty
@@ -226,7 +233,7 @@ assert read("evidence-references-result.json") == expected_references
 assert read("evidence-gc-result.json") == expected_gc
 all_output = "".join(open(os.path.join(root, p)).read() for p in os.listdir(root) if p.endswith(".json"))
 assert "never-emit-this" not in all_output
-print("[postgres-cli] verified source/run setup, complete/partial/failed/canceled PostgreSQL ingest, enqueue/targeted claim, evidence registration/reference discovery/cleanup, page commits, job lifecycle, and bounded reports OK")
+print("[postgres-cli] verified source/run setup, normalized and staged PostgreSQL ingest, complete/partial/failed/canceled runs, enqueue/targeted claim, evidence lifecycle, and bounded reports OK")
 PY
 
 printf 'X' >> "$T/evidence/$stored_name"
@@ -277,6 +284,36 @@ if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
 fi
 [[ ! -e "$T/malformed-connected" ]] || fail "malformed batch connected to PostgreSQL before validation"
 [[ ! -e "$T/ingest-malformed-result.json" ]] || fail "malformed batch wrote a result"
+python3 - "$T/ingest-staged-input.json" "$T/ingest-staged-invalid.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+records = json.loads(value["pages"][0]["staged_records_json"])
+records[0]["raw_payload"] = "not-json"
+value["pages"][0]["staged_records_json"] = json.dumps(records, separators=(",", ":"))
+json.dump(value, open(sys.argv[2], "w"))
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/invalid-staged-connected" \
+    "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-staged-invalid.json" \
+      --out "$T/ingest-staged-invalid-result.json" >/dev/null 2>&1; then
+  fail "malformed staged raw object accepted"
+fi
+[[ ! -e "$T/invalid-staged-connected" ]] || fail "malformed staged object connected to PostgreSQL before validation"
+[[ ! -e "$T/ingest-staged-invalid-result.json" ]] || fail "malformed staged object wrote a result"
+python3 - "$T/ingest-staged-input.json" "$T/ingest-staged-count-mismatch.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+value["pages"][0]["record_count"] = 2
+json.dump(value, open(sys.argv[2], "w"))
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/staged-count-connected" \
+    "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-staged-count-mismatch.json" \
+      --out "$T/ingest-staged-count-mismatch-result.json" >/dev/null 2>&1; then
+  fail "staged page record-count mismatch accepted"
+fi
+[[ ! -e "$T/staged-count-connected" ]] || fail "staged count mismatch connected to PostgreSQL before validation"
+[[ ! -e "$T/ingest-staged-count-mismatch-result.json" ]] || fail "staged count mismatch wrote a result"
 python3 - "$T/ingest-input.json" "$T/ingest-invalid-event.json" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1]))

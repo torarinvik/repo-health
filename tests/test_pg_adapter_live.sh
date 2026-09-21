@@ -85,6 +85,9 @@ if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
 else
   env -u RH_LIBPQ_PATH RH_TEST_PG_CONNINFO="host=127.0.0.1 port=$PORT dbname=repo_health user=postgres password=repo-health-test sslmode=disable" "$ROOT/build/test_postgres_live" || fail "libpq unavailable; set RH_LIBPQ_PATH to its library"
 fi
+staged_state="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) || ':' || min(raw_payload) FROM staged_source_record WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND page_number = 1")"
+[[ "$staged_state" == '1:{"id":"raw:adapter","state":"open"}' ]] || fail "parameter-bound staged page commit or raw-text preservation: $staged_state"
+echo "[pg-adapter-live] staged page parameters and exact raw JSON text OK"
 
 printf 'hello evidence\n' > "$TMP_DIR/evidence-source.txt"
 stored_name="$("$ROOT/build/rh_cli" store put --root "$TMP_DIR/evidence" --file "$TMP_DIR/evidence-source.txt" | awk '{print $3}')"
