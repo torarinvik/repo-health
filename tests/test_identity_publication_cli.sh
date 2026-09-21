@@ -15,7 +15,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/input.json" <<'JSON'
-{"schema":"rh-identity-publication-input/1","project_id":"example-parser","publication_scope":"public","actor_count":5,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1},{"a":1,"b":2,"state":"accepted","revision_added":2},{"a":3,"b":0,"state":"rejected","revision_added":3}],"actor_kinds":["human","human","unresolved","bot_known","service_known"],"correction_requests":[{"id":"c1","state":"open"},{"id":"c2","state":"accepted"},{"id":"c3","state":"rejected"},{"id":"c4","state":"withdrawn"}],"restricted_actor_metadata":[{"source_instance":"forge.example","native_object_id":"account-1","display_name":"Alice","aliases":["alice@example"]}]}
+{"schema":"rh-identity-publication-input/1","project_id":"example-parser","publication_scope":"public","actor_count":5,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1},{"a":1,"b":2,"state":"accepted","revision_added":2},{"a":3,"b":0,"state":"rejected","revision_added":3}],"actor_kinds":["human","human","unresolved","bot_known","service_known"],"actor_kind_sources":["provider","provider","unknown","provider","project"],"correction_requests":[{"id":"c1","state":"open"},{"id":"c2","state":"accepted"},{"id":"c3","state":"rejected"},{"id":"c4","state":"withdrawn"}],"restricted_actor_metadata":[{"source_instance":"forge.example","native_object_id":"account-1","display_name":"Alice","aliases":["alice@example"]}]}
 JSON
 
 "$ROOT/build/rh_cli" identity-publish --input "$T/input.json" --out "$T/out.json" >/dev/null || fail "publication run"
@@ -28,6 +28,7 @@ assert d["publication_scope"] == "project" and d["raw_identity"] == "restricted"
 assert d["actor_count"] == 5 and d["identity_revision"] == 2 and d["cluster_count"] == 3, d
 assert d["cluster_size_histogram"] == [{"size": 3, "clusters": 1}, {"size": 1, "clusters": 2}], d
 assert d["actor_kinds"] == {"human": 2, "bot_known": 1, "service_known": 1, "unresolved": 1}, d
+assert d["actor_kind_source_counts"] == {"provider": 3, "project": 1, "operator": 0, "unknown": 1}, d
 assert d["corrections"] == {"open": 1, "accepted": 1, "rejected": 1, "withdrawn": 1}, d
 assert d["correction_channel"] == "project-owner-review" and d["personal_leaderboard"] is False, d
 text = open(sys.argv[1]).read()
@@ -49,6 +50,7 @@ python3 - "$T/no-kinds.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["actor_kinds"] == {"human": 0, "bot_known": 0, "service_known": 0, "unresolved": 2}, d
+assert d["actor_kind_source_counts"] == {"provider": 0, "project": 0, "operator": 0, "unknown": 2}, d
 assert d["cluster_size_histogram"] == [{"size": 1, "clusters": 2}], d
 print("[identity-publication] unknown kinds stay unresolved")
 PY

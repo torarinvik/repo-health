@@ -51,6 +51,13 @@ module IdentityPublication:
             return Identity::RH_ACTOR_UNRESOLVED if IdentityPublication::rh_ip_eq(texts, s, e, "unresolved")
             -1
 
+        def rh_ip_kind_source(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return Identity::RH_ACTOR_SOURCE_PROVIDER if IdentityPublication::rh_ip_eq(texts, s, e, "provider")
+            return Identity::RH_ACTOR_SOURCE_PROJECT if IdentityPublication::rh_ip_eq(texts, s, e, "project")
+            return Identity::RH_ACTOR_SOURCE_OPERATOR if IdentityPublication::rh_ip_eq(texts, s, e, "operator")
+            return Identity::RH_ACTOR_SOURCE_UNKNOWN if IdentityPublication::rh_ip_eq(texts, s, e, "unknown")
+            -1
+
         def rh_ip_correction_state(texts: darray[u8]&, s: i64, e: i64) -> i64:
             return 0 if IdentityPublication::rh_ip_eq(texts, s, e, "open")
             return 1 if IdentityPublication::rh_ip_eq(texts, s, e, "accepted")
@@ -152,8 +159,10 @@ module IdentityPublication:
 
             kinds: mutable darray[u8] = []
             kinds_idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, root, "actor_kinds")
+            has_kinds: mutable bool = false
             if kinds_idx >= 0:
                 return -1 if nodes[kinds_idx.usize()].kind != Json::RH_JSON_ARR
+                has_kinds <- true
                 while kind >= 0 |kind: i64 = nodes[kinds_idx.usize()].first_child, nodes, texts, kinds|:
                     kind_s: mutable i64 = 0
                     kind_e: mutable i64 = 0
@@ -172,6 +181,23 @@ module IdentityPublication:
                 while i < actor_count |i: i64 = 0, kinds|:
                     kinds.push(Identity::RH_ACTOR_UNRESOLVED)
                     i <- i + 1
+
+            kind_sources: mutable darray[u8] = []
+            sources_idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, root, "actor_kind_sources")
+            if sources_idx >= 0:
+                return -1 if not has_kinds or nodes[sources_idx.usize()].kind != Json::RH_JSON_ARR
+                while source_node >= 0 |source_node: i64 = nodes[sources_idx.usize()].first_child, nodes, texts, kind_sources|:
+                    source_s: mutable i64 = 0
+                    source_e: mutable i64 = 0
+                    return -1 if not Json::rh_json_str_span(nodes, source_node, &source_s, &source_e)
+                    source_code: i64 = IdentityPublication::rh_ip_kind_source(texts, source_s, source_e)
+                    return -1 if source_code < 0
+                    kind_sources.push(source_code.u8())
+                    source_node <- nodes[source_node.usize()].next_sibling
+                return -1 if kind_sources.count.i64() != actor_count
+            else:
+                while kind_sources.count < actor_count.usize() |kind_sources, actor_count|:
+                    kind_sources.push(Identity::RH_ACTOR_SOURCE_UNKNOWN)
 
             corrections: mutable darray[RhPublicCorrection] = []
             corrections_idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, root, "correction_requests")
@@ -200,6 +226,11 @@ module IdentityPublication:
             services: mutable i64 = 0
             unresolved: mutable i64 = 0
             Identity::rh_actor_kinds(kinds, &humans, &bots, &services, &unresolved)
+            source_provider: mutable i64 = 0
+            source_project: mutable i64 = 0
+            source_operator: mutable i64 = 0
+            source_unknown: mutable i64 = 0
+            Identity::rh_actor_kind_sources(kind_sources, &source_provider, &source_project, &source_operator, &source_unknown)
             correction_counts: mutable darray[i64] = [0, 0, 0, 0]
             while i < corrections.count |i: usize = 0, corrections, correction_counts|:
                 correction_counts[corrections[i].state.usize()] <- correction_counts[corrections[i].state.usize()] + 1
@@ -221,6 +252,14 @@ module IdentityPublication:
             Base::rh_push_decimal_i64(out, services)
             Base::rh_push_text(out, ",\"unresolved\":")
             Base::rh_push_decimal_i64(out, unresolved)
+            Base::rh_push_text(out, "},\"actor_kind_source_counts\":{\"provider\":")
+            Base::rh_push_decimal_i64(out, source_provider)
+            Base::rh_push_text(out, ",\"project\":")
+            Base::rh_push_decimal_i64(out, source_project)
+            Base::rh_push_text(out, ",\"operator\":")
+            Base::rh_push_decimal_i64(out, source_operator)
+            Base::rh_push_text(out, ",\"unknown\":")
+            Base::rh_push_decimal_i64(out, source_unknown)
             Base::rh_push_text(out, "},\"cluster_size_histogram\":")
             IdentityPublication::rh_ip_emit_histogram(out, sizes)
             Base::rh_push_text(out, ",\"corrections\":{\"open\":")

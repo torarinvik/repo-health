@@ -35,6 +35,19 @@ module IdentityReport:
             return Identity::RH_ACTOR_UNRESOLVED if rh_ir_eq(texts, s, e, "unresolved")
             -1
 
+        def rh_ir_actor_kind_source(texts: darray[u8]&, s: i64, e: i64) -> i64:
+            return Identity::RH_ACTOR_SOURCE_PROVIDER if rh_ir_eq(texts, s, e, "provider")
+            return Identity::RH_ACTOR_SOURCE_PROJECT if rh_ir_eq(texts, s, e, "project")
+            return Identity::RH_ACTOR_SOURCE_OPERATOR if rh_ir_eq(texts, s, e, "operator")
+            return Identity::RH_ACTOR_SOURCE_UNKNOWN if rh_ir_eq(texts, s, e, "unknown")
+            -1
+
+        def rh_ir_actor_kind_label(kind: u8) -> u8&:
+            return "human" if kind == Identity::RH_ACTOR_HUMAN
+            return "bot_known" if kind == Identity::RH_ACTOR_BOT_KNOWN
+            return "service_known" if kind == Identity::RH_ACTOR_SERVICE_KNOWN
+            "unresolved"
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_ir_state_label(s: u8) -> u8&:
             return "accepted" if s == Identity::RH_LINK_ACCEPTED
@@ -115,11 +128,16 @@ module IdentityReport:
             bots: mutable i64 = 0
             services: mutable i64 = 0
             unresolved: mutable i64 = 0
+            kinds: mutable darray[u8] = []
+            kind_sources: mutable darray[u8] = []
+            kind_source_provider: mutable i64 = 0
+            kind_source_project: mutable i64 = 0
+            kind_source_operator: mutable i64 = 0
+            kind_source_unknown: mutable i64 = 0
             kinds_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "actor_kinds")
             if kinds_idx >= 0:
                 return -1 if nodes[kinds_idx.usize()].kind != Json::RH_JSON_ARR
                 has_kinds <- true
-                kinds: mutable darray[u8] = []
                 karr: Json::RhJsonNode = nodes[kinds_idx.usize()]
                 while kc >= 0 |kc: i64 = karr.first_child, nodes, texts, kinds|:
                     code: i64 = |nodes, texts|
@@ -131,7 +149,26 @@ module IdentityReport:
                     return -1 if code < 0
                     kinds.push(code.u8())
                     kc <- nodes[kc.usize()].next_sibling
+                return -1 if kinds.count.i64() != actor_count
                 Identity::rh_actor_kinds(kinds, &humans, &bots, &services, &unresolved)
+                sources_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "actor_kind_sources")
+                if sources_idx >= 0:
+                    return -1 if nodes[sources_idx.usize()].kind != Json::RH_JSON_ARR
+                    while source_node >= 0 |source_node: i64 = nodes[sources_idx.usize()].first_child, nodes, texts, kind_sources|:
+                        source_s: mutable i64 = 0
+                        source_e: mutable i64 = 0
+                        return -1 if not Json::rh_json_str_span(nodes, source_node, &source_s, &source_e)
+                        source_code: i64 = rh_ir_actor_kind_source(texts, source_s, source_e)
+                        return -1 if source_code < 0
+                        kind_sources.push(source_code.u8())
+                        source_node <- nodes[source_node.usize()].next_sibling
+                    return -1 if kind_sources.count.i64() != actor_count
+                else:
+                    while kind_sources.count < actor_count.usize() |kind_sources, actor_count|:
+                        kind_sources.push(Identity::RH_ACTOR_SOURCE_UNKNOWN)
+                Identity::rh_actor_kind_sources(kind_sources, &kind_source_provider, &kind_source_project, &kind_source_operator, &kind_source_unknown)
+            else:
+                return -1 if Json::rh_json_obj_get(nodes, texts, root, "actor_kind_sources") >= 0
 
             # Optional source-native actor metadata. When present, this is an
             # immutable namespace/alias ledger: display names never identify actors,
@@ -216,7 +253,26 @@ module IdentityReport:
                 Base::rh_push_decimal_i64(out, services)
                 Base::rh_push_text(out, ",\"unresolved\":")
                 Base::rh_push_decimal_i64(out, unresolved)
-                Base::rh_push_text(out, "}")
+                Base::rh_push_text(out, "},\"actor_kind_sources\":{\"provider\":")
+                Base::rh_push_decimal_i64(out, kind_source_provider)
+                Base::rh_push_text(out, ",\"project\":")
+                Base::rh_push_decimal_i64(out, kind_source_project)
+                Base::rh_push_text(out, ",\"operator\":")
+                Base::rh_push_decimal_i64(out, kind_source_operator)
+                Base::rh_push_text(out, ",\"unknown\":")
+                Base::rh_push_decimal_i64(out, kind_source_unknown)
+                Base::rh_push_text(out, "},\"actor_classifications\":[")
+                while classification_idx < actor_count |classification_idx: i64 = 0, actor_count, kinds, kind_sources, out|:
+                    out.push(44) if classification_idx > 0
+                    Base::rh_push_text(out, "{\"actor_id\":")
+                    Base::rh_push_decimal_i64(out, classification_idx)
+                    Base::rh_push_text(out, ",\"kind\":\"")
+                    Base::rh_push_text(out, IdentityReport::rh_ir_actor_kind_label(kinds[classification_idx.usize()]))
+                    Base::rh_push_text(out, "\",\"source\":\"")
+                    Base::rh_push_text(out, Identity::rh_actor_kind_source_label(kind_sources[classification_idx.usize()]))
+                    Base::rh_push_text(out, "\"}")
+                    classification_idx <- classification_idx + 1
+                Base::rh_push_text(out, "]")
             if actors.count.i64() > 0:
                 Base::rh_push_text(out, ",\"actors\":[")
                 while i < actors.count |i: usize = 0, actors, aliases, texts, out|:
