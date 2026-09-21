@@ -598,5 +598,122 @@ replayed_state="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -
 [[ "$replayed_state" == "1:1:0:succeeded:succeeded" ]] || fail "post-crash replay did not commit one complete page: $replayed_state"
 echo "[migrations-live] PostgreSQL crash recovery rolls back an open page transaction and accepts an exact replay"
 
-echo "[migrations-live] source/run, enqueue/claim/finish, lease-reclaim audit, stale/expired fencing, rollback, and crash-recovery boundaries OK"
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "seed staged normalization contract"
+INSERT INTO evidence_object (
+    id, visibility_scope, digest_algorithm, digest_value, media_type,
+    byte_length, storage_key, retention_class, transformation_kind, created_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000008', 'public', 'sha256', repeat('c', 64),
+    'application/json', 1, 'fnv1a64:f0f0f0f0f0f0f0f0', 'standard', 'captured', '2026-01-01T00:00:00Z'
+);
+INSERT INTO collection_run (
+    id, source_instance_id, capability, connector_name, connector_version,
+    started_at, finished_at, status, completeness, coverage_details
+) VALUES
+    ('00000000-0000-0000-0000-000000000040', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-06T00:00:00Z', '2026-01-06T00:01:00Z', 'succeeded', 'complete', '{"issues":"observed"}'),
+    ('00000000-0000-0000-0000-000000000043', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-06T00:00:00Z', '2026-01-06T00:01:00Z', 'succeeded', 'complete', '{"issues":"observed"}'),
+    ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-06T00:00:00Z', '2026-01-06T00:01:00Z', 'partial', 'partial', '{"issues":"partial"}');
+INSERT INTO collection_page (
+    id, collection_run_id, page_number, scope_hash, cursor_before, cursor_after,
+    status, completeness, record_count, evidence_id, attempted_at, completed_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000040',
+    1, 'staged-live-scope', NULL, '{"page":2}', 'success', 'complete', 1,
+    '00000000-0000-0000-0000-000000000008', '2026-01-06T00:00:30Z', '2026-01-06T00:00:45Z'
+);
+INSERT INTO collection_page (
+    id, collection_run_id, page_number, scope_hash, cursor_before, cursor_after,
+    status, completeness, record_count, evidence_id, attempted_at, completed_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000044', '00000000-0000-0000-0000-000000000043',
+    1, 'other-repository-scope', NULL, '{"page":2}', 'success', 'complete', 1,
+    '00000000-0000-0000-0000-000000000008', '2026-01-06T00:00:30Z', '2026-01-06T00:00:45Z'
+);
+INSERT INTO staged_source_record (
+    collection_run_id, page_number, record_ordinal, collector_label, raw_payload, captured_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000040', 1, 0, 'issues-page-v1',
+    '{"id":101,"state":"closed","created_at":"2023-07-22T04:26:40Z"}', '2026-01-06T00:00:45Z'
+);
+INSERT INTO staged_source_record (
+    collection_run_id, page_number, record_ordinal, collector_label, raw_payload, captured_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000043', 1, 0, 'issues-page-v1',
+    '{"id":101,"state":"closed","created_at":"2023-07-22T04:26:40Z"}', '2026-01-06T00:00:45Z'
+);
+SQL
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "commit and replay staged normalization"
+DO $$
+DECLARE events jsonb := '[{"kind":"issues","native_id":"github:101","status":"closed","created_at":1690000000,"updated_at":1695000000,"closed_at":null,"staged_origin":{"page_number":1,"record_ordinal":0,"evidence_id":"00000000-0000-0000-0000-000000000008"}}]'::jsonb;
+BEGIN
+  IF NOT rh_commit_staged_normalization(
+    '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000040',
+    'e710b485a90d96b174e4aa09d874bc24f77e5722588a0a4212571a2b9dd8f042',
+    'f00b322743316bc9459a25fb7aecd0690d614a3b25a83b76972c2d9d1cbfbefb',
+    '28fd63073eaf26a97de86ab4dc6027e69f33217858102da590ba4c1095308d26',
+    'rh-forge-events/1', 1700000000, events
+  ) THEN
+    RAISE EXCEPTION 'new staged normalization was not committed';
+  END IF;
+  IF rh_commit_staged_normalization(
+    '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000040',
+    'e710b485a90d96b174e4aa09d874bc24f77e5722588a0a4212571a2b9dd8f042',
+    'f00b322743316bc9459a25fb7aecd0690d614a3b25a83b76972c2d9d1cbfbefb',
+    '28fd63073eaf26a97de86ab4dc6027e69f33217858102da590ba4c1095308d26',
+      'rh-forge-events/1', 1700000000, events
+  ) THEN
+    RAISE EXCEPTION 'exact staged normalization replay was not absorbed';
+  END IF;
+  IF NOT rh_commit_staged_normalization(
+    '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000043',
+    'c710b485a90d96b174e4aa09d874bc24f77e5722588a0a4212571a2b9dd8f042',
+    'f00b322743316bc9459a25fb7aecd0690d614a3b25a83b76972c2d9d1cbfbefb', repeat('3', 64),
+    'rh-forge-events/1', 1700000000, events
+  ) THEN
+    RAISE EXCEPTION 'same native ID in a second source scope was not committed';
+  END IF;
+  BEGIN
+    PERFORM rh_commit_staged_normalization(
+      '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000040',
+      'e710b485a90d96b174e4aa09d874bc24f77e5722588a0a4212571a2b9dd8f042',
+      'f00b322743316bc9459a25fb7aecd0690d614a3b25a83b76972c2d9d1cbfbefb', repeat('0', 64),
+      'rh-forge-events/1', 1700000000, events
+    );
+    RAISE EXCEPTION 'conflicting staged normalization replay was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('different output metadata' IN SQLERRM) = 0 THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM rh_commit_staged_normalization(
+      '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000040',
+      'a710b485a90d96b174e4aa09d874bc24f77e5722588a0a4212571a2b9dd8f042',
+      'f00b322743316bc9459a25fb7aecd0690d614a3b25a83b76972c2d9d1cbfbefb', repeat('1', 64),
+      'rh-forge-events/1', 1700000000,
+      jsonb_set(events, '{0,staged_origin,evidence_id}', '"00000000-0000-0000-0000-000000000006"'::jsonb)
+    );
+    RAISE EXCEPTION 'mismatched staged evidence was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('complete evidence-bearing source page' IN SQLERRM) = 0 THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM rh_commit_staged_normalization(
+      '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000042',
+      'b710b485a90d96b174e4aa09d874bc24f77e5722588a0a4212571a2b9dd8f042',
+      'f00b322743316bc9459a25fb7aecd0690d614a3b25a83b76972c2d9d1cbfbefb', repeat('2', 64),
+      'rh-forge-events/1', 1700000000, events
+    );
+    RAISE EXCEPTION 'partial staged run was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('succeeded complete or empty run' IN SQLERRM) = 0 THEN RAISE; END IF;
+  END;
+  IF (SELECT count(*) FROM canonical_event WHERE source_object_id = json_build_array('staged-live-scope', 'github:101')::text) <> 1
+     OR (SELECT count(DISTINCT subject_id) FROM canonical_event WHERE source_object_type = 'issue' AND source_object_id IN (json_build_array('staged-live-scope', 'github:101')::text, json_build_array('other-repository-scope', 'github:101')::text)) <> 2
+     OR (SELECT count(*) FROM staged_normalization WHERE collection_run_id = '00000000-0000-0000-0000-000000000040'::uuid) <> 1 THEN
+    RAISE EXCEPTION 'staged normalization replay or rejection changed committed state';
+  END IF;
+END $$;
+SQL
+echo "[migrations-live] canonical staged normalization validates source lineage and exact replay"
+
+echo "[migrations-live] source/run, staged normalization, enqueue/claim/finish, lease-reclaim audit, stale/expired fencing, rollback, and crash-recovery boundaries OK"
 echo "test_migrations_live OK"

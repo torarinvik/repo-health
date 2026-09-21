@@ -134,6 +134,21 @@ CREATE TABLE staged_source_record (
 CREATE INDEX staged_source_record_run_page
     ON staged_source_record (collection_run_id, page_number, record_ordinal);
 
+-- A normalized staged run is an immutable, replayable projection of retained
+-- provider records. The digest key distinguishes captured input/configuration;
+-- the output digest detects an attempted rewrite of an existing projection.
+CREATE TABLE staged_normalization (
+    collection_run_id uuid NOT NULL REFERENCES collection_run(id),
+    input_sha256 text NOT NULL CHECK (input_sha256 ~ '^[0-9a-f]{64}$'),
+    configuration_sha256 text NOT NULL CHECK (configuration_sha256 ~ '^[0-9a-f]{64}$'),
+    output_sha256 text NOT NULL CHECK (output_sha256 ~ '^[0-9a-f]{64}$'),
+    normalizer_version text NOT NULL CHECK (length(normalizer_version) BETWEEN 1 AND 128),
+    captured_at timestamptz NOT NULL,
+    event_count integer NOT NULL CHECK (event_count BETWEEN 0 AND 10000),
+    committed_at timestamptz NOT NULL,
+    PRIMARY KEY (collection_run_id, input_sha256, configuration_sha256)
+);
+
 CREATE TABLE collection_cursor (
     id uuid PRIMARY KEY,
     source_instance_id uuid NOT NULL REFERENCES source_instance(id),
@@ -1253,6 +1268,253 @@ BEGIN
         );
         v_ordinal := v_ordinal + 1;
     END LOOP;
+    RETURN true;
+END;
+$$;
+
+-- Project a completed raw run into canonical observations. The run lock
+-- serializes replay by the input/configuration key, and each event must point
+-- back to an actual staged row and the page's registered evidence object.
+CREATE FUNCTION rh_commit_staged_normalization(
+    p_source_id uuid,
+    p_run_id uuid,
+    p_input_sha256 text,
+    p_configuration_sha256 text,
+    p_output_sha256 text,
+    p_normalizer_version text,
+    p_captured_at bigint,
+    p_events jsonb
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_source_visibility rh_visibility_scope;
+    v_run_status text;
+    v_run_completeness text;
+    v_event jsonb;
+    v_kind text;
+    v_object_type text;
+    v_entity_kind text;
+    v_native_id text;
+    v_source_revision text;
+    v_page_number integer;
+    v_record_ordinal integer;
+    v_record_count integer;
+    v_scope_hash text;
+    v_source_object_id text;
+    v_evidence_id uuid;
+    v_page_evidence_id uuid;
+    v_created_at bigint;
+    v_subject_id uuid;
+    v_existing_output_sha256 text;
+    v_existing_normalizer_version text;
+    v_existing_captured_at timestamptz;
+    v_existing_event_count integer;
+    v_event_count integer;
+    v_manifest_exists boolean;
+BEGIN
+    IF p_input_sha256 IS NULL OR p_configuration_sha256 IS NULL OR p_output_sha256 IS NULL
+       OR p_input_sha256 !~ '^[0-9a-f]{64}$'
+       OR p_configuration_sha256 !~ '^[0-9a-f]{64}$'
+       OR p_output_sha256 !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'staged normalization digests must be lowercase SHA-256 values';
+    END IF;
+    IF p_normalizer_version IS NULL OR length(p_normalizer_version) < 1
+       OR length(p_normalizer_version) > 128 THEN
+        RAISE EXCEPTION 'staged normalization version is outside the bounded range';
+    END IF;
+    IF p_captured_at IS NULL OR p_captured_at < 0 OR p_captured_at > 253402300799 THEN
+        RAISE EXCEPTION 'staged normalization capture time is outside the supported epoch range';
+    END IF;
+    IF p_events IS NULL OR jsonb_typeof(p_events) IS DISTINCT FROM 'array' THEN
+        RAISE EXCEPTION 'staged normalized events must be a JSON array';
+    END IF;
+    v_event_count := jsonb_array_length(p_events);
+    IF v_event_count > 10000 OR octet_length(p_events::text) > 16777216 THEN
+        RAISE EXCEPTION 'staged normalized events exceed the bounded count or byte limit';
+    END IF;
+
+    SELECT s.visibility_scope, r.status, r.completeness
+      INTO v_source_visibility, v_run_status, v_run_completeness
+      FROM collection_run AS r
+      JOIN source_instance AS s ON s.id = r.source_instance_id
+     WHERE r.id = p_run_id AND r.source_instance_id = p_source_id
+     FOR UPDATE OF r;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'staged normalization run does not belong to the declared source';
+    END IF;
+    IF v_run_status IS DISTINCT FROM 'succeeded'
+       OR v_run_completeness NOT IN ('complete', 'empty') THEN
+        RAISE EXCEPTION 'staged normalization requires a succeeded complete or empty run';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM collection_page AS p
+         WHERE p.collection_run_id = p_run_id
+           AND (p.status IS DISTINCT FROM 'success'
+                OR p.completeness NOT IN ('complete', 'empty'))
+    ) THEN
+        RAISE EXCEPTION 'staged normalization run contains a failed or incomplete page';
+    END IF;
+
+    -- Preflight the whole projection before inserting any canonical rows.
+    FOR v_event IN SELECT value FROM jsonb_array_elements(p_events) AS events(value) LOOP
+        IF jsonb_typeof(v_event) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(v_event->'kind') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'native_id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_event->'created_at') IS DISTINCT FROM 'number'
+           OR jsonb_typeof(v_event->'staged_origin') IS DISTINCT FROM 'object'
+           OR jsonb_typeof(v_event->'staged_origin'->'page_number') IS DISTINCT FROM 'number'
+           OR jsonb_typeof(v_event->'staged_origin'->'record_ordinal') IS DISTINCT FROM 'number'
+           OR jsonb_typeof(v_event->'staged_origin'->'evidence_id') IS DISTINCT FROM 'string' THEN
+            RAISE EXCEPTION 'staged normalized event is missing required canonical fields or provenance';
+        END IF;
+        v_kind := v_event->>'kind';
+        v_native_id := v_event->>'native_id';
+        IF v_kind = 'issues' THEN
+            v_object_type := 'issue';
+            v_entity_kind := 'forge_issue';
+        ELSIF v_kind = 'proposals' THEN
+            v_object_type := 'proposal';
+            v_entity_kind := 'forge_proposal';
+        ELSIF v_kind = 'reviews' THEN
+            v_object_type := 'review';
+            v_entity_kind := 'forge_review';
+        ELSIF v_kind = 'releases' THEN
+            v_object_type := 'release';
+            v_entity_kind := 'forge_release';
+        ELSE
+            RAISE EXCEPTION 'staged normalized event kind is unsupported';
+        END IF;
+        IF length(v_native_id) < 1 OR length(v_native_id) > 512 THEN
+            RAISE EXCEPTION 'staged normalized native identity is outside the bounded range';
+        END IF;
+        IF jsonb_typeof(v_event->'status') IS NOT NULL
+           AND jsonb_typeof(v_event->'status') IS DISTINCT FROM 'string' THEN
+            RAISE EXCEPTION 'staged normalized event status must be a string';
+        END IF;
+        IF (v_event->>'created_at') !~ '^(0|[1-9][0-9]*)$'
+           OR (v_event->>'created_at')::numeric > 253402300799 THEN
+            RAISE EXCEPTION 'staged normalized event creation time is outside the supported epoch range';
+        END IF;
+        IF (v_event->'staged_origin'->>'page_number') !~ '^(0|[1-9][0-9]*)$'
+           OR (v_event->'staged_origin'->>'page_number')::numeric > 2147483647
+           OR (v_event->'staged_origin'->>'record_ordinal') !~ '^(0|[1-9][0-9]*)$'
+           OR (v_event->'staged_origin'->>'record_ordinal')::numeric > 2147483647 THEN
+            RAISE EXCEPTION 'staged normalized source page or ordinal is outside the supported range';
+        END IF;
+        v_created_at := (v_event->>'created_at')::bigint;
+        v_page_number := (v_event->'staged_origin'->>'page_number')::integer;
+        v_record_ordinal := (v_event->'staged_origin'->>'record_ordinal')::integer;
+        v_evidence_id := (v_event->'staged_origin'->>'evidence_id')::uuid;
+
+        SELECT p.record_count, p.evidence_id, p.scope_hash
+          INTO v_record_count, v_page_evidence_id, v_scope_hash
+          FROM collection_page AS p
+         WHERE p.collection_run_id = p_run_id
+           AND p.page_number = v_page_number
+           AND p.status = 'success'
+           AND p.completeness IN ('complete', 'empty')
+         FOR SHARE;
+        IF NOT FOUND OR v_page_evidence_id IS DISTINCT FROM v_evidence_id
+           OR v_record_ordinal >= v_record_count THEN
+            RAISE EXCEPTION 'staged normalized event does not match a complete evidence-bearing source page';
+        END IF;
+        IF v_scope_hash IS NULL OR length(v_scope_hash) < 1 OR octet_length(v_scope_hash) > 4096 THEN
+            RAISE EXCEPTION 'staged normalized source page has no bounded scope identity';
+        END IF;
+        PERFORM 1 FROM staged_source_record AS staged
+         WHERE staged.collection_run_id = p_run_id
+           AND staged.page_number = v_page_number
+           AND staged.record_ordinal = v_record_ordinal
+         FOR KEY SHARE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'staged normalized event does not match a retained source record';
+        END IF;
+    END LOOP;
+
+    IF EXISTS (
+        SELECT 1
+          FROM jsonb_array_elements(p_events) AS events(value)
+         GROUP BY value->>'kind', value->>'native_id'
+        HAVING count(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'staged normalized events contain duplicate object identities';
+    END IF;
+
+    SELECT output_sha256, normalizer_version, captured_at, event_count
+      INTO v_existing_output_sha256, v_existing_normalizer_version,
+           v_existing_captured_at, v_existing_event_count
+      FROM staged_normalization
+     WHERE collection_run_id = p_run_id
+       AND input_sha256 = p_input_sha256
+       AND configuration_sha256 = p_configuration_sha256
+     FOR UPDATE;
+    v_manifest_exists := FOUND;
+    IF v_manifest_exists THEN
+        IF v_existing_output_sha256 IS DISTINCT FROM p_output_sha256
+           OR v_existing_normalizer_version IS DISTINCT FROM p_normalizer_version
+           OR v_existing_captured_at IS DISTINCT FROM to_timestamp(p_captured_at)
+           OR v_existing_event_count IS DISTINCT FROM v_event_count THEN
+            RAISE EXCEPTION 'staged normalization identity is already committed with different output metadata';
+        END IF;
+        RETURN false;
+    END IF;
+
+    v_source_revision := 'staged-normalization/1:' || p_input_sha256 || ':' || p_configuration_sha256;
+    FOR v_event IN SELECT value FROM jsonb_array_elements(p_events) AS events(value) LOOP
+        v_kind := v_event->>'kind';
+        v_native_id := v_event->>'native_id';
+        v_object_type := CASE v_kind
+            WHEN 'issues' THEN 'issue'
+            WHEN 'proposals' THEN 'proposal'
+            WHEN 'reviews' THEN 'review'
+            ELSE 'release'
+        END;
+        v_entity_kind := 'forge_' || v_object_type;
+        v_created_at := (v_event->>'created_at')::bigint;
+        v_page_number := (v_event->'staged_origin'->>'page_number')::integer;
+        v_record_ordinal := (v_event->'staged_origin'->>'record_ordinal')::integer;
+        v_evidence_id := (v_event->'staged_origin'->>'evidence_id')::uuid;
+        SELECT p.scope_hash INTO v_scope_hash
+          FROM collection_page AS p
+         WHERE p.collection_run_id = p_run_id AND p.page_number = v_page_number;
+        v_source_object_id := json_build_array(v_scope_hash, v_native_id)::text;
+        v_subject_id := md5(p_source_id::text || ':' || v_object_type || ':' ||
+            octet_length(v_scope_hash)::text || ':' || v_scope_hash || ':' || v_native_id)::uuid;
+
+        INSERT INTO entity (id, entity_kind, visibility_scope, created_at)
+        VALUES (v_subject_id, v_entity_kind, v_source_visibility, to_timestamp(v_created_at))
+        ON CONFLICT (id) DO NOTHING;
+        IF NOT EXISTS (
+            SELECT 1 FROM entity AS e
+             WHERE e.id = v_subject_id
+               AND e.entity_kind = v_entity_kind
+               AND e.visibility_scope = v_source_visibility
+               AND e.created_at = to_timestamp(v_created_at)
+        ) THEN
+            RAISE EXCEPTION 'staged normalized subject identity conflicts with immutable entity metadata';
+        END IF;
+
+        INSERT INTO canonical_event (
+            id, source_instance_id, source_object_type, source_object_id,
+            source_revision, event_kind, subject_id, actor_account_id,
+            occurred_at, observed_at, time_basis, evidence_id, parser_version, payload
+        ) VALUES (
+            md5(p_source_id::text || ':' || v_object_type || ':' || v_source_object_id || ':' || v_source_revision)::uuid,
+            p_source_id, v_object_type, v_source_object_id, v_source_revision,
+            'state_observation', v_subject_id, NULL, NULL,
+            to_timestamp(p_captured_at), 'observation', v_evidence_id,
+            p_normalizer_version, v_event
+        );
+    END LOOP;
+
+    INSERT INTO staged_normalization (
+        collection_run_id, input_sha256, configuration_sha256, output_sha256,
+        normalizer_version, captured_at, event_count, committed_at
+    ) VALUES (
+        p_run_id, p_input_sha256, p_configuration_sha256, p_output_sha256,
+        p_normalizer_version, to_timestamp(p_captured_at), v_event_count, clock_timestamp()
+    );
     RETURN true;
 END;
 $$;

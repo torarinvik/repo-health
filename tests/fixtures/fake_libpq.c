@@ -64,6 +64,14 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "[{\"collector_label\":\"legacy:7\",\"raw_payload\":\"{\\\"id\\\":\\\"legacy:7\\\"}\"}]",
         "2026-01-01T00:01:00Z"
     };
+    static const char *staged_normalization_values[8] = {
+        "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000030",
+        "e710b485a90d96b174e4aa09d874bc24f77e5722588a0a4212571a2b9dd8f042",
+        "f00b322743316bc9459a25fb7aecd0690d614a3b25a83b76972c2d9d1cbfbefb",
+        "28fd63073eaf26a97de86ab4dc6027e69f33217858102da590ba4c1095308d26",
+        "rh-forge-events/1", "1700000000",
+        "[{\"kind\":\"issues\",\"native_id\":\"github:101\",\"status\":\"closed\",\"created_at\":1690000000,\"updated_at\":1695000000,\"closed_at\":null,\"staged_origin\":{\"page_number\":1,\"record_ordinal\":0,\"evidence_id\":\"00000000-0000-0000-0000-000000000008\"}}]"
+    };
     static const char *page_events_subjects_values[14] = {
         "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004", "1", "1", "pg-adapter-live-events",
         "", "{\"page\":2}", "complete", "1", "",
@@ -193,6 +201,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = page_staged_values;
         expected_count = 11;
         prefix = "SELECT public.rh_commit_staged_collection_page(";
+    } else if (operation != NULL && strcmp(operation, "staged_normalization") == 0) {
+        expected = staged_normalization_values;
+        expected_count = 8;
+        prefix = "SELECT public.rh_commit_staged_normalization(";
     } else if (operation != NULL && strcmp(operation, "evidence") == 0) {
         expected = evidence_values;
         expected_count = 9;

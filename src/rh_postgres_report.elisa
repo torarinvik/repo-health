@@ -9,6 +9,7 @@ include "./rh_store.elisa"
 module PostgresReport:
     private:
         const RH_PG_REPORT_MAX_BYTES: usize = 1048576
+        const RH_PG_REPORT_MAX_NORMALIZATION_BYTES: usize = 20971520
         const RH_PG_REPORT_MAX_INGEST_BYTES: usize = 4194304
         const RH_PG_REPORT_MAX_EVIDENCE_BYTES: i64 = 67108864
         const RH_PG_REPORT_MAX_INGEST_EVIDENCE_BYTES: i64 = 67108864
@@ -47,6 +48,14 @@ module PostgresReport:
 
         def rh_pg_report_hex16(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if end - start != 16
+            while i < end |i: i64 = start, texts|:
+                b: u8 = texts[i.usize()]
+                return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
+                i <- i + 1
+            true
+
+        def rh_pg_report_hex64(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != 64
             while i < end |i: i64 = start, texts|:
                 b: u8 = texts[i.usize()]
                 return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
@@ -351,7 +360,7 @@ module PostgresReport:
         # Commands contain no connection settings. RH_DATABASE_URL is read by
         # the CLI and is never copied into the result or diagnostics.
         def rh_postgres_command(raw: darray[u8]&, conninfo: cstr, evidence_root: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            return -1 if raw.count == 0 or raw.count > RH_PG_REPORT_MAX_BYTES or Base::rh_cstr_len_c(conninfo) == 0 or Base::rh_cstr_len_c(conninfo) > 4096
+            return -1 if raw.count == 0 or raw.count > RH_PG_REPORT_MAX_NORMALIZATION_BYTES or Base::rh_cstr_len_c(conninfo) == 0 or Base::rh_cstr_len_c(conninfo) > 4096
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -364,6 +373,113 @@ module PostgresReport:
             operation_s: mutable i64 = 0
             operation_e: mutable i64 = 0
             return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "operation", &operation_s, &operation_e, false)
+
+            normalization_operation: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "commit_staged_normalization")
+            return -1 if raw.count > RH_PG_REPORT_MAX_BYTES and not normalization_operation
+
+            if normalization_operation:
+                normalization_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "normalization")
+                return -1 if normalization_idx < 0 or nodes[normalization_idx.usize()].kind != Json::RH_JSON_OBJ
+                normalization_schema_s: mutable i64 = 0
+                normalization_schema_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, normalization_idx, "schema", &normalization_schema_s, &normalization_schema_e, false)
+                return -1 if not PostgresReport::rh_pg_report_eq(texts, normalization_schema_s, normalization_schema_e, "rh-postgres-staged-normalize-result/1")
+
+                source_s: mutable i64 = 0
+                source_e: mutable i64 = 0
+                run_s: mutable i64 = 0
+                run_e: mutable i64 = 0
+                input_sha_s: mutable i64 = 0
+                input_sha_e: mutable i64 = 0
+                config_sha_s: mutable i64 = 0
+                config_sha_e: mutable i64 = 0
+                normalizer_s: mutable i64 = 0
+                normalizer_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, normalization_idx, "source_id", &source_s, &source_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, source_s, source_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, normalization_idx, "collection_run_id", &run_s, &run_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, run_s, run_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, normalization_idx, "input_sha256", &input_sha_s, &input_sha_e, false) or not PostgresReport::rh_pg_report_hex64(texts, input_sha_s, input_sha_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, normalization_idx, "configuration_sha256", &config_sha_s, &config_sha_e, false) or not PostgresReport::rh_pg_report_hex64(texts, config_sha_s, config_sha_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, normalization_idx, "normalizer", &normalizer_s, &normalizer_e, false) or normalizer_e - normalizer_s > 128
+                return -1 if not PostgresReport::rh_pg_report_eq(texts, normalizer_s, normalizer_e, "rh-forge-events/1")
+
+                normalized_idx: i64 = Json::rh_json_obj_get(nodes, texts, normalization_idx, "normalized")
+                return -1 if normalized_idx < 0 or nodes[normalized_idx.usize()].kind != Json::RH_JSON_OBJ
+                normalized_schema_s: mutable i64 = 0
+                normalized_schema_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, normalized_idx, "schema", &normalized_schema_s, &normalized_schema_e, false)
+                return -1 if not PostgresReport::rh_pg_report_eq(texts, normalized_schema_s, normalized_schema_e, "rh-forge-events-result/1")
+                captured_ok: mutable i64 = 0
+                captured_at: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, normalized_idx, "captured_at"), &captured_ok)
+                return -1 if captured_ok == 0 or captured_at < 0 or captured_at > 253402300799
+                events_idx: i64 = Json::rh_json_obj_get(nodes, texts, normalized_idx, "events")
+                return -1 if events_idx < 0 or nodes[events_idx.usize()].kind != Json::RH_JSON_ARR or nodes[events_idx.usize()].child_count > 10000
+
+                while event_idx >= 0 |event_idx: i64 = nodes[events_idx.usize()].first_child, nodes, raw, texts|:
+                    return -1 if nodes[event_idx.usize()].kind != Json::RH_JSON_OBJ
+                    event_kind_s: mutable i64 = 0
+                    event_kind_e: mutable i64 = 0
+                    native_id_s: mutable i64 = 0
+                    native_id_e: mutable i64 = 0
+                    return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, event_idx, "kind", &event_kind_s, &event_kind_e, false)
+                    return -1 if not PostgresReport::rh_pg_report_eq(texts, event_kind_s, event_kind_e, "issues") and not PostgresReport::rh_pg_report_eq(texts, event_kind_s, event_kind_e, "proposals") and not PostgresReport::rh_pg_report_eq(texts, event_kind_s, event_kind_e, "reviews") and not PostgresReport::rh_pg_report_eq(texts, event_kind_s, event_kind_e, "releases")
+                    return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, event_idx, "native_id", &native_id_s, &native_id_e, false) or native_id_e - native_id_s > 512
+                    created_ok: mutable i64 = 0
+                    created_at: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, event_idx, "created_at"), &created_ok)
+                    return -1 if created_ok == 0 or created_at < 0 or created_at > 253402300799
+                    status_idx: i64 = Json::rh_json_obj_get(nodes, texts, event_idx, "status")
+                    return -1 if status_idx >= 0 and nodes[status_idx.usize()].kind != Json::RH_JSON_STR
+                    origin_idx: i64 = Json::rh_json_obj_get(nodes, texts, event_idx, "staged_origin")
+                    return -1 if origin_idx < 0 or nodes[origin_idx.usize()].kind != Json::RH_JSON_OBJ
+                    page_ok: mutable i64 = 0
+                    page_number: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, origin_idx, "page_number"), &page_ok)
+                    return -1 if page_ok == 0 or page_number < 0 or page_number > 2147483647
+                    ordinal_ok: mutable i64 = 0
+                    record_ordinal: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, origin_idx, "record_ordinal"), &ordinal_ok)
+                    return -1 if ordinal_ok == 0 or record_ordinal < 0 or record_ordinal > 2147483647
+                    evidence_s: mutable i64 = 0
+                    evidence_e: mutable i64 = 0
+                    return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, origin_idx, "evidence_id", &evidence_s, &evidence_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, evidence_s, evidence_e)
+                    event_idx <- nodes[event_idx.usize()].next_sibling
+
+                event_node: Json::RhJsonNode = nodes[events_idx.usize()]
+                return -1 if event_node.text_start < 0 or event_node.text_end <= event_node.text_start or event_node.text_end - event_node.text_start > 16777216
+                events_json: mutable darray[u8] = []
+                while raw_index < event_node.text_end |raw_index: i64 = event_node.text_start, raw, event_node, events_json|:
+                    events_json.push(raw[raw_index.usize()])
+                    raw_index <- raw_index + 1
+                output_sha: mutable darray[u8] = []
+                Sha256::rh_sha256(events_json, output_sha)
+                output_sha.push(0)
+                events_json.push(0)
+
+                source_bytes: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, source_s, source_e)
+                run_bytes: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, run_s, run_e)
+                input_sha_bytes: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, input_sha_s, input_sha_e)
+                config_sha_bytes: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, config_sha_s, config_sha_e)
+                normalizer_bytes: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, normalizer_s, normalizer_e)
+                source_ptr: cstr = (&source_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                run_ptr: cstr = (&run_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                input_sha_ptr: cstr = (&input_sha_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                config_sha_ptr: cstr = (&config_sha_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                normalizer_ptr: cstr = (&normalizer_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                output_sha_ptr: cstr = (&output_sha[0]).cast[cstr] can Unsafe.PointerCast
+                events_json_ptr: cstr = (&events_json[0]).cast[cstr] can Unsafe.PointerCast
+                committed: i64 = Postgres::rh_pg_commit_staged_normalization(conninfo, source_ptr, run_ptr, input_sha_ptr, config_sha_ptr, output_sha_ptr, normalizer_ptr, captured_at, events_json_ptr)
+                return -1 if committed < 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"commit_staged_normalization\",\"status\":\"")
+                Base::rh_push_text(out, "committed\"" if committed == 1 else "duplicate\"")
+                Base::rh_push_text(out, ",\"event_count\":")
+                Base::rh_push_decimal_i64(out, event_node.child_count)
+                Base::rh_push_text(out, ",\"input_sha256\":\"")
+                Base::rh_json_escape(out, texts, input_sha_s.usize(), input_sha_e.usize())
+                Base::rh_push_text(out, "\",\"configuration_sha256\":\"")
+                Base::rh_json_escape(out, texts, config_sha_s.usize(), config_sha_e.usize())
+                Base::rh_push_text(out, "\",\"output_sha256\":\"")
+                while sha_index < 64 |sha_index: usize = 0, output_sha, out|:
+                    out.push(output_sha[sha_index])
+                    sha_index <- sha_index + 1
+                Base::rh_push_text(out, "\"}")
+                return 0
 
             if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "evidence_references"):
                 references: mutable darray[u8] = []

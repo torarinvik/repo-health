@@ -135,6 +135,77 @@ event_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "
 actor_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM account WHERE source_native_id = 'alice'")"
 [[ "$event_count" == "1" && "$actor_count" == "1" ]] || fail "registered evidence event and actor did not commit exactly once"
 
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "seed completed staged normalization"
+INSERT INTO evidence_object (
+    id, visibility_scope, digest_algorithm, digest_value, media_type,
+    byte_length, storage_key, retention_class, transformation_kind, created_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000008', 'public', 'sha256', repeat('c', 64),
+    'application/json', 1, 'fnv1a64:0000000000000008', 'standard', 'captured', '2026-01-01T00:00:00Z'
+);
+INSERT INTO collection_run (
+    id, source_instance_id, capability, connector_name, connector_version,
+    started_at, finished_at, status, completeness, coverage_details
+) VALUES (
+    '00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000001',
+    'issues', 'github', '1.0.0', '2026-09-21T00:00:00Z', '2026-09-21T00:01:00Z',
+    'succeeded', 'complete', '{"issues":"observed"}'
+);
+INSERT INTO collection_page (
+    id, collection_run_id, page_number, scope_hash, cursor_before, cursor_after,
+    status, completeness, record_count, evidence_id, attempted_at, completed_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000031', '00000000-0000-0000-0000-000000000030',
+    1, 'staged-normalization-live', NULL, '{"page":2}', 'success', 'complete', 1,
+    '00000000-0000-0000-0000-000000000008', '2026-09-21T00:00:30Z', '2026-09-21T00:00:45Z'
+);
+INSERT INTO staged_source_record (
+    collection_run_id, page_number, record_ordinal, collector_label, raw_payload, captured_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000030', 1, 0, 'issues-page-v1',
+    '{"id":101,"state":"closed","created_at":"2023-07-22T04:26:40Z"}', '2026-09-21T00:00:45Z'
+);
+INSERT INTO collection_run (
+    id, source_instance_id, capability, connector_name, connector_version,
+    started_at, finished_at, status, completeness, coverage_details
+) VALUES (
+    '00000000-0000-0000-0000-000000000032', '00000000-0000-0000-0000-000000000001',
+    'issues', 'github', '1.0.0', '2026-09-21T00:00:00Z', '2026-09-21T00:01:00Z',
+    'partial', 'partial', '{"issues":"partial"}'
+);
+SQL
+run_cli "$ROOT/fixtures/postgres/commit-staged-normalization-command.json" "$TMP_DIR/staged-normalization-committed.json" || fail "commit canonical staged normalization"
+run_cli "$ROOT/fixtures/postgres/commit-staged-normalization-command.json" "$TMP_DIR/staged-normalization-duplicate.json" || fail "replay canonical staged normalization"
+python3 - "$TMP_DIR/staged-normalization-committed.json" "$TMP_DIR/staged-normalization-duplicate.json" "$ROOT/fixtures/postgres/commit-staged-normalization-result.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[3]))
+assert json.load(open(sys.argv[2]))["status"] == "duplicate"
+PY
+staged_event_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM canonical_event WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid AND source_object_id = json_build_array('staged-normalization-live', 'github:101')::text AND source_revision = 'staged-normalization/1:e710b485a90d96b174e4aa09d874bc24f77e5722588a0a4212571a2b9dd8f042:f00b322743316bc9459a25fb7aecd0690d614a3b25a83b76972c2d9d1cbfbefb' AND evidence_id = '00000000-0000-0000-0000-000000000008'::uuid")"
+normalization_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM staged_normalization WHERE collection_run_id = '00000000-0000-0000-0000-000000000030'::uuid")"
+[[ "$staged_event_count" == "1" && "$normalization_count" == "1" ]] || fail "staged normalization event or replay manifest was not committed exactly once"
+python3 - "$ROOT/fixtures/postgres/commit-staged-normalization-command.json" "$TMP_DIR/staged-normalization-bad-evidence.json" "$TMP_DIR/staged-normalization-conflict.json" "$TMP_DIR/staged-normalization-partial.json" <<'PY'
+import copy, json, sys
+source = json.load(open(sys.argv[1]))
+bad_evidence = copy.deepcopy(source)
+bad_evidence["normalization"]["normalized"]["events"][0]["staged_origin"]["evidence_id"] = "00000000-0000-0000-0000-000000000006"
+json.dump(bad_evidence, open(sys.argv[2], "w"), separators=(",", ":"))
+conflict = copy.deepcopy(source)
+conflict["normalization"]["normalized"]["events"][0]["status"] = "open"
+json.dump(conflict, open(sys.argv[3], "w"), separators=(",", ":"))
+partial = copy.deepcopy(source)
+partial["normalization"]["collection_run_id"] = "00000000-0000-0000-0000-000000000032"
+json.dump(partial, open(sys.argv[4], "w"), separators=(",", ":"))
+PY
+for variant in bad-evidence conflict partial; do
+  if run_cli "$TMP_DIR/staged-normalization-$variant.json" "$TMP_DIR/staged-normalization-$variant-result.json" >/dev/null 2>&1; then
+    fail "staged normalization accepted $variant input"
+  fi
+  [[ ! -e "$TMP_DIR/staged-normalization-$variant-result.json" ]] || fail "$variant staged normalization wrote a result"
+done
+[[ "$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM canonical_event WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid AND source_object_id = json_build_array('staged-normalization-live', 'github:101')::text")" == "1" ]] || fail "rejected staged normalization changed canonical events"
+echo "[pg-adapter-live] canonical staged normalization provenance, replay, conflict, and incomplete-run rejection OK"
+
 run_cli "$ROOT/fixtures/postgres/enqueue-collection-job-command.json" "$TMP_DIR/job-enqueued.json" || fail "enqueue collection job through libpq adapter"
 run_cli "$ROOT/fixtures/postgres/enqueue-collection-job-command.json" "$TMP_DIR/job-duplicate.json" || fail "replay collection job through libpq adapter"
 run_cli "$ROOT/fixtures/postgres/claim-collection-job-command.json" "$TMP_DIR/job-claimed.json" || fail "targeted claim of enqueued collection job through libpq adapter"

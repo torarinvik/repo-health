@@ -50,6 +50,29 @@ run_ok claim committed claim-job
 run_ok claim duplicate claim-job
 run_ok claim_collection committed claim-collection-job
 run_ok claim_collection duplicate claim-collection-job
+run_ok staged_normalization committed commit-staged-normalization
+run_ok staged_normalization duplicate commit-staged-normalization
+python3 - "$T/commit-staged-normalization-committed.json" "$ROOT/fixtures/postgres/commit-staged-normalization-result.json" "$T/commit-staged-normalization-duplicate.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))
+assert json.load(open(sys.argv[3]))["status"] == "duplicate"
+PY
+cp "$ROOT/fixtures/postgres/commit-staged-normalization-command.json" "$T/staged-normalization-invalid.json"
+python3 - "$T/staged-normalization-invalid.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.load(open(path))
+value["normalization"]["normalized"]["events"][0]["staged_origin"]["evidence_id"] = "not-a-uuid"
+json.dump(value, open(path, "w"), separators=(",", ":"))
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=staged_normalization RH_FAKE_PG_CONNECT_MARK="$T/staged-normalization-invalid-connected" \
+    "$ROOT/build/rh_cli" postgres --input "$T/staged-normalization-invalid.json" \
+      --out "$T/staged-normalization-invalid-result.json" >/dev/null 2>&1; then
+  fail "staged normalization accepted invalid evidence provenance"
+fi
+[[ ! -e "$T/staged-normalization-invalid-connected" ]] || fail "invalid staged normalization connected to PostgreSQL"
+[[ ! -e "$T/staged-normalization-invalid-result.json" ]] || fail "invalid staged normalization wrote a result"
 
 cp "$ROOT/fixtures/postgres/ingest-input.json" "$T/ingest-input.json"
 mkdir -p "$T/evidence"
