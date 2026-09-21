@@ -347,6 +347,23 @@ assert snapshot == {
 PY
 echo "[migrations-live] bounded evidence reference query reports valid keys and malformed rows"
 
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "seed bounded reference population"
+INSERT INTO evidence_object (
+    id, visibility_scope, digest_algorithm, digest_value, media_type,
+    byte_length, storage_key, retention_class, transformation_kind, created_at
+)
+SELECT
+    md5('bounded-reference-' || reference_number::text)::uuid, 'public', 'sha256',
+    lpad(to_hex(reference_number), 64, '0'), 'application/octet-stream', 0,
+    'fnv1a64:' || lpad(to_hex(reference_number), 16, '0'), 'standard', 'captured',
+    '2026-01-01T00:00:00Z'
+FROM generate_series(1, 100000) AS reference_number;
+SQL
+docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "$reference_query" \
+  | python3 -c 'import json, sys; raw=sys.stdin.buffer.read(); snapshot=json.loads(raw); assert len(raw) <= 4194304, len(raw); assert snapshot["count"] == 100001 and len(snapshot["storage_keys"]) == 100001 and snapshot["truncated"] is True and snapshot["invalid_count"] == 0, (len(snapshot["storage_keys"]), snapshot)' \
+  || fail "bounded reference truncation and response size"
+echo "[migrations-live] 100,001-key snapshot is flagged truncated and stays within 4 MiB"
+
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
 DO $$
 DECLARE c record;
