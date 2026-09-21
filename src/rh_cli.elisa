@@ -45,6 +45,7 @@ include "./rh_ops.elisa"
 include "./rh_forge.elisa"
 include "./rh_forge_events.elisa"
 include "./rh_forge_events_fetch.elisa"
+include "./rh_github_probe.elisa"
 include "./rh_connector.elisa"
 include "./rh_job.elisa"
 include "./rh_reconcile.elisa"
@@ -141,6 +142,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
     rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [--review-pull N [--review-page N] | --review-repository [--max-pulls N] [--resume-from <result>]]) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
+    rh_cli_err("       rh_cli connector probe --github-repo <owner/repo> --out <file>")
     rh_cli_err("       rh_cli job classify --input <file> --out <file> | job run --input <file> --out <file>")
     rh_cli_err("       rh_cli reconcile --input <file> --out <file>")
     rh_cli_err("       rh_cli snapshot-reconcile --input <rh-snapshot-reconcile-input/1> --out <file>")
@@ -1635,6 +1637,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
     if Base::rh_streq(cmd, "connector"):
         return rh_cli_usage(2) if argc < 3
         csub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        if Base::rh_streq(csub, "probe"):
+            cpr_idx, cpo_idx =
+                while cpi < argc |cpr_idx: i64 = -1, cpo_idx: i64 = -1, cpi: i64 = 3, slots| -> cpr_idx, cpo_idx:
+                    cpa: u8& = slots[cpi].cast[u8&] can Unsafe.PointerCast
+                    if Base::rh_streq(cpa, "--github-repo"):
+                        if cpi + 1 < argc:
+                            cpi <- cpi + 1
+                            cpr_idx <- cpi
+                        else:
+                            return rh_cli_usage(2)
+                    elif Base::rh_streq(cpa, "--out"):
+                        if cpi + 1 < argc:
+                            cpi <- cpi + 1
+                            cpo_idx <- cpi
+                        else:
+                            return rh_cli_usage(2)
+                    else:
+                        return rh_cli_usage(2)
+                    cpi <- cpi + 1
+            return rh_cli_usage(2) if cpr_idx < 0 or cpo_idx < 0
+            return rh_do_github_traffic_probe(slots[cpr_idx], slots[cpo_idx])
         return rh_cli_usage(2) if not Base::rh_streq(csub, "check")
         cnin_idx, cnout_idx =
             while ci < argc |cnin_idx: i64 = -1, cnout_idx: i64 = -1, ci: i64 = 3, slots| -> cnin_idx, cnout_idx:
@@ -6010,6 +6033,21 @@ def rh_do_connector_check(input_path: cstr, out_path: cstr) -> i32 can[Memory.Al
         Base::rh_push_text(done, "transport-rejected")
     done.push(10)
     Base::rh_write_stdout(done)
+    0
+
+def rh_do_github_traffic_probe(repository: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected connector probe output path (allowlist)")
+        return 3
+    body: mutable darray[u8] = []
+    if GitHubProbe::rh_github_traffic_probe_live(repository, out_path, body) != 0:
+        rh_cli_err("connector: GitHub traffic capability probe failed (see request evidence)")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("connector: cannot write probe --out")
+        return 4
+    rh_cli_out("connector: GitHub traffic capability probed")
     0
 
 # --- M02-03 job classification execution path. ---

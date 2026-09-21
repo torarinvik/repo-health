@@ -159,4 +159,81 @@ for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7" "$rc8"; do
   [[ "$rc" -eq 4 ]] || fail "malformed connector instance must exit 4 (got $rc)"
 done
 
+echo "[connector] GitHub traffic probe retains bounded evidence and honest access states"
+mkdir -p "$T/probe-bin"
+cat > "$T/probe-bin/python3" <<'SH'
+#!/usr/bin/env bash
+printf '140.82.114.5\n'
+SH
+cat > "$T/probe-bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >> "$RH_PROBE_CURL_ARGS"
+body_out=""
+url=""
+while (($#)); do
+  case "$1" in
+    -o) body_out="$2"; shift 2 ;;
+    --config) [[ "$2" == "-" ]] || exit 20; cat > "$RH_PROBE_CURL_CONFIG"; shift 2 ;;
+    -w) shift 2 ;;
+    *) url="$1"; shift ;;
+  esac
+done
+[[ "$url" == "https://api.github.com/repos/example/project/traffic/views" ]]
+cp "$RH_PROBE_BODY" "$body_out"
+printf '%s' "$RH_PROBE_HTTP"
+SH
+chmod +x "$T/probe-bin/python3" "$T/probe-bin/curl"
+printf '%s\n' '{"count":12,"uniques":8,"views":[]}' > "$T/traffic-views.json"
+printf '%s\n' '{"message":"Resource not accessible"}' > "$T/probe-error.json"
+printf '%s\n' 'not json' > "$T/probe-malformed.json"
+rm -f "$T/traffic-probe.out" "$T/traffic-probe.out.github-traffic-views."* "$T/probe.args" "$T/probe.config"
+PATH="$T/probe-bin:$PATH" RH_GITHUB_TOKEN="ghp_probe_fixture" RH_PROBE_HTTP=200 RH_PROBE_BODY="$T/traffic-views.json" \
+  RH_PROBE_CURL_ARGS="$T/probe.args" RH_PROBE_CURL_CONFIG="$T/probe.config" \
+  "$ROOT/build/rh_cli" connector probe --github-repo example/project --out "$T/traffic-probe.out" >/dev/null || fail "GitHub traffic probe"
+python3 - "$T/traffic-probe.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["schema"] == "rh-github-capability-probe-result/1", d
+assert d["scope"] == {"repository":"example/project"}, d
+assert d["authorization"]["credential"] == "configured", d
+assert d["capabilities"]["traffic"] == {"declaration":"authorized-14-day-window","status":"observed","http_status":200,"window_days":14}, d
+assert "count" not in d and "12" not in open(sys.argv[1]).read(), d
+for ext in ("json", "status", "err", "url"):
+    assert (t / f"traffic-probe.out.github-traffic-views.{ext}").exists(), ext
+assert (t / "traffic-probe.out.github-traffic-views.url").read_text().strip() == "https://api.github.com/repos/example/project/traffic/views"
+print("[connector] traffic probe reports access without publishing the traffic payload")
+PY
+grep -Fxq 'header = "Authorization: Bearer ghp_probe_fixture"' "$T/probe.config" || fail "probe token header absent from curl stdin config"
+! grep -Fq 'ghp_probe_fixture' "$T/probe.args" || fail "probe token leaked into curl arguments"
+for evidence in "$T"/traffic-probe.out.github-traffic-views.*; do
+  [[ ! -f "$evidence" ]] || ! grep -Fq 'ghp_probe_fixture' "$evidence" || fail "probe token leaked into evidence"
+done
+
+for case_spec in "401:unauthorized:$T/probe-error.json" "403:forbidden_or_rate_limited:$T/probe-error.json" "404:not_found_or_private:$T/probe-error.json" "429:rate_limited:$T/probe-error.json" "200:malformed:$T/probe-malformed.json" "000:unavailable:$T/probe-error.json"; do
+  IFS=: read -r http want body <<< "$case_spec"
+  out="$T/probe-$http-$want.out"
+  PATH="$T/probe-bin:$PATH" RH_PROBE_HTTP="$http" RH_PROBE_BODY="$body" \
+    RH_PROBE_CURL_ARGS="$T/probe-$http.args" RH_PROBE_CURL_CONFIG="$T/probe-$http.config" \
+    "$ROOT/build/rh_cli" connector probe --github-repo example/project --out "$out" >/dev/null || fail "probe response $http"
+  python3 - "$out" "$want" "$http" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["traffic"]["status"] == sys.argv[2], d
+if sys.argv[3] == "000":
+    assert d["capabilities"]["traffic"]["http_status"] is None, d
+else:
+    assert d["capabilities"]["traffic"]["http_status"] == int(sys.argv[3]), d
+print("[connector] mapped HTTP", sys.argv[3], "to", sys.argv[2])
+PY
+done
+
+set +e
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/probe-invalid.args" RH_PROBE_CURL_CONFIG="$T/probe-invalid.config" \
+  "$ROOT/build/rh_cli" connector probe --github-repo 'example/../project' --out "$T/probe-invalid.out" >/dev/null 2>&1
+rc_probe_route=$?
+set -e
+[[ "$rc_probe_route" -eq 4 && ! -e "$T/probe-invalid.args" && ! -e "$T/probe-invalid.out" ]] || fail "invalid probe repository reached transport or wrote output"
+
 echo "test_connector_cli OK"
