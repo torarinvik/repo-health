@@ -64,6 +64,8 @@ assert "collection page lease is stale, expired, or belongs to another source" i
 assert "fencing_token = p_fencing_token" in clean and "lease_expires_at > p_now" in clean
 assert "input_manifest->>'collection_run_id' = p_run_id::text" in clean
 assert "kind <> 'collection'" in clean and "kind = 'collection'" in clean
+assert "outcome = 'lease_expired'" in clean and "error_kind = 'lease_expired'" in clean
+assert "a.fencing_token < j.fencing_token" in clean
 assert "collection job state and run status are inconsistent" in clean
 assert "collection job attempt was not found for the current fencing token" in clean
 assert "UPDATE job" in clean and "fencing_token = p_fencing_token" in clean

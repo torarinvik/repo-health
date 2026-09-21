@@ -834,10 +834,27 @@ AS $$
         FROM candidate AS c
         WHERE j.id = c.id
         RETURNING j.id, j.fencing_token, j.lease_expires_at, j.attempt_count
+    ), expired AS (
+        UPDATE job_attempt AS a
+        SET finished_at = p_now,
+            outcome = 'lease_expired',
+            error_kind = 'lease_expired'
+        FROM candidate AS c, claimed AS j
+        WHERE a.job_id = c.id
+          AND j.id = c.id
+          AND a.fencing_token < j.fencing_token
+          AND a.finished_at IS NULL
+        RETURNING a.job_id
     ), recorded AS (
         INSERT INTO job_attempt (id, job_id, attempt_number, fencing_token, worker_id, started_at)
-        SELECT md5(id::text || ':' || fencing_token::text)::uuid, id, attempt_count, fencing_token, p_worker_id, p_now
-        FROM claimed
+        SELECT md5(c.id::text || ':' || c.fencing_token::text)::uuid, c.id, c.attempt_count, c.fencing_token, p_worker_id, p_now
+        FROM claimed AS c
+        CROSS JOIN LATERAL (
+            SELECT count(*) AS closed_attempts
+            FROM expired
+            WHERE expired.job_id = c.id
+        ) AS prior_attempts
+        WHERE prior_attempts.closed_attempts >= 0
         RETURNING job_id
     )
     SELECT c.id, c.fencing_token, c.lease_expires_at

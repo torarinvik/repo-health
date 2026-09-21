@@ -173,6 +173,7 @@ DECLARE
   event_page jsonb := '[{"source_object_type":"issue","source_object_id":"issue:7","source_revision":"rev-1","event_kind":"created","subject_id":"00000000-0000-0000-0000-000000000005","actor_account_id":"00000000-0000-0000-0000-000000000007","occurred_at":"2026-01-01T00:00:30Z","observed_at":"2026-01-01T00:03:00Z","time_basis":"event","evidence_id":"00000000-0000-0000-0000-000000000006","parser_version":"fixture/1","payload":{"state":"open"}}]'::jsonb;
   event_subjects jsonb := '[{"id":"00000000-0000-0000-0000-000000000005","entity_kind":"issue","visibility_scope":"public","created_at":"2026-01-01T00:00:00Z"}]'::jsonb;
   event_actors jsonb := '[{"id":"00000000-0000-0000-0000-000000000007","source_native_id":"alice","account_kind":"human","display_name":"Alice Example","raw_identity_evidence_id":null,"visibility_scope":"public"}]'::jsonb;
+  reclaimed record;
 BEGIN
   IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 1, 'scope-events', NULL, '{"page":2}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-01T00:03:00Z') THEN
     RAISE EXCEPTION 'event page was refused';
@@ -232,13 +233,21 @@ BEGIN
       RAISE;
     END IF;
   END;
-  UPDATE job SET fencing_token = 2,
-                 input_manifest = '{"collection_run_id":"00000000-0000-0000-0000-000000000003"}'::jsonb
+  UPDATE job SET input_manifest = '{"collection_run_id":"00000000-0000-0000-0000-000000000003"}'::jsonb
   WHERE id = '00000000-0000-0000-0000-000000000008'::uuid;
-  INSERT INTO job_attempt (id, job_id, attempt_number, fencing_token, worker_id, started_at)
-  VALUES ('00000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-000000000008', 2, 2, 'worker-page-reclaimed', '2026-01-01T00:05:00Z');
+  SELECT * INTO reclaimed FROM rh_claim_next_job('worker-page-reclaimed', '2026-01-03T00:00:00Z', 60);
+  IF reclaimed.job_id <> '00000000-0000-0000-0000-000000000008'::uuid
+     OR reclaimed.fencing_token <> 2
+     OR reclaimed.lease_expires_at <> '2026-01-03T00:01:00Z'::timestamptz THEN
+    RAISE EXCEPTION 'expired collection job was not reclaimed with a new lease: %', reclaimed;
+  END IF;
+  IF (SELECT finished_at FROM job_attempt WHERE job_id = reclaimed.job_id AND fencing_token = 1) <> '2026-01-03T00:00:00Z'::timestamptz
+     OR (SELECT outcome FROM job_attempt WHERE job_id = reclaimed.job_id AND fencing_token = 1) <> 'lease_expired'
+     OR (SELECT error_kind FROM job_attempt WHERE job_id = reclaimed.job_id AND fencing_token = 1) <> 'lease_expired' THEN
+    RAISE EXCEPTION 'reclaim did not close the expired attempt';
+  END IF;
   BEGIN
-    PERFORM rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 1, 'scope-stale', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-01T00:05:30Z');
+    PERFORM rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 1, 'scope-stale', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-03T00:00:30Z');
     RAISE EXCEPTION 'stale page lease advanced a cursor';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('collection page lease is stale' IN SQLERRM) = 0 THEN
@@ -246,7 +255,7 @@ BEGIN
     END IF;
   END;
   BEGIN
-    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-01T00:05:45Z');
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-03T00:00:45Z');
     RAISE EXCEPTION 'stale event-page lease advanced a cursor';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('collection page lease is stale' IN SQLERRM) = 0 THEN
@@ -254,7 +263,7 @@ BEGIN
     END IF;
   END;
   BEGIN
-    PERFORM rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 1, 'scope-expired', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-03T00:00:00Z');
+    PERFORM rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 1, 'scope-expired', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-03T00:02:00Z');
     RAISE EXCEPTION 'an expired page lease advanced a cursor';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('collection page lease is stale' IN SQLERRM) = 0 THEN
@@ -275,32 +284,32 @@ BEGIN
      OR (SELECT actor_account_id FROM canonical_event WHERE source_object_id = 'issue:7') <> '00000000-0000-0000-0000-000000000007'::uuid THEN
     RAISE EXCEPTION 'page actor was not registered and linked exactly once';
   END IF;
-  IF rh_finish_job('00000000-0000-0000-0000-000000000008', 2, 'succeeded', '2026-01-01T00:06:00Z', 'ok', NULL) THEN
+  IF rh_finish_job('00000000-0000-0000-0000-000000000008', 2, 'succeeded', '2026-01-03T00:00:30Z', 'ok', NULL) THEN
     RAISE EXCEPTION 'generic finish bypassed collection run finalization';
   END IF;
-  IF rh_finish_collection_job('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 'succeeded', 'succeeded', 'complete', '{"issues":"observed"}'::jsonb, 'ok', NULL, '2026-01-03T00:00:00Z') THEN
+  IF rh_finish_collection_job('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 'succeeded', 'succeeded', 'complete', '{"issues":"observed"}'::jsonb, 'ok', NULL, '2026-01-03T00:02:00Z') THEN
     RAISE EXCEPTION 'expired collection job finished its run';
   END IF;
   IF (SELECT status FROM collection_run WHERE id = '00000000-0000-0000-0000-000000000003'::uuid) <> 'running'
      OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000008'::uuid) <> 'running'
-     OR (SELECT finished_at FROM job_attempt WHERE id = '00000000-0000-0000-0000-000000000010'::uuid) IS NOT NULL THEN
+     OR (SELECT finished_at FROM job_attempt WHERE job_id = '00000000-0000-0000-0000-000000000008'::uuid AND fencing_token = 2) IS NOT NULL THEN
     RAISE EXCEPTION 'expired collection finish partially changed durable state';
   END IF;
-  IF NOT rh_finish_collection_job('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 'succeeded', 'succeeded', 'complete', '{"issues":"observed"}'::jsonb, 'ok', NULL, '2026-01-01T00:06:00Z') THEN
+  IF NOT rh_finish_collection_job('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 'succeeded', 'succeeded', 'complete', '{"issues":"observed"}'::jsonb, 'ok', NULL, '2026-01-03T00:00:30Z') THEN
     RAISE EXCEPTION 'current collection job failed to finish its run';
   END IF;
-  IF rh_finish_collection_job('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 'succeeded', 'succeeded', 'complete', '{"issues":"observed"}'::jsonb, 'ok', NULL, '2026-01-01T00:06:00Z') THEN
+  IF rh_finish_collection_job('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 'succeeded', 'succeeded', 'complete', '{"issues":"observed"}'::jsonb, 'ok', NULL, '2026-01-03T00:00:30Z') THEN
     RAISE EXCEPTION 'terminal collection run finish was not fenced';
   END IF;
   IF (SELECT status FROM collection_run WHERE id = '00000000-0000-0000-0000-000000000003'::uuid) <> 'succeeded'
      OR (SELECT completeness FROM collection_run WHERE id = '00000000-0000-0000-0000-000000000003'::uuid) <> 'complete'
      OR (SELECT coverage_details FROM collection_run WHERE id = '00000000-0000-0000-0000-000000000003'::uuid) <> '{"issues":"observed"}'::jsonb
      OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000008'::uuid) <> 'succeeded'
-     OR (SELECT finished_at FROM job_attempt WHERE id = '00000000-0000-0000-0000-000000000010'::uuid) <> '2026-01-01T00:06:00Z'::timestamptz THEN
+     OR (SELECT finished_at FROM job_attempt WHERE job_id = '00000000-0000-0000-0000-000000000008'::uuid AND fencing_token = 2) <> '2026-01-03T00:00:30Z'::timestamptz THEN
     RAISE EXCEPTION 'collection and job terminal states did not commit together';
   END IF;
 END $$;
 SQL
 
-echo "[migrations-live] source/run, metadata, stale/expired fencing, atomic run finish, replay, and rollback boundaries OK"
+echo "[migrations-live] source/run, lease-reclaim audit, stale/expired fencing, atomic run finish, and rollback boundaries OK"
 echo "test_migrations_live OK"

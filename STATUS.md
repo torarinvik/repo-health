@@ -47,7 +47,8 @@ through `rh_cli postgres begin_collection_run`; blob distribution and wiring int
 collection run, job, and attempt terminal atomically under the current unexpired
 lease; generic finish cannot bypass collection finalization, and page commits
 require collection jobs; the migration rehearsal verifies expiry rejection and
-replay fencing.
+replay fencing. Reclaiming a PostgreSQL job closes its prior unfinished attempt
+as `lease_expired` before issuing the next token.
 Capability manifests
 (5 connectors), bounded JSON parser, ISO8601, fetch guard + curl transport, GitHub/GitLab/Gitea/Forgejo
 normalizers with goldens, per-capability status mapping, durable
