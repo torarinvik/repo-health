@@ -3,21 +3,38 @@
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="/tmp/rh-staged-github-issues"
-fail() { echo "[staged-github-issues] FAIL: $1" >&2; exit 1; }
+fail() { echo "[staged-github] FAIL: $1" >&2; exit 1; }
 
-echo "[staged-github-issues] build"
+echo "[staged-github] build"
 bash "$ROOT/tools/build.sh" >/dev/null
 [[ -x "$ROOT/build/rh_cli" ]] || fail "rh_cli not built"
 rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/postgres/staged-github-issues-input.json" "$T/input.json"
 cp "$ROOT/fixtures/postgres/staged-github-issues-output.json" "$T/expected.json"
 cp "$ROOT/fixtures/postgres/staged-github-proposals-input.json" "$T/proposals-input.json"
+cp "$ROOT/fixtures/postgres/staged-github-releases-input.json" "$T/releases-input.json"
 
-echo "[staged-github-issues] replay binds the exact stage input and preserves provenance"
+echo "[staged-github] replay binds the exact stage input and preserves provenance"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/input.json" --out "$T/output.json" >/dev/null || fail "valid staged rows"
 python3 - "$T/output.json" "$T/expected.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2])), "result differs from checked-in replay"
+PY
+
+echo "[staged-github] explicit release binding normalizes published releases"
+"$ROOT/build/rh_cli" staged-normalize --input "$T/releases-input.json" --out "$T/releases-output.json" >/dev/null || fail "valid staged releases"
+python3 - "$T/releases-input.json" "$T/releases-output.json" "$ROOT/fixtures/postgres/staged-github-releases-output.json" <<'PY'
+import hashlib, json, sys
+got = json.load(open(sys.argv[2]))
+expected = json.load(open(sys.argv[3]))
+assert got == expected, (got, expected)
+assert got["input_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), got
+assert got["canonical_capability"] == "releases" and got["record_count"] == 1, got
+n = got["normalized"]
+assert n["capabilities"]["releases"]["status"] == "observed" and n["capabilities"]["releases"]["count"] == 1, n
+assert n["events"][0]["kind"] == "releases" and n["events"][0]["native_id"] == "github:501", n["events"]
+assert n["events"][0]["tag"] == "v1.0.0", n["events"]
+assert n["capabilities"]["issues"]["status"] == "not_attempted" and n["capabilities"]["proposals"]["status"] == "not_attempted", n["capabilities"]
 PY
 python3 - "$T/input.json" "$T/output.json" <<'PY'
 import hashlib, json, sys
@@ -39,7 +56,7 @@ PY
 "$ROOT/build/rh_cli" staged-normalize --input "$T/input.json" --out "$T/replay.json" >/dev/null || fail "deterministic replay"
 cmp -s "$T/output.json" "$T/replay.json" || fail "replay changed output bytes"
 
-echo "[staged-github-issues] explicit pull-request binding normalizes proposals"
+echo "[staged-github] explicit pull-request binding normalizes proposals"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/proposals-input.json" --out "$T/proposals-output.json" >/dev/null || fail "valid staged pull requests"
 python3 - "$T/proposals-input.json" "$T/proposals-output.json" "$ROOT/fixtures/postgres/staged-github-proposals-output.json" <<'PY'
 import hashlib, json, sys
@@ -54,7 +71,7 @@ assert n["events"][0]["kind"] == "proposals" and n["events"][0]["native_id"] == 
 assert n["capabilities"]["issues"]["status"] == "not_attempted", n["capabilities"]
 PY
 
-echo "[staged-github-issues] committed empty pages remain observed empty"
+echo "[staged-github] committed empty pages remain observed empty"
 python3 - "$T/input.json" "$T/empty.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -70,7 +87,7 @@ issues = d["normalized"]["capabilities"]["issues"]
 assert issues["status"] == "observed" and issues["count"] == 0 and issues["rejected"] == 0, issues
 PY
 
-echo "[staged-github-issues] uncommitted, partial, misbound, and malformed rows fail closed"
+echo "[staged-github] uncommitted, partial, misbound, and malformed rows fail closed"
 python3 - "$T/input.json" "$T" <<'PY'
 import copy, json, os, sys
 base = json.load(open(sys.argv[1]))
@@ -95,5 +112,6 @@ done
 
 grep -q "rh-postgres-staged-github-issues-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "issue input contract token missing"
 grep -q "rh-postgres-staged-github-proposals-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "proposal input contract token missing"
+grep -q "rh-postgres-staged-github-releases-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "release input contract token missing"
 grep -q "rh-postgres-staged-normalize-result/1" "$ROOT/src/rh_staged_github.elisa" || fail "result contract token missing"
 echo "test_staged_github_cli OK"
