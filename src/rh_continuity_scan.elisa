@@ -7,11 +7,10 @@
 # those formulas consume, so continuity can be published from a real scan
 # bundle.
 #
-# Identity here is a project-local RAW AUTHOR-EMAIL key, assigned by first
-# appearance in the pinned log order. It is NOT a person, NOT a maintainer
-# claim, and NOT merged across sources or by name/domain (M04-02). Raw
-# emails are never emitted in reports: only counts and the pinned log as
-# evidence.
+# Identity here is a project-local author-email key after the repository's
+# `.mailmap`, assigned by first appearance in the pinned log order. The pinned
+# evidence retains raw and mapped author fields. This is not a person or
+# maintainer claim and never merges identities across sources (M04-02).
 #
 # Only events with window_start <= author_time <= now are collected; a
 # future timestamp is flagged by the M01 report and excluded here rather
@@ -25,9 +24,8 @@ include "./rh_continuity.elisa"
 
 module ContinuityScan:
     private:
-        # Locate a raw actor id whose stored email span equals log[s, e); -1 when
-        # new. Linear scan: actor sets in a single repository are small relative to
-        # events, and this keeps assignment deterministic without a sort.
+        # Locate a project-local actor id by the supplied author-email span; -1
+        # when new. Linear scan keeps first-appearance IDs deterministic.
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_cs_find_actor(pool: darray[u8]&, astart: darray[i64]&, aend: darray[i64]&, log: darray[u8]&, s: usize, e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
             while a < astart.count |a: usize = 0, astart, aend, pool, log, s, e|:
@@ -45,7 +43,7 @@ module ContinuityScan:
 
         # Parse in-window commits. Appends one entry per accepted commit to the
         # parallel arrays (actor, month, inst, kind) and returns the accepted
-        # count. n_actors_out receives the distinct raw-actor count. Returns -1 on
+        # count. n_actors_out receives the distinct mailmap-normalized count. Returns -1 on
         # argument misuse.
     public:
         def rh_cs_parse(log: darray[u8]&, window_start: i64, now: i64, actor: mutable darray[i64]&, month: mutable darray[i64]&, inst: mutable darray[i64]&, kind: mutable darray[u8]&, n_actors_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -80,8 +78,23 @@ module ContinuityScan:
                 if f3 < 0 or f3.usize() >= span_end:
                     pos <- span_end + 1
                     continue
+                f4: i64 = Base::rh_find_byte(log, f3.usize() + 1, 1)
+                f5: mutable i64 = -1
+                f6: mutable i64 = -1
+                if f4 >= 0 and f4.usize() < span_end:
+                    f5 <- Base::rh_find_byte(log, f4.usize() + 1, 1)
+                    if f5 >= 0 and f5.usize() < span_end:
+                        f6 <- Base::rh_find_byte(log, f5.usize() + 1, 1)
+                        if f6 < 0 or f6.usize() >= span_end:
+                            pos <- span_end + 1
+                            continue
                 ae_s: usize = f1.usize() + 1
                 ae_e: usize = f2.usize()
+                actor_email_s: mutable usize = ae_s
+                actor_email_e: mutable usize = ae_e
+                if f6 >= 0 and f6.usize() + 1 < span_end:
+                    actor_email_s <- f6.usize() + 1
+                    actor_email_e <- span_end
                 at_s: usize = f2.usize() + 1
                 at_e: usize = f3.usize()
                 at_ok: mutable i64 = 0
@@ -92,11 +105,11 @@ module ContinuityScan:
                 if at < window_start or at > now:
                     pos <- span_end + 1
                     continue
-                aid: mutable i64 = rh_cs_find_actor(pool, astart, aend, log, ae_s, ae_e)
+                aid: mutable i64 = rh_cs_find_actor(pool, astart, aend, log, actor_email_s, actor_email_e)
                 if aid < 0:
                     aid <- n
                     astart.push(pool.count.i64())
-                    while kk < ae_e |kk: usize = ae_s, log, ae_e, pool|:
+                    while kk < actor_email_e |kk: usize = actor_email_s, log, actor_email_e, pool|:
                         pool.push(log[kk])
                         kk <- kk + 1
                     aend.push(pool.count.i64())

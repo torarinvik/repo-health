@@ -1,11 +1,12 @@
 # rh_scan.elisa — log parsing + metric computation over a pinned snapshot
 # (M01-04/05/06).
 #
-# Input: raw bytes of `git log --all --no-decorate
-# --format=%H%x01%an%x01%ae%x01%at%x01%ct%x01%P%x00` captured to a file
+# Input: raw bytes of `git log --all --no-decorate --mailmap
+# --format=%H%x01%an%x01%ae%x01%at%x01%ct%x01%P%x01%aN%x01%aE%x00` captured to a file
 # (the evidence bundle retains this exact file; replay re-parses it).
 # Records are NUL-terminated; fields are \x01-separated:
-#   hash, author name, author email, author time, committer time, parents.
+#   hash, raw author name/email, author time, committer time, parents,
+#   project-mailmapped author name/email. Older six-field evidence remains valid.
 # Timestamps are decimal Unix seconds parsed with overflow checks
 # (Base::rh_parse_i64); any malformed record is counted as rejected and skipped —
 # a parse failure is never silently coerced into a zero timestamp (S006).
@@ -129,6 +130,14 @@ module Scan:
                     snap.rejected <- snap.rejected + 1
                     pos <- span_end + 1
                     continue
+                f5: i64 = Base::rh_find_byte(log, f4.usize() + 1, 1)
+                f6: mutable i64 = -1
+                if f5 >= 0 and f5.usize() < span_end:
+                    f6 <- Base::rh_find_byte(log, f5.usize() + 1, 1)
+                    if f6 < 0 or f6.usize() >= span_end:
+                        snap.rejected <- snap.rejected + 1
+                        pos <- span_end + 1
+                        continue
                 hash_start: usize = pos
                 hash_end: usize = f0.usize()
                 ae_start: usize = f1.usize() + 1
@@ -138,7 +147,10 @@ module Scan:
                 ct_start: usize = f3.usize() + 1
                 ct_end: usize = f4.usize()
                 par_start: usize = f4.usize() + 1
-                par_end: usize = span_end
+                par_end: usize = f5.usize() if f5 >= 0 and f5.usize() < span_end else span_end
+                mapped_name_start: usize = f5.usize() + 1 if f5 >= 0 and f5.usize() < span_end else span_end
+                mapped_name_end: usize = f6.usize() if f6 >= 0 else span_end
+                mapped_email_start: usize = f6.usize() + 1 if f6 >= 0 else span_end
                 at_ok: mutable i64 = 0
                 at: i64 = Base::rh_parse_i64(log, at_start, at_end, &at_ok)
                 ct_ok: mutable i64 = 0
@@ -154,6 +166,9 @@ module Scan:
                 snap.digest <- Evidence::rh_fnv_i64(snap.digest, at)
                 snap.digest <- Evidence::rh_fnv_i64(snap.digest, ct)
                 snap.digest <- rh_digest_span(snap.digest, log, ae_start, ae_end)
+                if f6 >= 0:
+                    snap.digest <- rh_digest_span(snap.digest, log, mapped_name_start, mapped_name_end)
+                    snap.digest <- rh_digest_span(snap.digest, log, mapped_email_start, span_end)
                 parents: mutable i64 = 0
                 if par_end > par_start:
                     spaces: i64 =

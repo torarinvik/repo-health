@@ -55,6 +55,47 @@ if grep -q '"first_month_index":0' "$CJ"; then
   fail "first_month_index must be a real calendar month index, not 0"
 fi
 
+echo "[continuity] project-local mailmap aliases merge only continuity actors"
+mkdir -p "$T/mailmap-src" "$T/mailmap-external"
+cat > "$T/mailmap-external/map" <<'EOF'
+External Person <external@example.test> Raw Two <raw-two@example.test>
+EOF
+git init -q -b main "$T/mailmap-src"
+(
+  cd "$T/mailmap-src"
+  git config user.name "Setup"
+  git config user.email "setup@example.test"
+  git config mailmap.file "$T/mailmap-external/map"
+  cat > .mailmap <<'EOF'
+Canonical Person <canonical@example.test> Raw One <raw-one@example.test>
+Canonical Person <canonical@example.test> Raw Two <raw-two@example.test>
+EOF
+  printf 'one\n' > one
+  git add .mailmap one
+  GIT_AUTHOR_NAME="Raw One" GIT_AUTHOR_EMAIL="raw-one@example.test" GIT_COMMITTER_NAME="Raw One" GIT_COMMITTER_EMAIL="raw-one@example.test" \
+    GIT_AUTHOR_DATE="@$(ago 400) +0000" GIT_COMMITTER_DATE="@$(ago 400) +0000" git commit -qm "first alias"
+  printf 'two\n' > two
+  git add two
+  GIT_AUTHOR_NAME="Raw Two" GIT_AUTHOR_EMAIL="raw-two@example.test" GIT_COMMITTER_NAME="Raw Two" GIT_COMMITTER_EMAIL="raw-two@example.test" \
+    GIT_AUTHOR_DATE="@$(ago 300) +0000" GIT_COMMITTER_DATE="@$(ago 300) +0000" git commit -qm "second alias"
+)
+"$ROOT/build/rh_cli" scan --repo "$T/mailmap-src" --out "$T/mailmap" --full-history >/dev/null || fail "mailmap scan"
+"$ROOT/build/rh_cli" continuity --bundle "$T/mailmap/bundle.manifest" --out "$T/mailmap-cont" >/dev/null || fail "mailmap continuity"
+python3 - "$T/mailmap/report.json" "$T/mailmap/evidence/git-log.bin" "$T/mailmap-cont/continuity.json" "$T/mailmap-cont/continuity-metrics.json" <<'PY'
+import json, sys
+m01 = json.load(open(sys.argv[1]))
+metrics = {m["key"]: m for m in m01["metrics"]}
+assert metrics["contributors.raw_identity_count"]["value"] == 2, metrics["contributors.raw_identity_count"]
+log = open(sys.argv[2], "rb").read()
+assert b"raw-one@example.test" in log and b"raw-two@example.test" in log, log
+assert log.count(b"canonical@example.test") == 2, log
+continuity = json.load(open(sys.argv[3]))
+assert continuity["actors_total"] == 1 and continuity["actor_identity_basis"] == "project-mailmap-author-email", continuity
+assert not any(secret in open(sys.argv[3]).read() for secret in ("raw-one@example.test", "raw-two@example.test", "canonical@example.test"))
+assert not any(secret in open(sys.argv[4]).read() for secret in ("raw-one@example.test", "raw-two@example.test", "canonical@example.test"))
+print("[continuity] raw identities retained; only project .mailmap merges local actors")
+PY
+
 echo "[continuity] concentration metrics are published with exact values"
 python3 - "$CM" <<'PY'
 import json, sys
