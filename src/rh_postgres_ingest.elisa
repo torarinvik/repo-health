@@ -360,10 +360,13 @@ module PostgresIngest:
             return -1 if requested_start_end > requested_start and requested_end_end > requested_end and requested_start_epoch > requested_end_epoch
             return -1 if source_created_epoch > started_epoch or started_epoch > claim_epoch or created_epoch > claim_epoch or next_attempt_epoch > claim_epoch
             return -1 if finish_epoch <= claim_epoch
-            return -1 if not PostgresIngest::rh_pi_eq(texts, job_state_start, job_state_end, "succeeded")
-            return -1 if not PostgresIngest::rh_pi_eq(texts, run_status_start, run_status_end, "succeeded")
-            return -1 if not PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "complete") and not PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "empty")
-            return -1 if not PostgresIngest::rh_pi_eq(texts, error_start, error_end, "")
+            partial_run: bool = PostgresIngest::rh_pi_eq(texts, run_status_start, run_status_end, "partial")
+            terminal_state_valid: bool =
+                if partial_run:
+                    PostgresIngest::rh_pi_eq(texts, job_state_start, job_state_end, "succeeded") and (PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "partial") or PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "unknown"))
+                else:
+                    PostgresIngest::rh_pi_eq(texts, job_state_start, job_state_end, "succeeded") and PostgresIngest::rh_pi_eq(texts, run_status_start, run_status_end, "succeeded") and (PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "complete") or PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "empty")) and PostgresIngest::rh_pi_eq(texts, error_start, error_end, "")
+            return -1 if not terminal_state_valid
 
             configuration_revision: mutable i64 = 0
             return -1 if not PostgresIngest::rh_pi_int(nodes, raw, texts, root, "configuration_revision", 1, 9223372036854775807, &configuration_revision)
@@ -382,7 +385,7 @@ module PostgresIngest:
                 return -1 if nodes[evidence_objects_index.usize()].kind != Json::RH_JSON_ARR or nodes[evidence_objects_index.usize()].child_count > RH_PI_MAX_PAGES
                 return -1 if nodes[evidence_objects_index.usize()].child_count > 0 and Base::rh_cstr_len_c(evidence_root) == 0
             pages_index: i64 = PostgresIngest::rh_pi_get(nodes, texts, root, "pages")
-            return -1 if pages_index < 0 or nodes[pages_index.usize()].kind != Json::RH_JSON_ARR or nodes[pages_index.usize()].child_count == 0 or nodes[pages_index.usize()].child_count > RH_PI_MAX_PAGES
+            return -1 if pages_index < 0 or nodes[pages_index.usize()].kind != Json::RH_JSON_ARR or nodes[pages_index.usize()].child_count > RH_PI_MAX_PAGES or (nodes[pages_index.usize()].child_count == 0 and not partial_run)
             expected_page: mutable i64 = 0
             complete_pages: mutable i64 = 0
             previous_page_commit: mutable i64 = claim_epoch
@@ -445,7 +448,7 @@ module PostgresIngest:
                 complete_pages <- complete_pages + 1 if PostgresIngest::rh_pi_eq(texts, completeness_start, completeness_end, "complete")
                 expected_page <- expected_page + 1
                 page <- nodes[page.usize()].next_sibling
-            return -1 if (complete_pages == 0 and not PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "empty")) or (complete_pages > 0 and not PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "complete"))
+            return -1 if not partial_run and ((complete_pages == 0 and not PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "empty")) or (complete_pages > 0 and not PostgresIngest::rh_pi_eq(texts, run_completeness_start, run_completeness_end, "complete")))
 
             if evidence_objects_index >= 0 and nodes[evidence_objects_index.usize()].child_count > 0:
                 return -1 if PostgresReport::rh_postgres_register_ingest_evidence(raw, conninfo, evidence_root) != 0
@@ -512,7 +515,9 @@ module PostgresIngest:
                 Base::rh_push_text(out, ",\"fencing_token\":0,\"pages\":[],\"lease_expires_at\":\"\"}")
                 return 0
 
-            Base::rh_push_text(out, "{\"schema\":\"rh-postgres-ingest-result/1\",\"operation\":\"ingest\",\"status\":\"succeeded\",\"source_id\":")
+            Base::rh_push_text(out, "{\"schema\":\"rh-postgres-ingest-result/1\",\"operation\":\"ingest\",\"status\":")
+            PostgresIngest::rh_pi_emit_span(out, texts, run_status_start, run_status_end)
+            Base::rh_push_text(out, ",\"source_id\":")
             PostgresIngest::rh_pi_emit_span(out, texts, source_start, source_end)
             Base::rh_push_text(out, ",\"run_id\":")
             PostgresIngest::rh_pi_emit_span(out, texts, run_start, run_end)

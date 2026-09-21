@@ -123,7 +123,12 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "00000000-0000-0000-0000-000000000020", "00000000-0000-0000-0000-000000000021", "1",
         "succeeded", "succeeded", "complete", "{\"issues\":\"observed\"}", "ok", "", "2026-09-21T00:03:30Z"
     };
+    static const char *ingest_partial_finish_values[10] = {
+        "00000000-0000-0000-0000-000000000020", "00000000-0000-0000-0000-000000000021", "1",
+        "succeeded", "partial", "partial", "{\"issues\":\"partial\",\"reason\":\"rate_limit\"}", "partial", "rate_limit", "2026-09-21T00:03:30Z"
+    };
     const char *operation = getenv("RH_FAKE_PG_OPERATION");
+    const char *mode = getenv("RH_FAKE_PG_EXPECT");
     const char **expected = page_values;
     const char *prefix = "SELECT public.rh_commit_collection_page(";
     int expected_count = 11;
@@ -191,7 +196,7 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             expected_count = 14;
             prefix = "SELECT public.rh_commit_collection_page_events(";
         } else if (query != NULL && strncmp(query, "SELECT public.rh_finish_collection_job(", strlen("SELECT public.rh_finish_collection_job(")) == 0) {
-            expected = ingest_finish_values;
+            expected = mode != NULL && strcmp(mode, "partial") == 0 ? ingest_partial_finish_values : ingest_finish_values;
             expected_count = 10;
             prefix = "SELECT public.rh_finish_collection_job(";
         }
@@ -208,7 +213,6 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
                 fprintf(stderr, "fake libpq ingest parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
             return NULL;
         }
-    const char *mode = getenv("RH_FAKE_PG_EXPECT");
     if (claim_query || (operation != NULL && (strcmp(operation, "claim") == 0 || strcmp(operation, "claim_collection") == 0))) {
         result.columns = 3;
         result.rows = mode != NULL && strcmp(mode, "duplicate") == 0 ? 0 : 1;
