@@ -15,6 +15,7 @@ cp "$ROOT/fixtures/connectors/forge-events-gitlab-input.json" "$T/gitlab.json"
 cp "$ROOT/fixtures/connectors/forge-events-forgejo-input.json" "$T/forgejo.json"
 cp "$ROOT/fixtures/connectors/forge-events-gitea-input.json" "$T/gitea.json"
 cp "$ROOT/fixtures/connectors/forge-events-bitbucket-input.json" "$T/bitbucket.json"
+cp "$ROOT/fixtures/connectors/forge-events-repository-reviews-input.json" "$T/repository-reviews-input.json"
 cp "$ROOT/fixtures/connectors/forge-events-result.json" "$T/expected.json"
 
 echo "[forge-events] valid capture reproduces the checked-in result"
@@ -27,6 +28,18 @@ assert got == expected, (got, expected)
 assert all(e["native_id"].startswith("github:") for e in got["events"])
 assert all("title" not in e and "body" not in e for e in got["events"])
 print("[forge-events] result and provider-native boundary OK")
+PY
+
+echo "[forge-events] repository-grouped reviews retain pull-request identity and cursors"
+"$ROOT/build/rh_cli" forge events --input "$T/repository-reviews-input.json" --out "$T/repository-grouped.out" >/dev/null || fail "grouped repository review capture"
+python3 - "$T/repository-grouped.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["scope"] == {"repository":"example/project"}, d
+assert d["capabilities"]["reviews"]["status"] == "observed" and d["capabilities"]["reviews"]["count"] == 1, d["capabilities"]
+assert d["events"][0]["native_id"] == "github:55" and d["events"][0]["pull_request"] == 7, d["events"]
+assert d["review_collection"]["complete"] is True, d["review_collection"]
+print("[forge-events] grouped review capture normalized with scope and continuation state")
 PY
 
 echo "[forge-events] additive provider fields survive schema evolution"
@@ -212,6 +225,23 @@ set -e
 [[ "$rc_records" -eq 4 ]] || fail "record attempt cap must fail closed (got $rc_records)"
 [[ ! -e "$T/over-limit.out" ]] || fail "over-limit capture wrote partial output"
 
+python3 - "$T/repository-reviews-input.json" "$T/duplicate-review-groups.json" "$T/over-limit-review-groups.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["reviews_by_pull"] = [{"pull_number":7,"reviews":[]}, {"pull_number":7,"reviews":[]}]
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+d["reviews_by_pull"] = [{"pull_number":n,"reviews":[]} for n in range(1, 12)]
+json.dump(d, open(sys.argv[3], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+set +e
+"$ROOT/build/rh_cli" forge events --input "$T/duplicate-review-groups.json" --out "$T/duplicate-review-groups.out" >/dev/null 2>&1
+rc_duplicate_review_groups=$?
+"$ROOT/build/rh_cli" forge events --input "$T/over-limit-review-groups.json" --out "$T/over-limit-review-groups.out" >/dev/null 2>&1
+rc_review_groups=$?
+set -e
+[[ "$rc_duplicate_review_groups" -eq 4 && "$rc_review_groups" -eq 4 ]] || fail "duplicate or over-limit pull groups were accepted"
+[[ ! -e "$T/duplicate-review-groups.out" && ! -e "$T/over-limit-review-groups.out" ]] || fail "invalid review groups wrote output"
+
 echo "[forge-events] malformed envelopes fail closed"
 set +e
 printf '%s\n' '{"schema":"rh-forge-events-input/1","provider":"github","captured_at":1,"issues":{}}' > "$T/wrong-array-shape.json"
@@ -242,7 +272,7 @@ PY
 
 echo "[forge-events] bounded live GitHub issue, pull-request, and release pages retain safe evidence"
 mkdir -p "$T/bin"
-python3 - "$T/live-page-1.json" "$T/live-empty.json" "$T/live-full-page.json" "$T/live-issues-page-1.json" "$T/live-issues-full-page.json" "$T/live-releases-page-1.json" "$T/live-releases-full-page.json" "$T/live-reviews-page-1.json" <<'PY'
+python3 - "$T/live-page-1.json" "$T/live-empty.json" "$T/live-full-page.json" "$T/live-issues-page-1.json" "$T/live-issues-full-page.json" "$T/live-releases-page-1.json" "$T/live-releases-full-page.json" "$T/live-reviews-page-1.json" "$T/repo-pulls-page-1.json" "$T/repo-pulls-page-2.json" "$T/repo-reviews-7-page-1.json" "$T/repo-reviews-7-page-2.json" "$T/repo-reviews-8-page-1.json" "$T/repo-reviews-9-page-1.json" <<'PY'
 import json, sys
 pull = {"number": 7, "state": "closed", "created_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "closed_at": "2023-11-16T22:13:20Z", "html_url": "https://github.com/example/project/pull/7"}
 issue = {"number": 301, "state": "open", "created_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "closed_at": None, "html_url": "https://github.com/example/project/issues/301"}
@@ -260,6 +290,13 @@ release_rows.insert(0, dict(release, id=999, tag_name="draft", published_at=None
 json.dump(release_rows, open(sys.argv[7], "w", encoding="utf-8"), separators=(",", ":"))
 review = {"id": 55, "state": "APPROVED", "submitted_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "html_url": "https://github.com/example/project/pull/7#pullrequestreview-55"}
 json.dump([review], open(sys.argv[8], "w", encoding="utf-8"), separators=(",", ":"))
+json.dump([dict(pull, number=n, html_url=f"https://github.com/example/project/pull/{n}") for n in (7, 8)], open(sys.argv[9], "w", encoding="utf-8"), separators=(",", ":"))
+json.dump([dict(pull, number=9, html_url="https://github.com/example/project/pull/9")], open(sys.argv[10], "w", encoding="utf-8"), separators=(",", ":"))
+repo_review = {"state":"COMMENTED", "submitted_at":"2023-11-14T22:13:20Z", "updated_at":"2023-11-15T22:13:20Z"}
+json.dump([dict(repo_review, id=n, html_url=f"https://github.com/example/project/pull/7#pullrequestreview-{n}") for n in range(1, 101)], open(sys.argv[11], "w", encoding="utf-8"), separators=(",", ":"))
+json.dump([dict(repo_review, id=101, html_url="https://github.com/example/project/pull/7#pullrequestreview-101")], open(sys.argv[12], "w", encoding="utf-8"), separators=(",", ":"))
+json.dump([dict(repo_review, id=201, html_url="https://github.com/example/project/pull/8#pullrequestreview-201")], open(sys.argv[13], "w", encoding="utf-8"), separators=(",", ":"))
+json.dump([dict(repo_review, id=301, html_url="https://github.com/example/project/pull/9#pullrequestreview-301")], open(sys.argv[14], "w", encoding="utf-8"), separators=(",", ":"))
 PY
 cat > "$T/bin/python3" <<'SH'
 #!/usr/bin/env bash
@@ -281,7 +318,17 @@ while (($#)); do
 done
 [[ -n "$body_out" && -n "$url" ]]
 if [[ "$config_stdin" == "1" ]]; then cat > "$RH_CURL_CONFIG_LOG"; fi
-if [[ "$url" == *"/issues?"* ]]; then
+if [[ "$url" == *"/pulls/7/reviews?"* && -n "${RH_CURL_REPO_REVIEW_7_PAGE1:-}" ]]; then
+  body="$RH_CURL_REPO_REVIEW_7_PAGE1"
+  [[ "$url" != *'page=2' ]] || body="$RH_CURL_REPO_REVIEW_7_PAGE2"
+elif [[ "$url" == *"/pulls/8/reviews?"* && -n "${RH_CURL_REPO_REVIEW_8_PAGE1:-}" ]]; then
+  body="$RH_CURL_REPO_REVIEW_8_PAGE1"
+elif [[ "$url" == *"/pulls/9/reviews?"* && -n "${RH_CURL_REPO_REVIEW_9_PAGE1:-}" ]]; then
+  body="$RH_CURL_REPO_REVIEW_9_PAGE1"
+elif [[ "$url" == *"/pulls?state=all&sort=updated&direction=desc&per_page="* && "$url" != *"per_page=100"* ]]; then
+  body="$RH_CURL_REPO_PULLS_PAGE1"
+  [[ "$url" != *'page=2' ]] || body="$RH_CURL_REPO_PULLS_PAGE2"
+elif [[ "$url" == *"/issues?"* ]]; then
   body="$RH_CURL_ISSUES_PAGE1"
   [[ "$url" != *'page=2' ]] || body="$RH_CURL_PAGE2"
 elif [[ "$url" == *"/reviews?"* ]]; then
@@ -439,6 +486,86 @@ assert "page=3" in open(t / "review-page-3-curl.args").read(), open(t / "review-
 print("[forge-events] review cursor continuation terminates on a short page")
 PY
 
+echo "[forge-events] repository review batches resume pull and review cursors"
+rm -f "$T/repo-reviews-1.out" "$T/repo-reviews-1.out.github-"* "$T/repo-reviews-1-curl.args" "$T/repo-reviews-1-curl.config"
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_repo_review_fixture" \
+  RH_CURL_REPO_PULLS_PAGE1="$T/repo-pulls-page-1.json" RH_CURL_REPO_PULLS_PAGE2="$T/repo-pulls-page-2.json" \
+  RH_CURL_REPO_REVIEW_7_PAGE1="$T/repo-reviews-7-page-1.json" RH_CURL_REPO_REVIEW_7_PAGE2="$T/repo-reviews-7-page-2.json" \
+  RH_CURL_REPO_REVIEW_8_PAGE1="$T/repo-reviews-8-page-1.json" RH_CURL_REPO_REVIEW_9_PAGE1="$T/repo-reviews-9-page-1.json" \
+  RH_CURL_LOG="$T/repo-reviews-1-curl.args" RH_CURL_CONFIG_LOG="$T/repo-reviews-1-curl.config" \
+  "$ROOT/build/rh_cli" forge events --github-repo example/project --review-repository --max-pulls 2 --max-pages 1 --out "$T/repo-reviews-1.out" >/dev/null || fail "repository review first batch"
+python3 - "$T/repo-reviews-1.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+state = d["review_collection"]
+assert d["scope"] == {"repository":"example/project"}, d
+assert d["authorization"]["state"] == "authorized", d["authorization"]
+assert d["capabilities"]["reviews"]["count"] == 101, d["capabilities"]
+assert len(d["events"]) == 101, len(d["events"])
+assert {event["pull_request"] for event in d["events"]} == {7, 8}, d["events"][:2]
+assert state == {"pending_pull_requests":[{"number":7,"next_review_page":2}], "next_pull_page":2, "pulls_complete":False, "complete":False}, state
+assert d["pagination"]["reviews"] == {"next":None,"complete":False}, d["pagination"]
+assert (t / "repo-reviews-1.out.github-review-pulls-page-1.url").read_text().strip().endswith("pulls?state=all&sort=updated&direction=desc&per_page=2&page=1")
+assert (t / "repo-reviews-1.out.github-reviews-pr-7-page-1.url").read_text().strip().endswith("/pulls/7/reviews?per_page=100&page=1")
+assert (t / "repo-reviews-1.out.github-reviews-pr-8-page-1.url").read_text().strip().endswith("/pulls/8/reviews?per_page=100&page=1")
+assert "ghp_repo_review_fixture" not in open(sys.argv[1]).read()
+print("[forge-events] repository batch normalizes events and retains both continuation cursors")
+PY
+grep -Fxq 'header = "Authorization: Bearer ghp_repo_review_fixture"' "$T/repo-reviews-1-curl.config" || fail "repository review token header absent from curl stdin config"
+! grep -Fq 'ghp_repo_review_fixture' "$T/repo-reviews-1-curl.args" || fail "repository review token leaked into curl arguments"
+for evidence in "$T"/repo-reviews-1.out.github-*; do
+  [[ ! -f "$evidence" ]] || ! grep -Fq 'ghp_repo_review_fixture' "$evidence" || fail "repository review token leaked into evidence"
+done
+
+rm -f "$T/repo-reviews-2.out" "$T/repo-reviews-2.out.github-"* "$T/repo-reviews-2-curl.args"
+PATH="$T/bin:$PATH" RH_CURL_REPO_PULLS_PAGE1="$T/repo-pulls-page-1.json" RH_CURL_REPO_PULLS_PAGE2="$T/repo-pulls-page-2.json" \
+  RH_CURL_REPO_REVIEW_7_PAGE1="$T/repo-reviews-7-page-1.json" RH_CURL_REPO_REVIEW_7_PAGE2="$T/repo-reviews-7-page-2.json" \
+  RH_CURL_REPO_REVIEW_8_PAGE1="$T/repo-reviews-8-page-1.json" RH_CURL_REPO_REVIEW_9_PAGE1="$T/repo-reviews-9-page-1.json" \
+  RH_CURL_LOG="$T/repo-reviews-2-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --github-repo example/project --review-repository --max-pulls 2 --max-pages 1 --resume-from "$T/repo-reviews-1.out" --out "$T/repo-reviews-2.out" >/dev/null || fail "repository review cursor resume"
+python3 - "$T/repo-reviews-2.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["review_collection"] == {"pending_pull_requests":[], "next_pull_page":2, "pulls_complete":False, "complete":False}, d["review_collection"]
+assert len(d["events"]) == 1 and d["events"][0]["native_id"] == "github:101" and d["events"][0]["pull_request"] == 7, d["events"]
+assert (t / "repo-reviews-2.out.github-reviews-pr-7-page-2.url").read_text().strip().endswith("/pulls/7/reviews?per_page=100&page=2")
+assert "/pulls?state=all" not in open(t / "repo-reviews-2-curl.args").read(), open(t / "repo-reviews-2-curl.args").read()
+print("[forge-events] pending review page resumes before the next pull-list page")
+PY
+
+rm -f "$T/repo-reviews-3.out" "$T/repo-reviews-3.out.github-"* "$T/repo-reviews-3-curl.args"
+PATH="$T/bin:$PATH" RH_CURL_REPO_PULLS_PAGE1="$T/repo-pulls-page-1.json" RH_CURL_REPO_PULLS_PAGE2="$T/repo-pulls-page-2.json" \
+  RH_CURL_REPO_REVIEW_7_PAGE1="$T/repo-reviews-7-page-1.json" RH_CURL_REPO_REVIEW_7_PAGE2="$T/repo-reviews-7-page-2.json" \
+  RH_CURL_REPO_REVIEW_8_PAGE1="$T/repo-reviews-8-page-1.json" RH_CURL_REPO_REVIEW_9_PAGE1="$T/repo-reviews-9-page-1.json" \
+  RH_CURL_LOG="$T/repo-reviews-3-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --github-repo example/project --review-repository --max-pulls 2 --max-pages 1 --resume-from "$T/repo-reviews-2.out" --out "$T/repo-reviews-3.out" >/dev/null || fail "repository pull-list cursor resume"
+python3 - "$T/repo-reviews-3.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["review_collection"] == {"pending_pull_requests":[], "next_pull_page":None, "pulls_complete":True, "complete":True}, d["review_collection"]
+assert len(d["events"]) == 1 and d["events"][0]["native_id"] == "github:301" and d["events"][0]["pull_request"] == 9, d["events"]
+assert (t / "repo-reviews-3.out.github-review-pulls-page-2.url").read_text().strip().endswith("pulls?state=all&sort=updated&direction=desc&per_page=2&page=2")
+assert (t / "repo-reviews-3.out.github-reviews-pr-9-page-1.url").read_text().strip().endswith("/pulls/9/reviews?per_page=100&page=1")
+assert "per_page=2&page=1" not in open(t / "repo-reviews-3-curl.args").read(), open(t / "repo-reviews-3-curl.args").read()
+print("[forge-events] pull-list cursor resumes and completes on a short page")
+PY
+
+rm -f "$T/repo-reviews-empty.out" "$T/repo-reviews-empty.out.github-"* "$T/repo-reviews-empty-curl.args"
+PATH="$T/bin:$PATH" RH_CURL_REPO_PULLS_PAGE1="$T/live-empty.json" RH_CURL_REPO_PULLS_PAGE2="$T/live-empty.json" \
+  RH_CURL_LOG="$T/repo-reviews-empty-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --github-repo example/project --review-repository --max-pulls 2 --max-pages 1 --out "$T/repo-reviews-empty.out" >/dev/null || fail "empty repository review collection"
+python3 - "$T/repo-reviews-empty.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["reviews"] == {"status":"observed","attempted":0,"normalized":0,"duplicate_replacements":0,"count":0,"rejected":0}, d["capabilities"]
+assert d["review_collection"] == {"pending_pull_requests":[],"next_pull_page":None,"pulls_complete":True,"complete":True}, d["review_collection"]
+assert d["events"] == [], d["events"]
+print("[forge-events] successful empty repository review scan is observed and complete")
+PY
+
 set +e
 PATH="$T/bin:$PATH" RH_CURL_LOG="$T/invalid-route-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
   "$ROOT/build/rh_cli" forge events --github-repo 'example/../project' --out "$T/invalid-route.out" >/dev/null 2>&1
@@ -447,8 +574,15 @@ rc_route=$?
 rc_pages=$?
 "$ROOT/build/rh_cli" forge events --github-repo example/project --review-page 2 --out "$T/invalid-review-page.out" >/dev/null 2>&1
 rc_review_page=$?
+"$ROOT/build/rh_cli" forge events --github-repo example/project --max-pulls 2 --out "$T/invalid-max-pulls.out" >/dev/null 2>&1
+rc_max_pulls_mode=$?
+"$ROOT/build/rh_cli" forge events --github-repo example/project --review-repository --max-pulls 11 --out "$T/invalid-max-pulls-limit.out" >/dev/null 2>&1
+rc_max_pulls_limit=$?
+"$ROOT/build/rh_cli" forge events --github-repo other/project --review-repository --max-pulls 2 --max-pages 1 --resume-from "$T/repo-reviews-2.out" --out "$T/invalid-resume-scope.out" >/dev/null 2>&1
+rc_resume_scope=$?
 set -e
-[[ "$rc_route" -eq 4 && "$rc_pages" -eq 2 && "$rc_review_page" -eq 2 ]] || fail "unsafe repo or page bound was accepted (route=$rc_route pages=$rc_pages review-page=$rc_review_page)"
+[[ "$rc_route" -eq 4 && "$rc_pages" -eq 2 && "$rc_review_page" -eq 2 && "$rc_max_pulls_mode" -eq 2 && "$rc_max_pulls_limit" -eq 2 && "$rc_resume_scope" -eq 4 ]] || fail "unsafe repo, page, pull bound, or resume scope was accepted (route=$rc_route pages=$rc_pages review-page=$rc_review_page max-pulls-mode=$rc_max_pulls_mode max-pulls-limit=$rc_max_pulls_limit resume-scope=$rc_resume_scope)"
 [[ ! -e "$T/invalid-route-curl.args" && ! -e "$T/invalid-route.out" ]] || fail "invalid repository reached transport or wrote a result"
+[[ ! -e "$T/invalid-resume-scope.out" ]] || fail "cross-repository continuation wrote a result"
 
 echo "test_forge_events_cli OK"

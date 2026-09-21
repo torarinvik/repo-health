@@ -35,6 +35,8 @@ module ForgeEvents:
             tag_s: mutable i64
             tag_e: mutable i64
             has_tag: mutable bool
+            pull_request: mutable i64
+            has_pull_request: mutable bool
 
         struct RhForgeCapabilityCounts:
             attempted: mutable i64
@@ -43,6 +45,10 @@ module ForgeEvents:
             rejected: mutable i64
             present: mutable bool
             not_attempted: mutable bool
+
+        struct RhForgeReviewCursor:
+            pull_number: mutable i64
+            next_review_page: mutable i64
 
         def rh_fe_eq(texts: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, literal)
@@ -152,15 +158,14 @@ module ForgeEvents:
             return "state" if kind < 3
             "status"
 
-        def rh_fe_existing(events: darray[RhForgeEvent]&, kind: u8, native_id: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_fe_existing(events: darray[RhForgeEvent]&, kind: u8, native_id: i64, pull_request: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             while i < events.count.i64() |i: i64 = 0, events, kind, native_id|:
                 event: RhForgeEvent = events[i.usize()]
-                return i if event.kind == kind and event.native_id == native_id
+                return i if event.kind == kind and event.native_id == native_id and event.pull_request == pull_request
                 i <- i + 1
             -1
 
-        def rh_fe_add_array(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, key: u8&, kind: u8, githubish: bool, bitbucket: bool, events: mutable darray[RhForgeEvent]&, counts: mutable RhForgeCapabilityCounts&, total_attempts: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            counts.present <- false
+        def rh_fe_add_array(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, key: u8&, kind: u8, githubish: bool, bitbucket: bool, pull_request: i64, events: mutable darray[RhForgeEvent]&, counts: mutable RhForgeCapabilityCounts&, total_attempts: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             arr: i64 = Json::rh_json_obj_get(nodes, texts, root, key)
             return 0 if arr < 0
             return -1 if nodes[arr.usize()].kind != Json::RH_JSON_ARR
@@ -270,9 +275,9 @@ module ForgeEvents:
                             counts.rejected <- counts.rejected + 1
                             child <- nodes[child.usize()].next_sibling
                             continue
-                normalized: RhForgeEvent = RhForgeEvent{kind: kind, native_id: native_id, status_s: status_s, status_e: status_e, has_status: status_ok == 1, created_at: created_at, has_created_at: true, updated_at: updated_at, has_updated_at: updated_ok == 1, closed_at: closed_at, has_closed_at: closed_ok == 1, url_s: url_s, url_e: url_e, has_url: url_ok == 1, tag_s: tag_s, tag_e: tag_e, has_tag: tag_ok == 1}
+                normalized: RhForgeEvent = RhForgeEvent{kind: kind, native_id: native_id, status_s: status_s, status_e: status_e, has_status: status_ok == 1, created_at: created_at, has_created_at: true, updated_at: updated_at, has_updated_at: updated_ok == 1, closed_at: closed_at, has_closed_at: closed_ok == 1, url_s: url_s, url_e: url_e, has_url: url_ok == 1, tag_s: tag_s, tag_e: tag_e, has_tag: tag_ok == 1, pull_request: pull_request, has_pull_request: pull_request > 0}
                 counts.normalized <- counts.normalized + 1
-                existing: i64 = ForgeEvents::rh_fe_existing(events, kind, native_id)
+                existing: i64 = ForgeEvents::rh_fe_existing(events, kind, native_id, pull_request)
                 if existing >= 0:
                     events[existing.usize()] <- normalized
                     counts.duplicate_replacements <- counts.duplicate_replacements + 1
@@ -357,6 +362,9 @@ module ForgeEvents:
                 Base::rh_push_text(out, ",\"url\":\"")
                 Base::rh_json_escape(out, texts, event.url_s.usize(), event.url_e.usize())
                 out.push(34)
+            if event.has_pull_request:
+                Base::rh_push_text(out, ",\"pull_request\":")
+                Base::rh_push_decimal_i64(out, event.pull_request)
             Base::rh_push_text(out, "}")
 
         def rh_fe_emit_page(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, pagination: i64, key: u8&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -417,12 +425,23 @@ module ForgeEvents:
                 return -1 if auth_state < 0
             scope_pull: mutable i64 = 0
             scope_present: mutable bool = false
+            scope_repository_s: mutable i64 = 0
+            scope_repository_e: mutable i64 = 0
+            scope_repository_present: mutable bool = false
             scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scope")
             if scope_idx >= 0:
                 return -1 if not github or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
-                scope_ok: mutable i64 = 0
-                return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, scope_idx, "pull_request", &scope_pull, &scope_ok) or scope_ok == 0 or scope_pull < 1
-                scope_present <- true
+                scope_repository_idx: i64 = Json::rh_json_obj_get(nodes, texts, scope_idx, "repository")
+                if scope_repository_idx >= 0:
+                    return -1 if not Json::rh_json_str_span(nodes, scope_repository_idx, &scope_repository_s, &scope_repository_e) or scope_repository_s == scope_repository_e
+                    scope_repository_present <- true
+                scope_pull_idx: i64 = Json::rh_json_obj_get(nodes, texts, scope_idx, "pull_request")
+                if scope_pull_idx >= 0:
+                    scope_ok: mutable i64 = 0
+                    scope_pull <- Json::rh_json_int(nodes, raw, scope_pull_idx, &scope_ok)
+                    return -1 if scope_ok == 0 or scope_pull < 1
+                    scope_present <- true
+                return -1 if not scope_repository_present and not scope_present
             events: mutable darray[RhForgeEvent] = []
             issues_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false, not_attempted: false}
             proposals_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false, not_attempted: false}
@@ -433,10 +452,64 @@ module ForgeEvents:
             pagination_present: bool = pagination >= 0
             if pagination_present:
                 return -1 if nodes[pagination.usize()].kind != Json::RH_JSON_OBJ
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "issues", 0, githubish, bitbucket, events, &issues_counts, &total_attempts) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, githubish, bitbucket, events, &proposals_counts, &total_attempts) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, githubish, bitbucket, events, &reviews_counts, &total_attempts) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "releases", 3, githubish, bitbucket, events, &releases_counts, &total_attempts) != 0
+            reviews_by_pull_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "reviews_by_pull")
+            review_collection_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "review_collection")
+            review_collection_present: bool = review_collection_idx >= 0
+            review_cursors: mutable darray[RhForgeReviewCursor] = []
+            next_pull_page: mutable i64 = 0
+            next_pull_page_present: mutable i64 = 0
+            pulls_complete: mutable bool = false
+            if review_collection_present:
+                return -1 if not github or not scope_repository_present or reviews_by_pull_idx < 0 or nodes[review_collection_idx.usize()].kind != Json::RH_JSON_OBJ
+                pending_idx: i64 = Json::rh_json_obj_get(nodes, texts, review_collection_idx, "pending_pull_requests")
+                return -1 if pending_idx < 0 or nodes[pending_idx.usize()].kind != Json::RH_JSON_ARR
+                while pending_node >= 0 |pending_node: i64 = nodes[pending_idx.usize()].first_child, nodes, raw, review_cursors|:
+                    return -1 if review_cursors.count >= 10 or nodes[pending_node.usize()].kind != Json::RH_JSON_OBJ
+                    pull_ok: mutable i64 = 0
+                    pull_number: mutable i64 = 0
+                    return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, pending_node, "number", &pull_number, &pull_ok) or pull_ok == 0 or pull_number < 1
+                    page_ok: mutable i64 = 0
+                    next_review_page: mutable i64 = 0
+                    return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, pending_node, "next_review_page", &next_review_page, &page_ok) or page_ok == 0 or next_review_page < 1 or next_review_page > 2147483640
+                    while prior_cursor_idx < review_cursors.count.i64() |prior_cursor_idx: i64 = 0, review_cursors, pull_number|:
+                        return -1 if review_cursors[prior_cursor_idx.usize()].pull_number == pull_number
+                        prior_cursor_idx <- prior_cursor_idx + 1
+                    review_cursors.push(RhForgeReviewCursor{pull_number: pull_number, next_review_page: next_review_page})
+                    pending_node <- nodes[pending_node.usize()].next_sibling
+                next_pull_idx: i64 = Json::rh_json_obj_get(nodes, texts, review_collection_idx, "next_pull_page")
+                return -1 if next_pull_idx < 0
+                if nodes[next_pull_idx.usize()].kind != Json::RH_JSON_NULL:
+                    next_pull_page <- Json::rh_json_int(nodes, raw, next_pull_idx, &next_pull_page_present)
+                    return -1 if next_pull_page_present == 0 or next_pull_page < 1 or next_pull_page > 2147483640
+                pulls_complete_idx: i64 = Json::rh_json_obj_get(nodes, texts, review_collection_idx, "pulls_complete")
+                return -1 if pulls_complete_idx < 0 or nodes[pulls_complete_idx.usize()].kind != Json::RH_JSON_BOOL
+                pulls_complete <- Json::rh_json_is_true(nodes, raw, pulls_complete_idx)
+                if pulls_complete:
+                    return -1 if nodes[next_pull_idx.usize()].kind != Json::RH_JSON_NULL
+                else:
+                    return -1 if nodes[next_pull_idx.usize()].kind == Json::RH_JSON_NULL
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "issues", 0, githubish, bitbucket, 0, events, &issues_counts, &total_attempts) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, githubish, bitbucket, 0, events, &proposals_counts, &total_attempts) != 0
+            reviews_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "reviews")
+            if reviews_by_pull_idx >= 0:
+                return -1 if not github or not scope_repository_present or reviews_idx >= 0 or nodes[reviews_by_pull_idx.usize()].kind != Json::RH_JSON_ARR
+                reviews_counts.present <- true
+                while review_group >= 0 |review_group: i64 = nodes[reviews_by_pull_idx.usize()].first_child, review_group_count: mutable i64 = 0, seen_pull_numbers: mutable darray[i64] = [], nodes, raw, texts, events, reviews_counts, total_attempts|:
+                    return -1 if review_group_count >= 10
+                    return -1 if nodes[review_group.usize()].kind != Json::RH_JSON_OBJ
+                    pull_ok: mutable i64 = 0
+                    grouped_pull: mutable i64 = 0
+                    return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, review_group, "pull_number", &grouped_pull, &pull_ok) or pull_ok == 0 or grouped_pull < 1
+                    while prior_group_idx < seen_pull_numbers.count.i64() |prior_group_idx: i64 = 0, seen_pull_numbers, grouped_pull|:
+                        return -1 if seen_pull_numbers[prior_group_idx.usize()] == grouped_pull
+                        prior_group_idx <- prior_group_idx + 1
+                    seen_pull_numbers.push(grouped_pull)
+                    return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, review_group, "reviews", 2, githubish, bitbucket, grouped_pull, events, &reviews_counts, &total_attempts) != 0
+                    review_group <- nodes[review_group.usize()].next_sibling
+                    review_group_count <- review_group_count + 1
+            else:
+                return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, githubish, bitbucket, 0, events, &reviews_counts, &total_attempts) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "releases", 3, githubish, bitbucket, 0, events, &releases_counts, &total_attempts) != 0
             return -1 if ForgeEvents::rh_fe_not_attempted(nodes, texts, root, "issues", &issues_counts) != 0
             return -1 if ForgeEvents::rh_fe_not_attempted(nodes, texts, root, "proposals", &proposals_counts) != 0
             return -1 if ForgeEvents::rh_fe_not_attempted(nodes, texts, root, "reviews", &reviews_counts) != 0
@@ -448,10 +521,20 @@ module ForgeEvents:
             Base::rh_push_text(out, ",\"authorization\":{\"state\":\"")
             Base::rh_push_text(out, ForgeEvents::rh_fe_auth_label(auth_state))
             Base::rh_push_text(out, "\"}")
-            if scope_present:
+            if scope_repository_present and scope_present:
+                Base::rh_push_text(out, ",\"scope\":{\"repository\":\"")
+                Base::rh_json_escape(out, texts, scope_repository_s.usize(), scope_repository_e.usize())
+                Base::rh_push_text(out, "\",\"pull_request\":")
+                Base::rh_push_decimal_i64(out, scope_pull)
+                Base::rh_push_text(out, "}")
+            elif scope_present:
                 Base::rh_push_text(out, ",\"scope\":{\"pull_request\":")
                 Base::rh_push_decimal_i64(out, scope_pull)
                 Base::rh_push_text(out, "}")
+            elif scope_repository_present:
+                Base::rh_push_text(out, ",\"scope\":{\"repository\":\"")
+                Base::rh_json_escape(out, texts, scope_repository_s.usize(), scope_repository_e.usize())
+                Base::rh_push_text(out, "\"}")
             Base::rh_push_text(out, ",\"capabilities\":{")
             ForgeEvents::rh_fe_emit_cap(out, 0, issues_counts, events)
             out.push(44)
@@ -471,6 +554,29 @@ module ForgeEvents:
                 out.push(44)
                 return -1 if ForgeEvents::rh_fe_emit_page(nodes, texts, raw, pagination, "releases", out) != 0
                 out.push(125)
+            if review_collection_present:
+                Base::rh_push_text(out, ",\"review_collection\":{\"pending_pull_requests\":[")
+                while cursor_idx < review_cursors.count.i64() |cursor_idx: i64 = 0, review_cursors, out|:
+                    out.push(44) if cursor_idx > 0
+                    Base::rh_push_text(out, "{\"number\":")
+                    Base::rh_push_decimal_i64(out, review_cursors[cursor_idx.usize()].pull_number)
+                    Base::rh_push_text(out, ",\"next_review_page\":")
+                    Base::rh_push_decimal_i64(out, review_cursors[cursor_idx.usize()].next_review_page)
+                    Base::rh_push_text(out, "}")
+                    cursor_idx <- cursor_idx + 1
+                Base::rh_push_text(out, "],\"next_pull_page\":")
+                if next_pull_page_present > 0:
+                    Base::rh_push_decimal_i64(out, next_pull_page)
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"pulls_complete\":")
+                Base::rh_push_text(out, "true") if pulls_complete
+                Base::rh_push_text(out, "false") if not pulls_complete
+                complete: bool = review_cursors.count == 0 and pulls_complete
+                Base::rh_push_text(out, ",\"complete\":")
+                Base::rh_push_text(out, "true") if complete
+                Base::rh_push_text(out, "false") if not complete
+                Base::rh_push_text(out, "}")
             Base::rh_push_text(out, ",\"events\":[")
             while i < events.count.i64() |i: i64 = 0, events, out, provider_s, provider_e, texts|:
                 out.push(44) if i > 0
