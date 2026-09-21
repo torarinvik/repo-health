@@ -10,6 +10,7 @@ module Postgres:
         struct RhPgApi:
             library: void&?
             connectdb_params: uintptr
+            exec: uintptr
             status: uintptr
             exec_params: uintptr
             result_status: uintptr
@@ -31,7 +32,7 @@ module Postgres:
         extern rh_pg_dlclose(library: void&) -> i32
 
         def rh_pg_empty_api() -> RhPgApi:
-            RhPgApi{library: null, connectdb_params: 0, status: 0, exec_params: 0, result_status: 0, tuples: 0, fields: 0, is_null: 0, value: 0, length: 0, clear: 0, finish: 0}
+            RhPgApi{library: null, connectdb_params: 0, exec: 0, status: 0, exec_params: 0, result_status: 0, tuples: 0, fields: 0, is_null: 0, value: 0, length: 0, clear: 0, finish: 0}
 
         def rh_pg_load_symbol(library: void&, name: cstr) -> uintptr can[Unsafe.PointerCast]:
             symbol: void&? = rh_pg_dlsym(library, name)
@@ -67,6 +68,7 @@ module Postgres:
             api: RhPgApi = RhPgApi{
                 library: library,
                 connectdb_params: rh_pg_load_symbol(handle, "PQconnectdbParams"),
+                exec: rh_pg_load_symbol(handle, "PQexec"),
                 status: rh_pg_load_symbol(handle, "PQstatus"),
                 exec_params: rh_pg_load_symbol(handle, "PQexecParams"),
                 result_status: rh_pg_load_symbol(handle, "PQresultStatus"),
@@ -78,7 +80,7 @@ module Postgres:
                 clear: rh_pg_load_symbol(handle, "PQclear"),
                 finish: rh_pg_load_symbol(handle, "PQfinish")
             }
-            ready: bool = api.connectdb_params != 0 and api.status != 0 and api.exec_params != 0 and api.result_status != 0 and api.tuples != 0 and api.fields != 0 and api.is_null != 0 and api.value != 0 and api.length != 0 and api.clear != 0 and api.finish != 0
+            ready: bool = api.connectdb_params != 0 and api.exec != 0 and api.status != 0 and api.exec_params != 0 and api.result_status != 0 and api.tuples != 0 and api.fields != 0 and api.is_null != 0 and api.value != 0 and api.length != 0 and api.clear != 0 and api.finish != 0
             if not ready:
                 _ = rh_pg_dlclose(handle)
                 return rh_pg_empty_api()
@@ -140,6 +142,67 @@ module Postgres:
                                 1 if Base::rh_streq(cell, "t") else 0 if Base::rh_streq(cell, "f") else -1
                         clear(result)
                         parsed
+            finish(conn)
+            _ = rh_pg_dlclose(library)
+            outcome
+
+        # The only caller supplies a fixed read-only statement. Keep this
+        # parameterless libpq path private so arbitrary SQL never reaches PQexec.
+        def rh_pg_text_query(conninfo: cstr, statement: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if out.count != 0 or Base::rh_cstr_len_c(conninfo) == 0 or Base::rh_cstr_len_c(conninfo) > 4096
+            api: RhPgApi = Postgres::rh_pg_load_api()
+            return -1 if api.library == null
+            library: void& = api.library
+            connectdb_params: fn(void&, void&, i32) -> void&? = api.connectdb_params.cast[fn(void&, void&, i32) -> void&?] can Unsafe.PointerCast
+            exec: fn(void&, cstr) -> void&? = api.exec.cast[fn(void&, cstr) -> void&?] can Unsafe.PointerCast
+            status: fn(void&) -> i32 = api.status.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            result_status: fn(void&) -> i32 = api.result_status.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            tuples: fn(void&) -> i32 = api.tuples.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            fields: fn(void&) -> i32 = api.fields.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            is_null: fn(void&, i32, i32) -> i32 = api.is_null.cast[fn(void&, i32, i32) -> i32] can Unsafe.PointerCast
+            value: fn(void&, i32, i32) -> cstr = api.value.cast[fn(void&, i32, i32) -> cstr] can Unsafe.PointerCast
+            length: fn(void&, i32, i32) -> i32 = api.length.cast[fn(void&, i32, i32) -> i32] can Unsafe.PointerCast
+            clear: fn(void&) -> void = api.clear.cast[fn(void&) -> void] can Unsafe.PointerCast
+            finish: fn(void&) -> void = api.finish.cast[fn(void&) -> void] can Unsafe.PointerCast
+            keywords: mutable darray[cstr?] = []
+            values: mutable darray[cstr?] = []
+            keywords.push("dbname")
+            values.push(conninfo)
+            keywords.push("connect_timeout")
+            values.push("5")
+            keywords.push(null)
+            values.push(null)
+            keyword_ptr: void& = (&keywords[0]).cast[void&] can Unsafe.PointerCast
+            value_ptr: void& = (&values[0]).cast[void&] can Unsafe.PointerCast
+            connection: void&? = connectdb_params(keyword_ptr, value_ptr, 1)
+            if connection == null:
+                _ = rh_pg_dlclose(library)
+                return -1
+            conn: void& = connection
+            outcome: i64 =
+                if status(conn) != 0:
+                    -1
+                else:
+                    query_result: void&? = exec(conn, statement)
+                    if query_result == null:
+                        -1
+                    else:
+                        result: void& = query_result
+                        copied: i64 =
+                            if result_status(result) != RH_PG_TUPLES_OK or tuples(result) != 1 or fields(result) != 1 or is_null(result, 0, 0) != 0:
+                                -1
+                            else:
+                                text_length: i32 = length(result, 0, 0)
+                                if text_length <= 0 or text_length > 4194304:
+                                    -1
+                                else:
+                                    text_value: cstr = value(result, 0, 0)
+                                    while i < text_length.i64() |i: i64 = 0, text_length, text_value, out|:
+                                        out.push(text_value[i.usize()].u8())
+                                        i <- i + 1
+                                    text_length.i64()
+                        clear(result)
+                        copied
             finish(conn)
             _ = rh_pg_dlclose(library)
             outcome
@@ -263,6 +326,11 @@ module Postgres:
             params.push(transformation_kind)
             params.push(created_at)
             Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_register_evidence_object($1::uuid, $2::rh_visibility_scope, $3::text, $4::bigint, $5::text, $6::text, $7::text, $8::text, $9::timestamptz)", params)
+
+        # Read the bounded set of local content-addressed evidence keys. Invalid
+        # keys and truncation are reported to the caller, which must fail closed.
+        def rh_pg_evidence_references(conninfo: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            Postgres::rh_pg_text_query(conninfo, "SELECT json_build_object('storage_keys', COALESCE(json_agg(storage_key ORDER BY storage_key) FILTER (WHERE storage_key ~ '^fnv1a64:[0-9a-f]{16}$'), '[]'::json), 'invalid_count', count(*) FILTER (WHERE storage_key !~ '^fnv1a64:[0-9a-f]{16}$'), 'truncated', count(*) > 100000, 'count', count(*) FILTER (WHERE storage_key ~ '^fnv1a64:[0-9a-f]{16}$'))::text FROM (SELECT storage_key FROM public.evidence_object ORDER BY storage_key LIMIT 100001) AS evidence_reference_window", out)
 
         # A stale worker token receives a normal false result from PostgreSQL;
         # transport or query failures remain distinguishable as -1.

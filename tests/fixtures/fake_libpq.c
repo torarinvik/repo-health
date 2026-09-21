@@ -16,6 +16,8 @@ static const char *claim_collection_cells[3] = {
 static const char *ingest_claim_cells[3] = {
     "00000000-0000-0000-0000-000000000021", "1", "2026-09-21 00:04:00+00"
 };
+static const char *evidence_references_json =
+    "{\"storage_keys\":[\"fnv1a64:f5e19178d3ff184e\"],\"invalid_count\":0,\"truncated\":false,\"count\":1}";
 
 void *PQconnectdbParams(const char *const *keywords, const char *const *values, int expand_dbname) {
     const char *marker = getenv("RH_FAKE_PG_CONNECT_MARK");
@@ -213,6 +215,20 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.status = 7;
     else
         result.status = 2;
+    return &result;
+}
+
+void *PQexec(void *handle, const char *query) {
+    const char *operation = getenv("RH_FAKE_PG_OPERATION");
+    const char *mode = getenv("RH_FAKE_PG_EXPECT");
+    if (handle != &connection || operation == NULL || strcmp(operation, "evidence_references") != 0 ||
+        query == NULL || strncmp(query, "SELECT json_build_object('storage_keys'", 39) != 0 ||
+        strstr(query, "FROM public.evidence_object") == NULL || strstr(query, "LIMIT 100001") == NULL)
+        return NULL;
+    result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+    result.rows = 1;
+    result.columns = 1;
+    result.value = evidence_references_json;
     return &result;
 }
 

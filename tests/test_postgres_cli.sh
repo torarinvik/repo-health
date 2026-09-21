@@ -75,10 +75,25 @@ for mode in committed duplicate; do
     || fail "register evidence $mode command"
 done
 
-python3 - "$T" "$ROOT/fixtures/postgres/ingest-output.json" <<'PY'
+cp "$ROOT/fixtures/postgres/evidence-references-command.json" "$T/evidence-references-command.json"
+RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+  RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=evidence_references RH_FAKE_PG_EXPECT=listed \
+  "$ROOT/build/rh_cli" postgres --input "$T/evidence-references-command.json" \
+    --out "$T/evidence-references-result.json" >/dev/null || fail "database evidence reference discovery"
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=evidence_references RH_FAKE_PG_EXPECT=failure \
+    "$ROOT/build/rh_cli" postgres --input "$T/evidence-references-command.json" \
+      --out "$T/evidence-references-failure.json" >/dev/null 2>&1; then
+  fail "database evidence reference query failure accepted"
+fi
+[[ ! -e "$T/evidence-references-failure.json" ]] || fail "failed evidence reference query wrote a result"
+echo "[postgres-cli] evidence reference query failures fail closed"
+
+python3 - "$T" "$ROOT/fixtures/postgres/ingest-output.json" "$ROOT/fixtures/postgres/evidence-references-result.json" <<'PY'
 import json, os, sys
 root = sys.argv[1]
 expected_ingest = json.load(open(sys.argv[2]))
+expected_references = json.load(open(sys.argv[3]))
 def read(name):
     with open(os.path.join(root, name)) as f:
         return json.load(f)
@@ -123,9 +138,10 @@ assert registered == {
 }, registered
 duplicate = read("register-evidence-duplicate.json")
 assert duplicate["status"] == "duplicate" and duplicate["digest_value"] == registered["digest_value"]
+assert read("evidence-references-result.json") == expected_references
 all_output = "".join(open(os.path.join(root, p)).read() for p in os.listdir(root) if p.endswith(".json"))
 assert "never-emit-this" not in all_output
-print("[postgres-cli] verified source/run setup, normalized PostgreSQL ingest, enqueue/targeted claim, evidence registration, page commits, job lifecycle, and bounded reports OK")
+print("[postgres-cli] verified source/run setup, normalized PostgreSQL ingest, enqueue/targeted claim, evidence registration/reference discovery, page commits, job lifecycle, and bounded reports OK")
 PY
 
 printf 'X' >> "$T/evidence/$stored_name"
