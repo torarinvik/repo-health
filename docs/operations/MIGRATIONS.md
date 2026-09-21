@@ -15,11 +15,14 @@ with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_
 a source configuration and running collection through `begin_collection_run`,
 then commits one complete or successful-empty collection page through `rh_commit_collection_page`,
 or commits normalized event rows, page metadata, and cursor advancement together
-through `rh_commit_collection_page_events`. A page may include bounded typed
+through `rh_commit_collection_page_events`. Both page commands require a running
+source-matched job whose `input_manifest.collection_run_id` matches the run, and
+its current, unexpired fencing token. A page may include bounded typed
 subject and source-scoped actor metadata; the transaction inserts new entities
 and accounts or checks exact immutable replays before inserting event rows.
-Conflicting metadata rolls back the page and cursor. The adapter also performs fenced job claim, heartbeat, and
-finish. Source/run retries succeed only when the supplied immutable metadata
+Conflicting metadata, expired leases, and stale tokens roll back the page and
+cursor. The adapter also performs fenced job claim, heartbeat, and finish.
+Source/run retries succeed only when the supplied immutable metadata
 matches the existing rows. Source base URLs must be absolute and contain no
 credentials, query, fragment, or whitespace; credentials stay in their separate
 locator. The `register_evidence` operation reads a blob from the

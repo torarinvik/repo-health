@@ -95,6 +95,8 @@ BEGIN
 END $$;
 INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, created_at)
 VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'queued', 10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, attempt_count, fencing_token, worker_id, lease_expires_at, created_at, input_manifest)
+VALUES ('00000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'running', 1, '2026-01-01T00:00:00Z', 1, 1, 'worker-page', '2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z', '{"collection_run_id":"00000000-0000-0000-0000-000000000003"}');
 DO $$
 DECLARE c record;
 BEGIN
@@ -136,17 +138,17 @@ END $$;
 DO $$
 BEGIN
   BEGIN
-    PERFORM rh_commit_collection_page('00000000-0000-0000-0000-000000000003', 0, 'scope-a', '{}'::jsonb, '{"page":1}'::jsonb, 'partial', 1, NULL, '2026-01-01T00:01:00Z');
+    PERFORM rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 0, 'scope-a', '{}'::jsonb, '{"page":1}'::jsonb, 'partial', 1, NULL, '2026-01-01T00:01:00Z');
     RAISE EXCEPTION 'partial page advanced cursor';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('partial page cannot advance' IN SQLERRM) = 0 THEN
       RAISE;
     END IF;
   END;
-  IF NOT rh_commit_collection_page('00000000-0000-0000-0000-000000000003', 0, 'scope-a', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-01T00:01:00Z') THEN
+  IF NOT rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 0, 'scope-a', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-01T00:01:00Z') THEN
     RAISE EXCEPTION 'complete page was refused';
   END IF;
-  IF rh_commit_collection_page('00000000-0000-0000-0000-000000000003', 0, 'scope-a', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-01T00:02:00Z') THEN
+  IF rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 0, 'scope-a', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-01T00:02:00Z') THEN
     RAISE EXCEPTION 'duplicate page advanced cursor';
   END IF;
 END $$;
@@ -167,24 +169,24 @@ DECLARE
   event_subjects jsonb := '[{"id":"00000000-0000-0000-0000-000000000005","entity_kind":"issue","visibility_scope":"public","created_at":"2026-01-01T00:00:00Z"}]'::jsonb;
   event_actors jsonb := '[{"id":"00000000-0000-0000-0000-000000000007","source_native_id":"alice","account_kind":"human","display_name":"Alice Example","raw_identity_evidence_id":null,"visibility_scope":"public"}]'::jsonb;
 BEGIN
-  IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 1, 'scope-events', NULL, '{"page":2}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-01T00:03:00Z') THEN
+  IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 1, 'scope-events', NULL, '{"page":2}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-01T00:03:00Z') THEN
     RAISE EXCEPTION 'event page was refused';
   END IF;
-  IF rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 1, 'scope-events', NULL, '{"page":99}'::jsonb, 'complete', 1, NULL, jsonb_set(event_page, '{0,source_object_id}', '"issue:8"'::jsonb), event_subjects, event_actors, '2026-01-01T00:03:30Z') THEN
+  IF rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 1, 'scope-events', NULL, '{"page":99}'::jsonb, 'complete', 1, NULL, jsonb_set(event_page, '{0,source_object_id}', '"issue:8"'::jsonb), event_subjects, event_actors, '2026-01-01T00:03:30Z') THEN
     RAISE EXCEPTION 'duplicate page was accepted';
   END IF;
   IF (SELECT count(*) FROM canonical_event WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid) <> 1
      OR (SELECT last_page_number FROM collection_cursor WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid AND capability = 'issues' AND scope_hash = 'scope-events') <> 1 THEN
     RAISE EXCEPTION 'duplicate page changed event or cursor state';
   END IF;
-  IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 2, 'scope-events', '{"page":2}'::jsonb, '{"page":3}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-01T00:04:00Z') THEN
+  IF NOT rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 2, 'scope-events', '{"page":2}'::jsonb, '{"page":3}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-01T00:04:00Z') THEN
     RAISE EXCEPTION 'replayed event page was refused';
   END IF;
   IF (SELECT count(*) FROM canonical_event WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid) <> 1 THEN
     RAISE EXCEPTION 'source-native event replay was not absorbed';
   END IF;
   BEGIN
-    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, '[{"id":"00000000-0000-0000-0000-000000000005","entity_kind":"issue","visibility_scope":"public","created_at":"2026-01-02T00:00:00Z"}]'::jsonb, event_actors, '2026-01-01T00:04:30Z');
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, '[{"id":"00000000-0000-0000-0000-000000000005","entity_kind":"issue","visibility_scope":"public","created_at":"2026-01-02T00:00:00Z"}]'::jsonb, event_actors, '2026-01-01T00:04:30Z');
     RAISE EXCEPTION 'conflicting subject metadata was accepted';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('different immutable metadata' IN SQLERRM) = 0 THEN
@@ -192,7 +194,7 @@ BEGIN
     END IF;
   END;
   BEGIN
-    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, '[{"id":"00000000-0000-0000-0000-000000000007","source_native_id":"alice","account_kind":"human","display_name":"Alicia Example","raw_identity_evidence_id":null,"visibility_scope":"public"}]'::jsonb, '2026-01-01T00:04:45Z');
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, '[{"id":"00000000-0000-0000-0000-000000000007","source_native_id":"alice","account_kind":"human","display_name":"Alicia Example","raw_identity_evidence_id":null,"visibility_scope":"public"}]'::jsonb, '2026-01-01T00:04:45Z');
     RAISE EXCEPTION 'conflicting actor metadata was accepted';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('page actor identity is already registered with different immutable metadata' IN SQLERRM) = 0 THEN
@@ -200,7 +202,7 @@ BEGIN
     END IF;
   END;
   BEGIN
-    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, '[{"source_object_type":"issue"}]'::jsonb, event_subjects, event_actors, '2026-01-01T00:05:00Z');
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, '[{"source_object_type":"issue"}]'::jsonb, event_subjects, event_actors, '2026-01-01T00:05:00Z');
     RAISE EXCEPTION 'malformed event page committed';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('page event is missing a required typed field' IN SQLERRM) = 0 THEN
@@ -208,16 +210,56 @@ BEGIN
     END IF;
   END;
   BEGIN
-    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, '[{"id":"00000000-0000-0000-0000-000000000007"}]'::jsonb, '2026-01-01T00:05:15Z');
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, '[{"id":"00000000-0000-0000-0000-000000000007"}]'::jsonb, '2026-01-01T00:05:15Z');
     RAISE EXCEPTION 'malformed page actor committed';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('page actor is missing a required typed field' IN SQLERRM) = 0 THEN
       RAISE;
     END IF;
   END;
+  UPDATE job SET input_manifest = '{"collection_run_id":"00000000-0000-0000-0000-000000000004"}'::jsonb
+  WHERE id = '00000000-0000-0000-0000-000000000008'::uuid;
+  BEGIN
+    PERFORM rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 1, 'scope-unbound', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-01T00:05:20Z');
+    RAISE EXCEPTION 'a job for another collection run advanced the cursor';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('collection page lease is stale' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  UPDATE job SET fencing_token = 2,
+                 input_manifest = '{"collection_run_id":"00000000-0000-0000-0000-000000000003"}'::jsonb
+  WHERE id = '00000000-0000-0000-0000-000000000008'::uuid;
+  BEGIN
+    PERFORM rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 1, 'scope-stale', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-01T00:05:30Z');
+    RAISE EXCEPTION 'stale page lease advanced a cursor';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('collection page lease is stale' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  BEGIN
+    PERFORM rh_commit_collection_page_events('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 1, 3, 'scope-events', '{"page":3}'::jsonb, '{"page":4}'::jsonb, 'complete', 1, NULL, event_page, event_subjects, event_actors, '2026-01-01T00:05:45Z');
+    RAISE EXCEPTION 'stale event-page lease advanced a cursor';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('collection page lease is stale' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  BEGIN
+    PERFORM rh_commit_collection_page('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000008', 2, 1, 'scope-expired', '{}'::jsonb, '{"page":1}'::jsonb, 'complete', 1, NULL, '2026-01-03T00:00:00Z');
+    RAISE EXCEPTION 'an expired page lease advanced a cursor';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('collection page lease is stale' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
   IF EXISTS (SELECT 1 FROM collection_page WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND page_number = 3)
      OR (SELECT last_page_number FROM collection_cursor WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid AND capability = 'issues' AND scope_hash = 'scope-events') <> 2 THEN
     RAISE EXCEPTION 'failed event page left a page or advanced cursor';
+  END IF;
+  IF EXISTS (SELECT 1 FROM collection_page WHERE collection_run_id = '00000000-0000-0000-0000-000000000003'::uuid AND scope_hash IN ('scope-stale', 'scope-unbound', 'scope-expired')) THEN
+    RAISE EXCEPTION 'stale simple page left a page row';
   END IF;
   IF (SELECT count(*) FROM entity WHERE id = '00000000-0000-0000-0000-000000000005'::uuid) <> 1 THEN
     RAISE EXCEPTION 'page subject was not registered exactly once';
@@ -229,5 +271,5 @@ BEGIN
 END $$;
 SQL
 
-echo "[migrations-live] source/run, evidence, subject/actor registration, event replay, and rollback boundaries OK"
+echo "[migrations-live] source/run, metadata, stale/expired page fencing, replay, and rollback boundaries OK"
 echo "test_migrations_live OK"

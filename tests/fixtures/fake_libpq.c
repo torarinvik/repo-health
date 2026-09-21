@@ -27,18 +27,18 @@ int PQstatus(void *handle) {
 void *PQexecParams(void *handle, const char *query, int count, const unsigned int *types,
                    const char *const *values, const int *lengths, const int *formats,
                    int result_format) {
-    static const char *page_values[9] = {
-        "00000000-0000-0000-0000-000000000001", "7",
+    static const char *page_values[11] = {
+        "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002", "4", "7",
         "scope ' ; SELECT pg_sleep(60); --", "", "{\"page\":8}", "complete",
         "2", "", "2026-01-01T00:01:00Z"
     };
-    static const char *page_events_values[12] = {
-        "00000000-0000-0000-0000-000000000001", "7",
+    static const char *page_events_values[14] = {
+        "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002", "4", "7",
         "scope ' ; SELECT pg_sleep(60); --", "", "{\"page\":8}", "complete",
         "0", "", "[]", "[]", "[]", "2026-01-01T00:01:00Z"
     };
-    static const char *page_events_subjects_values[12] = {
-        "00000000-0000-0000-0000-000000000003", "1", "pg-adapter-live-events",
+    static const char *page_events_subjects_values[14] = {
+        "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004", "1", "1", "pg-adapter-live-events",
         "", "{\"page\":2}", "complete", "1", "",
         "[{\"source_object_type\":\"issue\",\"source_object_id\":\"issue:live\",\"source_revision\":\"revision-1\",\"event_kind\":\"created\",\"subject_id\":\"00000000-0000-0000-0000-000000000005\",\"actor_account_id\":\"00000000-0000-0000-0000-000000000007\",\"occurred_at\":\"2026-09-21T00:00:30Z\",\"observed_at\":\"2026-09-21T00:00:40Z\",\"time_basis\":\"event\",\"evidence_id\":\"00000000-0000-0000-0000-000000000006\",\"parser_version\":\"fixture/1\",\"payload\":{\"state\":\"open\"}}]",
         "[{\"id\":\"00000000-0000-0000-0000-000000000005\",\"entity_kind\":\"issue\",\"visibility_scope\":\"public\",\"created_at\":\"2026-01-01T00:00:00Z\"}]",
@@ -69,7 +69,7 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     const char *operation = getenv("RH_FAKE_PG_OPERATION");
     const char **expected = page_values;
     const char *prefix = "SELECT public.rh_commit_collection_page(";
-    int expected_count = 9;
+    int expected_count = 11;
     if (operation != NULL && strcmp(operation, "begin_run") == 0) {
         expected = begin_run_values;
         expected_count = 13;
@@ -88,11 +88,11 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         prefix = "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job(";
     } else if (operation != NULL && strcmp(operation, "page_events") == 0) {
         expected = page_events_values;
-        expected_count = 12;
+        expected_count = 14;
         prefix = "SELECT public.rh_commit_collection_page_events(";
     } else if (operation != NULL && strcmp(operation, "page_events_subjects") == 0) {
         expected = page_events_subjects_values;
-        expected_count = 12;
+        expected_count = 14;
         prefix = "SELECT public.rh_commit_collection_page_events(";
     } else if (operation != NULL && strcmp(operation, "evidence") == 0) {
         expected = evidence_values;

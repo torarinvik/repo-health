@@ -897,6 +897,8 @@ $$;
 
 CREATE FUNCTION rh_commit_collection_page(
     p_run_id uuid,
+    p_job_id uuid,
+    p_fencing_token bigint,
     p_page_number integer,
     p_scope_hash text,
     p_cursor_before jsonb,
@@ -910,6 +912,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_source_instance_id uuid;
+    v_job_source_instance_id uuid;
     v_capability text;
     v_page_id uuid;
 BEGIN
@@ -920,10 +923,22 @@ BEGIN
     SELECT source_instance_id, capability
     INTO v_source_instance_id, v_capability
     FROM collection_run
-    WHERE id = p_run_id AND status = 'running';
+    WHERE id = p_run_id AND status = 'running'
+    FOR UPDATE;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'collection run is not running: %', p_run_id;
+    END IF;
+    SELECT source_instance_id INTO v_job_source_instance_id
+    FROM job
+    WHERE id = p_job_id
+      AND state = 'running'
+      AND fencing_token = p_fencing_token
+      AND lease_expires_at > p_now
+      AND input_manifest->>'collection_run_id' = p_run_id::text
+    FOR UPDATE;
+    IF NOT FOUND OR v_job_source_instance_id IS DISTINCT FROM v_source_instance_id THEN
+        RAISE EXCEPTION 'collection page lease is stale, expired, or belongs to another source';
     END IF;
 
     INSERT INTO collection_page (
@@ -961,10 +976,12 @@ END;
 $$;
 
 -- Commit one complete provider page together with its normalized events. The
--- run row serializes page replay; event uniqueness absorbs record replays, and
--- any bad event rolls back the page and cursor writes in this same statement.
+-- run and live job rows serialize page replay and fence stale workers; event
+-- uniqueness absorbs record replays, and bad input rolls back the page/cursor.
 CREATE FUNCTION rh_commit_collection_page_events(
     p_run_id uuid,
+    p_job_id uuid,
+    p_fencing_token bigint,
     p_page_number integer,
     p_scope_hash text,
     p_cursor_before jsonb,
@@ -981,6 +998,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_source_instance_id uuid;
+    v_job_source_instance_id uuid;
     v_capability text;
     v_event jsonb;
     v_event_count integer;
@@ -1037,6 +1055,17 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'collection run is not running: %', p_run_id;
+    END IF;
+    SELECT source_instance_id INTO v_job_source_instance_id
+    FROM job
+    WHERE id = p_job_id
+      AND state = 'running'
+      AND fencing_token = p_fencing_token
+      AND lease_expires_at > p_now
+      AND input_manifest->>'collection_run_id' = p_run_id::text
+    FOR UPDATE;
+    IF NOT FOUND OR v_job_source_instance_id IS DISTINCT FROM v_source_instance_id THEN
+        RAISE EXCEPTION 'collection page lease is stale, expired, or belongs to another source';
     END IF;
 
     IF EXISTS (

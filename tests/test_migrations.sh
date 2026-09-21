@@ -60,6 +60,9 @@ assert "evidence digest is already registered with different immutable metadata"
 assert "page event count does not match the declared bounded record count" in clean
 assert "ON CONFLICT (" in clean and "DO NOTHING" in clean
 assert "a partial page cannot advance a durable cursor" in clean
+assert "collection page lease is stale, expired, or belongs to another source" in clean
+assert "fencing_token = p_fencing_token" in clean and "lease_expires_at > p_now" in clean
+assert "input_manifest->>'collection_run_id' = p_run_id::text" in clean
 assert "UPDATE job" in clean and "fencing_token = p_fencing_token" in clean
 
 for ref in re.findall(r"\bREFERENCES\s+([a-z_][a-z0-9_]*)", clean, re.I):

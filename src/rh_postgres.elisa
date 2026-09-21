@@ -177,16 +177,20 @@ module Postgres:
         # idempotent transaction. Parameters use libpq's extended query protocol;
         # none are interpolated into SQL or passed through a shell. Empty optional
         # JSON/evidence strings map to SQL NULL. Returns 1 when committed, 0 when
-        # this page was already committed, or -1 on connection/query failure.
-        def rh_pg_commit_collection_page(conninfo: cstr, run_id: cstr, page_number: i64, scope_hash: cstr, cursor_before: cstr, cursor_after: cstr, completeness: cstr, record_count: i64, evidence_id: cstr, now: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            return -1 if page_number < 0 or record_count < 0
+        # this page was already committed, or -1 on invalid input or query failure.
+        def rh_pg_commit_collection_page(conninfo: cstr, run_id: cstr, job_id: cstr, fencing_token: i64, page_number: i64, scope_hash: cstr, cursor_before: cstr, cursor_after: cstr, completeness: cstr, record_count: i64, evidence_id: cstr, now: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if fencing_token <= 0 or page_number < 0 or record_count < 0
             return -1 if not Base::rh_streq(completeness, "complete") and not Base::rh_streq(completeness, "empty")
+            token_text: mutable darray[u8] = Postgres::rh_pg_decimal(fencing_token)
             page_text: mutable darray[u8] = Postgres::rh_pg_decimal(page_number)
             count_text: mutable darray[u8] = Postgres::rh_pg_decimal(record_count)
+            token_ptr: cstr = (&token_text[0]).cast[cstr] can Unsafe.PointerCast
             page_ptr: cstr = (&page_text[0]).cast[cstr] can Unsafe.PointerCast
             count_ptr: cstr = (&count_text[0]).cast[cstr] can Unsafe.PointerCast
             params: mutable darray[cstr] = []
             params.push(run_id)
+            params.push(job_id)
+            params.push(token_ptr)
             params.push(page_ptr)
             params.push(scope_hash)
             params.push(cursor_before)
@@ -195,21 +199,25 @@ module Postgres:
             params.push(count_ptr)
             params.push(evidence_id)
             params.push(now)
-            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_commit_collection_page($1::uuid, $2::integer, $3::text, NULLIF($4, '')::jsonb, $5::jsonb, $6::text, $7::integer, NULLIF($8, '')::uuid, $9::timestamptz)", params)
+            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_commit_collection_page($1::uuid, $2::uuid, $3::bigint, $4::integer, $5::text, NULLIF($6, '')::jsonb, $7::jsonb, $8::text, $9::integer, NULLIF($10, '')::uuid, $11::timestamptz)", params)
 
         # Commit a complete page with typed subjects, actors, and canonical
         # event rows as one database transaction. PostgreSQL validates the event
         # envelope, deduplicates source-native identities, and advances the
         # cursor only after every row has inserted successfully.
-        def rh_pg_commit_collection_page_events(conninfo: cstr, run_id: cstr, page_number: i64, scope_hash: cstr, cursor_before: cstr, cursor_after: cstr, completeness: cstr, record_count: i64, evidence_id: cstr, events_json: cstr, subjects_json: cstr, actors_json: cstr, now: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            return -1 if page_number < 0 or record_count < 0 or Base::rh_cstr_len_c(events_json) == 0 or Base::rh_cstr_len_c(events_json) > 1048576 or Base::rh_cstr_len_c(subjects_json) > 1048576 or Base::rh_cstr_len_c(actors_json) > 1048576
+        def rh_pg_commit_collection_page_events(conninfo: cstr, run_id: cstr, job_id: cstr, fencing_token: i64, page_number: i64, scope_hash: cstr, cursor_before: cstr, cursor_after: cstr, completeness: cstr, record_count: i64, evidence_id: cstr, events_json: cstr, subjects_json: cstr, actors_json: cstr, now: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if fencing_token <= 0 or page_number < 0 or record_count < 0 or Base::rh_cstr_len_c(events_json) == 0 or Base::rh_cstr_len_c(events_json) > 1048576 or Base::rh_cstr_len_c(subjects_json) > 1048576 or Base::rh_cstr_len_c(actors_json) > 1048576
             return -1 if not Base::rh_streq(completeness, "complete") and not Base::rh_streq(completeness, "empty")
+            token_text: mutable darray[u8] = Postgres::rh_pg_decimal(fencing_token)
             page_text: mutable darray[u8] = Postgres::rh_pg_decimal(page_number)
             count_text: mutable darray[u8] = Postgres::rh_pg_decimal(record_count)
+            token_ptr: cstr = (&token_text[0]).cast[cstr] can Unsafe.PointerCast
             page_ptr: cstr = (&page_text[0]).cast[cstr] can Unsafe.PointerCast
             count_ptr: cstr = (&count_text[0]).cast[cstr] can Unsafe.PointerCast
             params: mutable darray[cstr] = []
             params.push(run_id)
+            params.push(job_id)
+            params.push(token_ptr)
             params.push(page_ptr)
             params.push(scope_hash)
             params.push(cursor_before)
@@ -221,7 +229,7 @@ module Postgres:
             params.push(subjects_json)
             params.push(actors_json)
             params.push(now)
-            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_commit_collection_page_events($1::uuid, $2::integer, $3::text, NULLIF($4, '')::jsonb, $5::jsonb, $6::text, $7::integer, NULLIF($8, '')::uuid, $9::jsonb, COALESCE(NULLIF($10, '')::jsonb, '[]'::jsonb), COALESCE(NULLIF($11, '')::jsonb, '[]'::jsonb), $12::timestamptz)", params)
+            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_commit_collection_page_events($1::uuid, $2::uuid, $3::bigint, $4::integer, $5::text, NULLIF($6, '')::jsonb, $7::jsonb, $8::text, $9::integer, NULLIF($10, '')::uuid, $11::jsonb, COALESCE(NULLIF($12, '')::jsonb, '[]'::jsonb), COALESCE(NULLIF($13, '')::jsonb, '[]'::jsonb), $14::timestamptz)", params)
 
         # Register SHA-256 evidence metadata after the caller has verified its
         # immutable blob. Returns 1 for a new identity, 0 for an exact replay,
