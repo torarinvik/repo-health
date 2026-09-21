@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Replay committed PostgreSQL GitHub issue rows through rh-forge-events/1.
+# Replay committed PostgreSQL GitHub issue and proposal rows through rh-forge-events/1.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="/tmp/rh-staged-github-issues"
@@ -11,6 +11,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/postgres/staged-github-issues-input.json" "$T/input.json"
 cp "$ROOT/fixtures/postgres/staged-github-issues-output.json" "$T/expected.json"
+cp "$ROOT/fixtures/postgres/staged-github-proposals-input.json" "$T/proposals-input.json"
 
 echo "[staged-github-issues] replay binds the exact stage input and preserves provenance"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/input.json" --out "$T/output.json" >/dev/null || fail "valid staged rows"
@@ -37,6 +38,21 @@ assert all(n["capabilities"][k]["status"] == "not_attempted" for k in ("proposal
 PY
 "$ROOT/build/rh_cli" staged-normalize --input "$T/input.json" --out "$T/replay.json" >/dev/null || fail "deterministic replay"
 cmp -s "$T/output.json" "$T/replay.json" || fail "replay changed output bytes"
+
+echo "[staged-github-issues] explicit pull-request binding normalizes proposals"
+"$ROOT/build/rh_cli" staged-normalize --input "$T/proposals-input.json" --out "$T/proposals-output.json" >/dev/null || fail "valid staged pull requests"
+python3 - "$T/proposals-input.json" "$T/proposals-output.json" "$ROOT/fixtures/postgres/staged-github-proposals-output.json" <<'PY'
+import hashlib, json, sys
+got = json.load(open(sys.argv[2]))
+expected = json.load(open(sys.argv[3]))
+assert got == expected, (got, expected)
+assert got["input_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), got
+assert got["canonical_capability"] == "proposals" and got["record_count"] == 1, got
+n = got["normalized"]
+assert n["capabilities"]["proposals"]["status"] == "observed" and n["capabilities"]["proposals"]["count"] == 1, n
+assert n["events"][0]["kind"] == "proposals" and n["events"][0]["native_id"] == "github:17", n["events"]
+assert n["capabilities"]["issues"]["status"] == "not_attempted", n["capabilities"]
+PY
 
 echo "[staged-github-issues] committed empty pages remain observed empty"
 python3 - "$T/input.json" "$T/empty.json" <<'PY'
@@ -65,17 +81,19 @@ d = copy.deepcopy(base); d["pages"][0]["completeness"] = "partial"; cases["parti
 d = copy.deepcopy(base); d["pages"][0]["records"][0]["collector_label"] = "other-capability"; cases["misbound"] = d
 d = copy.deepcopy(base); d["pages"][0]["records"][0]["record_ordinal"] = 1; cases["ordinal"] = d
 d = copy.deepcopy(base); d["pages"][0]["records"][0]["raw_payload"] = "[]"; cases["non-object-payload"] = d
+d = copy.deepcopy(base); d["canonical_capability"] = "proposals"; cases["schema-capability-mismatch"] = d
 for name, value in cases.items():
     with open(os.path.join(out, name + ".json"), "w", encoding="utf-8") as f:
         json.dump(value, f, separators=(",", ":"))
 PY
-for name in uncommitted partial misbound ordinal non-object-payload; do
+for name in uncommitted partial misbound ordinal non-object-payload schema-capability-mismatch; do
   if "$ROOT/build/rh_cli" staged-normalize --input "$T/$name.json" --out "$T/$name.out" >/dev/null 2>&1; then
     fail "$name stage input was accepted"
   fi
   [[ ! -e "$T/$name.out" ]] || fail "$name wrote an output despite rejection"
 done
 
-grep -q "rh-postgres-staged-github-issues-input/1" "$ROOT/src/rh_staged_github_issues.elisa" || fail "input contract token missing"
-grep -q "rh-postgres-staged-normalize-result/1" "$ROOT/src/rh_staged_github_issues.elisa" || fail "result contract token missing"
-echo "test_staged_github_issues_cli OK"
+grep -q "rh-postgres-staged-github-issues-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "issue input contract token missing"
+grep -q "rh-postgres-staged-github-proposals-input/1" "$ROOT/src/rh_staged_github.elisa" || fail "proposal input contract token missing"
+grep -q "rh-postgres-staged-normalize-result/1" "$ROOT/src/rh_staged_github.elisa" || fail "result contract token missing"
+echo "test_staged_github_cli OK"
