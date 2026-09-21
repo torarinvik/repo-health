@@ -1,0 +1,214 @@
+# rh_staged_github_issues.elisa — replayable normalizer for committed GitHub issue rows.
+
+include "./rh_base.elisa"
+include "./rh_forge_events.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+
+module StagedGithubIssues:
+    private:
+        const RH_SGI_MAX_INPUT_BYTES: i64 = 16777216
+        const RH_SGI_MAX_PAGES: i64 = 1000
+        const RH_SGI_MAX_RECORDS: i64 = 10000
+        const RH_SGI_MAX_PAYLOAD_BYTES: i64 = 1048576
+        const RH_SGI_MAX_TOTAL_PAYLOAD_BYTES: i64 = 4000000
+
+        struct RhSgiPage:
+            page_number: mutable i64
+            completeness_start: mutable i64
+            completeness_end: mutable i64
+            record_count: mutable i64
+
+        struct RhSgiRecord:
+            page_number: mutable i64
+            record_ordinal: mutable i64
+            payload_start: mutable i64
+            payload_end: mutable i64
+
+        def rh_sgi_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_sgi_span(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&, minimum: i64, maximum: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            index: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            return false if index < 0 or nodes[index.usize()].kind != Json::RH_JSON_STR
+            return false if not Json::rh_json_str_span(nodes, index, &start_out[0], &end_out[0])
+            length: i64 = end_out[0] - start_out[0]
+            return false if length < minimum or length > maximum
+            while offset < length |offset: i64 = 0, texts, start_out, end_out|:
+                return false if texts[(start_out[0] + offset).usize()] == 0
+                offset <- offset + 1
+            true
+
+        def rh_sgi_field_is(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, literal: u8&, minimum: i64, maximum: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            start: mutable i64 = 0
+            end: mutable i64 = 0
+            StagedGithubIssues::rh_sgi_span(nodes, texts, object, key, &start, &end, minimum, maximum) and StagedGithubIssues::rh_sgi_eq(texts, start, end, literal)
+
+        def rh_sgi_field_matches_span(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, expected_texts: darray[u8]&, expected_start: i64, expected_end: i64, minimum: i64, maximum: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            start: mutable i64 = 0
+            end: mutable i64 = 0
+            StagedGithubIssues::rh_sgi_span(nodes, texts, object, key, &start, &end, minimum, maximum) and Base::rh_bytes_equal_span(texts, start, end, expected_texts, expected_start, expected_end)
+
+        def rh_sgi_int(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, object: i64, key: u8&, minimum: i64, maximum: i64, value_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            index: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, index, &ok)
+            return false if ok == 0 or value < minimum or value > maximum
+            value_out[0] <- value
+            true
+
+        def rh_sgi_payload_object(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            return false if end <= start or end - start > RH_SGI_MAX_PAYLOAD_BYTES
+            payload: mutable darray[u8] = []
+            while index < end |index: i64 = start, texts, end, payload|:
+                payload.push(texts[index.usize()])
+                index <- index + 1
+            nodes: mutable darray[Json::RhJsonNode] = []
+            decoded: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(payload, nodes, decoded)
+            root >= 0 and nodes[root.usize()].kind == Json::RH_JSON_OBJ
+
+        def rh_sgi_copy(texts: darray[u8]&, start: i64, end: i64, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while index < end |index: i64 = start, texts, end, out|:
+                out.push(texts[index.usize()])
+                index <- index + 1
+
+        def rh_sgi_emit_text(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            Base::rh_json_escape(out, texts, start.usize(), end.usize())
+            out.push(34)
+
+    public:
+        # Normalize exported PostgreSQL staged rows through the existing GitHub
+        # issue adapter. The input binds one opaque collector label explicitly
+        # to issues and includes only pages already committed as complete/empty.
+        def rh_staged_github_issues_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            return -1 if raw.count.i64() == 0 or raw.count.i64() > RH_SGI_MAX_INPUT_BYTES
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            return -1 if not StagedGithubIssues::rh_sgi_field_is(nodes, texts, root, "schema", "rh-postgres-staged-github-issues-input/1", 1, 64)
+            source_id_start: mutable i64 = 0
+            source_id_end: mutable i64 = 0
+            return -1 if not StagedGithubIssues::rh_sgi_span(nodes, texts, root, "source_id", &source_id_start, &source_id_end, 1, 128)
+            run_id_start: mutable i64 = 0
+            run_id_end: mutable i64 = 0
+            return -1 if not StagedGithubIssues::rh_sgi_span(nodes, texts, root, "collection_run_id", &run_id_start, &run_id_end, 1, 128)
+            return -1 if not StagedGithubIssues::rh_sgi_field_is(nodes, texts, root, "provider", "github", 1, 32)
+            label_start: mutable i64 = 0
+            label_end: mutable i64 = 0
+            return -1 if not StagedGithubIssues::rh_sgi_span(nodes, texts, root, "collector_label", &label_start, &label_end, 1, 4096)
+            return -1 if not StagedGithubIssues::rh_sgi_field_is(nodes, texts, root, "canonical_capability", "issues", 1, 32)
+            captured_at: mutable i64 = 0
+            return -1 if not StagedGithubIssues::rh_sgi_int(nodes, texts, raw, root, "captured_at", 0, 9223372036854775807, &captured_at)
+            authorization: i64 = Json::rh_json_obj_get(nodes, texts, root, "authorization")
+            return -1 if authorization < 0 or nodes[authorization.usize()].kind != Json::RH_JSON_OBJ
+            authorization_start: mutable i64 = 0
+            authorization_end: mutable i64 = 0
+            return -1 if not StagedGithubIssues::rh_sgi_span(nodes, texts, authorization, "state", &authorization_start, &authorization_end, 1, 32)
+            return -1 if not (StagedGithubIssues::rh_sgi_eq(texts, authorization_start, authorization_end, "authorized") or StagedGithubIssues::rh_sgi_eq(texts, authorization_start, authorization_end, "unauthorized") or StagedGithubIssues::rh_sgi_eq(texts, authorization_start, authorization_end, "not_requested") or StagedGithubIssues::rh_sgi_eq(texts, authorization_start, authorization_end, "unknown"))
+            scope_index: i64 = Json::rh_json_obj_get(nodes, texts, root, "scope")
+            return -1 if scope_index < 0 or nodes[scope_index.usize()].kind != Json::RH_JSON_OBJ
+            repository_start: mutable i64 = 0
+            repository_end: mutable i64 = 0
+            return -1 if not StagedGithubIssues::rh_sgi_span(nodes, texts, scope_index, "repository", &repository_start, &repository_end, 1, 512)
+            pages_index: i64 = Json::rh_json_obj_get(nodes, texts, root, "pages")
+            return -1 if pages_index < 0 or nodes[pages_index.usize()].kind != Json::RH_JSON_ARR or nodes[pages_index.usize()].child_count == 0 or nodes[pages_index.usize()].child_count > RH_SGI_MAX_PAGES
+            pages: mutable darray[RhSgiPage] = []
+            records: mutable darray[RhSgiRecord] = []
+            total_payload_bytes: mutable i64 = 0
+            expected_page: mutable i64 = -1
+            page_node: mutable i64 = nodes[pages_index.usize()].first_child
+            while page_node >= 0 |page_node, pages, records, total_payload_bytes, expected_page, nodes, raw, texts, label_start, label_end|:
+                return -1 if nodes[page_node.usize()].kind != Json::RH_JSON_OBJ or pages.count.i64() >= RH_SGI_MAX_PAGES
+                page_number: mutable i64 = 0
+                committed_index: i64 = Json::rh_json_obj_get(nodes, texts, page_node, "committed")
+                return -1 if committed_index < 0 or nodes[committed_index.usize()].kind != Json::RH_JSON_BOOL or not Json::rh_json_is_true(nodes, raw, committed_index)
+                return -1 if not StagedGithubIssues::rh_sgi_int(nodes, texts, raw, page_node, "page_number", 0, 2147483647, &page_number)
+                return -1 if expected_page >= 0 and page_number <= expected_page
+                completeness_start: mutable i64 = 0
+                completeness_end: mutable i64 = 0
+                return -1 if not StagedGithubIssues::rh_sgi_span(nodes, texts, page_node, "completeness", &completeness_start, &completeness_end, 1, 16)
+                is_complete: bool = StagedGithubIssues::rh_sgi_eq(texts, completeness_start, completeness_end, "complete")
+                is_empty: bool = StagedGithubIssues::rh_sgi_eq(texts, completeness_start, completeness_end, "empty")
+                return -1 if not is_complete and not is_empty
+                records_index: i64 = Json::rh_json_obj_get(nodes, texts, page_node, "records")
+                return -1 if records_index < 0 or nodes[records_index.usize()].kind != Json::RH_JSON_ARR
+                page_record_count: i64 = nodes[records_index.usize()].child_count
+                return -1 if page_record_count > RH_SGI_MAX_RECORDS
+                return -1 if is_empty and page_record_count != 0
+                return -1 if is_complete and page_record_count == 0
+                pages.push(RhSgiPage{page_number: page_number, completeness_start: completeness_start, completeness_end: completeness_end, record_count: page_record_count})
+                record_node: mutable i64 = nodes[records_index.usize()].first_child
+                ordinal: mutable i64 = 0
+                while record_node >= 0 |record_node, ordinal, page_record_count, page_number, records, total_payload_bytes, nodes, raw, texts, label_start, label_end|:
+                    return -1 if records.count.i64() >= RH_SGI_MAX_RECORDS or nodes[record_node.usize()].kind != Json::RH_JSON_OBJ
+                    record_ordinal: mutable i64 = 0
+                    return -1 if not StagedGithubIssues::rh_sgi_int(nodes, texts, raw, record_node, "record_ordinal", 0, RH_SGI_MAX_RECORDS, &record_ordinal) or record_ordinal != ordinal
+                    return -1 if not StagedGithubIssues::rh_sgi_field_matches_span(nodes, texts, record_node, "collector_label", texts, label_start, label_end, 1, 4096)
+                    payload_start: mutable i64 = 0
+                    payload_end: mutable i64 = 0
+                    return -1 if not StagedGithubIssues::rh_sgi_span(nodes, texts, record_node, "raw_payload", &payload_start, &payload_end, 1, RH_SGI_MAX_PAYLOAD_BYTES)
+                    return -1 if not StagedGithubIssues::rh_sgi_payload_object(texts, payload_start, payload_end)
+                    total_payload_bytes <- total_payload_bytes + payload_end - payload_start
+                    return -1 if total_payload_bytes > RH_SGI_MAX_TOTAL_PAYLOAD_BYTES
+                    records.push(RhSgiRecord{page_number: page_number, record_ordinal: record_ordinal, payload_start: payload_start, payload_end: payload_end})
+                    ordinal <- ordinal + 1
+                    record_node <- nodes[record_node.usize()].next_sibling
+                expected_page <- page_number
+                page_node <- nodes[page_node.usize()].next_sibling
+
+            forge_input: mutable darray[u8] = []
+            Base::rh_push_text(forge_input, "{\"schema\":\"rh-forge-events-input/1\",\"provider\":\"github\",\"captured_at\":")
+            Base::rh_push_decimal_i64(forge_input, captured_at)
+            Base::rh_push_text(forge_input, ",\"authorization\":{\"state\":")
+            StagedGithubIssues::rh_sgi_emit_text(forge_input, texts, authorization_start, authorization_end)
+            Base::rh_push_text(forge_input, "},\"scope\":{\"repository\":")
+            StagedGithubIssues::rh_sgi_emit_text(forge_input, texts, repository_start, repository_end)
+            Base::rh_push_text(forge_input, "},\"issues\":[")
+            while index < records.count |index: usize = 0, records, forge_input, texts|:
+                forge_input.push(44) if index > 0
+                StagedGithubIssues::rh_sgi_copy(texts, records[index].payload_start, records[index].payload_end, forge_input)
+                index <- index + 1
+            Base::rh_push_text(forge_input, "],\"capability_states\":{\"proposals\":\"not_attempted\",\"reviews\":\"not_attempted\",\"releases\":\"not_attempted\"}}")
+            return -1 if forge_input.count.i64() > 4194304
+            normalized: mutable darray[u8] = []
+            return -1 if ForgeEvents::rh_forge_events_report(forge_input, normalized) != 0
+            digest: mutable darray[u8] = []
+            Sha256::rh_sha256(raw, digest)
+            Base::rh_push_text(out, "{\"schema\":\"rh-postgres-staged-normalize-result/1\",\"source_id\":")
+            StagedGithubIssues::rh_sgi_emit_text(out, texts, source_id_start, source_id_end)
+            Base::rh_push_text(out, ",\"collection_run_id\":")
+            StagedGithubIssues::rh_sgi_emit_text(out, texts, run_id_start, run_id_end)
+            Base::rh_push_text(out, ",\"input_sha256\":\"")
+            out.extend(bytes_view(digest))
+            Base::rh_push_text(out, "\",\"provider\":\"github\",\"collector_label\":")
+            StagedGithubIssues::rh_sgi_emit_text(out, texts, label_start, label_end)
+            Base::rh_push_text(out, ",\"canonical_capability\":\"issues\",\"record_count\":")
+            Base::rh_push_decimal_i64(out, records.count.i64())
+            Base::rh_push_text(out, ",\"pages\":[")
+            while page_index < pages.count |page_index: usize = 0, pages, out, texts|:
+                out.push(44) if page_index > 0
+                Base::rh_push_text(out, "{\"page_number\":")
+                Base::rh_push_decimal_i64(out, pages[page_index].page_number)
+                Base::rh_push_text(out, ",\"completeness\":")
+                StagedGithubIssues::rh_sgi_emit_text(out, texts, pages[page_index].completeness_start, pages[page_index].completeness_end)
+                Base::rh_push_text(out, ",\"record_count\":")
+                Base::rh_push_decimal_i64(out, pages[page_index].record_count)
+                out.push(125)
+                page_index <- page_index + 1
+            Base::rh_push_text(out, "],\"staged_records\":[")
+            while record_index < records.count |record_index: usize = 0, records, out, texts|:
+                out.push(44) if record_index > 0
+                Base::rh_push_text(out, "{\"page_number\":")
+                Base::rh_push_decimal_i64(out, records[record_index].page_number)
+                Base::rh_push_text(out, ",\"record_ordinal\":")
+                Base::rh_push_decimal_i64(out, records[record_index].record_ordinal)
+                out.push(125)
+                record_index <- record_index + 1
+            Base::rh_push_text(out, "],\"normalizer\":\"rh-forge-events/1\",\"normalized\":")
+            out.extend(bytes_view(normalized))
+            Base::rh_push_text(out, ",\"note\":\"The collector label was bound explicitly to GitHub issues. The input SHA-256 binds this deterministic normalization result to the exported staged rows; raw payloads remain in the PostgreSQL staged-source records.\"}")
+            return -1 if out.count.i64() > RH_SGI_MAX_INPUT_BYTES
+            0

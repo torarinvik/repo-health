@@ -44,6 +44,7 @@ include "./rh_state_store.elisa"
 include "./rh_ops.elisa"
 include "./rh_forge.elisa"
 include "./rh_forge_events.elisa"
+include "./rh_staged_github_issues.elisa"
 include "./rh_forge_events_fetch.elisa"
 include "./rh_github_probe.elisa"
 include "./rh_github_traffic.elisa"
@@ -145,6 +146,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli pilot-review --input <file> --out <file>")
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
     rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [--review-pull N [--review-page N] | --review-repository [--max-pulls N] [--resume-from <result>]]) --out <file> [--max-pages N]")
+    rh_cli_err("       rh_cli staged-normalize --input <rh-postgres-staged-github-issues-input/1> --out <file>")
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
     rh_cli_err("       rh_cli connector probe --github-repo <owner/repo> --out <file> [--all]")
     rh_cli_err("       rh_cli connector traffic-observe --github-repo <owner/repo> --captured-at <unix-seconds> --input <raw-traffic.json> --out <file>")
@@ -1645,6 +1647,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         if has_url:
             forge_url <- slots[furl_idx]
         return rh_do_forge_normalize(slots[fconn_idx], forge_input, slots[fout_idx], fts, fhas, forge_url, has_url)
+    if Base::rh_streq(cmd, "staged-normalize"):
+        staged_input_idx, staged_output_idx =
+            while staged_arg < argc |staged_input_idx: i64 = -1, staged_output_idx: i64 = -1, staged_arg: i64 = 2, slots| -> staged_input_idx, staged_output_idx:
+                staged_flag: u8& = slots[staged_arg].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(staged_flag, "--input"):
+                    if staged_arg + 1 < argc:
+                        staged_arg <- staged_arg + 1
+                        staged_input_idx <- staged_arg
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(staged_flag, "--out"):
+                    if staged_arg + 1 < argc:
+                        staged_arg <- staged_arg + 1
+                        staged_output_idx <- staged_arg
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                staged_arg <- staged_arg + 1
+        return rh_cli_usage(2) if staged_input_idx < 0 or staged_output_idx < 0
+        return rh_do_staged_github_issues_normalize(slots[staged_input_idx], slots[staged_output_idx])
     if Base::rh_streq(cmd, "connector"):
         return rh_cli_usage(2) if argc < 3
         csub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
@@ -6011,6 +6034,27 @@ def rh_do_forge_events(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloc
         rh_cli_err("forge events: cannot write --out")
         return 4
     rh_cli_out("forge events: ok")
+    0
+
+# Replay committed PostgreSQL GitHub issue stage rows through the existing
+# provider-native normalizer, preserving an exact input digest and row cursors.
+def rh_do_staged_github_issues_normalize(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected staged normalization argument (allowlist)")
+        return 3
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(input_path, raw) < 0:
+        rh_cli_err("staged normalize: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if StagedGithubIssues::rh_staged_github_issues_report(raw, body) != 0:
+        rh_cli_err("staged normalize: unsupported or malformed committed GitHub issue stage (fail closed)")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("staged normalize: cannot write --out")
+        return 4
+    rh_cli_out("staged normalize: GitHub issues normalized")
     0
 
 def rh_do_forge_events_github(repository: cstr, out_path: cstr, max_pages: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
