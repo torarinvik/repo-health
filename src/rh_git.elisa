@@ -681,11 +681,30 @@ module Git:
             _ = remove_file(resolved_ptr)
             pin_valid
 
+        # GitHub credentials are used only for its exact public API host. The
+        # restricted token alphabet keeps curl's config syntax unambiguous.
+        def rh_github_api_auth_state(url: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return 0 if not Base::rh_cstr_starts_with(url, "https://api.github.com/")
+            token: u8&? = getenv("RH_GITHUB_TOKEN")
+            return 0 if token == null
+            token_ptr: cstr = token.cast[cstr] can Unsafe.PointerCast
+            length: usize = Base::rh_cstr_len_c(token_ptr)
+            return -1 if length == 0 or length > 512
+            while index < length |index: usize = 0, token_ptr|:
+                byte: u8 = token_ptr[index]
+                return -1 if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 95)
+                index <- index + 1
+            1
+
         # Assemble the fixed transport policy in one private helper so the
         # public operation only validates, prepares the pin, and runs it.
-        def rh_https_get_command(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&, max_secs: i64, github_api: bool) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def rh_https_get_command(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&, max_secs: i64, github_api: bool, github_auth: bool) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             cmd: mutable darray[u8] = []
-            Base::rh_push_text(cmd, "curl --disable -sS --noproxy '*' --proto '=https,file' --max-redirs 0")
+            if github_auth:
+                Base::rh_push_text(cmd, "printf '%s\\n' \"header = \\\"Authorization: Bearer $RH_GITHUB_TOKEN\\\"\" | ")
+            Base::rh_push_text(cmd, "curl --disable")
+            Base::rh_push_text(cmd, " --config -") if github_auth
+            Base::rh_push_text(cmd, " -sS --noproxy '*' --proto '=https,file' --max-redirs 0")
             if pin.count > 0:
                 Base::rh_push_text(cmd, " --resolve ")
                 rh_push_quoted(cmd, (&pin[0]).cast[cstr] can Unsafe.PointerCast)
@@ -716,11 +735,14 @@ module Git:
             return -1 if not rh_arg_safe(body_file)
             return -1 if not rh_arg_safe(code_file)
             return -1 if not rh_arg_safe(err_file)
+            github_auth_state: i64 = rh_github_api_auth_state(url) if github_api else 0
+            return -1 if github_auth_state < 0
+            github_auth: bool = github_auth_state == 1
             pin: mutable darray[u8] = []
             if Base::rh_cstr_starts_with(url, "https://"):
                 return -1 if not rh_prepare_https_pin(url, err_file, pin)
             transport: i64 =
-                cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin, max_secs, github_api)
+                cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin, max_secs, github_api, github_auth)
                 block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
                 block_result
             transport
@@ -776,8 +798,10 @@ module Git:
         # (shell quoting safety); HTTPS DNS answers are validated as a complete
         # set and pinned with curl --resolve, proxy and user config are disabled,
         # redirects disabled (fail closed, no credential re-send surface), and
-        # wall-clock and byte caps bound the transfer. No Authorization header is ever sent in
-        # the M02 slice: authed endpoints report unauthorized honestly instead.
+        # wall-clock and byte caps bound the transfer. Optional GitHub bearer
+        # auth is read from RH_GITHUB_TOKEN and sent only to api.github.com;
+        # curl reads the header config from stdin, so the token is absent from
+        # argv and retained files.
         # Returns the curl process status (0 = transfer ran; the caller MUST read
         # the code file: 200 = body usable, 000 = file-fixture transport with no
         # HTTP status, anything else = upstream answer preserved as evidence).
@@ -791,7 +815,8 @@ module Git:
 
         # GitHub's REST API requires an explicit supported-version header for
         # stable interpretation. The endpoint remains caller-supplied under the
-        # same HTTPS/DNS/redirect/size policy; no credential header is added.
+        # same HTTPS/DNS/redirect/size policy; optional bearer auth is scoped to
+        # the exact api.github.com host.
         def rh_run_github_api_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, true)
 

@@ -72,17 +72,22 @@ cat > "$T/bin/curl" <<'SH'
 set -euo pipefail
 printf '%s\n' "$@" > "$RH_CURL_LOG"
 body_out=""
+config_stdin=0
 while (($#)); do
   if [[ "$1" == "-o" ]]; then
     body_out="$2"
+    shift 2
+  elif [[ "$1" == "--config" && "$2" == "-" ]]; then
+    config_stdin=1
     shift 2
   else
     shift
   fi
 done
 [[ -n "$body_out" ]]
+if [[ "$config_stdin" == "1" ]]; then cat > "$RH_CURL_CONFIG_LOG"; fi
 cp "$RH_CURL_BODY" "$body_out"
-printf '000'
+printf '%s' "${RH_CURL_STATUS:-000}"
 SH
 chmod +x "$T/bin/curl"
 PATH="$T/bin:$PATH" RH_CURL_BODY="$T/github-repo.json" RH_CURL_LOG="$T/github-curl.args" \
@@ -93,6 +98,33 @@ PATH="$T/bin:$PATH" RH_CURL_BODY="$T/gitea-repo.json" RH_CURL_LOG="$T/gitea-curl
   "$ROOT/build/rh_cli" forge normalize --connector gitea --url "file://$T/gitea-repo.json" --out "$T/gitea-versioned.out" --fetched-at 1700000000 >/dev/null || fail "unversioned Gitea fetch"
 ! grep -Fq 'X-GitHub-Api-Version:' "$T/gitea-curl.args" || fail "GitHub version header leaked to Gitea"
 echo "[forge] API version header is connector-scoped and credential-free"
+
+echo "[forge] optional GitHub token stays out of arguments and evidence"
+cat > "$T/bin/python3" <<'SH'
+#!/usr/bin/env bash
+printf '140.82.114.5\n'
+SH
+chmod +x "$T/bin/python3"
+api_url="https://api.github.com/repos/example/project"
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_test-token_1" RH_CURL_BODY="$T/github-repo.json" RH_CURL_STATUS=200 \
+  RH_CURL_LOG="$T/github-auth.args" RH_CURL_CONFIG_LOG="$T/github-auth.config" \
+  "$ROOT/build/rh_cli" forge normalize --connector github --url "$api_url" --out "$T/github-auth.out" --fetched-at 1700000000 >/dev/null \
+  || fail "authenticated GitHub API fetch"
+grep -Fxq 'header = "Authorization: Bearer ghp_test-token_1"' "$T/github-auth.config" || fail "GitHub bearer header missing from curl stdin config"
+! grep -Fq 'ghp_test-token_1' "$T/github-auth.args" || fail "GitHub token leaked into curl arguments"
+for evidence in "$T/github-auth.out" "$T/github-auth.out.source" "$T/github-auth.out.source.status" "$T/github-auth.out.source.err"; do
+  [[ ! -f "$evidence" ]] || ! grep -Fq 'ghp_test-token_1' "$evidence" || fail "GitHub token leaked into retained evidence"
+done
+cmp -s "$T/gh.out" "$T/github-auth.out" || fail "authenticated GitHub normalization changed canonical output"
+set +e
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="bad token" RH_CURL_BODY="$T/github-repo.json" \
+  RH_CURL_LOG="$T/github-invalid-token.args" RH_CURL_CONFIG_LOG="$T/github-invalid-token.config" \
+  "$ROOT/build/rh_cli" forge normalize --connector github --url "$api_url" --out "$T/github-invalid-token.out" --fetched-at 1700000000 >/dev/null 2>&1
+invalid_token_rc=$?
+set -e
+[[ "$invalid_token_rc" -eq 4 ]] || fail "invalid GitHub token must fail closed (got $invalid_token_rc)"
+[[ ! -e "$T/github-invalid-token.args" && ! -e "$T/github-invalid-token.out" ]] || fail "invalid GitHub token launched curl or wrote a result"
+echo "[forge] token authentication is host-scoped, input-validated, and absent from arguments and evidence"
 
 echo "[forge] negatives fail closed"
 set +e
