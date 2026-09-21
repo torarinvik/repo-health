@@ -44,6 +44,12 @@ assert metrics["maintainer.permission_inventory_coverage"]["value"] == {"num": 1
 assert metrics["maintainer.observed_release_actors"]["value"] == 2, metrics
 assert metrics["maintainer.observed_merge_actors"]["value"] == 1, metrics
 assert metrics["maintainer.observed_review_actors"]["value"] == 1, metrics
+assert d["action_events_by_actor_type"] == {
+    "status": "observed",
+    "release": {"human": 1, "bot": 1, "service": 0, "unknown": 2},
+    "merge": {"human": 0, "bot": 0, "service": 0, "unknown": 1},
+    "review": {"human": 0, "bot": 0, "service": 0, "unknown": 2},
+}, d["action_events_by_actor_type"]
 assert metrics["maintainer.unattributed_release_count"]["value"] == 2, metrics
 assert metrics["maintainer.release_role_automation_share"]["value"] == {"num": 1, "den": 2}, metrics
 assert metrics["maintainer.review_share"]["value"] == {"num": 2, "den": 2}, metrics
@@ -120,6 +126,7 @@ python3 - "$T/noauth-out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["authorization_state"] == "unknown", d
+assert d["action_events_by_actor_type"]["status"] == "unsupported", d
 print("[roles] absent authorization is explicit unknown")
 PY
 
