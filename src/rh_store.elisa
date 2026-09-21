@@ -8,16 +8,24 @@ extern fsync(fd: i32) -> i32
 extern close(fd: i32) -> i32
 extern flock(fd: i32, operation: i32) -> i32
 extern fchmod(fd: i32, mode: i32) -> i32
+extern opendir(path: cstr) -> void&?
+extern readdir(directory: void&) -> void&?
+extern closedir(directory: void&) -> i32
 
 module Store:
     private:
         const RH_LS_AVAILABLE: i64 = 6
         const RH_STORE_LOCK_EXCLUSIVE: i32 = 2
         const RH_STORE_LOCK_RELEASE: i32 = 8
+        const RH_STORE_MAX_GC_CANDIDATES: i64 = 50000
         static if ELISA_TARGET_OS_MACOS:
             const RH_STORE_OPEN_CREATE: i32 = 512
+            const RH_STORE_DIRENT_NAME_OFFSET: usize = 21
+            extern __error() -> mutable i32&
         static elif ELISA_TARGET_OS_LINUX:
             const RH_STORE_OPEN_CREATE: i32 = 64
+            const RH_STORE_DIRENT_NAME_OFFSET: usize = 19
+            extern __errno_location() -> mutable i32&
         static else:
             const RH_STORE_OPEN_CREATE: i32 = 0
 
@@ -190,6 +198,53 @@ module Store:
         # bytes come from the two different buffers on purpose.
         # (private to this file)
     private:
+        static if ELISA_TARGET_OS_MACOS or ELISA_TARGET_OS_LINUX:
+            static if ELISA_TARGET_OS_MACOS:
+                def rh_store_errno() -> mutable i32&:
+                    __error()
+            static elif ELISA_TARGET_OS_LINUX:
+                def rh_store_errno() -> mutable i32&:
+                    __errno_location()
+
+            def rh_store_readdir_next(directory: void&, error_out: mutable i64&) -> void&? can[Blocking.IO]:
+                errno_ref: mutable i32& = Store::rh_store_errno()
+                errno_ref[0] <- 0
+                entry: void&? = readdir(directory)
+                error_out[0] <- errno_ref[0] if entry == null
+                entry
+
+            def rh_store_entry_is_blob_name(entry: void&) -> bool can[Unsafe.PointerCast]:
+                entry_bytes: u8& = entry.cast[u8&] can Unsafe.PointerCast
+                while i < 17 |i: usize = 0, entry_bytes|:
+                    byte: u8 = entry_bytes[RH_STORE_DIRENT_NAME_OFFSET + i]
+                    return i == 16 if byte == 0
+                    return false if i == 16 or not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
+                    i <- i + 1
+                false
+
+        def rh_store_names_sorted(names: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not Store::rh_store_names_valid(names)
+            previous: mutable usize = 0
+            have_previous: mutable bool = false
+            while start < names.count |start: usize = 0, names, previous, have_previous|:
+                if have_previous:
+                    order: mutable i64 = 0
+                    while i < 16 |i: usize = 0, names, previous, start, order|:
+                        left: u8 = names[previous + i]
+                        right: u8 = names[start + i]
+                        if left != right:
+                            order <- -1 if left < right
+                            order <- 1 if left > right
+                            i <- 16
+                        else:
+                            i <- i + 1
+                    return false if order >= 0
+                previous <- start
+                have_previous <- true
+                stop: i64 = Base::rh_find_byte(names, start, 10)
+                start <- stop.usize() + 1 if stop >= 0 else names.count
+            true
+
         def rh_names_has(buf: darray[u8]&, target: darray[u8]&, ts: usize, te: usize) -> bool can[Memory.Allocate, Abort.Panic]:
             while start < buf.count |start: usize = 0, buf, target, ts, te|:
                 stop: i64 = Base::rh_find_byte(buf, start, 10)
@@ -207,6 +262,27 @@ module Store:
                     start <- stop.usize() + 1
             false
 
+        def rh_names_has_sorted(buf: darray[u8]&, target: darray[u8]&, ts: usize, te: usize, count: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            low: mutable usize = 0
+            high: mutable usize = count.usize()
+            while low < high |low, high, buf, target, ts, te|:
+                middle: usize = low + (high - low) / 2
+                offset: usize = middle * 17
+                order: mutable i64 = 0
+                while i < te - ts |i: usize = 0, buf, target, ts, offset, order, te|:
+                    left: u8 = target[ts + i]
+                    right: u8 = buf[offset + i]
+                    if left != right:
+                        order <- -1 if left < right
+                        order <- 1 if left > right
+                        i <- te - ts
+                    else:
+                        i <- i + 1
+                return true if order == 0
+                low <- middle + 1 if order > 0
+                high <- middle if order < 0
+            false
+
         # Validate a newline-separated set of canonical local blob names. An
         # empty set is valid; empty interior lines and path-like names are not.
         def rh_store_names_valid(names: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -222,27 +298,28 @@ module Store:
             true
 
     private:
-        # Orphan cleanup (F033): delete every candidate blob whose name is NOT in
-        # the referenced set. The candidate and referenced sets are supplied by the
-        # caller (newline-separated names) because this slice has no directory
-        # listing; the operation itself is real and verifies by unlink. Both full
-        # name lists are validated before any deletion, so malformed or path-like
-        # entries cannot cause partial cleanup or escape the evidence directory.
+        # Orphan cleanup (F033): delete each discovered candidate absent from the
+        # referenced set. The database path uses the guarded directory scan above;
+        # the local selftest can still supply explicit newline-separated sets. Both
+        # full name lists are validated before any deletion, so malformed or
+        # path-like entries cannot escape the evidence directory.
         # A database caller must hold the same root guard across reference
         # discovery and deletion, and registration must acquire it before verify.
         # Referenced objects are never touched. deleted_out counts successful
         # unlinks. Returns -1 for bad inputs or filesystem failures.
-        def rh_store_gc_unlocked(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_store_gc_unlocked(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, references_sorted: bool, reference_count: i64, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             deleted_out[0] <- 0
             return -1 if Base::rh_cstr_len_c(evidence_dir) == 0 or Base::rh_cstr_len_c(evidence_dir) > 4096
             return -1 if not rh_store_names_valid(candidates) or not rh_store_names_valid(referenced)
+            return -1 if references_sorted and (reference_count < 0 or referenced.count.i64() != reference_count * 17 or not Store::rh_store_names_sorted(referenced))
             directory_fd: i32 = open(evidence_dir, 0, 0)
             return -1 if directory_fd < 0
             while start < candidates.count |start: usize = 0, candidates, referenced, evidence_dir, deleted_out, directory_fd|:
                 stop: i64 = Base::rh_find_byte(candidates, start, 10)
                 line_end: mutable usize = stop.usize() if stop >= 0 else candidates.count
                 if line_end > start:
-                    if not rh_names_has(referenced, candidates, start, line_end):
+                    referenced_blob: bool = rh_names_has_sorted(referenced, candidates, start, line_end, reference_count) if references_sorted else rh_names_has(referenced, candidates, start, line_end)
+                    if not referenced_blob:
                         path: mutable darray[u8] =
                             path: mutable darray[u8] = []
                             Base::rh_push_cstr(path, evidence_dir)
@@ -269,10 +346,51 @@ module Store:
             0
 
     public:
+        # Discover canonical blob names while the caller holds the root guard.
+        # Lock metadata, staging files, and unrelated names are not candidates.
+        # A capped or failed directory scan returns no usable candidate set.
+        static if ELISA_TARGET_OS_MACOS or ELISA_TARGET_OS_LINUX:
+            def rh_store_gc_candidate_names_under_guard(evidence_dir: cstr, candidates_out: mutable darray[u8]&, count_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Unsafe.PointerCast]:
+                count_out[0] <- 0
+                return -1 if candidates_out.count != 0 or Base::rh_cstr_len_c(evidence_dir) == 0 or Base::rh_cstr_len_c(evidence_dir) > 4096
+                directory_result: void&? = opendir(evidence_dir)
+                return -1 if directory_result == null
+                directory: void& = directory_result
+                candidate_count: mutable i64 = 0
+                read_error: mutable i64 = 0
+                failed: mutable bool = false
+                entry: mutable void&? = Store::rh_store_readdir_next(directory, &read_error)
+                while entry != null and not failed |entry, read_error, failed, directory, candidates_out, candidate_count|:
+                    if Store::rh_store_entry_is_blob_name(entry):
+                        if candidate_count == RH_STORE_MAX_GC_CANDIDATES:
+                            failed <- true
+                        else:
+                            entry_bytes: u8& = entry.cast[u8&] can Unsafe.PointerCast
+                            while i < 16 |i: usize = 0, entry_bytes, candidates_out|:
+                                candidates_out.push(entry_bytes[RH_STORE_DIRENT_NAME_OFFSET + i])
+                                i <- i + 1
+                            candidates_out.push(10)
+                            candidate_count <- candidate_count + 1
+                    entry <- Store::rh_store_readdir_next(directory, &read_error)
+                failed <- true if read_error != 0
+                closed: i32 = closedir(directory)
+                return -1 if failed or closed != 0
+                count_out[0] <- candidate_count
+                0
+        static else:
+            def rh_store_gc_candidate_names_under_guard(evidence_dir: cstr, candidates_out: mutable darray[u8]&, count_out: mutable i64&) -> i64:
+                count_out[0] <- 0
+                return -1
+
         # Caller-held form keeps the root guarded across reference discovery and
         # deletion. The caller must acquire and release the matching root guard.
         def rh_store_gc_under_guard(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-            Store::rh_store_gc_unlocked(evidence_dir, candidates, referenced, deleted_out)
+            Store::rh_store_gc_unlocked(evidence_dir, candidates, referenced, false, 0, deleted_out)
+
+        # Database reference scans arrive in canonical name order. Validate that
+        # order once, then use bounded binary lookup for every discovered object.
+        def rh_store_gc_sorted_under_guard(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, reference_count: i64, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            Store::rh_store_gc_unlocked(evidence_dir, candidates, referenced, true, reference_count, deleted_out)
 
         def rh_store_gc(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             guard_fd: mutable i32 = -1

@@ -92,17 +92,8 @@ done
 echo "[postgres-cli] evidence reference query failures and oversized results fail closed"
 
 cp "$ROOT/fixtures/postgres/evidence-gc-command.json" "$T/evidence-gc-command.json"
-printf '%s\n' '{"schema":"rh-postgres-command/1","operation":"evidence_gc","candidate_names":["../outside"]}' > "$T/evidence-gc-invalid.json"
-printf '%s\n' '{"schema":"rh-postgres-command/1","operation":"evidence_gc","candidate_names":["f5e19178d3ff184e","f5e19178d3ff184e"]}' > "$T/evidence-gc-duplicate.json"
-for invalid in invalid duplicate; do
-  if RH_DATABASE_URL='host=fake dbname=repo_health' RH_EVIDENCE_ROOT="$T/evidence" \
-      RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=evidence_references \
-      "$ROOT/build/rh_cli" postgres --input "$T/evidence-gc-$invalid.json" \
-        --out "$T/evidence-gc-$invalid-result.json" >/dev/null 2>&1; then
-    fail "evidence GC accepted $invalid candidate names"
-  fi
-  [[ ! -e "$T/evidence-gc-$invalid-result.json" ]] || fail "$invalid evidence GC wrote a result"
-done
+printf 'unrelated evidence-root metadata\n' > "$T/evidence/.notes"
+printf 'incomplete staged object\n' > "$T/evidence/0000000000000000.stage.stale"
 printf 'orphan evidence\n' > "$T/orphan-evidence.txt"
 orphan_name="$("$ROOT/build/rh_cli" store put --root "$T/evidence" --file "$T/orphan-evidence.txt" | awk '{print $3}')"
 [[ "$orphan_name" == "4d9bc51a88048cee" ]] || fail "content-addressed orphan fixture changed"
@@ -125,7 +116,8 @@ set +e
 orphan_rc=$?
 set -e
 [[ "$orphan_rc" -eq 5 ]] || fail "evidence GC did not remove the orphan"
-for mode in failure oversize invalid_refs truncated_refs; do
+[[ -f "$T/evidence/.notes" && -f "$T/evidence/0000000000000000.stage.stale" ]] || fail "evidence GC removed non-blob evidence-root files"
+for mode in failure oversize invalid_refs truncated_refs unsorted_refs; do
   "$ROOT/build/rh_cli" store put --root "$T/evidence" --file "$T/orphan-evidence.txt" >/dev/null || fail "recreate orphan before $mode snapshot"
   if RH_DATABASE_URL='host=fake dbname=repo_health' RH_EVIDENCE_ROOT="$T/evidence" \
       RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=evidence_references RH_FAKE_PG_EXPECT="$mode" \
