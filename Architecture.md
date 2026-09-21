@@ -2139,6 +2139,7 @@ References establish external interfaces and terminology; repo-health's proposed
 [S24]: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html "OWASP SSRF prevention guidance"
 [S25]: https://www.postgresql.org/docs/current/explicit-locking.html "PostgreSQL explicit locking documentation"
 [S26]: https://reproducible-builds.org/docs/definition/ "Reproducible Builds definition"
+[S27]: https://docs.github.com/en/rest/about-the-rest-api/api-versions "GitHub REST API versioning and supported versions"
 
 | Reference | Use in this design | Verification note |
 |---|---|---|
@@ -2147,7 +2148,7 @@ References establish external interfaces and terminology; repo-health's proposed
 | [S04] / [S05] | Existing practice and criticality tools. | Criticality dataset availability was explicitly checked; do not assume a live cloud feed. |
 | [S06] / [S07] | Optional ecosystem enrichment. | Coverage and applicable data terms require connector-specific review. |
 | [S08] | Package coordinate interchange. | Pin supported package types and normalization rules. |
-| [S09] / [S10] / [S11] / [S12] / [S13] / [S14] / [S15] / [S16] | Source-specific adapter implementation. | Instance versions and capabilities must be probed; documentation is not proof of deployment support. |
+| [S09] / [S10] / [S11] / [S12] / [S13] / [S14] / [S15] / [S16] / [S27] | Source-specific adapter implementation. | Official API documentation checked 2026-09-21; instance versions and capabilities must still be probed because documentation does not prove deployment support. |
 | [S17] | Authorized traffic limitations. | Fourteen-day windows and permission requirements must be modeled. |
 | [S18] | Patch-series, review, testing, and attribution semantics. | Trailer meaning is retained rather than flattened. |
 | [S19] / [S20] / [S21] / [S22] / [S23] | Advisory, inventory, provenance, and archival interoperability. | Pin supported format revisions and retain issuer evidence. |

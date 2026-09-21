@@ -30,7 +30,7 @@ echo "$out"
 
 echo "[m02] manifests: distinct ids, honest capability strings"
 python3 - "$ROOT/connectors/manifests" <<'EOF'
-import json, glob, sys
+import datetime, json, glob, sys
 seen = {}
 for p in sorted(glob.glob(sys.argv[1] + "/*.json")):
     d = json.load(open(p))
@@ -39,6 +39,8 @@ for p in sorted(glob.glob(sys.argv[1] + "/*.json")):
     seen[cid] = p
     assert d["connector_version"] == "1.0.0", p
     assert isinstance(d["capabilities"], dict), p
+    assert datetime.date.fromisoformat(d["contract_checked_at"]).isoformat() == d["contract_checked_at"], p
+    assert isinstance(d["source_docs"], list) and all(isinstance(u, str) and u.startswith("https://") for u in d["source_docs"]), p
 assert set(seen) == {"generic-git", "github", "gitlab", "forgejo", "gitea", "bitbucket", "mercurial", "subversion", "fossil", "release-feed"}, seen
 assert seen["mercurial"] != seen["subversion"] and seen["subversion"] != seen["fossil"], "native-vcs manifests must be separate"
 assert seen["forgejo"] != seen["gitea"], "forgejo/gitea must be separate manifests"
