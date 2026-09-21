@@ -174,3 +174,41 @@ module ForgeEventsFetch:
             ForgeEventsFetch::rh_fef_push_pagination(capture, releases_complete == 1, releases_next_page)
             Base::rh_push_text(capture, "}}")
             ForgeEvents::rh_forge_events_report(capture, out)
+
+        # Reviews are listed under one pull request. Keep the requested scope in
+        # the result instead of implying a repository-wide review snapshot.
+        def rh_forge_events_github_reviews_live(repository: cstr, pull_request: i64, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or pull_request < 1 or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
+            endpoint: mutable darray[u8] = []
+            Base::rh_push_text(endpoint, "pulls/")
+            Base::rh_push_decimal_i64(endpoint, pull_request)
+            Base::rh_push_text(endpoint, "/reviews?per_page=100&page=")
+            endpoint.push(0)
+            endpoint_ptr: cstr = (&endpoint[0]).cast[cstr] can Unsafe.PointerCast
+            capability: mutable darray[u8] = []
+            Base::rh_push_text(capability, "reviews-pr-")
+            Base::rh_push_decimal_i64(capability, pull_request)
+            capability.push(0)
+            capability_ptr: cstr = (&capability[0]).cast[cstr] can Unsafe.PointerCast
+            reviews: mutable darray[u8] = []
+            review_total: mutable i64 = 0
+            byte_total: mutable i64 = 0
+            complete: mutable i64 = 0
+            next_page: mutable i64 = 1
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, endpoint_ptr, capability_ptr, max_pages, evidence_base, reviews, &review_total, &byte_total, &complete, &next_page)
+            captured_at: i64 = Base::rh_now()
+            return -1 if captured_at < 0
+            token: u8&? = getenv("RH_GITHUB_TOKEN")
+            capture: mutable darray[u8] = []
+            Base::rh_push_text(capture, "{\"schema\":\"rh-forge-events-input/1\",\"provider\":\"github\",\"captured_at\":")
+            Base::rh_push_decimal_i64(capture, captured_at)
+            Base::rh_push_text(capture, ",\"authorization\":{\"state\":\"")
+            Base::rh_push_text(capture, "authorized" if token != null else "not_requested")
+            Base::rh_push_text(capture, "\"},\"scope\":{\"pull_request\":")
+            Base::rh_push_decimal_i64(capture, pull_request)
+            Base::rh_push_text(capture, "},\"capability_states\":{\"issues\":\"not_attempted\",\"proposals\":\"not_attempted\",\"releases\":\"not_attempted\"},\"reviews\":[")
+            capture.extend(bytes_view(reviews))
+            Base::rh_push_text(capture, "],\"pagination\":{\"issues\":{\"next\":null,\"complete\":false},\"proposals\":{\"next\":null,\"complete\":false},\"reviews\":")
+            ForgeEventsFetch::rh_fef_push_pagination(capture, complete == 1, next_page)
+            Base::rh_push_text(capture, ",\"releases\":{\"next\":null,\"complete\":false}}}")
+            ForgeEvents::rh_forge_events_report(capture, out)

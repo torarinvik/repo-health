@@ -139,7 +139,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli ops monitor --input <file> --out <file> | ops quota --input <file> --out <file>")
     rh_cli_err("       rh_cli pilot-review --input <file> --out <file>")
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
-    rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo>) --out <file> [--max-pages N]")
+    rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [--review-pull N]) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
     rh_cli_err("       rh_cli job classify --input <file> --out <file> | job run --input <file> --out <file>")
     rh_cli_err("       rh_cli reconcile --input <file> --out <file>")
@@ -1489,8 +1489,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if argc < 3
         fsub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
         if Base::rh_streq(fsub, "events"):
-            fei_idx, feo_idx, feg_idx, fem_idx =
-                while feq < argc |fei_idx: i64 = -1, feo_idx: i64 = -1, feg_idx: i64 = -1, fem_idx: i64 = -1, feq: i64 = 3, slots| -> fei_idx, feo_idx, feg_idx, fem_idx:
+            fei_idx, feo_idx, feg_idx, fem_idx, fer_idx =
+                while feq < argc |fei_idx: i64 = -1, feo_idx: i64 = -1, feg_idx: i64 = -1, fem_idx: i64 = -1, fer_idx: i64 = -1, feq: i64 = 3, slots| -> fei_idx, feo_idx, feg_idx, fem_idx, fer_idx:
                     fea: u8& = slots[feq].cast[u8&] can Unsafe.PointerCast
                     if Base::rh_streq(fea, "--input"):
                         if feq + 1 < argc:
@@ -1516,12 +1516,18 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                             fem_idx <- feq
                         else:
                             return rh_cli_usage(2)
+                    elif Base::rh_streq(fea, "--review-pull"):
+                        if feq + 1 < argc:
+                            feq <- feq + 1
+                            fer_idx <- feq
+                        else:
+                            return rh_cli_usage(2)
                     else:
                         return rh_cli_usage(2)
                     feq <- feq + 1
-            return rh_cli_usage(2) if feo_idx < 0 or (fei_idx < 0 and feg_idx < 0) or (fei_idx >= 0 and feg_idx >= 0)
+            return rh_cli_usage(2) if feo_idx < 0 or (fei_idx < 0 and feg_idx < 0) or (fei_idx >= 0 and feg_idx >= 0) or (fer_idx >= 0 and feg_idx < 0)
             if fei_idx >= 0:
-                return rh_cli_usage(2) if fem_idx >= 0
+                return rh_cli_usage(2) if fem_idx >= 0 or fer_idx >= 0
                 return rh_do_forge_events(slots[fei_idx], slots[feo_idx])
             max_pages: mutable i64 = 4
             if fem_idx >= 0:
@@ -1529,6 +1535,11 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 parsed: i64 = rh_parse_cstr_int(slots[fem_idx], &ok)
                 return rh_cli_usage(2) if ok == 0 or parsed < 1 or parsed > 10
                 max_pages <- parsed
+            if fer_idx >= 0:
+                review_pull_ok: mutable i64 = 0
+                review_pull: i64 = rh_parse_cstr_int(slots[fer_idx], &review_pull_ok)
+                return rh_cli_usage(2) if review_pull_ok == 0 or review_pull < 1
+                return rh_do_forge_events_github_reviews(slots[feg_idx], review_pull, slots[feo_idx], max_pages)
             return rh_do_forge_events_github(slots[feg_idx], slots[feo_idx], max_pages)
         return rh_cli_usage(2) if not Base::rh_streq(fsub, "normalize")
         fconn_idx, fin_idx, fout_idx, furl_idx, fts, fhas =
@@ -5839,6 +5850,21 @@ def rh_do_forge_events_github(repository: cstr, out_path: cstr, max_pages: i64) 
         rh_cli_err("forge events: cannot write --out")
         return 4
     rh_cli_out("forge events: GitHub issues, proposals, and releases collected")
+    0
+
+def rh_do_forge_events_github_reviews(repository: cstr, pull_request: i64, out_path: cstr, max_pages: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected forge events output path (allowlist)")
+        return 3
+    body: mutable darray[u8] = []
+    if ForgeEventsFetch::rh_forge_events_github_reviews_live(repository, pull_request, max_pages, out_path, body) != 0:
+        rh_cli_err("forge events: GitHub pull-request review collection failed (see page evidence)")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("forge events: cannot write --out")
+        return 4
+    rh_cli_out("forge events: GitHub pull-request reviews collected")
     0
 
 # --- M02-04/05 connector instance execution path. ---

@@ -242,7 +242,7 @@ PY
 
 echo "[forge-events] bounded live GitHub issue, pull-request, and release pages retain safe evidence"
 mkdir -p "$T/bin"
-python3 - "$T/live-page-1.json" "$T/live-empty.json" "$T/live-full-page.json" "$T/live-issues-page-1.json" "$T/live-issues-full-page.json" "$T/live-releases-page-1.json" "$T/live-releases-full-page.json" <<'PY'
+python3 - "$T/live-page-1.json" "$T/live-empty.json" "$T/live-full-page.json" "$T/live-issues-page-1.json" "$T/live-issues-full-page.json" "$T/live-releases-page-1.json" "$T/live-releases-full-page.json" "$T/live-reviews-page-1.json" <<'PY'
 import json, sys
 pull = {"number": 7, "state": "closed", "created_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "closed_at": "2023-11-16T22:13:20Z", "html_url": "https://github.com/example/project/pull/7"}
 issue = {"number": 301, "state": "open", "created_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "closed_at": None, "html_url": "https://github.com/example/project/issues/301"}
@@ -258,6 +258,8 @@ json.dump([release], open(sys.argv[6], "w", encoding="utf-8"), separators=(",", 
 release_rows = [dict(release, id=n, tag_name=f"v{n}", html_url=f"https://github.com/example/project/releases/tag/v{n}") for n in range(1, 100)]
 release_rows.insert(0, dict(release, id=999, tag_name="draft", published_at=None, draft=True, html_url="https://github.com/example/project/releases/tag/draft"))
 json.dump(release_rows, open(sys.argv[7], "w", encoding="utf-8"), separators=(",", ":"))
+review = {"id": 55, "state": "APPROVED", "submitted_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "html_url": "https://github.com/example/project/pull/7#pullrequestreview-55"}
+json.dump([review], open(sys.argv[8], "w", encoding="utf-8"), separators=(",", ":"))
 PY
 cat > "$T/bin/python3" <<'SH'
 #!/usr/bin/env bash
@@ -281,6 +283,9 @@ done
 if [[ "$config_stdin" == "1" ]]; then cat > "$RH_CURL_CONFIG_LOG"; fi
 if [[ "$url" == *"/issues?"* ]]; then
   body="$RH_CURL_ISSUES_PAGE1"
+  [[ "$url" != *'page=2' ]] || body="$RH_CURL_PAGE2"
+elif [[ "$url" == *"/reviews?"* ]]; then
+  body="$RH_CURL_REVIEWS_PAGE1"
   [[ "$url" != *'page=2' ]] || body="$RH_CURL_PAGE2"
 elif [[ "$url" == *"/pulls?"* ]]; then
   body="$RH_CURL_PULLS_PAGE1"
@@ -368,6 +373,32 @@ print("[forge-events] short-page completion OK")
 PY
 [[ "$(grep -c 'page=1' "$T/short-live-curl.args")" -eq 3 ]] || fail "collector requested a page after a short response"
 [[ ! -e "$T/short-live.out.github-issues-page-2.status" && ! -e "$T/short-live.out.github-pulls-page-2.status" && ! -e "$T/short-live.out.github-releases-page-2.status" ]] || fail "collector requested a page after a short response"
+
+echo "[forge-events] pull-request review collection stays scoped and paginated"
+rm -f "$T/reviews.out" "$T/reviews.out.github-"* "$T/reviews-curl.args" "$T/reviews-curl.config"
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_review_fixture" RH_CURL_REVIEWS_PAGE1="$T/live-reviews-page-1.json" RH_CURL_PAGE2="$T/live-empty.json" \
+  RH_CURL_LOG="$T/reviews-curl.args" RH_CURL_CONFIG_LOG="$T/reviews-curl.config" \
+  "$ROOT/build/rh_cli" forge events --github-repo example/project --review-pull 7 --max-pages 2 --out "$T/reviews.out" >/dev/null || fail "scoped review collection"
+python3 - "$T/reviews.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["scope"] == {"pull_request":7}, d
+assert d["authorization"]["state"] == "authorized", d["authorization"]
+assert d["capabilities"]["reviews"]["status"] == "observed" and d["capabilities"]["reviews"]["count"] == 1, d["capabilities"]
+assert all(d["capabilities"][key]["status"] == "not_attempted" for key in ("issues", "proposals", "releases")), d["capabilities"]
+assert d["events"] == [{"kind":"reviews", "native_id":"github:55", "status":"APPROVED", "created_at":1700000000, "updated_at":1700086400, "closed_at":None, "url":"https://github.com/example/project/pull/7#pullrequestreview-55"}], d["events"]
+assert d["pagination"]["reviews"] == {"next":None, "complete":True}, d["pagination"]
+assert (t / "reviews.out.github-reviews-pr-7-page-1.url").read_text().strip() == "https://api.github.com/repos/example/project/pulls/7/reviews?per_page=100&page=1"
+assert (t / "reviews.out.github-reviews-pr-7-page-1.status").read_text() == "200"
+assert "ghp_review_fixture" not in open(sys.argv[1]).read()
+print("[forge-events] scoped review identity, authorization, and evidence OK")
+PY
+grep -Fxq 'header = "Authorization: Bearer ghp_review_fixture"' "$T/reviews-curl.config" || fail "review token header absent from curl stdin config"
+! grep -Fq 'ghp_review_fixture' "$T/reviews-curl.args" || fail "review token leaked into curl arguments"
+for evidence in "$T"/reviews.out.github-reviews-pr-*; do
+  [[ ! -f "$evidence" ]] || ! grep -Fq 'ghp_review_fixture' "$evidence" || fail "review token leaked into evidence"
+done
 set +e
 PATH="$T/bin:$PATH" RH_CURL_LOG="$T/invalid-route-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
   "$ROOT/build/rh_cli" forge events --github-repo 'example/../project' --out "$T/invalid-route.out" >/dev/null 2>&1
