@@ -556,7 +556,7 @@ Implement the user's central insight: persistent committed stewardship is differ
 
 **M04-03: Accepted identity links.** Add explicit proposed/accepted/rejected/revoked assertions, a review workflow, revisioned clusters, and complete recomputation after revocation.
 
-**M04-04: Automation classification.** Store provider-declared bot/service accounts, explicit project declarations, and unresolved cases. Publish stratified metrics rather than treating every account as a person.
+**M04-04: Automation classification.** Store provider-declared bot/service accounts, explicit project declarations, and unresolved cases. Publish stratified metrics rather than treating every account as a person. The identity and project-publication paths now accept `human`, `bot_known`, `service_known`, and `unresolved` actor kinds and expose each group separately; the public publication input defaults a missing kind list to unresolved, while the restricted report marks omitted classification unsupported, and unknown labels fail closed. Provider/project declaration provenance and merge-safe propagation into every action-derived metric remain open.
 
 **M04-05: Persistence cohorts.** Implement exact complete-calendar-month activity, span, and recent-activity criteria. Return component measurements alongside cohort membership.
 

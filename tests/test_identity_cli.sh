@@ -17,7 +17,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/a.json" <<'JSON'
-{"schema":"rh-identity-input/1","actor_count":4,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1},{"a":1,"b":2,"state":"accepted","revision_added":2},{"a":3,"b":0,"state":"rejected","revision_added":3}],"actor_kinds":["human","human","unresolved","bot_known"],"actors":[{"source":"github","source_instance":"github.com/acme","native_object_id":"repo-1","display_name":"shared","aliases":[{"value":"old-name","observed_at":100}]},{"source":"github","source_instance":"github.com/acme","native_object_id":"repo-2","display_name":"other","aliases":[]},{"source":"gitlab","source_instance":"gitlab.com/acme","native_object_id":"repo-1","display_name":"shared","aliases":[]},{"source":"github","source_instance":"github.com/acme","native_object_id":"bot-1","display_name":"bot","aliases":[]}]}
+{"schema":"rh-identity-input/1","actor_count":5,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1},{"a":1,"b":2,"state":"accepted","revision_added":2},{"a":3,"b":0,"state":"rejected","revision_added":3}],"actor_kinds":["human","human","unresolved","bot_known","service_known"],"actors":[{"source":"github","source_instance":"github.com/acme","native_object_id":"repo-1","display_name":"shared","aliases":[{"value":"old-name","observed_at":100}]},{"source":"github","source_instance":"github.com/acme","native_object_id":"repo-2","display_name":"other","aliases":[]},{"source":"gitlab","source_instance":"gitlab.com/acme","native_object_id":"repo-1","display_name":"shared","aliases":[]},{"source":"github","source_instance":"github.com/acme","native_object_id":"bot-1","display_name":"bot","aliases":[]},{"source":"github","source_instance":"github.com/acme","native_object_id":"service-1","display_name":"automation service","aliases":[]}]}
 JSON
 cat > "$T/b.json" <<'JSON'
 {"schema":"rh-identity-input/1","actor_count":4,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1},{"a":1,"b":2,"state":"revoked","revision_added":4},{"a":3,"b":0,"state":"rejected","revision_added":3}]}
@@ -28,13 +28,13 @@ python3 - "$T/a.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-identity-result/1", d
-assert d["actor_count"] == 4 and d["identity_revision"] == 2, d
-assert d["cluster_count"] == 2, d
-assert d["metrics"][0]["key"] == "contributor.accepted_actor_clusters" and d["metrics"][0]["value"] == 2, d
+assert d["actor_count"] == 5 and d["identity_revision"] == 2, d
+assert d["cluster_count"] == 3, d
+assert d["metrics"][0]["key"] == "contributor.accepted_actor_clusters" and d["metrics"][0]["value"] == 3, d
 assert d["metrics"][1]["key"] == "contributor.known_human_accounts" and d["metrics"][1]["value"] == 2, d
-assert d["clusters"] == [[0, 1, 2], [3]], d["clusters"]
-assert d["cluster_id_by_actor"] == [0, 0, 0, 3], d["cluster_id_by_actor"]
-assert d["actor_kinds"] == {"human": 2, "bot_known": 1, "unresolved": 1}, d["actor_kinds"]
+assert d["clusters"] == [[0, 1, 2], [3], [4]], d["clusters"]
+assert d["cluster_id_by_actor"] == [0, 0, 0, 3, 4], d["cluster_id_by_actor"]
+assert d["actor_kinds"] == {"human": 2, "bot_known": 1, "service_known": 1, "unresolved": 1}, d["actor_kinds"]
 assert d["actors"][0]["source_instance"] == "github.com/acme", d
 assert d["actors"][0]["aliases"] == [{"value": "old-name", "observed_at": 100}], d
 assert d["actors"][0]["display_name"] == d["actors"][2]["display_name"] and d["actors"][0]["source_instance"] != d["actors"][2]["source_instance"], d
