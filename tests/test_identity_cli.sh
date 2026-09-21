@@ -77,6 +77,15 @@ echo "[identity] determinism"
 cmp -s "$T/a.out" "$T/a2.out" || fail "identity output not deterministic"
 
 echo "[identity] malformed input fails closed"
+python3 - "$T/a.json" "$T/badnative.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["actor_count"] += 1
+d["actor_kinds"].append("human")
+d["actor_kind_sources"].append("provider")
+d["actors"].append(dict(d["actors"][0]))
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+PY
 set +e
 printf '{"schema":"rh-identity-input/2","actor_count":1,"links":[]}' > "$T/badschema.json"
 "$ROOT/build/rh_cli" identity --input "$T/badschema.json" --out "$T/x" >/dev/null 2>&1; rc_schema=$?
@@ -90,9 +99,10 @@ printf '{"schema":"rh-identity-input/1","actor_count":2,"links":[],"actor_kinds"
 "$ROOT/build/rh_cli" identity --input "$T/badkindsource.json" --out "$T/x" >/dev/null 2>&1; rc_kind_source=$?
 printf '{"schema":"rh-identity-input/1","actor_count":2,"links":[],"actor_kinds":["human","unresolved"],"actor_kind_sources":["project"]}' > "$T/badkindsourcecount.json"
 "$ROOT/build/rh_cli" identity --input "$T/badkindsourcecount.json" --out "$T/x" >/dev/null 2>&1; rc_kind_source_count=$?
+"$ROOT/build/rh_cli" identity --input "$T/badnative.json" --out "$T/x" >/dev/null 2>&1; rc_native_duplicate=$?
 "$ROOT/build/rh_cli" identity --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_state" "$rc_actor" "$rc_kind" "$rc_kind_source" "$rc_kind_source_count" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_state" "$rc_actor" "$rc_kind" "$rc_kind_source" "$rc_kind_source_count" "$rc_native_duplicate" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed identity input must exit 4 (got $rc)"
 done
 
