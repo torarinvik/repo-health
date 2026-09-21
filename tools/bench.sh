@@ -96,7 +96,7 @@ def storage_disk_profile_at(work_dir: str) -> dict[str, object]:
         corpus_digest.update(content)
         subprocess.run([cli, "store", "put", "--root", store_dir, "--file", source_path], check=True, stdout=subprocess.DEVNULL)
 
-    names = sorted(os.listdir(store_dir))
+    names = sorted(name for name in os.listdir(store_dir) if name != ".rh-evidence.lock")
     if len(names) != len(unique):
         raise SystemExit("content-addressed store did not deduplicate identical evidence")
     object_stats = [os.stat(os.path.join(store_dir, name)) for name in names]

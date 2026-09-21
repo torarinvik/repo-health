@@ -91,11 +91,59 @@ for mode in failure oversize; do
 done
 echo "[postgres-cli] evidence reference query failures and oversized results fail closed"
 
-python3 - "$T" "$ROOT/fixtures/postgres/ingest-output.json" "$ROOT/fixtures/postgres/evidence-references-result.json" <<'PY'
+cp "$ROOT/fixtures/postgres/evidence-gc-command.json" "$T/evidence-gc-command.json"
+printf '%s\n' '{"schema":"rh-postgres-command/1","operation":"evidence_gc","candidate_names":["../outside"]}' > "$T/evidence-gc-invalid.json"
+printf '%s\n' '{"schema":"rh-postgres-command/1","operation":"evidence_gc","candidate_names":["f5e19178d3ff184e","f5e19178d3ff184e"]}' > "$T/evidence-gc-duplicate.json"
+for invalid in invalid duplicate; do
+  if RH_DATABASE_URL='host=fake dbname=repo_health' RH_EVIDENCE_ROOT="$T/evidence" \
+      RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=evidence_references \
+      "$ROOT/build/rh_cli" postgres --input "$T/evidence-gc-$invalid.json" \
+        --out "$T/evidence-gc-$invalid-result.json" >/dev/null 2>&1; then
+    fail "evidence GC accepted $invalid candidate names"
+  fi
+  [[ ! -e "$T/evidence-gc-$invalid-result.json" ]] || fail "$invalid evidence GC wrote a result"
+done
+printf 'orphan evidence\n' > "$T/orphan-evidence.txt"
+orphan_name="$("$ROOT/build/rh_cli" store put --root "$T/evidence" --file "$T/orphan-evidence.txt" | awk '{print $3}')"
+[[ "$orphan_name" == "4d9bc51a88048cee" ]] || fail "content-addressed orphan fixture changed"
+RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+  RH_EVIDENCE_ROOT="$T/evidence" RH_LIBPQ_PATH="$LIBPQ" \
+  RH_FAKE_PG_OPERATION=evidence_references RH_FAKE_PG_EXPECT=listed \
+  "$ROOT/build/rh_cli" postgres --input "$T/evidence-gc-command.json" \
+    --out "$T/evidence-gc-result.json" >/dev/null || fail "database-backed evidence cleanup"
+python3 - "$T/evidence-gc-result.json" "$ROOT/fixtures/postgres/evidence-gc-result.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    actual = json.load(f)
+with open(sys.argv[2]) as f:
+    expected = json.load(f)
+assert actual == expected, actual
+PY
+"$ROOT/build/rh_cli" store verify --root "$T/evidence" --name f5e19178d3ff184e >/dev/null || fail "evidence GC removed a referenced blob"
+set +e
+"$ROOT/build/rh_cli" store verify --root "$T/evidence" --name "$orphan_name" >/dev/null 2>&1
+orphan_rc=$?
+set -e
+[[ "$orphan_rc" -eq 5 ]] || fail "evidence GC did not remove the orphan"
+for mode in failure oversize invalid_refs truncated_refs; do
+  "$ROOT/build/rh_cli" store put --root "$T/evidence" --file "$T/orphan-evidence.txt" >/dev/null || fail "recreate orphan before $mode snapshot"
+  if RH_DATABASE_URL='host=fake dbname=repo_health' RH_EVIDENCE_ROOT="$T/evidence" \
+      RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=evidence_references RH_FAKE_PG_EXPECT="$mode" \
+      "$ROOT/build/rh_cli" postgres --input "$T/evidence-gc-command.json" \
+        --out "$T/evidence-gc-$mode.json" >/dev/null 2>&1; then
+    fail "evidence GC accepted $mode reference snapshot"
+  fi
+  [[ ! -e "$T/evidence-gc-$mode.json" ]] || fail "$mode evidence GC wrote a result"
+  "$ROOT/build/rh_cli" store verify --root "$T/evidence" --name "$orphan_name" >/dev/null || fail "$mode evidence GC deleted an orphan without a complete snapshot"
+done
+echo "[postgres-cli] evidence GC preserves references and fails closed on incomplete snapshots"
+
+python3 - "$T" "$ROOT/fixtures/postgres/ingest-output.json" "$ROOT/fixtures/postgres/evidence-references-result.json" "$ROOT/fixtures/postgres/evidence-gc-result.json" <<'PY'
 import json, os, sys
 root = sys.argv[1]
 expected_ingest = json.load(open(sys.argv[2]))
 expected_references = json.load(open(sys.argv[3]))
+expected_gc = json.load(open(sys.argv[4]))
 def read(name):
     with open(os.path.join(root, name)) as f:
         return json.load(f)
@@ -141,9 +189,10 @@ assert registered == {
 duplicate = read("register-evidence-duplicate.json")
 assert duplicate["status"] == "duplicate" and duplicate["digest_value"] == registered["digest_value"]
 assert read("evidence-references-result.json") == expected_references
+assert read("evidence-gc-result.json") == expected_gc
 all_output = "".join(open(os.path.join(root, p)).read() for p in os.listdir(root) if p.endswith(".json"))
 assert "never-emit-this" not in all_output
-print("[postgres-cli] verified source/run setup, normalized PostgreSQL ingest, enqueue/targeted claim, evidence registration/reference discovery, page commits, job lifecycle, and bounded reports OK")
+print("[postgres-cli] verified source/run setup, normalized PostgreSQL ingest, enqueue/targeted claim, evidence registration/reference discovery/cleanup, page commits, job lifecycle, and bounded reports OK")
 PY
 
 printf 'X' >> "$T/evidence/$stored_name"

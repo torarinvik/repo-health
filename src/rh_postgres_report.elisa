@@ -10,6 +10,7 @@ module PostgresReport:
     private:
         const RH_PG_REPORT_MAX_BYTES: usize = 1048576
         const RH_PG_REPORT_MAX_EVIDENCE_BYTES: i64 = 67108864
+        const RH_PG_REPORT_MAX_GC_CANDIDATES: i64 = 50000
 
         def rh_pg_report_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, start, end, literal)
@@ -71,6 +72,106 @@ module PostgresReport:
             out.push(34)
             Base::rh_json_escape(out, raw, 0, raw.count)
             out.push(34)
+
+        def rh_pg_report_name_list_has(names: darray[u8]&, target: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while offset < names.count |offset: usize = 0, names, target, start, end|:
+                stop: i64 = Base::rh_find_byte(names, offset, 10)
+                line_end: usize = stop.usize() if stop >= 0 else names.count
+                return true if line_end.i64() - offset.i64() == end - start and Base::rh_bytes_equal_span(names, offset.i64(), line_end.i64(), target, start, end)
+                offset <- names.count if stop < 0 else stop.usize() + 1
+            false
+
+        def rh_pg_report_gc_candidates(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, candidates_out: mutable darray[u8]&, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            count_out[0] <- 0
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "candidate_names")
+            return false if idx < 0 or nodes[idx.usize()].kind != Json::RH_JSON_ARR or nodes[idx.usize()].child_count > RH_PG_REPORT_MAX_GC_CANDIDATES
+            arr: Json::RhJsonNode = nodes[idx.usize()]
+            while child >= 0 |child: i64 = arr.first_child, nodes, texts, candidates_out, count_out|:
+                return false if nodes[child.usize()].kind != Json::RH_JSON_STR
+                name_start: mutable i64 = 0
+                name_end: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, child, &name_start, &name_end) or not PostgresReport::rh_pg_report_hex16(texts, name_start, name_end)
+                return false if PostgresReport::rh_pg_report_name_list_has(candidates_out, texts, name_start, name_end)
+                while i < name_end |i: i64 = name_start, texts, candidates_out|:
+                    candidates_out.push(texts[i.usize()])
+                    i <- i + 1
+                candidates_out.push(10)
+                count_out[0] <- count_out[0] + 1
+                child <- nodes[child.usize()].next_sibling
+            true
+
+        def rh_pg_report_reference_names(snapshot: darray[u8]&, names_out: mutable darray[u8]&, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(snapshot, nodes, texts)
+            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            keys_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "storage_keys")
+            return false if keys_idx < 0 or nodes[keys_idx.usize()].kind != Json::RH_JSON_ARR
+            invalid_ok: mutable i64 = 0
+            invalid_count: i64 = Json::rh_json_int(nodes, snapshot, Json::rh_json_obj_get(nodes, texts, root, "invalid_count"), &invalid_ok)
+            return false if invalid_ok == 0 or invalid_count != 0
+            count_ok: mutable i64 = 0
+            count: i64 = Json::rh_json_int(nodes, snapshot, Json::rh_json_obj_get(nodes, texts, root, "count"), &count_ok)
+            return false if count_ok == 0 or count < 0 or count > 100000 or nodes[keys_idx.usize()].child_count != count
+            truncated_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "truncated")
+            return false if truncated_idx < 0 or nodes[truncated_idx.usize()].kind != Json::RH_JSON_BOOL or Json::rh_json_is_true(nodes, snapshot, truncated_idx)
+            count_out[0] <- count
+            keys: Json::RhJsonNode = nodes[keys_idx.usize()]
+            while child >= 0 |child: i64 = keys.first_child, nodes, texts, names_out|:
+                key_start: mutable i64 = 0
+                key_end: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, child, &key_start, &key_end) or key_end - key_start != 24
+                return false if texts[key_start.usize()] != 102 or texts[(key_start + 1).usize()] != 110 or texts[(key_start + 2).usize()] != 118 or texts[(key_start + 3).usize()] != 49 or texts[(key_start + 4).usize()] != 97 or texts[(key_start + 5).usize()] != 54 or texts[(key_start + 6).usize()] != 52 or texts[(key_start + 7).usize()] != 58
+                return false if not PostgresReport::rh_pg_report_hex16(texts, key_start + 8, key_end)
+                while i < key_end |i: i64 = key_start + 8, texts, names_out|:
+                    names_out.push(texts[i.usize()])
+                    i <- i + 1
+                names_out.push(10)
+                child <- nodes[child.usize()].next_sibling
+            true
+
+        def rh_pg_report_evidence_gc_under_guard(conninfo: cstr, evidence_root: cstr, candidates: darray[u8]&, candidate_count: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            snapshot: mutable darray[u8] = []
+            return -1 if Postgres::rh_pg_evidence_references(conninfo, snapshot) <= 0
+            references: mutable darray[u8] = []
+            reference_count: mutable i64 = 0
+            return -1 if not PostgresReport::rh_pg_report_reference_names(snapshot, references, &reference_count)
+            orphan_candidates: mutable darray[u8] = []
+            while start < candidates.count |start: usize = 0, candidates, references, orphan_candidates|:
+                stop: i64 = Base::rh_find_byte(candidates, start, 10)
+                line_end: usize = stop.usize() if stop >= 0 else candidates.count
+                if line_end > start and not PostgresReport::rh_pg_report_name_list_has(references, candidates, start.i64(), line_end.i64()):
+                    while i < line_end |i: usize = start, candidates, orphan_candidates|:
+                        orphan_candidates.push(candidates[i])
+                        i <- i + 1
+                    orphan_candidates.push(10)
+                start <- candidates.count if stop < 0 else stop.usize() + 1
+            deleted: mutable i64 = 0
+            gc_result: i64 = Store::rh_store_gc_under_guard(evidence_root, candidates, references, &deleted)
+            Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"evidence_gc\",\"status\":\"")
+            Base::rh_push_text(out, "collected" if gc_result == 0 else "partial")
+            Base::rh_push_text(out, "\",\"candidate_count\":")
+            Base::rh_push_decimal_i64(out, candidate_count)
+            Base::rh_push_text(out, ",\"deleted_count\":")
+            Base::rh_push_decimal_i64(out, deleted)
+            Base::rh_push_text(out, ",\"reference_count\":")
+            Base::rh_push_decimal_i64(out, reference_count)
+            Base::rh_push_text(out, ",\"deleted_names\":[")
+            emitted: mutable i64 = 0
+            while start < orphan_candidates.count and emitted < deleted |start: usize = 0, orphan_candidates, emitted, out|:
+                stop: i64 = Base::rh_find_byte(orphan_candidates, start, 10)
+                line_end: usize = stop.usize() if stop >= 0 else orphan_candidates.count
+                if line_end > start:
+                    Base::rh_push_text(out, "," if emitted > 0 else "")
+                    out.push(34)
+                    while i < line_end |i: usize = start, orphan_candidates, out|:
+                        out.push(orphan_candidates[i])
+                        i <- i + 1
+                    out.push(34)
+                    emitted <- emitted + 1
+                start <- orphan_candidates.count if stop < 0 else stop.usize() + 1
+            Base::rh_push_text(out, "]}")
+            0
 
         def rh_pg_report_register_evidence_unlocked(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, conninfo: cstr, evidence_root: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             evidence_id_s: mutable i64 = 0
@@ -174,6 +275,18 @@ module PostgresReport:
                 Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"evidence_references\",\"status\":\"listed\",\"reference_snapshot\":")
                 out.extend(bytes_view(references))
                 out.push(125)
+                return 0
+
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "evidence_gc"):
+                return -1 if Base::rh_cstr_len_c(evidence_root) == 0 or Base::rh_cstr_len_c(evidence_root) > 4096
+                candidates: mutable darray[u8] = []
+                candidate_count: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_gc_candidates(nodes, texts, root, candidates, &candidate_count)
+                guard_fd: mutable i32 = -1
+                return -1 if Store::rh_store_guard_acquire(evidence_root, &guard_fd) != 0
+                result: i64 = PostgresReport::rh_pg_report_evidence_gc_under_guard(conninfo, evidence_root, candidates, candidate_count, out)
+                released: i64 = Store::rh_store_guard_release(guard_fd)
+                return -1 if result != 0 or released != 0
                 return 0
 
             if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "register_evidence"):

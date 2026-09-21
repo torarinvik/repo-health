@@ -18,6 +18,10 @@ static const char *ingest_claim_cells[3] = {
 };
 static const char *evidence_references_json =
     "{\"storage_keys\":[\"fnv1a64:f5e19178d3ff184e\"],\"invalid_count\":0,\"truncated\":false,\"count\":1}";
+static const char *evidence_references_invalid_json =
+    "{\"storage_keys\":[\"fnv1a64:f5e19178d3ff184e\"],\"invalid_count\":1,\"truncated\":false,\"count\":1}";
+static const char *evidence_references_truncated_json =
+    "{\"storage_keys\":[\"fnv1a64:f5e19178d3ff184e\"],\"invalid_count\":0,\"truncated\":true,\"count\":1}";
 
 void *PQconnectdbParams(const char *const *keywords, const char *const *values, int expand_dbname) {
     const char *marker = getenv("RH_FAKE_PG_CONNECT_MARK");
@@ -228,7 +232,8 @@ void *PQexec(void *handle, const char *query) {
     result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
     result.rows = 1;
     result.columns = 1;
-    result.value = evidence_references_json;
+    result.value = mode != NULL && strcmp(mode, "invalid_refs") == 0 ? evidence_references_invalid_json :
+        mode != NULL && strcmp(mode, "truncated_refs") == 0 ? evidence_references_truncated_json : evidence_references_json;
     return &result;
 }
 
