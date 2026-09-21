@@ -199,7 +199,8 @@ assert d["schema"] == "rh-github-capability-probe-result/1", d
 assert d["scope"] == {"repository":"example/project"}, d
 assert d["authorization"]["credential"] == "configured", d
 assert d["capabilities"]["traffic"] == {"declaration":"authorized-14-day-window","status":"observed","http_status":200,"window_days":14}, d
-assert "count" not in d and "12" not in open(sys.argv[1]).read(), d
+published = open(sys.argv[1]).read()
+assert "count" not in d and '"count":12' not in published and '"uniques":8' not in published and '"views":[]' not in published, d
 for ext in ("json", "status", "err", "url"):
     assert (t / f"traffic-probe.out.github-traffic-views.{ext}").exists(), ext
 assert (t / "traffic-probe.out.github-traffic-views.url").read_text().strip() == "https://api.github.com/repos/example/project/traffic/views"

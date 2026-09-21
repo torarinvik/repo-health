@@ -77,6 +77,80 @@ RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
   RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=committed \
   "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-staged-input.json" --out "$T/ingest-staged-result.json" >/dev/null \
   || fail "staged PostgreSQL page ingest"
+
+cat > "$T/legacy-bridge-input.json" <<'JSON'
+{"schema":"rh-ingest-input/1","source":"github","capability":"issues","owner":"worker-a","lease_now":1000,"lease_ttl":100,"collection_start":1000,"collection_complete":true,"pages":[{"page":1,"status":"complete","commit":false,"events":[{"id":"issue:raw-1","line":"{\"id\":\"issue:raw-1\",\"state\":\"open\"}"}]},{"page":1,"status":"complete","commit":true,"events":[{"id":"issue:raw-1","line":"{\"id\":\"issue:raw-1\",\"state\":\"open\"}"}]}]}
+JSON
+"$ROOT/build/rh_cli" ingest --root "$T/legacy-bridge-store" --input "$T/legacy-bridge-input.json" \
+  --out "$T/legacy-bridge-result.json" >/dev/null || fail "legacy crash/retry replay for PostgreSQL bridge"
+python3 - "$ROOT/fixtures/postgres/ingest-staged-input.json" "$T/legacy-bridge-input.json" \
+    "$T/legacy-bridge-result.json" "$T/legacy-bridge.json" <<'PY'
+import json, sys
+postgres = json.load(open(sys.argv[1]))
+postgres["pages"] = []
+legacy_raw = open(sys.argv[2], "rb").read().decode("utf-8")
+result = json.load(open(sys.argv[3]))
+committed = []
+previous_page = None
+for attempt, page in enumerate(result["pages"]):
+    if page["cursor_advanced"]:
+        committed.append({
+            "legacy_attempt": attempt,
+            "cursor_before_json": "" if previous_page is None else json.dumps({"page": previous_page}, separators=(",", ":")),
+            "cursor_after_json": json.dumps({"page": page["page"]}, separators=(",", ":")),
+            "committed_at": "2026-09-21T00:03:00Z",
+        })
+        previous_page = page["page"]
+bridge = {
+    "schema": "rh-postgres-legacy-ingest-input/1",
+    "postgres_input_json": json.dumps(postgres, separators=(",", ":")),
+    "legacy_input_json": legacy_raw,
+    "legacy_result_json": json.dumps(result, separators=(",", ":")),
+    "scope_hash": "postgres-ingest-live",
+    "committed_attempts": committed,
+}
+assert [row["legacy_attempt"] for row in committed] == [1], committed
+json.dump(bridge, open(sys.argv[4], "w"), separators=(",", ":"))
+PY
+RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+  RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=committed \
+  "$ROOT/build/rh_cli" ingest --postgres --input "$T/legacy-bridge.json" \
+    --out "$T/legacy-bridge-postgres-result.json" >/dev/null \
+  || fail "legacy replay to PostgreSQL staged-page bridge"
+python3 - "$T/legacy-bridge-postgres-result.json" "$ROOT/fixtures/postgres/ingest-staged-output.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))
+print("[postgres-cli] legacy crash/retry replay maps only its committed raw page")
+PY
+python3 - "$T/legacy-bridge.json" "$T/legacy-bridge-uncommitted.json" <<'PY'
+import json, sys
+bridge = json.load(open(sys.argv[1]))
+bridge["committed_attempts"][0]["legacy_attempt"] = 0
+json.dump(bridge, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/legacy-bridge-invalid-connected" \
+    "$ROOT/build/rh_cli" ingest --postgres --input "$T/legacy-bridge-uncommitted.json" \
+      --out "$T/legacy-bridge-invalid-result.json" >/dev/null 2>&1; then
+  fail "legacy bridge mapped a simulated crash attempt"
+fi
+[[ ! -e "$T/legacy-bridge-invalid-connected" ]] || fail "invalid legacy bridge connected to PostgreSQL"
+[[ ! -e "$T/legacy-bridge-invalid-result.json" ]] || fail "invalid legacy bridge wrote a result"
+python3 - "$T/legacy-bridge.json" "$T/legacy-bridge-mismatch.json" <<'PY'
+import json, sys
+bridge = json.load(open(sys.argv[1]))
+bridge["legacy_input_json"] = bridge["legacy_input_json"].replace("issue:raw-1", "issue:changed")
+json.dump(bridge, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/legacy-bridge-mismatch-connected" \
+    "$ROOT/build/rh_cli" ingest --postgres --input "$T/legacy-bridge-mismatch.json" \
+      --out "$T/legacy-bridge-mismatch-result.json" >/dev/null 2>&1; then
+  fail "legacy bridge accepted an input that differs from its replay result"
+fi
+[[ ! -e "$T/legacy-bridge-mismatch-connected" ]] || fail "mismatched legacy bridge connected to PostgreSQL"
+[[ ! -e "$T/legacy-bridge-mismatch-result.json" ]] || fail "mismatched legacy bridge wrote a result"
+
 cp "$ROOT/fixtures/postgres/ingest-partial-input.json" "$T/ingest-partial-input.json"
 RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
   RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=partial \

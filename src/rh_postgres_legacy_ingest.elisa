@@ -1,0 +1,286 @@
+# rh_postgres_legacy_ingest.elisa — explicit bridge from filesystem replay pages to PostgreSQL staging.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+
+module PostgresLegacyIngest:
+    private:
+        const RH_PLI_MAX_BRIDGE_BYTES: i64 = 8388608
+        const RH_PLI_MAX_INPUT_BYTES: i64 = 4194304
+        const RH_PLI_MAX_PAGES: i64 = 1000
+        const RH_PLI_MAX_RECORDS: i64 = 10000
+
+        def rh_pli_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            Json::rh_json_obj_get(nodes, texts, object, key)
+
+        def rh_pli_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_pli_span(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&, allow_empty: bool) -> bool can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            index: i64 = PostgresLegacyIngest::rh_pli_get(nodes, texts, object, key)
+            return false if index < 0 or not Json::rh_json_str_span(nodes, index, start_out, end_out)
+            return false if end_out[0] < start_out[0] or (not allow_empty and end_out[0] == start_out[0])
+            while offset < end_out[0] - start_out[0] |offset: i64 = 0, texts, start_out, end_out|:
+                return false if texts[(start_out[0] + offset).usize()] == 0
+                offset <- offset + 1
+            true
+
+        def rh_pli_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, object: i64, key: u8&, minimum: i64, maximum: i64, value_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            index: i64 = PostgresLegacyIngest::rh_pli_get(nodes, texts, object, key)
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, index, &ok)
+            return false if ok == 0 or value < minimum or value > maximum
+            value_out[0] <- value
+            true
+
+        def rh_pli_copy(texts: darray[u8]&, start: i64, end: i64, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while offset < end - start |offset: i64 = 0, texts, start, end, out|:
+                out.push(texts[(start + offset).usize()])
+                offset <- offset + 1
+
+        def rh_pli_emit_string(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            Base::rh_json_escape(out, texts, start.usize(), end.usize())
+            out.push(34)
+
+        def rh_pli_emit_bytes_string(out: mutable darray[u8]&, bytes: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            while index < bytes.count |index: usize = 0, bytes, out|:
+                byte: u8 = bytes[index]
+                if byte == 34:
+                    Base::rh_push_text(out, "\\\"")
+                elif byte == 92:
+                    Base::rh_push_text(out, "\\\\")
+                elif byte < 32:
+                    Base::rh_push_text(out, "\\u00")
+                    Base::rh_push_hexdigit(out, byte.u64() / 16)
+                    Base::rh_push_hexdigit(out, byte.u64() % 16)
+                else:
+                    out.push(byte)
+                index <- index + 1
+            out.push(34)
+
+        def rh_pli_json_object(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            return false if start < 0 or end <= start or end - start > 1048576
+            raw: mutable darray[u8] = []
+            PostgresLegacyIngest::rh_pli_copy(texts, start, end, raw)
+            nodes: mutable darray[Json::RhJsonNode] = []
+            decoded: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, decoded)
+            root >= 0 and nodes[root.usize()].kind == Json::RH_JSON_OBJ
+
+        def rh_pli_nested_input(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, key: u8&, raw_out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            start: mutable i64 = 0
+            end: mutable i64 = 0
+            return false if not PostgresLegacyIngest::rh_pli_span(nodes, texts, root, key, &start, &end, false) or end - start > RH_PLI_MAX_INPUT_BYTES
+            PostgresLegacyIngest::rh_pli_copy(texts, start, end, raw_out)
+            true
+
+    public:
+        # Expands a bridge envelope into the ordinary PostgreSQL ingest contract.
+        # Only page attempts marked cursor_advanced by a matching legacy result
+        # can enter the staged page list.
+        def rh_postgres_legacy_expand(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            return -1 if raw.count == 0 or raw.count.i64() > RH_PLI_MAX_BRIDGE_BYTES
+            bridge_nodes: mutable darray[Json::RhJsonNode] = []
+            bridge_texts: mutable darray[u8] = []
+            bridge_root: i64 = Json::rh_json_parse(raw, bridge_nodes, bridge_texts)
+            return -1 if bridge_root < 0 or bridge_nodes[bridge_root.usize()].kind != Json::RH_JSON_OBJ
+            schema_start: mutable i64 = 0
+            schema_end: mutable i64 = 0
+            return -1 if not PostgresLegacyIngest::rh_pli_span(bridge_nodes, bridge_texts, bridge_root, "schema", &schema_start, &schema_end, false)
+            if PostgresLegacyIngest::rh_pli_eq(bridge_texts, schema_start, schema_end, "rh-postgres-ingest-input/1"):
+                return -1 if raw.count.i64() > RH_PLI_MAX_INPUT_BYTES
+                while index < raw.count |index: usize = 0, raw, out|:
+                    out.push(raw[index])
+                    index <- index + 1
+                return 0
+            return -1 if not PostgresLegacyIngest::rh_pli_eq(bridge_texts, schema_start, schema_end, "rh-postgres-legacy-ingest-input/1")
+
+            postgres_raw: mutable darray[u8] = []
+            legacy_raw: mutable darray[u8] = []
+            result_raw: mutable darray[u8] = []
+            return -1 if not PostgresLegacyIngest::rh_pli_nested_input(bridge_nodes, bridge_texts, bridge_root, "postgres_input_json", &postgres_raw)
+            return -1 if not PostgresLegacyIngest::rh_pli_nested_input(bridge_nodes, bridge_texts, bridge_root, "legacy_input_json", &legacy_raw)
+            return -1 if not PostgresLegacyIngest::rh_pli_nested_input(bridge_nodes, bridge_texts, bridge_root, "legacy_result_json", &result_raw)
+
+            postgres_nodes: mutable darray[Json::RhJsonNode] = []
+            postgres_texts: mutable darray[u8] = []
+            postgres_root: i64 = Json::rh_json_parse(postgres_raw, postgres_nodes, postgres_texts)
+            return -1 if postgres_root < 0 or postgres_nodes[postgres_root.usize()].kind != Json::RH_JSON_OBJ
+            postgres_schema_start: mutable i64 = 0
+            postgres_schema_end: mutable i64 = 0
+            return -1 if not PostgresLegacyIngest::rh_pli_span(postgres_nodes, postgres_texts, postgres_root, "schema", &postgres_schema_start, &postgres_schema_end, false)
+            return -1 if not PostgresLegacyIngest::rh_pli_eq(postgres_texts, postgres_schema_start, postgres_schema_end, "rh-postgres-ingest-input/1")
+            postgres_pages_index: i64 = PostgresLegacyIngest::rh_pli_get(postgres_nodes, postgres_texts, postgres_root, "pages")
+            return -1 if postgres_pages_index < 0 or postgres_nodes[postgres_pages_index.usize()].kind != Json::RH_JSON_ARR or postgres_nodes[postgres_pages_index.usize()].child_count != 0
+
+            legacy_nodes: mutable darray[Json::RhJsonNode] = []
+            legacy_texts: mutable darray[u8] = []
+            legacy_root: i64 = Json::rh_json_parse(legacy_raw, legacy_nodes, legacy_texts)
+            return -1 if legacy_root < 0 or legacy_nodes[legacy_root.usize()].kind != Json::RH_JSON_OBJ
+            legacy_schema_start: mutable i64 = 0
+            legacy_schema_end: mutable i64 = 0
+            return -1 if not PostgresLegacyIngest::rh_pli_span(legacy_nodes, legacy_texts, legacy_root, "schema", &legacy_schema_start, &legacy_schema_end, false)
+            return -1 if not PostgresLegacyIngest::rh_pli_eq(legacy_texts, legacy_schema_start, legacy_schema_end, "rh-ingest-input/1")
+            legacy_source_start: mutable i64 = 0
+            legacy_source_end: mutable i64 = 0
+            legacy_capability_start: mutable i64 = 0
+            legacy_capability_end: mutable i64 = 0
+            return -1 if not PostgresLegacyIngest::rh_pli_span(legacy_nodes, legacy_texts, legacy_root, "source", &legacy_source_start, &legacy_source_end, false)
+            return -1 if not PostgresLegacyIngest::rh_pli_span(legacy_nodes, legacy_texts, legacy_root, "capability", &legacy_capability_start, &legacy_capability_end, false)
+
+            result_nodes: mutable darray[Json::RhJsonNode] = []
+            result_texts: mutable darray[u8] = []
+            result_root: i64 = Json::rh_json_parse(result_raw, result_nodes, result_texts)
+            return -1 if result_root < 0 or result_nodes[result_root.usize()].kind != Json::RH_JSON_OBJ
+            result_schema_start: mutable i64 = 0
+            result_schema_end: mutable i64 = 0
+            return -1 if not PostgresLegacyIngest::rh_pli_span(result_nodes, result_texts, result_root, "schema", &result_schema_start, &result_schema_end, false)
+            return -1 if not PostgresLegacyIngest::rh_pli_eq(result_texts, result_schema_start, result_schema_end, "rh-ingest-result/1")
+            result_source_start: mutable i64 = 0
+            result_source_end: mutable i64 = 0
+            result_capability_start: mutable i64 = 0
+            result_capability_end: mutable i64 = 0
+            return -1 if not PostgresLegacyIngest::rh_pli_span(result_nodes, result_texts, result_root, "source", &result_source_start, &result_source_end, false)
+            return -1 if not PostgresLegacyIngest::rh_pli_span(result_nodes, result_texts, result_root, "capability", &result_capability_start, &result_capability_end, false)
+            return -1 if not Base::rh_bytes_equal_span(legacy_texts, legacy_source_start, legacy_source_end, result_texts, result_source_start, result_source_end)
+            return -1 if not Base::rh_bytes_equal_span(legacy_texts, legacy_capability_start, legacy_capability_end, result_texts, result_capability_start, result_capability_end)
+            input_digest_start: mutable i64 = 0
+            input_digest_end: mutable i64 = 0
+            return -1 if not PostgresLegacyIngest::rh_pli_span(result_nodes, result_texts, result_root, "input_sha256", &input_digest_start, &input_digest_end, false) or input_digest_end - input_digest_start != 64
+            legacy_digest: mutable darray[u8] = []
+            Sha256::rh_sha256(legacy_raw, legacy_digest)
+            return -1 if legacy_digest.count.i64() != 64 or not Base::rh_bytes_equal_span(legacy_digest, 0, 64, result_texts, input_digest_start, input_digest_end)
+
+            legacy_pages_index: i64 = PostgresLegacyIngest::rh_pli_get(legacy_nodes, legacy_texts, legacy_root, "pages")
+            result_pages_index: i64 = PostgresLegacyIngest::rh_pli_get(result_nodes, result_texts, result_root, "pages")
+            return -1 if legacy_pages_index < 0 or result_pages_index < 0
+            return -1 if legacy_nodes[legacy_pages_index.usize()].kind != Json::RH_JSON_ARR or result_nodes[result_pages_index.usize()].kind != Json::RH_JSON_ARR
+            return -1 if legacy_nodes[legacy_pages_index.usize()].child_count > RH_PLI_MAX_PAGES or legacy_nodes[legacy_pages_index.usize()].child_count != result_nodes[result_pages_index.usize()].child_count
+            scope_start: mutable i64 = 0
+            scope_end: mutable i64 = 0
+            return -1 if not PostgresLegacyIngest::rh_pli_span(bridge_nodes, bridge_texts, bridge_root, "scope_hash", &scope_start, &scope_end, false) or scope_end - scope_start > 1024
+            attempts_index: i64 = PostgresLegacyIngest::rh_pli_get(bridge_nodes, bridge_texts, bridge_root, "committed_attempts")
+            return -1 if attempts_index < 0 or bridge_nodes[attempts_index.usize()].kind != Json::RH_JSON_ARR or bridge_nodes[attempts_index.usize()].child_count > RH_PLI_MAX_PAGES
+
+            pages_out: mutable darray[u8] = []
+            attempt: mutable i64 = 0
+            mapped: mutable i64 = 0
+            pg_page: mutable i64 = 0
+            previous_cursor_start: mutable i64 = -1
+            previous_cursor_end: mutable i64 = -1
+            legacy_page: mutable i64 = legacy_nodes[legacy_pages_index.usize()].first_child
+            result_page: mutable i64 = result_nodes[result_pages_index.usize()].first_child
+            mapping: mutable i64 = bridge_nodes[attempts_index.usize()].first_child
+            while legacy_page >= 0 |legacy_page: i64 = legacy_page, result_page, mapping, legacy_nodes, legacy_texts, legacy_raw, result_nodes, result_texts, result_raw, bridge_nodes, bridge_texts, raw, pages_out, scope_start, scope_end, attempt, mapped, pg_page, previous_cursor_start, previous_cursor_end|:
+                return -1 if result_page < 0 or legacy_nodes[legacy_page.usize()].kind != Json::RH_JSON_OBJ or result_nodes[result_page.usize()].kind != Json::RH_JSON_OBJ
+                legacy_number: mutable i64 = 0
+                result_number: mutable i64 = 0
+                return -1 if not PostgresLegacyIngest::rh_pli_int(legacy_nodes, legacy_raw, legacy_texts, legacy_page, "page", 0, 2147483647, &legacy_number)
+                return -1 if not PostgresLegacyIngest::rh_pli_int(result_nodes, result_raw, result_texts, result_page, "page", 0, 2147483647, &result_number) or legacy_number != result_number
+                legacy_status_start: mutable i64 = 0
+                legacy_status_end: mutable i64 = 0
+                result_status_start: mutable i64 = 0
+                result_status_end: mutable i64 = 0
+                return -1 if not PostgresLegacyIngest::rh_pli_span(legacy_nodes, legacy_texts, legacy_page, "status", &legacy_status_start, &legacy_status_end, false)
+                return -1 if not PostgresLegacyIngest::rh_pli_span(result_nodes, result_texts, result_page, "status", &result_status_start, &result_status_end, false)
+                return -1 if not Base::rh_bytes_equal_span(legacy_texts, legacy_status_start, legacy_status_end, result_texts, result_status_start, result_status_end)
+                advanced_index: i64 = PostgresLegacyIngest::rh_pli_get(result_nodes, result_texts, result_page, "cursor_advanced")
+                commit_index: i64 = PostgresLegacyIngest::rh_pli_get(legacy_nodes, legacy_texts, legacy_page, "commit")
+                return -1 if advanced_index < 0 or result_nodes[advanced_index.usize()].kind != Json::RH_JSON_BOOL or commit_index < 0 or legacy_nodes[commit_index.usize()].kind != Json::RH_JSON_BOOL
+                advanced: bool = Json::rh_json_is_true(result_nodes, result_raw, advanced_index)
+                commit: bool = Json::rh_json_is_true(legacy_nodes, legacy_raw, commit_index)
+                if advanced:
+                    return -1 if not commit or (not PostgresLegacyIngest::rh_pli_eq(legacy_texts, legacy_status_start, legacy_status_end, "complete") and not PostgresLegacyIngest::rh_pli_eq(legacy_texts, legacy_status_start, legacy_status_end, "empty"))
+                    return -1 if mapping < 0 or bridge_nodes[mapping.usize()].kind != Json::RH_JSON_OBJ
+                    mapped_attempt: mutable i64 = 0
+                    return -1 if not PostgresLegacyIngest::rh_pli_int(bridge_nodes, raw, bridge_texts, mapping, "legacy_attempt", 0, RH_PLI_MAX_PAGES - 1, &mapped_attempt) or mapped_attempt != attempt
+                    committed_start: mutable i64 = 0
+                    committed_end: mutable i64 = 0
+                    cursor_before_start: mutable i64 = 0
+                    cursor_before_end: mutable i64 = 0
+                    cursor_after_start: mutable i64 = 0
+                    cursor_after_end: mutable i64 = 0
+                    return -1 if not PostgresLegacyIngest::rh_pli_span(bridge_nodes, bridge_texts, mapping, "committed_at", &committed_start, &committed_end, false)
+                    return -1 if not PostgresLegacyIngest::rh_pli_span(bridge_nodes, bridge_texts, mapping, "cursor_before_json", &cursor_before_start, &cursor_before_end, true)
+                    return -1 if not PostgresLegacyIngest::rh_pli_span(bridge_nodes, bridge_texts, mapping, "cursor_after_json", &cursor_after_start, &cursor_after_end, false)
+                    return -1 if (cursor_before_end > cursor_before_start and not PostgresLegacyIngest::rh_pli_json_object(bridge_texts, cursor_before_start, cursor_before_end)) or not PostgresLegacyIngest::rh_pli_json_object(bridge_texts, cursor_after_start, cursor_after_end)
+                    if pg_page > 0:
+                        return -1 if not Base::rh_bytes_equal_span(bridge_texts, previous_cursor_start, previous_cursor_end, bridge_texts, cursor_before_start, cursor_before_end)
+                    else:
+                        return -1 if cursor_before_end != cursor_before_start
+
+                    events_index: i64 = PostgresLegacyIngest::rh_pli_get(legacy_nodes, legacy_texts, legacy_page, "events")
+                    return -1 if events_index < 0 or legacy_nodes[events_index.usize()].kind != Json::RH_JSON_ARR or legacy_nodes[events_index.usize()].child_count > RH_PLI_MAX_RECORDS
+                    record_count: i64 = legacy_nodes[events_index.usize()].child_count
+                    return -1 if PostgresLegacyIngest::rh_pli_eq(legacy_texts, legacy_status_start, legacy_status_end, "empty") and record_count != 0
+                    pages_out.push(44) if pg_page > 0
+                    Base::rh_push_text(pages_out, "{\"page_number\":")
+                    Base::rh_push_decimal_i64(pages_out, pg_page)
+                    Base::rh_push_text(pages_out, ",\"scope_hash\":")
+                    PostgresLegacyIngest::rh_pli_emit_string(pages_out, bridge_texts, scope_start, scope_end)
+                    Base::rh_push_text(pages_out, ",\"cursor_before\":")
+                    PostgresLegacyIngest::rh_pli_emit_string(pages_out, bridge_texts, cursor_before_start, cursor_before_end)
+                    Base::rh_push_text(pages_out, ",\"cursor_after\":")
+                    PostgresLegacyIngest::rh_pli_emit_string(pages_out, bridge_texts, cursor_after_start, cursor_after_end)
+                    Base::rh_push_text(pages_out, ",\"completeness\":")
+                    PostgresLegacyIngest::rh_pli_emit_string(pages_out, legacy_texts, legacy_status_start, legacy_status_end)
+                    Base::rh_push_text(pages_out, ",\"record_count\":")
+                    Base::rh_push_decimal_i64(pages_out, record_count)
+                    Base::rh_push_text(pages_out, ",\"evidence_id\":\"\",\"events_json\":\"[]\",\"subjects_json\":\"[]\",\"actors_json\":\"[]\",\"record_mode\":\"staged\",\"staged_records_json\":")
+                    staged_records: mutable darray[u8] =
+                        staged: mutable darray[u8] = []
+                        staged.push(91)
+                        while event >= 0 |event: i64 = legacy_nodes[events_index.usize()].first_child, legacy_nodes, legacy_texts, staged|:
+                            return -1 if legacy_nodes[event.usize()].kind != Json::RH_JSON_OBJ
+                            label_start: mutable i64 = 0
+                            label_end: mutable i64 = 0
+                            payload_start: mutable i64 = 0
+                            payload_end: mutable i64 = 0
+                            return -1 if not PostgresLegacyIngest::rh_pli_span(legacy_nodes, legacy_texts, event, "id", &label_start, &label_end, false)
+                            return -1 if not PostgresLegacyIngest::rh_pli_span(legacy_nodes, legacy_texts, event, "line", &payload_start, &payload_end, false)
+                            return -1 if not PostgresLegacyIngest::rh_pli_json_object(legacy_texts, payload_start, payload_end)
+                            staged.push(44) if event != legacy_nodes[events_index.usize()].first_child
+                            Base::rh_push_text(staged, "{\"collector_label\":")
+                            PostgresLegacyIngest::rh_pli_emit_string(staged, legacy_texts, label_start, label_end)
+                            Base::rh_push_text(staged, ",\"raw_payload\":")
+                            PostgresLegacyIngest::rh_pli_emit_string(staged, legacy_texts, payload_start, payload_end)
+                            Base::rh_push_text(staged, "}")
+                            event <- legacy_nodes[event.usize()].next_sibling
+                        staged.push(93)
+                        staged
+                    PostgresLegacyIngest::rh_pli_emit_bytes_string(pages_out, staged_records)
+                    Base::rh_push_text(pages_out, ",\"committed_at\":")
+                    PostgresLegacyIngest::rh_pli_emit_string(pages_out, bridge_texts, committed_start, committed_end)
+                    Base::rh_push_text(pages_out, "}")
+                    previous_cursor_start <- cursor_after_start
+                    previous_cursor_end <- cursor_after_end
+                    mapping <- bridge_nodes[mapping.usize()].next_sibling
+                    mapped <- mapped + 1
+                    pg_page <- pg_page + 1
+                result_page <- result_nodes[result_page.usize()].next_sibling
+                legacy_page <- legacy_nodes[legacy_page.usize()].next_sibling
+                attempt <- attempt + 1
+            return -1 if result_page >= 0 or mapping >= 0 or mapped != bridge_nodes[attempts_index.usize()].child_count
+            return -1 if pages_out.count.i64() > RH_PLI_MAX_INPUT_BYTES
+
+            page_node: Json::RhJsonNode = postgres_nodes[postgres_pages_index.usize()]
+            expanded: mutable darray[u8] = []
+            while index < page_node.text_start.usize() |index: usize = 0, postgres_raw, page_node, expanded|:
+                expanded.push(postgres_raw[index])
+                index <- index + 1
+            expanded.push(91)
+            while index < pages_out.count |index: usize = 0, pages_out, expanded|:
+                expanded.push(pages_out[index])
+                index <- index + 1
+            expanded.push(93)
+            while index < postgres_raw.count |index: usize = page_node.text_end.usize(), postgres_raw, expanded|:
+                expanded.push(postgres_raw[index])
+                index <- index + 1
+            return -1 if expanded.count.i64() > RH_PLI_MAX_INPUT_BYTES
+            while index < expanded.count |index: usize = 0, expanded, out|:
+                out.push(expanded[index])
+                index <- index + 1
+            0

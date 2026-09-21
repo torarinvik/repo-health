@@ -48,7 +48,16 @@ d = json.load(open(sys.argv[1])); d["lease_now"] = 2000
 json.dump(d, open(sys.argv[1], "w"), separators=(",", ":"))
 PY
 "$ROOT/build/rh_cli" ingest --root "$T-root-2" --input "$T-input.json" --out "$T-out-2.json" >/dev/null || fail "second ingest run"
-cmp -s "$T-out.json" "$T-out-2.json" || fail "semantic replay output is not deterministic"
+python3 - "$T-out.json" "$T-out-2.json" "$T-input.json" <<'PY'
+import hashlib, json, sys
+first = json.load(open(sys.argv[1]))
+second = json.load(open(sys.argv[2]))
+first_digest = first.pop("input_sha256")
+second_digest = second.pop("input_sha256")
+assert first == second, (first, second)
+assert first_digest != second_digest, (first_digest, second_digest)
+assert second_digest == hashlib.sha256(open(sys.argv[3], "rb").read()).hexdigest(), second_digest
+PY
 python3 - "$T-out-2.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
