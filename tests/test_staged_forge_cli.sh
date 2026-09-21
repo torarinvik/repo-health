@@ -171,7 +171,11 @@ n = d["normalized"]
 assert n["schema"] == "rh-forge-events-result/1" and n["capabilities"]["issues"]["duplicate_replacements"] == 1, n
 assert n["capabilities"]["issues"]["count"] == 1 and n["events"][0]["native_id"] == "github:101", n
 assert n["events"][0]["status"] == "closed", n["events"]
-assert n["events"][0]["staged_origin"] == {"page_number": 1, "record_ordinal": 0}, n["events"]
+assert n["events"][0]["staged_origin"] == {
+    "page_number": 1,
+    "record_ordinal": 0,
+    "evidence_id": "00000000-0000-0000-0000-000000000008",
+}, n["events"]
 assert all(n["capabilities"][k]["status"] == "not_attempted" for k in ("proposals", "reviews", "releases")), n
 PY
 "$ROOT/build/rh_cli" staged-normalize --input "$T/input.json" --out "$T/replay.json" >/dev/null || fail "deterministic replay"
@@ -234,6 +238,7 @@ d = copy.deepcopy(base); d["pages"][0]["completeness"] = "partial"; cases["parti
 d = copy.deepcopy(base); d["pages"][0]["records"][0]["collector_label"] = "other-capability"; cases["misbound"] = d
 d = copy.deepcopy(base); d["pages"][0]["records"][0]["record_ordinal"] = 1; cases["ordinal"] = d
 d = copy.deepcopy(base); d["pages"][0]["records"][0]["raw_payload"] = "[]"; cases["non-object-payload"] = d
+d = copy.deepcopy(base); d["pages"][0]["evidence_id"] = "not-a-uuid"; cases["invalid-page-evidence-id"] = d
 d = copy.deepcopy(base); d["canonical_capability"] = "proposals"; cases["schema-capability-mismatch"] = d
 d = json.load(open(os.path.join(out, "reviews-input.json"))); d["scope"].pop("pull_request"); cases["review-scope-missing"] = d
 d = json.load(open(os.path.join(out, "gitlab-issues-input.json"))); d["scope"] = {"repository": "group/project"}; cases["gitlab-github-scope-confusion"] = d
@@ -245,7 +250,7 @@ for name, value in cases.items():
     with open(os.path.join(out, name + ".json"), "w", encoding="utf-8") as f:
         json.dump(value, f, separators=(",", ":"))
 PY
-for name in uncommitted partial misbound ordinal non-object-payload schema-capability-mismatch review-scope-missing gitlab-github-scope-confusion unsupported-bitbucket-releases unsupported-gitea-reviews generic-github-token generic-gitlab-token; do
+for name in uncommitted partial misbound ordinal non-object-payload invalid-page-evidence-id schema-capability-mismatch review-scope-missing gitlab-github-scope-confusion unsupported-bitbucket-releases unsupported-gitea-reviews generic-github-token generic-gitlab-token; do
   if "$ROOT/build/rh_cli" staged-normalize --input "$T/$name.json" --out "$T/$name.out" >/dev/null 2>&1; then
     fail "$name stage input was accepted"
   fi
