@@ -40,7 +40,7 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_register_evidence_object", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_commit_collection_page", "rh_commit_collection_page_events"} <= functions
+assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_commit_collection_page", "rh_commit_collection_page_events"} <= functions
 assert clean.lstrip().startswith("BEGIN;") and clean.rstrip().endswith("COMMIT;")
 assert "FOR UPDATE SKIP LOCKED" in clean
 assert "fencing_token" in clean and "lease_expires_at" in clean
@@ -49,6 +49,9 @@ assert "jsonb_array_elements(p_events)" in clean
 assert "jsonb_array_elements(p_subjects)" in clean
 assert "page subjects must be a JSON array" in clean
 assert "page subject identity is already registered with different immutable metadata" in clean
+assert "source instance identity is already registered with different immutable metadata" in clean
+assert "collection run identity is already registered with different immutable metadata" in clean
+assert "source base URL must be absolute and free of credentials, query, fragment, and whitespace" in clean
 assert "evidence digest must be a lowercase SHA-256 value" in clean
 assert "evidence digest is already registered with different immutable metadata" in clean
 assert "page event count does not match the declared bounded record count" in clean

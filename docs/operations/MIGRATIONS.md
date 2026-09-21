@@ -11,14 +11,18 @@ evidence of a deployed database.
 
 Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa),
 with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).
-`rh_cli postgres --input <rh-postgres-command/1> --out <file>` commits one
-complete or successful-empty collection page through `rh_commit_collection_page`,
+`rh_cli postgres --input <rh-postgres-command/1> --out <file>` starts or verifies
+a source configuration and running collection through `begin_collection_run`,
+then commits one complete or successful-empty collection page through `rh_commit_collection_page`,
 or commits normalized event rows, page metadata, and cursor advancement together
 through `rh_commit_collection_page_events`. A page may include bounded typed
 subject metadata; the transaction inserts new entities or checks exact immutable
 replays before inserting the event rows. A conflicting subject rolls back its
 page and cursor. The adapter also performs fenced job claim, heartbeat, and
-finish. The `register_evidence` operation reads a blob from the
+finish. Source/run retries succeed only when the supplied immutable metadata
+matches the existing rows. Source base URLs must be absolute and contain no
+credentials, query, fragment, or whitespace; credentials stay in their separate
+locator. The `register_evidence` operation reads a blob from the
 configured `RH_EVIDENCE_ROOT`, verifies its FNV-1a content-addressed name,
 computes SHA-256 metadata, and idempotently registers that metadata through
 `rh_register_evidence_object`; the blob remains in the evidence directory.

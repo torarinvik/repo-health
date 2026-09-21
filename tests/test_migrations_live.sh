@@ -35,8 +35,64 @@ docker cp "$ROOT/db/migrations/001_initial.sql" "$CONTAINER:/tmp/001_initial.sql
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/001_initial.sql >/dev/null || fail "apply migration"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
-INSERT INTO source_instance (id, kind, base_url, visibility_scope, configuration_revision, created_at)
-VALUES ('00000000-0000-0000-0000-000000000001', 'github', 'https://api.github.com', 'public', 1, '2026-01-01T00:00:00Z');
+DO $$
+BEGIN
+  IF NOT rh_begin_collection_run(
+    '00000000-0000-0000-0000-000000000001', 'github', 'https://api.github.com',
+    'public', 1, '2026-01-01T00:00:00Z',
+    '00000000-0000-0000-0000-000000000003', 'issues', 'github', '1.0.0',
+    NULL, NULL, '2026-01-01T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'initial collection run was not started';
+  END IF;
+  IF rh_begin_collection_run(
+    '00000000-0000-0000-0000-000000000001', 'github', 'https://api.github.com',
+    'public', 1, '2026-01-01T00:00:00Z',
+    '00000000-0000-0000-0000-000000000003', 'issues', 'github', '1.0.0',
+    NULL, NULL, '2026-01-01T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'exact collection run replay was not absorbed';
+  END IF;
+  BEGIN
+    PERFORM rh_begin_collection_run(
+      '00000000-0000-0000-0000-000000000004', 'github', 'https://token@example.test/api',
+      'public', 1, '2026-01-01T00:00:00Z',
+      '00000000-0000-0000-0000-000000000004', 'issues', 'github', '1.0.0',
+      NULL, NULL, '2026-01-01T00:00:00Z'
+    );
+    RAISE EXCEPTION 'credential-bearing source URL was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('source base URL must be absolute and free of credentials' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  BEGIN
+    PERFORM rh_begin_collection_run(
+      '00000000-0000-0000-0000-000000000001', 'github', 'https://api.github.com/changed',
+      'public', 1, '2026-01-01T00:00:00Z',
+      '00000000-0000-0000-0000-000000000004', 'issues', 'github', '1.0.0',
+      NULL, NULL, '2026-01-01T00:00:00Z'
+    );
+    RAISE EXCEPTION 'conflicting source metadata was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('source instance identity is already registered' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+  BEGIN
+    PERFORM rh_begin_collection_run(
+      '00000000-0000-0000-0000-000000000001', 'github', 'https://api.github.com',
+      'public', 1, '2026-01-01T00:00:00Z',
+      '00000000-0000-0000-0000-000000000003', 'pulls', 'github', '1.0.0',
+      NULL, NULL, '2026-01-01T00:00:00Z'
+    );
+    RAISE EXCEPTION 'conflicting collection run metadata was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('collection run identity is already registered' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
+END $$;
 INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, created_at)
 VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'queued', 10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
 DO $$
@@ -60,8 +116,6 @@ BEGIN
   END IF;
 END $$;
 
-INSERT INTO collection_run (id, source_instance_id, capability, connector_name, connector_version, started_at, status, completeness)
-VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-01T00:00:00Z', 'running', 'unknown');
 DO $$
 BEGIN
   IF NOT rh_register_evidence_object('00000000-0000-0000-0000-000000000006', 'public', repeat('a', 64), 18, 'application/json', 'fnv1a64:aaaaaaaaaaaaaaaa', 'standard', 'captured', '2026-01-01T00:00:00Z') THEN
@@ -154,5 +208,5 @@ BEGIN
 END $$;
 SQL
 
-echo "[migrations-live] canonical event commit, duplicate replay, and rollback boundary OK"
+echo "[migrations-live] source/run, evidence, canonical event commit, duplicate replay, and rollback boundaries OK"
 echo "test_migrations_live OK"

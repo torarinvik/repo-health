@@ -19,7 +19,7 @@ fi
 LIBPQ="$T/libpq.so"
 [[ "$(uname -s)" == "Darwin" ]] && LIBPQ="$T/libpq.dylib"
 
-for operation in page page_events evidence heartbeat finish claim; do
+for operation in begin_run page page_events evidence heartbeat finish claim; do
   for mode in committed duplicate failure connect_failure; do
     if [[ "$mode" == "connect_failure" ]]; then
       RH_FAKE_PG_OPERATION="$operation" RH_FAKE_PG_CONNECT_FAIL=1 RH_FAKE_PG_EXPECT="$mode" RH_LIBPQ_PATH="$LIBPQ" "$ROOT/build/test_postgres" || fail "$operation $mode result"

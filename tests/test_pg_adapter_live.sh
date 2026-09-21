@@ -27,32 +27,11 @@ done
 docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1 || fail "PostgreSQL did not become ready"
 docker cp "$ROOT/db/migrations/001_initial.sql" "$CONTAINER:/tmp/001_initial.sql" >/dev/null || fail "copy migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/001_initial.sql >/dev/null || fail "apply migration"
-docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "seed collection run"
-INSERT INTO source_instance (id, kind, base_url, visibility_scope, configuration_revision, created_at)
-VALUES ('00000000-0000-0000-0000-000000000001', 'github', 'https://api.github.com', 'public', 1, '2026-01-01T00:00:00Z');
-INSERT INTO collection_run (id, source_instance_id, capability, connector_name, connector_version, started_at, status, completeness)
-VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-01T00:00:00Z', 'running', 'unknown');
-INSERT INTO entity (id, entity_kind, visibility_scope, created_at)
-VALUES ('00000000-0000-0000-0000-000000000005', 'issue', 'public', '2026-01-01T00:00:00Z');
-INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, attempt_count, fencing_token, worker_id, lease_expires_at, created_at)
-VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'running', 1, '2026-01-01T00:00:00Z', 1, 4, 'worker-a', '2026-09-22T00:00:00Z', '2026-01-01T00:00:00Z');
-INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, created_at)
-VALUES ('00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'queued', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
-SQL
+
 PORT="$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')"
 [[ -n "$PORT" ]] || fail "published PostgreSQL port is missing"
-if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
-  RH_TEST_PG_CONNINFO="host=127.0.0.1 port=$PORT dbname=repo_health user=postgres password=repo-health-test sslmode=disable" RH_LIBPQ_PATH="$RH_LIBPQ_PATH" "$ROOT/build/test_postgres_live" || fail "parameterized page commit and duplicate replay"
-else
-  env -u RH_LIBPQ_PATH RH_TEST_PG_CONNINFO="host=127.0.0.1 port=$PORT dbname=repo_health user=postgres password=repo-health-test sslmode=disable" "$ROOT/build/test_postgres_live" || fail "libpq unavailable; set RH_LIBPQ_PATH to its library"
-fi
-
-mkdir -p "$TMP_DIR/evidence"
-printf 'hello evidence\n' > "$TMP_DIR/evidence-source.txt"
-stored_name="$("$ROOT/build/rh_cli" store put --root "$TMP_DIR/evidence" --file "$TMP_DIR/evidence-source.txt" | awk '{print $3}')"
-[[ "$stored_name" == "f5e19178d3ff184e" ]] || fail "content-addressed evidence fixture changed"
 CONNINFO="host=127.0.0.1 port=$PORT dbname=repo_health user=postgres password=repo-health-test sslmode=disable"
-
+mkdir -p "$TMP_DIR/evidence"
 run_cli() {
   local input="$1" output="$2"
   if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
@@ -63,7 +42,30 @@ run_cli() {
       "$ROOT/build/rh_cli" postgres --input "$input" --out "$output" >/dev/null
   fi
 }
+run_cli "$ROOT/fixtures/postgres/begin-collection-run-command.json" "$TMP_DIR/run-started.json" || fail "CLI source and run registration"
+run_cli "$ROOT/fixtures/postgres/begin-collection-run-command.json" "$TMP_DIR/run-duplicate.json" || fail "CLI source and run replay"
+python3 - "$TMP_DIR" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+assert json.load(open(os.path.join(root, "run-started.json")))["status"] == "started"
+assert json.load(open(os.path.join(root, "run-duplicate.json")))["status"] == "duplicate"
+PY
 
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "seed collection run"
+INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, attempt_count, fencing_token, worker_id, lease_expires_at, created_at)
+VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'running', 1, '2026-01-01T00:00:00Z', 1, 4, 'worker-a', '2026-09-22T00:00:00Z', '2026-01-01T00:00:00Z');
+INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, created_at)
+VALUES ('00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'queued', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+SQL
+if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
+  RH_TEST_PG_CONNINFO="host=127.0.0.1 port=$PORT dbname=repo_health user=postgres password=repo-health-test sslmode=disable" RH_LIBPQ_PATH="$RH_LIBPQ_PATH" "$ROOT/build/test_postgres_live" || fail "parameterized page commit and duplicate replay"
+else
+  env -u RH_LIBPQ_PATH RH_TEST_PG_CONNINFO="host=127.0.0.1 port=$PORT dbname=repo_health user=postgres password=repo-health-test sslmode=disable" "$ROOT/build/test_postgres_live" || fail "libpq unavailable; set RH_LIBPQ_PATH to its library"
+fi
+
+printf 'hello evidence\n' > "$TMP_DIR/evidence-source.txt"
+stored_name="$("$ROOT/build/rh_cli" store put --root "$TMP_DIR/evidence" --file "$TMP_DIR/evidence-source.txt" | awk '{print $3}')"
+[[ "$stored_name" == "f5e19178d3ff184e" ]] || fail "content-addressed evidence fixture changed"
 run_cli "$ROOT/fixtures/postgres/register-evidence-command.json" "$TMP_DIR/evidence-registered.json" || fail "CLI evidence registration"
 run_cli "$ROOT/fixtures/postgres/register-evidence-command.json" "$TMP_DIR/evidence-duplicate.json" || fail "CLI evidence replay"
 run_cli "$ROOT/fixtures/postgres/page-events-evidence-command.json" "$TMP_DIR/events-committed.json" || fail "CLI event page with registered evidence"
@@ -81,4 +83,4 @@ assert read("events-duplicate.json")["status"] == "duplicate"
 PY
 event_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM canonical_event WHERE source_object_id = 'issue:live' AND evidence_id = '00000000-0000-0000-0000-000000000006'::uuid")"
 [[ "$event_count" == "1" ]] || fail "registered evidence event did not commit exactly once"
-echo "[pg-adapter-live] page replay, evidence registration, event linkage, fenced job lifecycle, and empty-queue claim OK"
+echo "[pg-adapter-live] source/run setup, page replay, evidence registration, event linkage, fenced job lifecycle, and empty-queue claim OK"

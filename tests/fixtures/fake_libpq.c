@@ -60,11 +60,20 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     static const char *claim_values[3] = {
         "worker-a", "2026-01-01T00:01:00Z", "60"
     };
+    static const char *begin_run_values[13] = {
+        "00000000-0000-0000-0000-000000000001", "github", "https://api.github.com",
+        "public", "1", "2026-01-01T00:00:00Z", "00000000-0000-0000-0000-000000000003",
+        "issues", "github", "1.0.0", "", "", "2026-01-01T00:00:00Z"
+    };
     const char *operation = getenv("RH_FAKE_PG_OPERATION");
     const char **expected = page_values;
     const char *prefix = "SELECT public.rh_commit_collection_page(";
     int expected_count = 9;
-    if (operation != NULL && strcmp(operation, "heartbeat") == 0) {
+    if (operation != NULL && strcmp(operation, "begin_run") == 0) {
+        expected = begin_run_values;
+        expected_count = 13;
+        prefix = "SELECT public.rh_begin_collection_run(";
+    } else if (operation != NULL && strcmp(operation, "heartbeat") == 0) {
         expected = heartbeat_values;
         expected_count = 4;
         prefix = "SELECT public.rh_heartbeat_job(";

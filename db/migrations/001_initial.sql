@@ -20,6 +20,7 @@ CREATE TABLE source_instance (
     visibility_scope rh_visibility_scope NOT NULL,
     configuration_revision bigint NOT NULL CHECK (configuration_revision > 0),
     created_at timestamptz NOT NULL,
+    CHECK (base_url ~ '^[A-Za-z][A-Za-z0-9+.-]*://[^/[:space:]@]+(/[^?#[:space:]]*)?$'),
     UNIQUE (kind, base_url, visibility_scope)
 );
 
@@ -711,6 +712,96 @@ BEGIN
        OR v_existing.transformation_kind IS DISTINCT FROM p_transformation_kind
        OR v_existing.created_at IS DISTINCT FROM p_created_at THEN
         RAISE EXCEPTION 'evidence digest is already registered with different immutable metadata';
+    END IF;
+    RETURN false;
+END;
+$$;
+
+-- Register a source configuration and its first collection run atomically.
+-- Exact retries are harmless; reusing either identity with changed metadata
+-- fails without leaving a half-created source or run.
+CREATE FUNCTION rh_begin_collection_run(
+    p_source_id uuid,
+    p_source_kind text,
+    p_source_base_url text,
+    p_source_visibility_scope rh_visibility_scope,
+    p_configuration_revision bigint,
+    p_source_created_at timestamptz,
+    p_run_id uuid,
+    p_capability text,
+    p_connector_name text,
+    p_connector_version text,
+    p_requested_start timestamptz,
+    p_requested_end timestamptz,
+    p_started_at timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_existing_source source_instance%ROWTYPE;
+    v_existing_run collection_run%ROWTYPE;
+BEGIN
+    IF COALESCE(p_source_kind, '') = '' OR COALESCE(p_source_base_url, '') = ''
+       OR COALESCE(p_capability, '') = '' OR COALESCE(p_connector_name, '') = ''
+       OR COALESCE(p_connector_version, '') = '' THEN
+        RAISE EXCEPTION 'collection source and connector metadata must be non-empty';
+    END IF;
+    IF p_source_base_url !~ '^[A-Za-z][A-Za-z0-9+.-]*://[^/[:space:]@]+(/[^?#[:space:]]*)?$' THEN
+        RAISE EXCEPTION 'source base URL must be absolute and free of credentials, query, fragment, and whitespace';
+    END IF;
+    IF p_configuration_revision IS NULL OR p_configuration_revision <= 0 THEN
+        RAISE EXCEPTION 'source configuration revision must be positive';
+    END IF;
+    IF p_requested_end IS NOT NULL AND p_requested_start IS NOT NULL
+       AND p_requested_end <= p_requested_start THEN
+        RAISE EXCEPTION 'requested collection end must follow its start';
+    END IF;
+
+    INSERT INTO source_instance (
+        id, kind, base_url, visibility_scope, configuration_revision, created_at
+    ) VALUES (
+        p_source_id, p_source_kind, p_source_base_url, p_source_visibility_scope,
+        p_configuration_revision, p_source_created_at
+    ) ON CONFLICT (id) DO NOTHING;
+
+    IF NOT FOUND THEN
+        SELECT * INTO v_existing_source FROM source_instance WHERE id = p_source_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'source instance identity conflict could not be read';
+        END IF;
+        IF v_existing_source.kind IS DISTINCT FROM p_source_kind
+           OR v_existing_source.base_url IS DISTINCT FROM p_source_base_url
+           OR v_existing_source.visibility_scope IS DISTINCT FROM p_source_visibility_scope
+           OR v_existing_source.configuration_revision IS DISTINCT FROM p_configuration_revision
+           OR v_existing_source.created_at IS DISTINCT FROM p_source_created_at THEN
+            RAISE EXCEPTION 'source instance identity is already registered with different immutable metadata';
+        END IF;
+    END IF;
+
+    INSERT INTO collection_run (
+        id, source_instance_id, capability, connector_name, connector_version,
+        requested_start, requested_end, started_at, status, completeness
+    ) VALUES (
+        p_run_id, p_source_id, p_capability, p_connector_name, p_connector_version,
+        p_requested_start, p_requested_end, p_started_at, 'running', 'unknown'
+    ) ON CONFLICT (id) DO NOTHING;
+
+    IF FOUND THEN
+        RETURN true;
+    END IF;
+
+    SELECT * INTO v_existing_run FROM collection_run WHERE id = p_run_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'collection run identity conflict could not be read';
+    END IF;
+    IF v_existing_run.source_instance_id IS DISTINCT FROM p_source_id
+       OR v_existing_run.capability IS DISTINCT FROM p_capability
+       OR v_existing_run.connector_name IS DISTINCT FROM p_connector_name
+       OR v_existing_run.connector_version IS DISTINCT FROM p_connector_version
+       OR v_existing_run.requested_start IS DISTINCT FROM p_requested_start
+       OR v_existing_run.requested_end IS DISTINCT FROM p_requested_end
+       OR v_existing_run.started_at IS DISTINCT FROM p_started_at THEN
+        RAISE EXCEPTION 'collection run identity is already registered with different immutable metadata';
     END IF;
     RETURN false;
 END;

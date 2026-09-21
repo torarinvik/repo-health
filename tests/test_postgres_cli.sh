@@ -30,6 +30,8 @@ run_ok() {
     || fail "$operation $mode command"
 }
 
+run_ok begin_run committed begin-collection-run
+run_ok begin_run duplicate begin-collection-run
 run_ok page committed page-commit
 run_ok page duplicate page-commit
 run_ok page_events committed page-events
@@ -63,6 +65,8 @@ root = sys.argv[1]
 def read(name):
     with open(os.path.join(root, name)) as f:
         return json.load(f)
+assert read("begin-collection-run-committed.json")["status"] == "started"
+assert read("begin-collection-run-duplicate.json")["status"] == "duplicate"
 assert read("page-commit-committed.json")["status"] == "committed"
 assert read("page-commit-duplicate.json")["status"] == "duplicate"
 assert read("page-events-committed.json")["operation"] == "page_commit_events"
