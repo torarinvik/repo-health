@@ -9,6 +9,7 @@
 # while an explicitly empty array is an observed empty result.
 
 include "./rh_base.elisa"
+include "./rh_forge.elisa"
 include "./rh_json.elisa"
 
 module ForgeEvents:
@@ -41,6 +42,7 @@ module ForgeEvents:
             duplicate_replacements: mutable i64
             rejected: mutable i64
             present: mutable bool
+            not_attempted: mutable bool
 
         def rh_fe_eq(texts: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, literal)
@@ -92,6 +94,27 @@ module ForgeEvents:
             ok: mutable i64 = 0
             value_out[0] <- Json::rh_json_int(nodes, raw, idx, &ok)
             return false if ok == 0
+            present_out[0] <- 1
+            true
+
+        def rh_fe_time(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            present_out[0] <- 0
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
+            return true if idx < 0 or nodes[idx.usize()].kind == Json::RH_JSON_NULL
+            node: Json::RhJsonNode = nodes[idx.usize()]
+            if node.kind == Json::RH_JSON_NUM:
+                ok: mutable i64 = 0
+                value_out[0] <- Json::rh_json_int(nodes, raw, idx, &ok)
+                return false if ok == 0
+            elif node.kind == Json::RH_JSON_STR:
+                start: mutable i64 = 0
+                end: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, idx, &start, &end)
+                ok: mutable i64 = 0
+                value_out[0] <- Forge::rh_parse_iso8601(texts, start.usize(), end.usize(), &ok)
+                return false if ok == 0
+            else:
+                return false
             present_out[0] <- 1
             true
 
@@ -168,9 +191,9 @@ module ForgeEvents:
                         continue
                 time_ok: mutable i64 = 0
                 created_at: mutable i64 = 0
-                if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, ForgeEvents::rh_fe_kind_time_key(kind), &created_at, &time_ok) or time_ok == 0 or created_at < 0:
+                if not ForgeEvents::rh_fe_time(nodes, raw, texts, child, ForgeEvents::rh_fe_kind_time_key(kind), &created_at, &time_ok) or time_ok == 0 or created_at < 0:
                     if kind == 3:
-                        if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "created_at", &created_at, &time_ok) or time_ok == 0 or created_at < 0:
+                        if not ForgeEvents::rh_fe_time(nodes, raw, texts, child, "created_at", &created_at, &time_ok) or time_ok == 0 or created_at < 0:
                             counts.rejected <- counts.rejected + 1
                             child <- nodes[child.usize()].next_sibling
                             continue
@@ -193,7 +216,7 @@ module ForgeEvents:
                     status_ok <- 1
                 updated_at: mutable i64 = 0
                 updated_ok: mutable i64 = 0
-                if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "updated_at", &updated_at, &updated_ok):
+                if not ForgeEvents::rh_fe_time(nodes, raw, texts, child, "updated_at", &updated_at, &updated_ok):
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
@@ -204,7 +227,7 @@ module ForgeEvents:
                 closed_at: mutable i64 = 0
                 closed_ok: mutable i64 = 0
                 if kind == 0 or kind == 1:
-                    if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "closed_at", &closed_at, &closed_ok):
+                    if not ForgeEvents::rh_fe_time(nodes, raw, texts, child, "closed_at", &closed_at, &closed_ok):
                         counts.rejected <- counts.rejected + 1
                         child <- nodes[child.usize()].next_sibling
                         continue
@@ -247,7 +270,7 @@ module ForgeEvents:
             Base::rh_push_text(out, "\"")
             Base::rh_push_text(out, ForgeEvents::rh_fe_cap_label(kind))
             Base::rh_push_text(out, "\":{\"status\":\"")
-            Base::rh_push_text(out, "observed" if counts.present else "unsupported")
+            Base::rh_push_text(out, "not_attempted" if counts.not_attempted else ("observed" if counts.present else "unsupported"))
             Base::rh_push_text(out, "\",\"attempted\":")
             if counts.present:
                 Base::rh_push_decimal_i64(out, counts.attempted)
@@ -275,6 +298,19 @@ module ForgeEvents:
             Base::rh_push_text(out, ",\"rejected\":")
             Base::rh_push_decimal_i64(out, counts.rejected)
             Base::rh_push_text(out, "}")
+
+        def rh_fe_not_attempted(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, key: u8&, counts: mutable RhForgeCapabilityCounts&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            states: i64 = Json::rh_json_obj_get(nodes, texts, root, "capability_states")
+            return 0 if states < 0
+            return -1 if nodes[states.usize()].kind != Json::RH_JSON_OBJ
+            state: i64 = Json::rh_json_obj_get(nodes, texts, states, key)
+            return 0 if state < 0
+            return -1 if counts.present or nodes[state.usize()].kind != Json::RH_JSON_STR
+            state_start: mutable i64 = 0
+            state_end: mutable i64 = 0
+            return -1 if not Json::rh_json_str_span(nodes, state, &state_start, &state_end) or not ForgeEvents::rh_fe_eq(texts, state_start, state_end, "not_attempted")
+            counts.not_attempted <- true
+            0
 
         def rh_fe_emit_event(out: mutable darray[u8]&, event: RhForgeEvent, texts: darray[u8]&, provider_s: i64, provider_e: i64) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"kind\":\"")
@@ -365,10 +401,10 @@ module ForgeEvents:
                 auth_state <- ForgeEvents::rh_fe_auth(texts, auth_s, auth_e)
                 return -1 if auth_state < 0
             events: mutable darray[RhForgeEvent] = []
-            issues_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false}
-            proposals_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false}
-            reviews_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false}
-            releases_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false}
+            issues_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false, not_attempted: false}
+            proposals_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false, not_attempted: false}
+            reviews_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false, not_attempted: false}
+            releases_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false, not_attempted: false}
             total_attempts: mutable i64 = 0
             pagination: i64 = Json::rh_json_obj_get(nodes, texts, root, "pagination")
             pagination_present: bool = pagination >= 0
@@ -378,6 +414,10 @@ module ForgeEvents:
             return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, githubish, bitbucket, events, &proposals_counts, &total_attempts) != 0
             return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, githubish, bitbucket, events, &reviews_counts, &total_attempts) != 0
             return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "releases", 3, githubish, bitbucket, events, &releases_counts, &total_attempts) != 0
+            return -1 if ForgeEvents::rh_fe_not_attempted(nodes, texts, root, "issues", &issues_counts) != 0
+            return -1 if ForgeEvents::rh_fe_not_attempted(nodes, texts, root, "proposals", &proposals_counts) != 0
+            return -1 if ForgeEvents::rh_fe_not_attempted(nodes, texts, root, "reviews", &reviews_counts) != 0
+            return -1 if ForgeEvents::rh_fe_not_attempted(nodes, texts, root, "releases", &releases_counts) != 0
             Base::rh_push_text(out, "{\"schema\":\"rh-forge-events-result/1\",\"provider\":\"")
             Base::rh_json_escape(out, texts, provider_s.usize(), provider_e.usize())
             Base::rh_push_text(out, "\",\"captured_at\":")
@@ -408,5 +448,5 @@ module ForgeEvents:
                 out.push(44) if i > 0
                 ForgeEvents::rh_fe_emit_event(out, events[i], texts, provider_s, provider_e)
                 i <- i + 1
-            Base::rh_push_text(out, "],\"note\":\"provider-native ids and status strings are retained at the captured evidence boundary; duplicate page observations replace by capability and native id; missing capability arrays are unsupported, malformed records are counted as rejected, and no role or authority is inferred from workflow participation\"}")
+            Base::rh_push_text(out, "],\"note\":\"provider-native ids and status strings are retained at the captured evidence boundary; duplicate page observations replace by capability and native id; missing capability arrays are unsupported unless capability_states marks them not_attempted, malformed records are counted as rejected, and no role or authority is inferred from workflow participation\"}")
             0

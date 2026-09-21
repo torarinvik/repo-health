@@ -224,4 +224,122 @@ set -e
 [[ "$rc_missing" -eq 4 ]] || fail "wrong capability array shape must exit 4 (got $rc_missing)"
 [[ "$rc_schema" -eq 4 ]] || fail "wrong schema must exit 4 (got $rc_schema)"
 [[ "$rc_provider" -eq 4 ]] || fail "wrong provider must exit 4 (got $rc_provider)"
+
+echo "[forge-events] explicit not-attempted capabilities stay distinct from unsupported"
+python3 - "$T/partial.json" "$T/not-attempted.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["capability_states"] = {"releases": "not_attempted"}
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" forge events --input "$T/not-attempted.json" --out "$T/not-attempted.out" >/dev/null || fail "not-attempted capture"
+python3 - "$T/not-attempted.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["releases"] == {"status":"not_attempted", "attempted":None, "normalized":None, "duplicate_replacements":None, "count":None, "rejected":0}, d
+print("[forge-events] not-attempted state OK")
+PY
+
+echo "[forge-events] bounded live GitHub proposal pages retain safe evidence"
+mkdir -p "$T/bin"
+python3 - "$T/live-page-1.json" "$T/live-empty.json" "$T/live-full-page.json" <<'PY'
+import json, sys
+pull = {"number": 7, "state": "closed", "created_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "closed_at": "2023-11-16T22:13:20Z", "html_url": "https://github.com/example/project/pull/7"}
+json.dump([pull], open(sys.argv[1], "w", encoding="utf-8"), separators=(",", ":"))
+open(sys.argv[2], "w", encoding="utf-8").write("[]\n")
+json.dump([dict(pull, number=n, html_url=f"https://github.com/example/project/pull/{n}") for n in range(1, 101)], open(sys.argv[3], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+cat > "$T/bin/python3" <<'SH'
+#!/usr/bin/env bash
+printf '140.82.114.5\n'
+SH
+cat > "$T/bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >> "$RH_CURL_LOG"
+body_out=""
+url=""
+config_stdin=0
+while (($#)); do
+  case "$1" in
+    -o) body_out="$2"; shift 2 ;;
+    --config) [[ "$2" == "-" ]] || exit 20; config_stdin=1; shift 2 ;;
+    *) url="$1"; shift ;;
+  esac
+done
+[[ -n "$body_out" && -n "$url" ]]
+if [[ "$config_stdin" == "1" ]]; then cat > "$RH_CURL_CONFIG_LOG"; fi
+body="$RH_CURL_PAGE1"
+[[ "$url" != *'page=2' ]] || body="$RH_CURL_PAGE2"
+cp "$body" "$body_out"
+printf '%s' 200
+SH
+chmod +x "$T/bin/python3" "$T/bin/curl"
+
+rm -f "$T/live.out" "$T/live.out.github-pulls-page-"* "$T/live-curl.args" "$T/live-curl.config"
+PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_fixture_token" RH_CURL_PAGE1="$T/live-full-page.json" RH_CURL_PAGE2="$T/live-empty.json" \
+  RH_CURL_LOG="$T/live-curl.args" RH_CURL_CONFIG_LOG="$T/live-curl.config" \
+  "$ROOT/build/rh_cli" forge events --github-repo example/project --max-pages 2 --out "$T/live.out" >/dev/null || fail "live GitHub collection"
+python3 - "$T/live.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["provider"] == "github" and d["authorization"]["state"] == "authorized", d
+assert d["capabilities"]["proposals"]["status"] == "observed" and d["capabilities"]["proposals"]["count"] == 100, d
+assert d["capabilities"]["issues"]["status"] == "not_attempted", d
+assert d["capabilities"]["reviews"]["status"] == "not_attempted" and d["capabilities"]["releases"]["status"] == "not_attempted", d
+assert d["events"][0] == {"kind":"proposals", "native_id":"github:1", "status":"closed", "created_at":1700000000, "updated_at":1700086400, "closed_at":1700172800, "url":"https://github.com/example/project/pull/1"}, d["events"][0]
+assert len(d["events"]) == 100, d["events"]
+assert d["pagination"]["proposals"] == {"next":None, "complete":True}, d["pagination"]
+for suffix in ("json", "url", "status", "err"):
+    assert (t / f"live.out.github-pulls-page-1.{suffix}").exists(), suffix
+assert (t / "live.out.github-pulls-page-2.status").read_text() == "200"
+assert (t / "live.out.github-pulls-page-1.url").read_text().strip() == "https://api.github.com/repos/example/project/pulls?state=all&sort=updated&direction=desc&per_page=100&page=1"
+assert "ghp_fixture_token" not in open(sys.argv[1]).read()
+print("[forge-events] live page normalization, pagination, and evidence OK")
+PY
+grep -Fxq 'header = "Authorization: Bearer ghp_fixture_token"' "$T/live-curl.config" || fail "live token header absent from curl stdin config"
+! grep -Fq 'ghp_fixture_token' "$T/live-curl.args" || fail "live GitHub token leaked into curl arguments"
+for evidence in "$T"/live.out.github-pulls-page-*; do
+  [[ ! -f "$evidence" ]] || ! grep -Fq 'ghp_fixture_token' "$evidence" || fail "live token leaked into evidence"
+done
+
+echo "[forge-events] page limit preserves a resumable cursor"
+rm -f "$T/partial-live.out" "$T/partial-live.out.github-pulls-page-"* "$T/partial-live-curl.args"
+PATH="$T/bin:$PATH" RH_CURL_PAGE1="$T/live-full-page.json" RH_CURL_PAGE2="$T/live-empty.json" \
+  RH_CURL_LOG="$T/partial-live-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --github-repo example/project --max-pages 1 --out "$T/partial-live.out" >/dev/null || fail "page-limited GitHub collection"
+python3 - "$T/partial-live.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["authorization"]["state"] == "not_requested", d["authorization"]
+assert d["capabilities"]["proposals"]["count"] == 100, d["capabilities"]["proposals"]
+assert d["pagination"]["proposals"] == {"next":"page=2", "complete":False}, d["pagination"]
+print("[forge-events] bounded continuation cursor OK")
+PY
+[[ "$(grep -c 'page=1' "$T/partial-live-curl.args")" -eq 1 ]] || fail "collector exceeded max-pages"
+
+echo "[forge-events] short pages terminate and unsafe routes fail before transport"
+rm -f "$T/short-live.out" "$T/short-live.out.github-pulls-page-"* "$T/short-live-curl.args"
+PATH="$T/bin:$PATH" RH_CURL_PAGE1="$T/live-page-1.json" RH_CURL_PAGE2="$T/live-empty.json" \
+  RH_CURL_LOG="$T/short-live-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --github-repo example/project --max-pages 2 --out "$T/short-live.out" >/dev/null || fail "short-page GitHub collection"
+python3 - "$T/short-live.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["proposals"]["count"] == 1, d["capabilities"]["proposals"]
+assert d["pagination"]["proposals"] == {"next":None, "complete":True}, d["pagination"]
+print("[forge-events] short-page completion OK")
+PY
+[[ "$(grep -c 'page=1' "$T/short-live-curl.args")" -eq 1 ]] || fail "collector requested a page after a short response"
+set +e
+PATH="$T/bin:$PATH" RH_CURL_LOG="$T/invalid-route-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --github-repo 'example/../project' --out "$T/invalid-route.out" >/dev/null 2>&1
+rc_route=$?
+"$ROOT/build/rh_cli" forge events --github-repo example/project --max-pages 11 --out "$T/invalid-pages.out" >/dev/null 2>&1
+rc_pages=$?
+set -e
+[[ "$rc_route" -eq 4 && "$rc_pages" -eq 2 ]] || fail "unsafe repo or page bound was accepted (route=$rc_route pages=$rc_pages)"
+[[ ! -e "$T/invalid-route-curl.args" && ! -e "$T/invalid-route.out" ]] || fail "invalid repository reached transport or wrote a result"
+
 echo "test_forge_events_cli OK"
