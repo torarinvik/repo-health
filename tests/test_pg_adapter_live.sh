@@ -44,6 +44,18 @@ run_cli() {
       "$ROOT/build/rh_cli" postgres --input "$safe_input" --out "$output" >/dev/null
   fi
 }
+run_postgres_ingest() {
+  local output="$1"
+  local safe_input="$TMP_DIR/ingest-input.json"
+  cp "$ROOT/fixtures/postgres/ingest-input.json" "$safe_input" || fail "copy normalized ingest fixture"
+  if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
+    RH_DATABASE_URL="$CONNINFO" RH_LIBPQ_PATH="$RH_LIBPQ_PATH" \
+      "$ROOT/build/rh_cli" ingest --postgres --input "$safe_input" --out "$output" >/dev/null
+  else
+    env -u RH_LIBPQ_PATH RH_DATABASE_URL="$CONNINFO" \
+      "$ROOT/build/rh_cli" ingest --postgres --input "$safe_input" --out "$output" >/dev/null
+  fi
+}
 run_cli "$ROOT/fixtures/postgres/begin-collection-run-command.json" "$TMP_DIR/run-started.json" || fail "CLI source and run registration"
 run_cli "$ROOT/fixtures/postgres/begin-collection-run-command.json" "$TMP_DIR/run-duplicate.json" || fail "CLI source and run replay"
 python3 - "$TMP_DIR" <<'PY'
@@ -107,4 +119,16 @@ assert read("job-finished.json")["status"] == "applied"
 PY
 run_state="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT r.status || ':' || j.state || ':' || a.outcome FROM collection_run r JOIN job j ON j.input_manifest->>'collection_run_id' = r.id::text JOIN job_attempt a ON a.job_id = j.id WHERE r.id = '00000000-0000-0000-0000-000000000003'::uuid AND j.id = '00000000-0000-0000-0000-00000000000a'::uuid AND a.fencing_token = 1")"
 [[ "$run_state" == "succeeded:succeeded:ok" ]] || fail "enqueued run, job, and attempt did not finish together: $run_state"
-echo "[pg-adapter-live] source/run setup, enqueue/claim/finish, page replay, evidence registration, actor linkage, and fenced job lifecycle OK"
+run_postgres_ingest "$TMP_DIR/ingest-result.json" || fail "normalized PostgreSQL ingest pipeline"
+python3 - "$TMP_DIR/ingest-result.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert result["status"] == "succeeded", result
+assert result["pages"] == [{"page_number": 0, "status": "committed"}], result
+assert result["fencing_token"] == 1, result
+PY
+ingest_state="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT r.status || ':' || j.state || ':' || a.outcome FROM collection_run r JOIN job j ON j.input_manifest->>'collection_run_id' = r.id::text JOIN job_attempt a ON a.job_id = j.id WHERE r.id = '00000000-0000-0000-0000-000000000020'::uuid AND j.id = '00000000-0000-0000-0000-000000000021'::uuid AND a.fencing_token = 1")"
+[[ "$ingest_state" == "succeeded:succeeded:ok" ]] || fail "normalized ingest did not finalize the run, job, and attempt atomically: $ingest_state"
+ingest_event_count="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM canonical_event WHERE source_object_id = 'issue:postgres-ingest-live' AND evidence_id = '00000000-0000-0000-0000-000000000006'::uuid")"
+[[ "$ingest_event_count" == "1" ]] || fail "normalized ingest event did not commit exactly once"
+echo "[pg-adapter-live] source/run setup, enqueue/claim/finish, page replay, evidence registration, actor linkage, and end-to-end normalized PostgreSQL ingest OK"

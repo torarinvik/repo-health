@@ -51,6 +51,16 @@ run_ok claim duplicate claim-job
 run_ok claim_collection committed claim-collection-job
 run_ok claim_collection duplicate claim-collection-job
 
+cp "$ROOT/fixtures/postgres/ingest-input.json" "$T/ingest-input.json"
+RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+  RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=committed \
+  "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-input.json" --out "$T/ingest-result.json" >/dev/null \
+  || fail "normalized PostgreSQL page ingest"
+RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+  RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_EXPECT=duplicate \
+  "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-input.json" --out "$T/ingest-not-claimed.json" >/dev/null \
+  || fail "normalized PostgreSQL ingest replay without a runnable lease"
+
 mkdir -p "$T/evidence"
 printf 'hello evidence\n' > "$T/evidence-source.txt"
 stored_name="$("$ROOT/build/rh_cli" store put --root "$T/evidence" --file "$T/evidence-source.txt" | awk '{print $3}')"
@@ -65,9 +75,10 @@ for mode in committed duplicate; do
     || fail "register evidence $mode command"
 done
 
-python3 - "$T" <<'PY'
+python3 - "$T" "$ROOT/fixtures/postgres/ingest-output.json" <<'PY'
 import json, os, sys
 root = sys.argv[1]
+expected_ingest = json.load(open(sys.argv[2]))
 def read(name):
     with open(os.path.join(root, name)) as f:
         return json.load(f)
@@ -97,6 +108,11 @@ specific_claim = read("claim-collection-job-committed.json")
 assert specific_claim["status"] == "claimed" and specific_claim["fencing_token"] == 1, specific_claim
 assert specific_claim["job_id"] == "00000000-0000-0000-0000-00000000000a", specific_claim
 assert read("claim-collection-job-duplicate.json")["status"] == "empty"
+assert read("ingest-result.json") == expected_ingest
+not_claimed = read("ingest-not-claimed.json")
+assert not_claimed["status"] == "not_claimed" and not_claimed["pages"] == [] and not_claimed["fencing_token"] == 0, not_claimed
+assert not_claimed["schema"] == "rh-postgres-ingest-result/1" and not_claimed["operation"] == "ingest", not_claimed
+assert not_claimed["source_id"] == expected_ingest["source_id"] and not_claimed["lease_expires_at"] == "", not_claimed
 registered = read("register-evidence-committed.json")
 assert registered == {
     "schema": "rh-postgres-result/1", "operation": "register_evidence",
@@ -109,7 +125,7 @@ duplicate = read("register-evidence-duplicate.json")
 assert duplicate["status"] == "duplicate" and duplicate["digest_value"] == registered["digest_value"]
 all_output = "".join(open(os.path.join(root, p)).read() for p in os.listdir(root) if p.endswith(".json"))
 assert "never-emit-this" not in all_output
-print("[postgres-cli] verified source/run initialization, collection-job enqueue and targeted claim, evidence registration, page commits, generic claim, heartbeat, finish, and bounded reports OK")
+print("[postgres-cli] verified source/run setup, normalized PostgreSQL ingest, enqueue/targeted claim, evidence registration, page commits, job lifecycle, and bounded reports OK")
 PY
 
 printf 'X' >> "$T/evidence/$stored_name"
@@ -145,3 +161,49 @@ if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" RH_FAKE
 fi
 [[ ! -e "$T/malformed-result.json" ]] || fail "malformed command wrote a result"
 echo "[postgres-cli] missing configuration, transport failure, and malformed input fail closed"
+
+python3 - "$T/ingest-input.json" "$T/ingest-malformed.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+value["pages"][0]["record_count"] = 2
+json.dump(value, open(sys.argv[2], "w"))
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/malformed-connected" \
+    "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-malformed.json" \
+      --out "$T/ingest-malformed-result.json" >/dev/null 2>&1; then
+  fail "malformed normalized page batch accepted"
+fi
+[[ ! -e "$T/malformed-connected" ]] || fail "malformed batch connected to PostgreSQL before validation"
+[[ ! -e "$T/ingest-malformed-result.json" ]] || fail "malformed batch wrote a result"
+python3 - "$T/ingest-input.json" "$T/ingest-invalid-event.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+events = json.loads(value["pages"][0]["events_json"])
+events[0]["subject_id"] = "not-a-uuid"
+value["pages"][0]["events_json"] = json.dumps(events, separators=(",", ":"))
+json.dump(value, open(sys.argv[2], "w"))
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/invalid-event-connected" \
+    "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-invalid-event.json" \
+      --out "$T/ingest-invalid-event-result.json" >/dev/null 2>&1; then
+  fail "malformed normalized event accepted"
+fi
+[[ ! -e "$T/invalid-event-connected" ]] || fail "malformed event connected to PostgreSQL before validation"
+[[ ! -e "$T/ingest-invalid-event-result.json" ]] || fail "malformed event wrote a result"
+python3 - "$T/ingest-input.json" "$T/ingest-invalid-time.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+value["pages"][0]["committed_at"] = "2026-02-30T00:03:00Z"
+json.dump(value, open(sys.argv[2], "w"))
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=ingest RH_FAKE_PG_CONNECT_MARK="$T/invalid-time-connected" \
+    "$ROOT/build/rh_cli" ingest --postgres --input "$T/ingest-invalid-time.json" \
+      --out "$T/ingest-invalid-time-result.json" >/dev/null 2>&1; then
+  fail "invalid normalized page timestamp accepted"
+fi
+[[ ! -e "$T/invalid-time-connected" ]] || fail "invalid timestamp connected to PostgreSQL before validation"
+[[ ! -e "$T/ingest-invalid-time-result.json" ]] || fail "invalid timestamp wrote a result"
+echo "[postgres-cli] page records, timestamps, and lease bounds are preflighted before PostgreSQL"
