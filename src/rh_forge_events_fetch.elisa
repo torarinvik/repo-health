@@ -89,7 +89,6 @@ module ForgeEventsFetch:
                 Base::rh_push_cstr(url, repository)
                 Base::rh_push_text(url, "/")
                 Base::rh_push_cstr(url, endpoint)
-                Base::rh_push_text(url, "?state=all&sort=updated&direction=desc&per_page=100&page=")
                 Base::rh_push_decimal_i64(url, page_number)
                 url.push(0)
                 url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
@@ -132,22 +131,27 @@ module ForgeEventsFetch:
                 Base::rh_push_text(out, "\",\"complete\":false}")
 
     public:
-        # Fetch GitHub issue and pull-request pages from two fixed API routes.
+        # Fetch GitHub issues, pulls, and published-release pages from fixed API routes.
         # The numeric page sequence and page cap avoid following arbitrary Link
         # URLs. Raw response, URL, status, and stderr evidence stay beside output.
         def rh_forge_events_github_live(repository: cstr, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
             issues: mutable darray[u8] = []
             proposals: mutable darray[u8] = []
+            releases: mutable darray[u8] = []
             issues_total: mutable i64 = 0
             proposals_total: mutable i64 = 0
+            releases_total: mutable i64 = 0
             byte_total: mutable i64 = 0
             issues_complete: mutable i64 = 0
             proposals_complete: mutable i64 = 0
+            releases_complete: mutable i64 = 0
             issues_next_page: mutable i64 = 1
             proposals_next_page: mutable i64 = 1
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, "issues", "issues", max_pages, evidence_base, issues, &issues_total, &byte_total, &issues_complete, &issues_next_page)
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, "pulls", "pulls", max_pages, evidence_base, proposals, &proposals_total, &byte_total, &proposals_complete, &proposals_next_page)
+            releases_next_page: mutable i64 = 1
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, "issues?state=all&sort=updated&direction=desc&per_page=100&page=", "issues", max_pages, evidence_base, issues, &issues_total, &byte_total, &issues_complete, &issues_next_page)
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, "pulls?state=all&sort=updated&direction=desc&per_page=100&page=", "pulls", max_pages, evidence_base, proposals, &proposals_total, &byte_total, &proposals_complete, &proposals_next_page)
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, "releases?per_page=100&page=", "releases", max_pages, evidence_base, releases, &releases_total, &byte_total, &releases_complete, &releases_next_page)
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             token: u8&? = getenv("RH_GITHUB_TOKEN")
@@ -156,13 +160,17 @@ module ForgeEventsFetch:
             Base::rh_push_decimal_i64(capture, captured_at)
             Base::rh_push_text(capture, ",\"authorization\":{\"state\":\"")
             Base::rh_push_text(capture, "authorized" if token != null else "not_requested")
-            Base::rh_push_text(capture, "\"},\"capability_states\":{\"reviews\":\"not_attempted\",\"releases\":\"not_attempted\"},\"issues\":[")
+            Base::rh_push_text(capture, "\"},\"capability_states\":{\"reviews\":\"not_attempted\"},\"issues\":[")
             capture.extend(bytes_view(issues))
             Base::rh_push_text(capture, "],\"proposals\":[")
             capture.extend(bytes_view(proposals))
+            Base::rh_push_text(capture, "],\"releases\":[")
+            capture.extend(bytes_view(releases))
             Base::rh_push_text(capture, "],\"pagination\":{\"issues\":")
             ForgeEventsFetch::rh_fef_push_pagination(capture, issues_complete == 1, issues_next_page)
             Base::rh_push_text(capture, ",\"proposals\":")
             ForgeEventsFetch::rh_fef_push_pagination(capture, proposals_complete == 1, proposals_next_page)
-            Base::rh_push_text(capture, ",\"reviews\":{\"next\":null,\"complete\":false},\"releases\":{\"next\":null,\"complete\":false}}}")
+            Base::rh_push_text(capture, ",\"reviews\":{\"next\":null,\"complete\":false},\"releases\":")
+            ForgeEventsFetch::rh_fef_push_pagination(capture, releases_complete == 1, releases_next_page)
+            Base::rh_push_text(capture, "}}")
             ForgeEvents::rh_forge_events_report(capture, out)
