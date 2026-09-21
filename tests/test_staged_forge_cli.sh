@@ -15,12 +15,42 @@ cp "$ROOT/fixtures/postgres/staged-github-proposals-input.json" "$T/proposals-in
 cp "$ROOT/fixtures/postgres/staged-github-reviews-input.json" "$T/reviews-input.json"
 cp "$ROOT/fixtures/postgres/staged-github-releases-input.json" "$T/releases-input.json"
 cp "$ROOT/fixtures/postgres/staged-gitlab-issues-input.json" "$T/gitlab-issues-input.json"
+cp "$ROOT/fixtures/postgres/staged-gitlab-proposals-input.json" "$T/gitlab-proposals-input.json"
+cp "$ROOT/fixtures/postgres/staged-gitlab-releases-input.json" "$T/gitlab-releases-input.json"
 
 echo "[staged-forge] replay binds the exact stage input and preserves provenance"
 "$ROOT/build/rh_cli" staged-normalize --input "$T/input.json" --out "$T/output.json" >/dev/null || fail "valid staged rows"
 python3 - "$T/output.json" "$T/expected.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2])), "result differs from checked-in replay"
+PY
+
+echo "[staged-forge] GitLab merge-request identity and merged state stay native"
+"$ROOT/build/rh_cli" staged-normalize --input "$T/gitlab-proposals-input.json" --out "$T/gitlab-proposals-output.json" >/dev/null || fail "valid staged GitLab merge requests"
+python3 - "$T/gitlab-proposals-input.json" "$T/gitlab-proposals-output.json" "$ROOT/fixtures/postgres/staged-gitlab-proposals-output.json" <<'PY'
+import hashlib, json, sys
+got = json.load(open(sys.argv[2]))
+expected = json.load(open(sys.argv[3]))
+assert got == expected, (got, expected)
+assert got["input_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), got
+n = got["normalized"]
+assert got["provider"] == "gitlab" and got["canonical_capability"] == "proposals", got
+assert n["capabilities"]["proposals"]["count"] == 1, n["capabilities"]
+assert n["events"][0]["native_id"] == "gitlab:8" and n["events"][0]["status"] == "merged", n["events"]
+PY
+
+echo "[staged-forge] GitLab release tags use the existing provider mapping"
+"$ROOT/build/rh_cli" staged-normalize --input "$T/gitlab-releases-input.json" --out "$T/gitlab-releases-output.json" >/dev/null || fail "valid staged GitLab releases"
+python3 - "$T/gitlab-releases-input.json" "$T/gitlab-releases-output.json" "$ROOT/fixtures/postgres/staged-gitlab-releases-output.json" <<'PY'
+import hashlib, json, sys
+got = json.load(open(sys.argv[2]))
+expected = json.load(open(sys.argv[3]))
+assert got == expected, (got, expected)
+assert got["input_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), got
+n = got["normalized"]
+assert got["provider"] == "gitlab" and got["canonical_capability"] == "releases", got
+assert n["capabilities"]["releases"]["count"] == 1, n["capabilities"]
+assert n["events"][0]["native_id"] == "gitlab:10" and n["events"][0]["tag"] == "v2.0.0", n["events"]
 PY
 
 echo "[staged-forge] GitLab issue identity and status pass through the provider adapter"
@@ -149,5 +179,7 @@ grep -q "rh-postgres-staged-github-proposals-input/1" "$ROOT/src/rh_staged_forge
 grep -q "rh-postgres-staged-github-reviews-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "review input contract token missing"
 grep -q "rh-postgres-staged-github-releases-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "release input contract token missing"
 grep -q "rh-postgres-staged-gitlab-issues-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "GitLab input contract token missing"
+grep -q "rh-postgres-staged-gitlab-proposals-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "GitLab proposal contract token missing"
+grep -q "rh-postgres-staged-gitlab-releases-input/1" "$ROOT/src/rh_staged_forge.elisa" || fail "GitLab release contract token missing"
 grep -q "rh-postgres-staged-normalize-result/1" "$ROOT/src/rh_staged_forge.elisa" || fail "result contract token missing"
 echo "test_staged_forge_cli OK"
