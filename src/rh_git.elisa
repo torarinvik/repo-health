@@ -465,6 +465,8 @@ module Git:
                 dj <- dj + 1
 
     private:
+        const RH_GITHUB_REST_API_VERSION: u8& = "2026-03-10"
+
         # Parse colon-delimited IPv6 hextets into a bounded word list. Empty
         # parts, non-hex bytes, overlong hextets, and more than eight words fail.
         def rh_v6_parse_groups(ip: cstr, start: usize, end: usize, words: mutable InlineVec[i64, 8]&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -681,7 +683,7 @@ module Git:
 
         # Assemble the fixed transport policy in one private helper so the
         # public operation only validates, prepares the pin, and runs it.
-        def rh_https_get_command(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&, max_secs: i64) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def rh_https_get_command(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&, max_secs: i64, github_api: bool) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             cmd: mutable darray[u8] = []
             Base::rh_push_text(cmd, "curl --disable -sS --noproxy '*' --proto '=https,file' --max-redirs 0")
             if pin.count > 0:
@@ -691,7 +693,12 @@ module Git:
             Base::rh_push_decimal_i64(cmd, max_secs)
             Base::rh_push_text(cmd, " --max-filesize ")
             Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_BYTES)
-            Base::rh_push_text(cmd, " -H 'User-Agent: repo-health-m02' -H 'Accept: application/json' -o ")
+            Base::rh_push_text(cmd, " -H 'User-Agent: repo-health-m02' -H 'Accept: application/json'")
+            if github_api:
+                Base::rh_push_text(cmd, " -H 'X-GitHub-Api-Version: ")
+                Base::rh_push_text(cmd, RH_GITHUB_REST_API_VERSION)
+                cmd.push(39)
+            Base::rh_push_text(cmd, " -o ")
             rh_push_quoted(cmd, body_file)
             Base::rh_push_text(cmd, " -w '%{http_code}' > ")
             rh_push_quoted(cmd, code_file)
@@ -702,7 +709,7 @@ module Git:
             cmd.push(0)
             cmd
 
-        def rh_run_https_get_with_timeout(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_run_https_get_with_timeout(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64, github_api: bool) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if max_secs <= 0 or max_secs > RH_FETCH_MAX_SECS
             return -1 if not rh_fetch_guard(url)
             return -1 if not rh_fetch_arg_safe(url)
@@ -713,7 +720,7 @@ module Git:
             if Base::rh_cstr_starts_with(url, "https://"):
                 return -1 if not rh_prepare_https_pin(url, err_file, pin)
             transport: i64 =
-                cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin, max_secs)
+                cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin, max_secs, github_api)
                 block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
                 block_result
             transport
@@ -780,7 +787,13 @@ module Git:
         const RH_OSV_VULNERABILITY_GET_MAX_SECS: i64 = 10
 
         def rh_run_https_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS)
+            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, false)
+
+        # GitHub's REST API requires an explicit supported-version header for
+        # stable interpretation. The endpoint remains caller-supplied under the
+        # same HTTPS/DNS/redirect/size policy; no credential header is added.
+        def rh_run_github_api_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, true)
 
         # Run a single bounded JSON package/version query to OSV. The endpoint
         # is fixed here, so this POST cannot be redirected to a caller URL. DNS
@@ -810,7 +823,7 @@ module Git:
             url.extend(bytes_view(advisory_id))
             url.push(0)
             url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
-            rh_run_https_get_with_timeout(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS)
+            rh_run_https_get_with_timeout(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS, false)
 
         # Run a bounded bare clone for https remotes (M01-03): no worktree, no
         # checkout (so no smudge/clean filters, no hooks execute), blob-less and

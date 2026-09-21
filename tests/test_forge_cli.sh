@@ -65,6 +65,35 @@ cmp -s "$T/github-repo.json" "$T/gh-url.out.source" || fail "url source evidence
 cmp -s "$T/gh.out" "$T/gh-url.out" || fail "url normalization differs"
 echo "[forge] url capture OK"
 
+echo "[forge] GitHub capture sends the manifest-pinned API version header"
+mkdir -p "$T/bin"
+cat > "$T/bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" > "$RH_CURL_LOG"
+body_out=""
+while (($#)); do
+  if [[ "$1" == "-o" ]]; then
+    body_out="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+[[ -n "$body_out" ]]
+cp "$RH_CURL_BODY" "$body_out"
+printf '000'
+SH
+chmod +x "$T/bin/curl"
+PATH="$T/bin:$PATH" RH_CURL_BODY="$T/github-repo.json" RH_CURL_LOG="$T/github-curl.args" \
+  "$ROOT/build/rh_cli" forge normalize --connector github --url "$source_url" --out "$T/gh-versioned.out" --fetched-at 1700000000 >/dev/null || fail "versioned GitHub fetch"
+grep -Fxq 'X-GitHub-Api-Version: 2026-03-10' "$T/github-curl.args" || fail "GitHub API version header missing"
+! grep -Fq 'Authorization:' "$T/github-curl.args" || fail "unexpected credential header"
+PATH="$T/bin:$PATH" RH_CURL_BODY="$T/gitea-repo.json" RH_CURL_LOG="$T/gitea-curl.args" \
+  "$ROOT/build/rh_cli" forge normalize --connector gitea --url "file://$T/gitea-repo.json" --out "$T/gitea-versioned.out" --fetched-at 1700000000 >/dev/null || fail "unversioned Gitea fetch"
+! grep -Fq 'X-GitHub-Api-Version:' "$T/gitea-curl.args" || fail "GitHub version header leaked to Gitea"
+echo "[forge] API version header is connector-scoped and credential-free"
+
 echo "[forge] negatives fail closed"
 set +e
 for conn in generic-git mercurial bogus ""; do
