@@ -48,7 +48,7 @@ for want in ("dep-graph", "canonical-repo", "bundle-manifest", "report",
              "notify-state", "store-lease-result", "policy-state",
              "corrections-state", "connector-instance", "job-next",
              "job-schedule-result",
-             "reconcile-result", "snapshot-reconcile-input", "snapshot-reconcile-result", "job-schedule-result", "projection-snapshot", "github-capability-probe-result",
+             "reconcile-result", "snapshot-reconcile-input", "snapshot-reconcile-result", "job-schedule-result", "projection-snapshot", "github-capability-probe-result", "github-traffic-observation",
              "worker-plan", "succession-metric", "adapter-manifest-result", "research-conformance", "pilot-review-result", "provider-roles-input", "ecosystem-lookup-result", "forge-events-input", "forge-events-result", "ingest-input", "postgres-command", "postgres-result", "osv-query-input", "osv-commit-query-input", "osv-query-result", "osv-query-pages-result", "osv-query-batch-result", "osv-query-batch-pages-result", "osv-query-batch-hydrated-result", "pylock-audit", "pylock-artifact-observation-result"):
     assert want in ids, ("missing contract", want)
 assert d["rules"], "contract rules must be stated"

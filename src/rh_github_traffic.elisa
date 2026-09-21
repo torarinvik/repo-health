@@ -1,0 +1,120 @@
+# rh_github_traffic.elisa — bounded GitHub traffic-window observations.
+
+include "./rh_base.elisa"
+include "./rh_forge.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+
+module GitHubTraffic:
+    private:
+        const RH_GT_MAX_BODY_BYTES: i64 = 3145728
+        const RH_GT_MAX_DAYS: i64 = 14
+
+        def rh_gt_component_char(byte: u8) -> bool:
+            (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95
+
+        def rh_gt_repository_valid(repository: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            length: usize = Base::rh_cstr_len_c(repository)
+            return false if length < 3 or length > 201
+            slash: mutable usize = length
+            while index < length |index: usize = 0, repository, slash|:
+                byte: u8 = repository[index]
+                if byte == 47:
+                    return false if slash != length
+                    slash <- index
+                else:
+                    return false if not GitHubTraffic::rh_gt_component_char(byte)
+                index <- index + 1
+            return false if slash == 0 or slash + 1 >= length
+            owner_dot: bool = slash == 1 and repository[0] == 46
+            owner_dotdot: bool = slash == 2 and repository[0] == 46 and repository[1] == 46
+            repo_dot: bool = slash + 2 == length and repository[slash + 1] == 46
+            repo_dotdot: bool = slash + 3 == length and repository[slash + 1] == 46 and repository[slash + 2] == 46
+            not owner_dot and not owner_dotdot and not repo_dot and not repo_dotdot
+
+        def rh_gt_timestamp_valid(texts: darray[u8]&, start: i64, end: i64, captured_at: i64, epoch_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != 20
+            s: usize = start.usize()
+            e: usize = end.usize()
+            return false if texts[s + 10] != 84 or texts[s + 11] != 48 or texts[s + 12] != 48 or texts[s + 13] != 58 or texts[s + 14] != 48 or texts[s + 15] != 48 or texts[s + 16] != 58 or texts[s + 17] != 48 or texts[s + 18] != 48 or texts[s + 19] != 90
+            parsed_ok: mutable i64 = 0
+            epoch_out[0] <- Forge::rh_parse_iso8601(texts, s, e, &parsed_ok)
+            parsed_ok == 1 and epoch_out[0] <= captured_at and epoch_out[0] % 86400 == 0
+
+        def rh_gt_daily_observations(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, views_idx: i64, captured_at: i64, daily_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            views: Json::RhJsonNode = nodes[views_idx.usize()]
+            return -1 if views.kind != Json::RH_JSON_ARR or views.child_count > RH_GT_MAX_DAYS
+            previous_epoch: mutable i64 = -1
+            reported: mutable i64 = 0
+            while item >= 0 |item: i64 = views.first_child, nodes, texts, raw, captured_at, daily_out, previous_epoch, reported|:
+                return -1 if nodes[item.usize()].kind != Json::RH_JSON_OBJ
+                timestamp_idx: i64 = Json::rh_json_obj_get(nodes, texts, item, "timestamp")
+                timestamp_start: mutable i64 = 0
+                timestamp_end: mutable i64 = 0
+                return -1 if not Json::rh_json_str_span(nodes, timestamp_idx, &timestamp_start, &timestamp_end)
+                timestamp_epoch: mutable i64 = 0
+                return -1 if not GitHubTraffic::rh_gt_timestamp_valid(texts, timestamp_start, timestamp_end, captured_at, &timestamp_epoch)
+                return -1 if reported > 0 and timestamp_epoch <= previous_epoch
+                count_ok: mutable i64 = 0
+                count: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, item, "count"), &count_ok)
+                return -1 if count_ok == 0 or count < 0
+                unique_ok: mutable i64 = 0
+                uniques: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, item, "uniques"), &unique_ok)
+                return -1 if unique_ok == 0 or uniques < 0 or uniques > count
+                daily_out.push(44) if reported > 0
+                Base::rh_push_text(daily_out, "{\"timestamp\":\"")
+                start_ptr: u8& = (&texts[timestamp_start.usize()]).cast[u8&] can Unsafe.PointerCast
+                Base::rh_push_raw(daily_out, start_ptr, (timestamp_end - timestamp_start).usize())
+                Base::rh_push_text(daily_out, "\",\"count\":")
+                Base::rh_push_decimal_i64(daily_out, count)
+                Base::rh_push_text(daily_out, ",\"uniques\":")
+                Base::rh_push_decimal_i64(daily_out, uniques)
+                daily_out.push(125)
+                previous_epoch <- timestamp_epoch
+                reported <- reported + 1
+                item <- nodes[item.usize()].next_sibling
+            reported
+
+        def rh_gt_emit(repository: cstr, captured_at: i64, count: i64, uniques: i64, daily: darray[u8]&, raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            digest: mutable darray[u8] = []
+            Sha256::rh_sha256(raw, digest)
+            Base::rh_push_text(out, "{\"schema\":\"rh-github-traffic-observation/1\",\"provider\":\"github\",\"origin\":\"caller_supplied_response\",\"repository\":\"")
+            Base::rh_push_cstr(out, repository)
+            Base::rh_push_text(out, "\",\"captured_at\":")
+            Base::rh_push_decimal_i64(out, captured_at)
+            Base::rh_push_text(out, ",\"window\":{\"days\":14,\"views\":")
+            Base::rh_push_decimal_i64(out, count)
+            Base::rh_push_text(out, ",\"uniques\":")
+            Base::rh_push_decimal_i64(out, uniques)
+            Base::rh_push_text(out, "},\"daily_observations\":[")
+            out.extend(bytes_view(daily))
+            Base::rh_push_text(out, "],\"aggregation\":{\"kind\":\"rolling_window_snapshot\",\"additive_across_captures\":false},\"response_sha256\":\"")
+            out.extend(bytes_view(digest))
+            Base::rh_push_text(out, "\",\"coverage\":\"provider_returned_daily_buckets_only\"}")
+            0
+
+    public:
+        # Normalize one caller-supplied GitHub traffic response. The payload is
+        # kept as one rolling-window snapshot; consumers must not add snapshots.
+        def rh_github_traffic_observe_file(input_path: cstr, repository: cstr, captured_at: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            input_size: i64 = Base::rh_file_size(input_path)
+            return -1 if input_size <= 0 or input_size > RH_GT_MAX_BODY_BYTES
+            raw: mutable darray[u8] = []
+            return -1 if Base::rh_io_read(input_path, raw) != input_size
+            return -1 if not GitHubTraffic::rh_gt_repository_valid(repository) or captured_at < 0
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            count_ok: mutable i64 = 0
+            count: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, root, "count"), &count_ok)
+            return -1 if count_ok == 0 or count < 0
+            unique_ok: mutable i64 = 0
+            uniques: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, root, "uniques"), &unique_ok)
+            return -1 if unique_ok == 0 or uniques < 0 or uniques > count
+            views_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "views")
+            return -1 if views_idx < 0
+            daily: mutable darray[u8] = []
+            reported: i64 = GitHubTraffic::rh_gt_daily_observations(nodes, texts, raw, views_idx, captured_at, daily)
+            return -1 if reported < 0
+            GitHubTraffic::rh_gt_emit(repository, captured_at, count, uniques, daily, raw, out)

@@ -236,4 +236,66 @@ rc_probe_route=$?
 set -e
 [[ "$rc_probe_route" -eq 4 && ! -e "$T/probe-invalid.args" && ! -e "$T/probe-invalid.out" ]] || fail "invalid probe repository reached transport or wrote output"
 
+echo "[connector] GitHub traffic observations preserve daily buckets as non-additive snapshots"
+cp "$ROOT/fixtures/connectors/github-traffic-views.json" "$T/traffic-response.json"
+"$ROOT/build/rh_cli" connector traffic-observe --github-repo example/project \
+  --captured-at 1789992000 --input "$T/traffic-response.json" \
+  --out "$T/traffic-observation.json" >/dev/null || fail "traffic observation normalization"
+cmp "$ROOT/fixtures/connectors/github-traffic-observation.json" "$T/traffic-observation.json" \
+  || fail "traffic observation golden mismatch"
+python3 - "$T/traffic-observation.json" "$T/traffic-response.json" <<'PY'
+import hashlib, json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+raw = pathlib.Path(sys.argv[2]).read_bytes()
+assert d["schema"] == "rh-github-traffic-observation/1", d
+assert d["origin"] == "caller_supplied_response", d
+assert d["window"] == {"days":14,"views":14,"uniques":10}, d
+assert [x["timestamp"] for x in d["daily_observations"]] == [
+    "2026-09-19T00:00:00Z", "2026-09-20T00:00:00Z"], d
+assert d["aggregation"] == {"kind":"rolling_window_snapshot","additive_across_captures":False}, d
+assert d["response_sha256"] == hashlib.sha256(raw).hexdigest(), d
+assert "github-traffic-views.json" not in open(sys.argv[1]).read(), d
+print("[connector] traffic window snapshot and exact response digest OK")
+PY
+
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+t = pathlib.Path(sys.argv[1])
+base = {"count": 2, "uniques": 2, "views": [
+    {"timestamp":"2026-09-19T00:00:00Z","count":1,"uniques":1},
+    {"timestamp":"2026-09-20T00:00:00Z","count":1,"uniques":1}]}
+cases = {
+    "duplicate": lambda d: d["views"].__setitem__(1, dict(d["views"][0])),
+    "out-of-order": lambda d: d["views"].reverse(),
+    "future": lambda d: d["views"][1].update(timestamp="2026-09-22T00:00:00Z"),
+    "not-daily": lambda d: d["views"][1].update(timestamp="2026-09-20T12:00:00Z"),
+    "bad-date": lambda d: d["views"][1].update(timestamp="2026-02-30T00:00:00Z"),
+    "unique-exceeds-count": lambda d: d["views"][1].update(uniques=2),
+}
+for name, change in cases.items():
+    d = json.loads(json.dumps(base))
+    change(d)
+    (t / (name + ".json")).write_text(json.dumps(d))
+too_many = json.loads(json.dumps(base))
+too_many["views"] = [{"timestamp":f"2026-09-{day:02d}T00:00:00Z","count":1,"uniques":1}
+                     for day in range(1, 16)]
+(t / "too-many-days.json").write_text(json.dumps(too_many))
+(t / "oversized-response.json").write_bytes(b" " * (3 * 1024 * 1024 + 1))
+PY
+for malformed in duplicate out-of-order future not-daily bad-date unique-exceeds-count too-many-days; do
+  set +e
+  "$ROOT/build/rh_cli" connector traffic-observe --github-repo example/project \
+    --captured-at 1789992000 --input "$T/$malformed.json" --out "$T/$malformed.out" >/dev/null 2>&1
+  rc_traffic=$?
+  set -e
+  [[ "$rc_traffic" -eq 4 && ! -e "$T/$malformed.out" ]] || fail "malformed traffic response $malformed was accepted or published"
+done
+set +e
+"$ROOT/build/rh_cli" connector traffic-observe --github-repo example/project \
+  --captured-at 1789992000 --input "$T/oversized-response.json" --out "$T/oversized-response.out" >/dev/null 2>&1
+rc_traffic_size=$?
+set -e
+[[ "$rc_traffic_size" -eq 4 && ! -e "$T/oversized-response.out" ]] || fail "oversized traffic response was accepted or published"
+echo "[connector] malformed and oversized-window traffic samples fail closed"
+
 echo "test_connector_cli OK"
