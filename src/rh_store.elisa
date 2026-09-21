@@ -157,14 +157,33 @@ module Store:
                     start <- stop.usize() + 1
             false
 
+        # Validate a newline-separated set of canonical local blob names. An
+        # empty set is valid; empty interior lines and path-like names are not.
+        def rh_store_names_valid(names: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while start < names.count |start: usize = 0, names|:
+                stop: i64 = Base::rh_find_byte(names, start, 10)
+                end: usize = stop.usize() if stop >= 0 else names.count
+                return false if end - start != 16
+                while i < end |i: usize = start, names|:
+                    b: u8 = names[i]
+                    return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
+                    i <- i + 1
+                start <- end + 1 if stop >= 0 else names.count
+            true
+
         # Orphan cleanup (F033): delete every candidate blob whose name is NOT in
         # the referenced set. The candidate and referenced sets are supplied by the
         # caller (newline-separated names) because this slice has no directory
-        # listing; the operation itself is real and verifies by unlink. Referenced
-        # objects are never touched. deleted_out counts removals (already-absent
-        # candidates count as removed). Returns 0, or -1 on a malformed name.
+        # listing; the operation itself is real and verifies by unlink. Both full
+        # name lists are validated before any deletion, so malformed or path-like
+        # entries cannot cause partial cleanup or escape the evidence directory.
+        # Registration must still be serialized with deletion by a future caller.
+        # Referenced objects are never touched. deleted_out counts removals
+        # (already-absent candidates count as removed). Returns -1 for bad inputs.
         def rh_store_gc(evidence_dir: cstr, candidates: darray[u8]&, referenced: darray[u8]&, deleted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             deleted_out[0] <- 0
+            return -1 if Base::rh_cstr_len_c(evidence_dir) == 0 or Base::rh_cstr_len_c(evidence_dir) > 4096
+            return -1 if not rh_store_names_valid(candidates) or not rh_store_names_valid(referenced)
             while start < candidates.count |start: usize = 0, candidates, referenced, evidence_dir, deleted_out|:
                 stop: i64 = Base::rh_find_byte(candidates, start, 10)
                 line_end: mutable usize = stop.usize() if stop >= 0 else candidates.count

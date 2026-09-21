@@ -75,7 +75,7 @@ fi
 echo "[m02] usage gate"
 expect 2 "$FORGE"
 
-echo "[m02] store selftest (blobs, dedup, cursor, leases, coverage)"
+echo "[m02] store selftest (blobs, dedup, guarded orphan cleanup, cursor, leases, coverage)"
 STORE="$ROOT/build/test_store"
 [[ -x "$STORE" ]] || fail "test_store not built"
 SW="/tmp/rh-m02-store"
