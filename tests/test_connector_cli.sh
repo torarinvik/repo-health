@@ -171,6 +171,8 @@ set -euo pipefail
 printf '%s\n' "$@" >> "$RH_PROBE_CURL_ARGS"
 body_out=""
 url=""
+response_body="$RH_PROBE_BODY"
+response_http="${RH_PROBE_HTTP:-200}"
 while (($#)); do
   case "$1" in
     -o) body_out="$2"; shift 2 ;;
@@ -179,9 +181,26 @@ while (($#)); do
     *) url="$1"; shift ;;
   esac
 done
-[[ "$url" == "https://api.github.com/repos/example/project/traffic/views" ]]
-cp "$RH_PROBE_BODY" "$body_out"
-printf '%s' "$RH_PROBE_HTTP"
+case "$url" in
+  "https://api.github.com/repos/example/project/issues?per_page=1")
+    response_body="${RH_PROBE_ISSUES_BODY:-$RH_PROBE_ARRAY_BODY}"
+    response_http="${RH_PROBE_ISSUES_HTTP:-200}"
+    ;;
+  "https://api.github.com/repos/example/project/pulls?per_page=1")
+    response_body="${RH_PROBE_PULLS_BODY:-$RH_PROBE_ARRAY_BODY}"
+    response_http="${RH_PROBE_PULLS_HTTP:-200}"
+    ;;
+  "https://api.github.com/repos/example/project/releases?per_page=1")
+    response_body="${RH_PROBE_RELEASES_BODY:-$RH_PROBE_ARRAY_BODY}"
+    response_http="${RH_PROBE_RELEASES_HTTP:-200}"
+    ;;
+  "https://api.github.com/repos/example/project/traffic/views")
+    response_http="${RH_PROBE_TRAFFIC_HTTP:-${RH_PROBE_HTTP:-200}}"
+    ;;
+  *) exit 21 ;;
+esac
+cp "$response_body" "$body_out"
+printf '%s' "$response_http"
 SH
 chmod +x "$T/probe-bin/python3" "$T/probe-bin/curl"
 printf '%s\n' '{"count":12,"uniques":8,"views":[]}' > "$T/traffic-views.json"
@@ -229,6 +248,53 @@ else:
 print("[connector] mapped HTTP", sys.argv[3], "to", sys.argv[2])
 PY
 done
+
+echo "[connector] --all probes bounded GitHub routes with separate evidence"
+printf '%s\n' '[]' > "$T/probe-array.json"
+PATH="$T/probe-bin:$PATH" RH_GITHUB_TOKEN="ghp_probe_fixture" \
+  RH_PROBE_ARRAY_BODY="$T/probe-array.json" RH_PROBE_BODY="$T/probe-error.json" \
+  RH_PROBE_ISSUES_HTTP=200 RH_PROBE_PULLS_HTTP=200 RH_PROBE_RELEASES_HTTP=403 RH_PROBE_TRAFFIC_HTTP=404 \
+  RH_PROBE_CURL_ARGS="$T/matrix.args" RH_PROBE_CURL_CONFIG="$T/matrix.config" \
+  "$ROOT/build/rh_cli" connector probe --github-repo example/project --out "$T/capability-matrix.out" --all >/dev/null || fail "GitHub capability matrix probe"
+python3 - "$T/capability-matrix.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["schema"] == "rh-github-capability-matrix/1", d
+assert d["authorization"]["credential"] == "configured", d
+caps = d["capabilities"]
+assert caps["issues"]["status"] == "observed" and caps["issues"]["http_status"] == 200, caps
+assert caps["pull_requests"]["status"] == "observed" and caps["pull_requests"]["http_status"] == 200, caps
+assert caps["releases"]["status"] == "forbidden_or_rate_limited" and caps["releases"]["http_status"] == 403, caps
+assert caps["traffic"]["status"] == "not_found_or_private" and caps["traffic"]["http_status"] == 404, caps
+assert "count" not in json.dumps(caps) and "uniques" not in json.dumps(caps), caps
+for key in ("issues", "pull_requests", "releases", "traffic"):
+    for evidence in d["evidence"][key].values():
+        assert (t / pathlib.Path(evidence).name).exists(), evidence
+assert (t / "capability-matrix.out.github-issues.url").read_text().strip().endswith("/issues?per_page=1")
+assert (t / "capability-matrix.out.github-pulls.url").read_text().strip().endswith("/pulls?per_page=1")
+assert (t / "capability-matrix.out.github-releases.url").read_text().strip().endswith("/releases?per_page=1")
+print("[connector] matrix distinguishes route availability, authorization, and hidden-repository states")
+PY
+grep -Fxq 'header = "Authorization: Bearer ghp_probe_fixture"' "$T/matrix.config" || fail "matrix token header absent from curl stdin config"
+! grep -Fq 'ghp_probe_fixture' "$T/matrix.args" || fail "matrix token leaked into curl arguments"
+[[ "$(grep -c 'api.github.com/repos/example/project/' "$T/matrix.args")" -eq 4 ]] || fail "matrix must issue exactly four fixed requests"
+for evidence in "$T"/capability-matrix.out.github-*; do
+  ! grep -Fq 'ghp_probe_fixture' "$evidence" || fail "matrix token leaked into evidence"
+done
+
+PATH="$T/probe-bin:$PATH" RH_GITHUB_TOKEN="ghp_probe_fixture" \
+  RH_PROBE_ARRAY_BODY="$T/probe-array.json" RH_PROBE_ISSUES_BODY="$T/probe-malformed.json" \
+  RH_PROBE_BODY="$T/traffic-views.json" RH_PROBE_ISSUES_HTTP=200 RH_PROBE_PULLS_HTTP=200 \
+  RH_PROBE_RELEASES_HTTP=200 RH_PROBE_TRAFFIC_HTTP=200 \
+  RH_PROBE_CURL_ARGS="$T/malformed-matrix.args" RH_PROBE_CURL_CONFIG="$T/malformed-matrix.config" \
+  "$ROOT/build/rh_cli" connector probe --github-repo example/project --out "$T/malformed-matrix.out" --all >/dev/null || fail "malformed GitHub matrix probe"
+python3 - "$T/malformed-matrix.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["issues"] == {"declaration":"read", "status":"malformed", "http_status":200}, d
+print("[connector] matrix marks a 200 non-array response malformed")
+PY
 
 set +e
 PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/probe-invalid.args" RH_PROBE_CURL_CONFIG="$T/probe-invalid.config" \

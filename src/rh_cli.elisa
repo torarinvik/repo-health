@@ -146,7 +146,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
     rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [--review-pull N [--review-page N] | --review-repository [--max-pulls N] [--resume-from <result>]]) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
-    rh_cli_err("       rh_cli connector probe --github-repo <owner/repo> --out <file>")
+    rh_cli_err("       rh_cli connector probe --github-repo <owner/repo> --out <file> [--all]")
     rh_cli_err("       rh_cli connector traffic-observe --github-repo <owner/repo> --captured-at <unix-seconds> --input <raw-traffic.json> --out <file>")
     rh_cli_err("       rh_cli job classify --input <file> --out <file> | job run --input <file> --out <file>")
     rh_cli_err("       rh_cli reconcile --input <file> --out <file>")
@@ -1649,8 +1649,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if argc < 3
         csub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
         if Base::rh_streq(csub, "probe"):
-            cpr_idx, cpo_idx =
-                while cpi < argc |cpr_idx: i64 = -1, cpo_idx: i64 = -1, cpi: i64 = 3, slots| -> cpr_idx, cpo_idx:
+            cpr_idx, cpo_idx, probe_all =
+                while cpi < argc |cpr_idx: i64 = -1, cpo_idx: i64 = -1, probe_all: mutable bool = false, cpi: i64 = 3, slots| -> cpr_idx, cpo_idx, probe_all:
                     cpa: u8& = slots[cpi].cast[u8&] can Unsafe.PointerCast
                     if Base::rh_streq(cpa, "--github-repo"):
                         if cpi + 1 < argc:
@@ -1664,10 +1664,14 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                             cpo_idx <- cpi
                         else:
                             return rh_cli_usage(2)
+                    elif Base::rh_streq(cpa, "--all"):
+                        return rh_cli_usage(2) if probe_all
+                        probe_all <- true
                     else:
                         return rh_cli_usage(2)
                     cpi <- cpi + 1
             return rh_cli_usage(2) if cpr_idx < 0 or cpo_idx < 0
+            return rh_do_github_capability_matrix(slots[cpr_idx], slots[cpo_idx]) if probe_all
             return rh_do_github_traffic_probe(slots[cpr_idx], slots[cpo_idx])
         if Base::rh_streq(csub, "traffic-observe"):
             ctr_idx, cti_idx, cto_idx, cta_idx =
@@ -6129,6 +6133,21 @@ def rh_do_github_traffic_probe(repository: cstr, out_path: cstr) -> i32 can[Memo
         rh_cli_err("connector: cannot write probe --out")
         return 4
     rh_cli_out("connector: GitHub traffic capability probed")
+    0
+
+def rh_do_github_capability_matrix(repository: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected connector probe output path (allowlist)")
+        return 3
+    body: mutable darray[u8] = []
+    if GitHubProbe::rh_github_capability_matrix_live(repository, out_path, body) != 0:
+        rh_cli_err("connector: GitHub capability matrix probe failed (see request evidence)")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("connector: cannot write probe --out")
+        return 4
+    rh_cli_out("connector: GitHub capability matrix probed")
     0
 
 def rh_do_github_traffic_observe(repository: cstr, input_path: cstr, captured_at: i64, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:

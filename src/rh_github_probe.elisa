@@ -8,6 +8,12 @@ module GitHubProbe:
     private:
         const RH_GP_MAX_BODY_BYTES: i64 = 3145728
 
+        struct RhGpCapture:
+            status: mutable darray[u8]
+            transport: i64
+            response_valid: bool
+            ok: bool
+
         def rh_gp_component_char(byte: u8) -> bool:
             (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95
 
@@ -65,6 +71,90 @@ module GitHubProbe:
         def rh_gp_status_is(status: darray[u8]&, expected: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(status, 0, status.count.i64(), expected)
 
+        def rh_gp_array_body_valid(raw: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            root >= 0 and nodes[root.usize()].kind == Json::RH_JSON_ARR
+
+        def rh_gp_named_evidence_path(base: cstr, capability: cstr, extension: cstr) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
+            path: mutable darray[u8] = []
+            Base::rh_push_cstr(path, base)
+            Base::rh_push_text(path, ".github-")
+            Base::rh_push_cstr(path, capability)
+            path.push(46)
+            Base::rh_push_cstr(path, extension)
+            path.push(0)
+            path
+
+        # Request one fixed list or traffic route and retain its exact request,
+        # response, status, and transport error beside the matrix result.
+        def rh_gp_capture_endpoint(repository: cstr, route: cstr, capability: cstr, evidence_base: cstr, traffic_response: bool) -> RhGpCapture can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            url: mutable darray[u8] = []
+            Base::rh_push_text(url, "https://api.github.com/repos/")
+            Base::rh_push_cstr(url, repository)
+            Base::rh_push_text(url, "/")
+            Base::rh_push_cstr(url, route)
+            url.push(0)
+            url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
+            url_file: mutable darray[u8] = rh_gp_named_evidence_path(evidence_base, capability, "url")
+            body_file: mutable darray[u8] = rh_gp_named_evidence_path(evidence_base, capability, "json")
+            status_file: mutable darray[u8] = rh_gp_named_evidence_path(evidence_base, capability, "status")
+            error_file: mutable darray[u8] = rh_gp_named_evidence_path(evidence_base, capability, "err")
+            url_ptr_file: cstr = (&url_file[0]).cast[cstr] can Unsafe.PointerCast
+            body_ptr: cstr = (&body_file[0]).cast[cstr] can Unsafe.PointerCast
+            status_ptr: cstr = (&status_file[0]).cast[cstr] can Unsafe.PointerCast
+            error_ptr: cstr = (&error_file[0]).cast[cstr] can Unsafe.PointerCast
+            url_evidence: mutable darray[u8] = []
+            Base::rh_push_cstr(url_evidence, url_ptr)
+            url_evidence.push(10)
+            return RhGpCapture{status: [], transport: -1, response_valid: false, ok: false} if not Base::rh_io_write(url_ptr_file, url_evidence)
+            transport: i64 = Git::rh_run_github_api_get(url_ptr, body_ptr, status_ptr, error_ptr)
+            return RhGpCapture{status: [], transport: transport, response_valid: false, ok: false} if transport < 0
+            status: mutable darray[u8] = []
+            _ = Base::rh_io_read(status_ptr, status)
+            body: mutable darray[u8] = []
+            body_read: i64 = Base::rh_io_read(body_ptr, body)
+            return RhGpCapture{status: status, transport: transport, response_valid: false, ok: false} if body_read >= 0 and body.count.i64() > RH_GP_MAX_BODY_BYTES
+            response_valid: mutable bool = false
+            if body_read >= 0 and GitHubProbe::rh_gp_status_is(status, "200"):
+                parsed_valid: bool = GitHubProbe::rh_gp_array_body_valid(body) if not traffic_response else GitHubProbe::rh_gp_traffic_body_valid(body)
+                response_valid <- parsed_valid
+            RhGpCapture{status: status, transport: transport, response_valid: response_valid, ok: true}
+
+        def rh_gp_emit_capability(out: mutable darray[u8]&, declaration: cstr, transport: i64, status: darray[u8]&, response_valid: bool, traffic: bool) -> void can[Memory.Allocate, Abort.Panic]:
+            label: u8& = GitHubProbe::rh_gp_traffic_status(transport, status, response_valid)
+            status_ok: mutable i64 = 0
+            http_status: mutable i64 = 0
+            if status.count > 0 and not GitHubProbe::rh_gp_status_is(status, "000"):
+                http_status <- Base::rh_parse_i64(status, 0, status.count, &status_ok)
+            Base::rh_push_text(out, "{\"declaration\":\"")
+            Base::rh_push_cstr(out, declaration)
+            Base::rh_push_text(out, "\",\"status\":\"")
+            Base::rh_push_text(out, label)
+            Base::rh_push_text(out, "\",\"http_status\":")
+            if status_ok == 1:
+                Base::rh_push_decimal_i64(out, http_status)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"window_days\":14" if traffic else "")
+            out.push(125)
+
+        def rh_gp_emit_evidence_paths(out: mutable darray[u8]&, evidence_base: cstr, capability: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            url_file: mutable darray[u8] = GitHubProbe::rh_gp_named_evidence_path(evidence_base, capability, "url")
+            body_file: mutable darray[u8] = GitHubProbe::rh_gp_named_evidence_path(evidence_base, capability, "json")
+            status_file: mutable darray[u8] = GitHubProbe::rh_gp_named_evidence_path(evidence_base, capability, "status")
+            error_file: mutable darray[u8] = GitHubProbe::rh_gp_named_evidence_path(evidence_base, capability, "err")
+            Base::rh_push_text(out, "{\"url\":\"")
+            Base::rh_push_cstr(out, (&url_file[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(out, "\",\"body\":\"")
+            Base::rh_push_cstr(out, (&body_file[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(out, "\",\"status\":\"")
+            Base::rh_push_cstr(out, (&status_file[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(out, "\",\"error\":\"")
+            Base::rh_push_cstr(out, (&error_file[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(out, "\"}")
+
         def rh_gp_emit(repository: cstr, credential_configured: bool, transport: i64, status: darray[u8]&, response_valid: bool, url_path: cstr, body_path: cstr, status_path: cstr, error_path: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
@@ -98,6 +188,47 @@ module GitHubProbe:
             0
 
     public:
+        # Probe the bounded read routes already used by the GitHub collector,
+        # plus its separately authorized traffic window. This reports route
+        # access only; it does not claim a complete snapshot or publish counts.
+        def rh_github_capability_matrix_live(repository: cstr, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if not GitHubProbe::rh_gp_repository_valid(repository) or not Git::rh_arg_safe(evidence_base)
+            issues: RhGpCapture = GitHubProbe::rh_gp_capture_endpoint(repository, "issues?per_page=1", "issues", evidence_base, false)
+            return -1 if not issues.ok
+            pulls: RhGpCapture = GitHubProbe::rh_gp_capture_endpoint(repository, "pulls?per_page=1", "pulls", evidence_base, false)
+            return -1 if not pulls.ok
+            releases: RhGpCapture = GitHubProbe::rh_gp_capture_endpoint(repository, "releases?per_page=1", "releases", evidence_base, false)
+            return -1 if not releases.ok
+            traffic: RhGpCapture = GitHubProbe::rh_gp_capture_endpoint(repository, "traffic/views", "traffic-views", evidence_base, true)
+            return -1 if not traffic.ok
+            captured_at: i64 = Base::rh_now()
+            return -1 if captured_at < 0
+            token: u8&? = getenv("RH_GITHUB_TOKEN")
+            Base::rh_push_text(out, "{\"schema\":\"rh-github-capability-matrix/1\",\"provider\":\"github\",\"captured_at\":")
+            Base::rh_push_decimal_i64(out, captured_at)
+            Base::rh_push_text(out, ",\"scope\":{\"repository\":\"")
+            Base::rh_push_cstr(out, repository)
+            Base::rh_push_text(out, "\"},\"authorization\":{\"credential\":\"")
+            Base::rh_push_text(out, "configured" if token != null else "not_requested")
+            Base::rh_push_text(out, "\"},\"capabilities\":{\"issues\":")
+            GitHubProbe::rh_gp_emit_capability(out, "read", issues.transport, issues.status, issues.response_valid, false)
+            Base::rh_push_text(out, ",\"pull_requests\":")
+            GitHubProbe::rh_gp_emit_capability(out, "read", pulls.transport, pulls.status, pulls.response_valid, false)
+            Base::rh_push_text(out, ",\"releases\":")
+            GitHubProbe::rh_gp_emit_capability(out, "read", releases.transport, releases.status, releases.response_valid, false)
+            Base::rh_push_text(out, ",\"traffic\":")
+            GitHubProbe::rh_gp_emit_capability(out, "authorized-14-day-window", traffic.transport, traffic.status, traffic.response_valid, true)
+            Base::rh_push_text(out, "},\"evidence\":{\"issues\":")
+            GitHubProbe::rh_gp_emit_evidence_paths(out, evidence_base, "issues")
+            Base::rh_push_text(out, ",\"pull_requests\":")
+            GitHubProbe::rh_gp_emit_evidence_paths(out, evidence_base, "pulls")
+            Base::rh_push_text(out, ",\"releases\":")
+            GitHubProbe::rh_gp_emit_evidence_paths(out, evidence_base, "releases")
+            Base::rh_push_text(out, ",\"traffic\":")
+            GitHubProbe::rh_gp_emit_evidence_paths(out, evidence_base, "traffic-views")
+            Base::rh_push_text(out, "},\"note\":\"Each route is a separate bounded HTTP check; these results are neither a complete nor atomic snapshot. A 403 may be access denial or rate limiting, and a 404 may conceal a private repository. Traffic reports access only; its counts are omitted.\"}")
+            0
+
         # Probe only the fixed GitHub traffic-views route. The raw response is
         # retained as evidence; this reports access state without publishing
         # traffic counts or treating a hidden repository as unsupported.
