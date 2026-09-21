@@ -37,6 +37,9 @@ module ForgeEvents:
             has_tag: mutable bool
             pull_request: mutable i64
             has_pull_request: mutable bool
+            staged_page_number: mutable i64
+            staged_record_ordinal: mutable i64
+            has_staged_origin: mutable bool
 
         struct RhForgeCapabilityCounts:
             attempted: mutable i64
@@ -171,7 +174,24 @@ module ForgeEvents:
             return -1 if nodes[arr.usize()].kind != Json::RH_JSON_ARR
             counts.present <- true
             array: Json::RhJsonNode = nodes[arr.usize()]
-            while child >= 0 |child: i64 = array.first_child, nodes, raw, texts, events, counts, total_attempts, kind, githubish, bitbucket|:
+            origins: i64 = Json::rh_json_obj_get(nodes, texts, root, "staged_origins")
+            return -1 if origins >= 0 and nodes[origins.usize()].kind != Json::RH_JSON_OBJ
+            origin_rows: i64 = Json::rh_json_obj_get(nodes, texts, origins, key)
+            return -1 if origin_rows >= 0 and nodes[origin_rows.usize()].kind != Json::RH_JSON_ARR
+            return -1 if origin_rows >= 0 and nodes[origin_rows.usize()].child_count != array.child_count
+            while child >= 0 |child: i64 = array.first_child, origin_node: mutable i64 = nodes[origin_rows.usize()].first_child if origin_rows >= 0 else -1, nodes, raw, texts, events, counts, total_attempts, kind, githubish, bitbucket|:
+                current_origin: i64 = origin_node
+                origin_node <- nodes[origin_node.usize()].next_sibling if origin_node >= 0
+                staged_page_number: mutable i64 = 0
+                staged_record_ordinal: mutable i64 = 0
+                has_staged_origin: mutable bool = false
+                if current_origin >= 0:
+                    return -1 if nodes[current_origin.usize()].kind != Json::RH_JSON_OBJ
+                    page_ok: mutable i64 = 0
+                    record_ok: mutable i64 = 0
+                    return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, current_origin, "page_number", &staged_page_number, &page_ok) or page_ok == 0 or staged_page_number < 0
+                    return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, current_origin, "record_ordinal", &staged_record_ordinal, &record_ok) or record_ok == 0 or staged_record_ordinal < 0
+                    has_staged_origin <- true
                 # GitHub's issues route also returns pull requests. The pulls
                 # capability owns those rows, so exclude them before counting.
                 if kind == 0 and githubish and Json::rh_json_obj_get(nodes, texts, child, "pull_request") >= 0:
@@ -275,7 +295,7 @@ module ForgeEvents:
                             counts.rejected <- counts.rejected + 1
                             child <- nodes[child.usize()].next_sibling
                             continue
-                normalized: RhForgeEvent = RhForgeEvent{kind: kind, native_id: native_id, status_s: status_s, status_e: status_e, has_status: status_ok == 1, created_at: created_at, has_created_at: true, updated_at: updated_at, has_updated_at: updated_ok == 1, closed_at: closed_at, has_closed_at: closed_ok == 1, url_s: url_s, url_e: url_e, has_url: url_ok == 1, tag_s: tag_s, tag_e: tag_e, has_tag: tag_ok == 1, pull_request: pull_request, has_pull_request: pull_request > 0}
+                normalized: RhForgeEvent = RhForgeEvent{kind: kind, native_id: native_id, status_s: status_s, status_e: status_e, has_status: status_ok == 1, created_at: created_at, has_created_at: true, updated_at: updated_at, has_updated_at: updated_ok == 1, closed_at: closed_at, has_closed_at: closed_ok == 1, url_s: url_s, url_e: url_e, has_url: url_ok == 1, tag_s: tag_s, tag_e: tag_e, has_tag: tag_ok == 1, pull_request: pull_request, has_pull_request: pull_request > 0, staged_page_number: staged_page_number, staged_record_ordinal: staged_record_ordinal, has_staged_origin: has_staged_origin}
                 counts.normalized <- counts.normalized + 1
                 existing: i64 = ForgeEvents::rh_fe_existing(events, kind, native_id, pull_request)
                 if existing >= 0:
@@ -365,6 +385,12 @@ module ForgeEvents:
             if event.has_pull_request:
                 Base::rh_push_text(out, ",\"pull_request\":")
                 Base::rh_push_decimal_i64(out, event.pull_request)
+            if event.has_staged_origin:
+                Base::rh_push_text(out, ",\"staged_origin\":{\"page_number\":")
+                Base::rh_push_decimal_i64(out, event.staged_page_number)
+                Base::rh_push_text(out, ",\"record_ordinal\":")
+                Base::rh_push_decimal_i64(out, event.staged_record_ordinal)
+                out.push(125)
             Base::rh_push_text(out, "}")
 
         def rh_fe_emit_page(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, pagination: i64, key: u8&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:

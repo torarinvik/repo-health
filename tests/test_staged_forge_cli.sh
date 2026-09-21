@@ -93,6 +93,7 @@ for index, (provider, capability) in enumerate(matrix, 1):
     assert cap["status"] == "observed" and cap["count"] == 1 and cap["rejected"] == 0, cap
     event = normalized["events"][0]
     assert event["kind"] == capability and event["native_id"] == f"{provider}:{native_id}", event
+    assert event["staged_origin"] == {"page_number": 0, "record_ordinal": 0}, event
     assert all(normalized["capabilities"][other]["status"] == "not_attempted" for other in ("issues", "proposals", "reviews", "releases") if other != capability), normalized["capabilities"]
 assert seen_states == {"preserved", "transformed", "inferred", "discarded", "unsupported"}, seen_states
 PY
@@ -170,6 +171,7 @@ n = d["normalized"]
 assert n["schema"] == "rh-forge-events-result/1" and n["capabilities"]["issues"]["duplicate_replacements"] == 1, n
 assert n["capabilities"]["issues"]["count"] == 1 and n["events"][0]["native_id"] == "github:101", n
 assert n["events"][0]["status"] == "closed", n["events"]
+assert n["events"][0]["staged_origin"] == {"page_number": 1, "record_ordinal": 0}, n["events"]
 assert all(n["capabilities"][k]["status"] == "not_attempted" for k in ("proposals", "reviews", "releases")), n
 PY
 "$ROOT/build/rh_cli" staged-normalize --input "$T/input.json" --out "$T/replay.json" >/dev/null || fail "deterministic replay"
