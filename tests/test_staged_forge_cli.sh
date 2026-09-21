@@ -39,6 +39,12 @@ import hashlib, json, sys
 got = json.load(open(sys.argv[2]))
 assert got == json.load(open(sys.argv[3])), (got, sys.argv[3])
 assert got["input_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), got
+assert got["normalizer"] == "rh-forge-events/1" and got["output_schema"] == "rh-forge-events-result/1", got
+mapping = got["field_transformations"]
+assert got["configuration_sha256"] == hashlib.sha256(json.dumps(mapping, separators=(",", ":")).encode()).hexdigest(), got
+assert {item["state"] for item in mapping} >= {"preserved", "transformed", "discarded", "unsupported"}, mapping
+assert next(item for item in mapping if item["source_field"] == "raw_payload.updated_at")["missing_state"] == "unknown", mapping
+assert any(item["target_field"] == "normalized.events[].actor" and item["state"] == "unsupported" for item in mapping), mapping
 provider, capability = sys.argv[4].split("-")
 assert got["provider"] == provider and got["canonical_capability"] == capability, got
 assert got["normalized"]["events"][0]["native_id"].startswith(provider + ":"), got["normalized"]["events"]
@@ -47,10 +53,11 @@ done
 
 echo "[staged-forge] generic provider tokens cover only their declared capability matrix"
 python3 - "$ROOT/build/rh_cli" "$T" <<'PY'
-import json, os, subprocess, sys
+import hashlib, json, os, subprocess, sys
 cli, tmp = sys.argv[1:]
 matrix = [(provider, capability) for provider in ("gitea", "forgejo") for capability in ("issues", "proposals", "releases")]
 matrix += [("bitbucket", capability) for capability in ("issues", "proposals")]
+seen_states = set()
 for index, (provider, capability) in enumerate(matrix, 1):
     label = f"{provider}-{capability}-matrix-v1"
     native_id = 700 + index
@@ -77,12 +84,17 @@ for index, (provider, capability) in enumerate(matrix, 1):
     subprocess.run([cli, "staged-normalize", "--input", input_path, "--out", output_path], check=True, stdout=subprocess.DEVNULL)
     got = json.load(open(output_path))
     assert got["provider"] == provider and got["canonical_capability"] == capability, got
+    transformations = got["field_transformations"]
+    assert got["output_schema"] == "rh-forge-events-result/1", got
+    assert got["configuration_sha256"] == hashlib.sha256(json.dumps(transformations, separators=(",", ":")).encode()).hexdigest(), got
+    seen_states.update(item["state"] for item in transformations)
     normalized = got["normalized"]
     cap = normalized["capabilities"][capability]
     assert cap["status"] == "observed" and cap["count"] == 1 and cap["rejected"] == 0, cap
     event = normalized["events"][0]
     assert event["kind"] == capability and event["native_id"] == f"{provider}:{native_id}", event
     assert all(normalized["capabilities"][other]["status"] == "not_attempted" for other in ("issues", "proposals", "reviews", "releases") if other != capability), normalized["capabilities"]
+assert seen_states == {"preserved", "transformed", "inferred", "discarded", "unsupported"}, seen_states
 PY
 
 echo "[staged-forge] GitLab merge-request identity and merged state stay native"

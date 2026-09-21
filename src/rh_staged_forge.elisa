@@ -78,6 +78,57 @@ module StagedForge:
             Base::rh_json_escape(out, texts, start.usize(), end.usize())
             out.push(34)
 
+        def rh_sf_emit_field(out: mutable darray[u8]&, first: mutable i64&, source_field: u8&, target_field: u8&, state: u8&, missing_state: u8&, reason: u8&) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(44) if first[0] != 0
+            first[0] <- 1
+            Base::rh_push_text(out, "{\"source_field\":\"")
+            Base::rh_push_text(out, source_field)
+            Base::rh_push_text(out, "\",\"target_field\":\"")
+            Base::rh_push_text(out, target_field)
+            Base::rh_push_text(out, "\",\"state\":\"")
+            Base::rh_push_text(out, state)
+            Base::rh_push_text(out, "\",\"missing_state\":\"")
+            Base::rh_push_text(out, missing_state)
+            Base::rh_push_text(out, "\",\"reason\":\"")
+            Base::rh_push_text(out, reason)
+            out.push(34)
+            out.push(125)
+
+        def rh_sf_emit_transformations(out: mutable darray[u8]&, is_github: bool, is_gitlab: bool, is_bitbucket: bool, is_issues: bool, is_proposals: bool, is_reviews: bool, is_releases: bool) -> void can[Memory.Allocate, Abort.Panic]:
+            first: mutable i64 = 0
+            githubish: bool = is_github or (not is_gitlab and not is_bitbucket)
+            id_source: u8& = "raw_payload.iid|raw_payload.id" if is_gitlab and (is_issues or is_proposals) else "raw_payload.number" if (is_issues or is_proposals) and not is_bitbucket else "raw_payload.id"
+            time_source: u8& = "raw_payload.submitted_at" if is_reviews else "raw_payload.published_at|raw_payload.created_at" if is_releases else "raw_payload.created_at"
+            time_reason: u8& = "Provider published_at is normalized to whole Unix seconds, with created_at as the documented fallback." if is_releases else "Provider numeric or ISO-8601 time is normalized to whole Unix seconds."
+            url_source: u8& = "raw_payload.links.html.href" if is_bitbucket else "raw_payload.web_url" if is_gitlab else "raw_payload.html_url"
+            url_reason: u8& = "Optional Bitbucket href is selected from links.html.href." if is_bitbucket else "Optional provider URL is retained from the provider-specific URL field."
+            out.push(91)
+            StagedForge::rh_sf_emit_field(out, &first, "provider", "normalized.provider", "preserved", "rejected", "The selected provider identifier is copied without rewriting.")
+            StagedForge::rh_sf_emit_field(out, &first, "canonical_capability", "normalized.events[].kind", "transformed", "rejected", "The explicit staged capability binding selects the canonical event kind.")
+            StagedForge::rh_sf_emit_field(out, &first, id_source, "normalized.events[].native_id", "transformed", "rejected", "The provider-native identifier is rendered as a provider-prefixed canonical string.")
+            StagedForge::rh_sf_emit_field(out, &first, time_source, "normalized.events[].created_at", "transformed", "rejected", time_reason)
+            if is_releases:
+                StagedForge::rh_sf_emit_field(out, &first, "raw_payload.status", "normalized.events[].status", "preserved", "unknown", "A provider release status is retained when supplied.")
+                StagedForge::rh_sf_emit_field(out, &first, "release collection membership", "normalized.events[].status", "inferred", "not_applicable", "A release without status is emitted as published because it appears in the selected published-release collection.")
+            else:
+                StagedForge::rh_sf_emit_field(out, &first, "raw_payload.state", "normalized.events[].status", "preserved", "rejected", "The provider-native workflow state string is retained.")
+            StagedForge::rh_sf_emit_field(out, &first, "raw_payload.updated_at", "normalized.events[].updated_at", "transformed", "unknown", "Optional update time is normalized to whole Unix seconds; absence remains null and unknown.")
+            if is_issues or is_proposals:
+                StagedForge::rh_sf_emit_field(out, &first, "raw_payload.closed_at", "normalized.events[].closed_at", "transformed", "unknown", "Optional close time is normalized to whole Unix seconds; absence remains null and unknown.")
+            StagedForge::rh_sf_emit_field(out, &first, url_source, "normalized.events[].url", "transformed" if is_bitbucket else "preserved", "unknown", url_reason)
+            if is_releases:
+                StagedForge::rh_sf_emit_field(out, &first, "raw_payload.tag_name", "normalized.events[].tag", "transformed", "unknown", "The provider tag_name is mapped to the canonical tag field when present.")
+                StagedForge::rh_sf_emit_field(out, &first, "raw_payload.tag", "normalized.events[].tag", "preserved", "unknown", "The provider tag fallback is retained when present.")
+                if githubish:
+                    StagedForge::rh_sf_emit_field(out, &first, "raw_payload.draft", "normalized.events[] inclusion", "discarded", "not_applicable", "Draft releases are excluded from the published-release population.")
+            if is_reviews:
+                StagedForge::rh_sf_emit_field(out, &first, "scope.pull_request", "normalized.events[].pull_request", "transformed", "rejected", "The required explicit pull-request scope is attached to each normalized review.")
+            if is_github and is_issues:
+                StagedForge::rh_sf_emit_field(out, &first, "raw_payload.pull_request", "normalized.events[] inclusion", "discarded", "not_applicable", "Pull-request rows returned by the GitHub issues route are excluded from issue counts.")
+            StagedForge::rh_sf_emit_field(out, &first, "raw_payload.user|raw_payload.author", "normalized.events[].actor", "unsupported", "unknown", "The forge event result does not emit actor-account attribution; source actors remain only in the staged raw payload.")
+            StagedForge::rh_sf_emit_field(out, &first, "raw_payload fields outside this mapping", "normalized.events[]", "discarded", "not_applicable", "Unmapped provider fields are omitted from this normalized view; exact raw payload text remains in staged-source records.")
+            out.push(93)
+
     private:
         # Normalize committed forge staged rows through the existing provider
         # event adapter. The versioned input token binds one opaque label to one
@@ -234,6 +285,10 @@ module StagedForge:
             return -1 if forge_input.count.i64() > 4194304
             normalized: mutable darray[u8] = []
             return -1 if ForgeEvents::rh_forge_events_report(forge_input, normalized) != 0
+            field_transformations: mutable darray[u8] = []
+            StagedForge::rh_sf_emit_transformations(field_transformations, is_github, is_gitlab, is_bitbucket, is_issues, is_proposals, is_reviews, is_releases)
+            configuration_digest: mutable darray[u8] = []
+            Sha256::rh_sha256(field_transformations, configuration_digest)
             digest: mutable darray[u8] = []
             Sha256::rh_sha256(raw, digest)
             Base::rh_push_text(out, "{\"schema\":\"rh-postgres-staged-normalize-result/1\",\"source_id\":")
@@ -270,7 +325,11 @@ module StagedForge:
                 Base::rh_push_decimal_i64(out, records[record_index].record_ordinal)
                 out.push(125)
                 record_index <- record_index + 1
-            Base::rh_push_text(out, "],\"normalizer\":\"rh-forge-events/1\",\"normalized\":")
+            Base::rh_push_text(out, "],\"normalizer\":\"rh-forge-events/1\",\"output_schema\":\"rh-forge-events-result/1\",\"configuration_sha256\":\"")
+            out.extend(bytes_view(configuration_digest))
+            Base::rh_push_text(out, "\",\"field_transformations\":")
+            out.extend(bytes_view(field_transformations))
+            Base::rh_push_text(out, ",\"normalized\":")
             out.extend(bytes_view(normalized))
             Base::rh_push_text(out, ",\"note\":\"The collector label was bound explicitly to the selected provider capability. The input SHA-256 binds this deterministic normalization result to the exported staged rows; raw payloads remain in the PostgreSQL staged-source records.\"}")
             return -1 if out.count.i64() > RH_SF_MAX_INPUT_BYTES
