@@ -45,7 +45,8 @@ through `rh_cli postgres begin_collection_run`; blob distribution and wiring int
 manifests
 (5 connectors), bounded JSON parser, ISO8601, fetch guard + curl transport, GitHub/GitLab/Gitea/Forgejo
 normalizers with goldens, per-capability status mapping, durable
-filesystem store (content-addressed blobs with tamper-blocked publication,
+filesystem store (content-addressed blobs with exclusive staging, atomic
+no-clobber publication, and tamper-blocked verification,
 JSONL events with id-based dedup, commit-after-verify cursors with
 one-page overlap, coverage intervals), fencing job leases (monotonic
 tokens, recorded-ttl expiry, stale-release refusal, terminal phases) —
@@ -58,8 +59,9 @@ a different blob under the same digest) and `rh_cli store verify --root
 M07-10 drill: a canonical `rh-backup/1` manifest, a verify that counts
 verified/missing/corrupt separately (missing was previously conflated with
 corrupt — fixed), and a restore that copies only digest-verified objects.
-`tests/test_store_cli.sh` covers all of it, including a corrupt object
-being skipped by restore. Job leasing is a real path too: `rh_cli store
+`tests/test_store_cli.sh` covers all of it, including twelve concurrent
+identical puts converging on one verified object and a corrupt object being
+skipped by restore. Job leasing is a real path too: `rh_cli store
 lease --root <dir> --job <name> --input <file> --out <file>` applies a
 claim/heartbeat/release/status sequence to a real `<root>/leases/<job>.lease`
 (+ attempt `.log`) and enforces fencing — a live lease is held, an expired

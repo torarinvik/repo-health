@@ -1,6 +1,12 @@
 include "./rh_base.elisa"
 include "./rh_observation.elisa"
 
+extern mkstemp(template: cstr) -> i32
+extern link(existing: cstr, published: cstr) -> i32
+extern open(path: cstr, flags: i32) -> i32
+extern fsync(fd: i32) -> i32
+extern close(fd: i32) -> i32
+
 module Store:
     private:
         const RH_LS_AVAILABLE: i64 = 6
@@ -47,25 +53,65 @@ module Store:
             h: u64 = hash_sview(bytes_view(data))
             Base::rh_push_hex_u64(out, h)
 
-        # Store bytes under evidence/<hex>. Idempotent: existing identical blobs
-        # are a no-op success; existing DIFFERENT bytes under the same name fail
-        # closed (never overwrite immutable evidence). hex_out must be empty on
-        # entry (the digest is appended); callers needing a second digest use a
-        # fresh buffer. Returns digest in hex_out.
+        # Stage bytes in the evidence directory, sync them, then publish with an
+        # atomic no-clobber hard link and sync the directory. Concurrent retries
+        # converge on one immutable object; a different object at the same digest
+        # fails closed. hex_out is appended to and must be empty on entry.
         def rh_store_blob(root: cstr, data: mutable darray[u8]&, hex_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             rh_digest_hex(data, hex_out)
-            path: mutable darray[u8] =
+            published_path: mutable darray[u8] =
                 path: mutable darray[u8] = []
                 Base::rh_push_cstr(path, root)
                 path.push(47)
                 path.extend(bytes_view(hex_out))
                 path.push(0)
                 path
-            pp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+            published: cstr = (&published_path[0]).cast[cstr] can Unsafe.PointerCast
+            stage_path: mutable darray[u8] =
+                path: mutable darray[u8] = []
+                Base::rh_push_cstr(path, root)
+                path.push(47)
+                path.push(46)
+                path.extend(bytes_view(hex_out))
+                Base::rh_push_text(path, ".stage.XXXXXX")
+                path.push(0)
+                path
+            stage: cstr = (&stage_path[0]).cast[cstr] can Unsafe.PointerCast
+            fd: i32 = mkstemp(stage)
+            return -1 if fd < 0
+            offset: mutable usize = 0
+            while offset < data.count |offset: usize = 0, data, fd|:
+                bytes: void& = (&data[offset]).cast[void&] can Unsafe.PointerCast
+                written: i64 = write(fd, bytes, (data.count - offset).i64())
+                if written <= 0:
+                    _ = close(fd)
+                    _ = unlink((&stage_path[0]).cast[u8&] can Unsafe.PointerCast)
+                    return -1
+                offset <- offset + written.usize()
+            if fsync(fd) != 0:
+                _ = close(fd)
+                _ = unlink((&stage_path[0]).cast[u8&] can Unsafe.PointerCast)
+                return -1
+            if close(fd) != 0:
+                _ = unlink((&stage_path[0]).cast[u8&] can Unsafe.PointerCast)
+                return -1
+            directory_fd: i32 = open(root, 0)
+            if directory_fd < 0:
+                _ = unlink((&stage_path[0]).cast[u8&] can Unsafe.PointerCast)
+                return -1
+            if link(stage, published) == 0:
+                stage_removed: i32 = unlink((&stage_path[0]).cast[u8&] can Unsafe.PointerCast)
+                synced: i32 = -1 if stage_removed != 0 else fsync(directory_fd)
+                closed: i32 = close(directory_fd)
+                return -1 if stage_removed != 0 or synced != 0 or closed != 0
+                return 0
             back: mutable darray[u8] = []
-            if Base::rh_io_read(pp, back) >= 0:
-                return 0 if string_views_eq(bytes_view(back), bytes_view(data)) == 1 else -1
-            return 0 if Base::rh_io_write(pp, data)
+            existing: bool = Base::rh_io_read(published, back) >= 0
+            _ = unlink((&stage_path[0]).cast[u8&] can Unsafe.PointerCast)
+            same: bool = existing and string_views_eq(bytes_view(back), bytes_view(data)) == 1
+            synced_existing: i32 = fsync(directory_fd) if same else 0
+            closed_directory: i32 = close(directory_fd)
+            return 0 if same and synced_existing == 0 and closed_directory == 0
             -1
 
         # Verify a stored blob recomputes to its name. False when missing or
