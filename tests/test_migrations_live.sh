@@ -7,9 +7,10 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${RH_PG_IMAGE:-postgres:16-alpine}"
 CONTAINER="rh-migration-${$}"
+CRASH_LOG="/tmp/${CONTAINER}.crash.log"
 
 fail() { echo "[migrations-live] FAIL: $1" >&2; exit 1; }
-cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; rm -f "$CRASH_LOG"; }
 trap cleanup EXIT
 
 if [[ "${RH_PG_MIGRATION:-0}" != "1" ]]; then
@@ -22,7 +23,7 @@ docker info >/dev/null 2>&1 || fail "docker daemon is unavailable"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "image is unavailable: $IMAGE"
 
 echo "[migrations-live] start $IMAGE"
-docker run --rm -d --name "$CONTAINER" -e POSTGRES_PASSWORD=repo-health-test -e POSTGRES_DB=repo_health "$IMAGE" >/dev/null || fail "container start"
+docker run -d --name "$CONTAINER" -e POSTGRES_PASSWORD=repo-health-test -e POSTGRES_DB=repo_health "$IMAGE" >/dev/null || fail "container start"
 ready_checks=0
 for _ in $(seq 1 60); do
   if docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1; then
@@ -423,5 +424,96 @@ BEGIN
 END $$;
 SQL
 
-echo "[migrations-live] source/run, enqueue/claim/finish, lease-reclaim audit, stale/expired fencing, and rollback boundaries OK"
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "seed crash-recovery run and lease"
+DO $$
+DECLARE c record;
+BEGIN
+  IF NOT rh_begin_collection_run(
+    '00000000-0000-0000-0000-000000000001', 'github', 'https://api.github.com',
+    'public', 1, '2026-01-01T00:00:00Z',
+    '00000000-0000-0000-0000-000000000030', 'issues', 'github', '1.0.0',
+    NULL, NULL, '2026-01-05T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'crash-recovery collection run was not started';
+  END IF;
+  IF NOT rh_enqueue_collection_job(
+    '00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000031',
+    7, '2026-01-05T00:00:00Z', '2026-01-05T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'crash-recovery collection job was not queued';
+  END IF;
+  SELECT * INTO c FROM rh_claim_next_job('worker-recovery', '2026-01-05T00:00:01Z', 60, '00000000-0000-0000-0000-000000000031');
+  IF c.job_id <> '00000000-0000-0000-0000-000000000031'::uuid OR c.fencing_token <> 1 THEN
+    RAISE EXCEPTION 'crash-recovery collection job was not claimed: %', c;
+  END IF;
+END $$;
+SQL
+
+docker exec -i -e PGAPPNAME=repo-health-crash-boundary "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health >"$CRASH_LOG" 2>&1 <<'SQL' &
+BEGIN;
+SELECT rh_commit_collection_page_events(
+  '00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000031', 1,
+  0, 'scope-crash-recovery', NULL, '{"page":1}'::jsonb, 'complete', 1,
+  NULL,
+  '[{"source_object_type":"issue","source_object_id":"issue:restart","source_revision":"rev-1","event_kind":"created","subject_id":"00000000-0000-0000-0000-000000000005","actor_account_id":"00000000-0000-0000-0000-000000000007","occurred_at":"2026-01-05T00:00:10Z","observed_at":"2026-01-05T00:00:15Z","time_basis":"event","evidence_id":"00000000-0000-0000-0000-000000000006","parser_version":"fixture/1","payload":{"state":"open"}}]'::jsonb,
+  '[]'::jsonb, '[]'::jsonb, '2026-01-05T00:00:15Z'
+);
+SELECT pg_sleep(60);
+COMMIT;
+SQL
+crash_pid=$!
+crash_transaction_ready=0
+for _ in $(seq 1 100); do
+  active_query="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'repo-health-crash-boundary' AND state = 'active' AND query LIKE '%pg_sleep(60)%'" 2>/dev/null || true)"
+  if [[ "$active_query" == "1" ]]; then
+    crash_transaction_ready=1
+    break
+  fi
+  kill -0 "$crash_pid" >/dev/null 2>&1 || break
+  sleep 0.1
+done
+[[ "$crash_transaction_ready" -eq 1 ]] || fail "crash-recovery transaction did not reach its uncommitted wait"
+docker kill --signal KILL "$CONTAINER" >/dev/null || fail "stop PostgreSQL during uncommitted page transaction"
+wait "$crash_pid" >/dev/null 2>&1 || true
+docker start "$CONTAINER" >/dev/null || fail "restart PostgreSQL after crash"
+ready_checks=0
+for _ in $(seq 1 60); do
+  if docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1; then
+    ready_checks=$((ready_checks + 1))
+    [[ "$ready_checks" -ge 3 ]] && break
+  else
+    ready_checks=0
+  fi
+  sleep 1
+done
+[[ "$ready_checks" -ge 3 ]] || fail "PostgreSQL did not recover after crash"
+recovered_state="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT (SELECT count(*) FROM collection_page WHERE collection_run_id = '00000000-0000-0000-0000-000000000030'::uuid AND scope_hash = 'scope-crash-recovery') || ':' || (SELECT count(*) FROM canonical_event WHERE source_object_id = 'issue:restart') || ':' || (SELECT count(*) FROM collection_cursor WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid AND capability = 'issues' AND scope_hash = 'scope-crash-recovery')")"
+[[ "$recovered_state" == "0:0:0" ]] || fail "crash recovery left partial page state: $recovered_state"
+
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "replay page after PostgreSQL crash recovery"
+DO $$
+BEGIN
+  IF NOT rh_commit_collection_page_events(
+    '00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000031', 1,
+    0, 'scope-crash-recovery', NULL, '{"page":1}'::jsonb, 'complete', 1,
+    NULL,
+    '[{"source_object_type":"issue","source_object_id":"issue:restart","source_revision":"rev-1","event_kind":"created","subject_id":"00000000-0000-0000-0000-000000000005","actor_account_id":"00000000-0000-0000-0000-000000000007","occurred_at":"2026-01-05T00:00:10Z","observed_at":"2026-01-05T00:00:15Z","time_basis":"event","evidence_id":"00000000-0000-0000-0000-000000000006","parser_version":"fixture/1","payload":{"state":"open"}}]'::jsonb,
+    '[]'::jsonb, '[]'::jsonb, '2026-01-05T00:00:15Z'
+  ) THEN
+    RAISE EXCEPTION 'page replay after database crash was not committed';
+  END IF;
+  IF NOT rh_finish_collection_job(
+    '00000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000031', 1,
+    'succeeded', 'succeeded', 'complete', '{"issues":"observed"}'::jsonb,
+    'ok', NULL, '2026-01-05T00:00:20Z'
+  ) THEN
+    RAISE EXCEPTION 'crash-recovery collection job did not finalize';
+  END IF;
+END $$;
+SQL
+replayed_state="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT (SELECT count(*) FROM collection_page WHERE collection_run_id = '00000000-0000-0000-0000-000000000030'::uuid AND scope_hash = 'scope-crash-recovery') || ':' || (SELECT count(*) FROM canonical_event WHERE source_object_id = 'issue:restart') || ':' || (SELECT last_page_number FROM collection_cursor WHERE source_instance_id = '00000000-0000-0000-0000-000000000001'::uuid AND capability = 'issues' AND scope_hash = 'scope-crash-recovery') || ':' || (SELECT status FROM collection_run WHERE id = '00000000-0000-0000-0000-000000000030'::uuid) || ':' || (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000031'::uuid) ")"
+[[ "$replayed_state" == "1:1:0:succeeded:succeeded" ]] || fail "post-crash replay did not commit one complete page: $replayed_state"
+echo "[migrations-live] PostgreSQL crash recovery rolls back an open page transaction and accepts an exact replay"
+
+echo "[migrations-live] source/run, enqueue/claim/finish, lease-reclaim audit, stale/expired fencing, rollback, and crash-recovery boundaries OK"
 echo "test_migrations_live OK"
