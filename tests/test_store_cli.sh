@@ -58,6 +58,26 @@ for n in "${names[@]}"; do
   [[ -f "$T/restore/$n" ]] || fail "restored object $n missing"
   "$ROOT/build/rh_cli" store verify --root "$T/restore" --name "$n" >/dev/null || fail "restored $n does not verify"
 done
+"$ROOT/build/rh_cli" ops restore --root "$T/ev" --dest "$T/restore" --manifest "$T/backup.manifest" | grep -q "restored=2" || fail "idempotent restore into populated destination"
+echo "[store] repeated distribution is idempotent and no-clobber"
+
+printf 'preserve this file\n' > "$T/outside"
+printf 'rh-backup/1 fnv1a-64-hex\n../outside\n' > "$T/path-traversal.manifest"
+set +e
+"$ROOT/build/rh_cli" ops restore --root "$T/ev" --dest "$T/restore" --manifest "$T/path-traversal.manifest" >/dev/null 2>&1
+rc_traversal=$?
+set -e
+[[ "$rc_traversal" -eq 4 ]] || fail "path-like backup name must fail closed (got $rc_traversal)"
+[[ "$(cat "$T/outside")" == "preserve this file" ]] || fail "restore changed a path outside the evidence root"
+
+mkdir -p "$T/restore-conflict"
+printf 'destination conflict\n' > "$T/restore-conflict/${names[0]}"
+set +e
+"$ROOT/build/rh_cli" ops restore --root "$T/ev" --dest "$T/restore-conflict" --manifest "$T/backup.manifest" >/dev/null 2>&1
+rc_conflict=$?
+set -e
+[[ "$rc_conflict" -eq 4 ]] || fail "conflicting destination object must fail closed (got $rc_conflict)"
+[[ "$(cat "$T/restore-conflict/${names[0]}")" == "destination conflict" ]] || fail "restore overwrote a conflicting destination object"
 
 echo "[store] corrupt evidence fails closed"
 printf 'X' >> "$T/ev/${names[0]}"
@@ -77,6 +97,12 @@ case "$out" in
   "ops verify: verified=0 missing=1 corrupt=1") : ;;
   *) fail "expected one missing and one corrupt, got: $out" ;;
 esac
+
+printf '../outside\n' > "$T/path-like-names.txt"
+if "$ROOT/build/rh_cli" ops backup --root "$T/ev" --manifest "$T/path-like-backup.manifest" --names "$T/path-like-names.txt" >/dev/null 2>&1; then
+  fail "backup accepted a path-like blob name"
+fi
+[[ ! -e "$T/path-like-backup.manifest" ]] || fail "invalid backup names wrote a manifest"
 
 echo "[store] negatives fail closed"
 set +e

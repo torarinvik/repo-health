@@ -21,6 +21,7 @@ include "./rh_store.elisa"
 module Ops:
     public:
         def rh_backup_write(manifest_path: cstr, names: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return false if not rh_backup_names_valid(names, 0)
             out: mutable darray[u8] =
                 out: mutable darray[u8] = []
                 Base::rh_push_text(out, "rh-backup/1 fnv1a-64-hex\n")
@@ -90,10 +91,10 @@ module Ops:
                         src: cstr = rh_backup_path_cstr(evidence_root, nn, src_buf)
                         back: mutable darray[u8] = []
                         if Base::rh_io_read(src, back) >= 0:
-                            dst_buf: mutable darray[u8] = []
-                            dst: cstr = rh_backup_path_cstr(dest_root, nn, dst_buf)
-                            if Base::rh_io_write(dst, back):
-                                restored_out[0] <- restored_out[0] + 1
+                            restored_name: mutable darray[u8] = []
+                            return -1 if Store::rh_store_blob(dest_root, back, restored_name) != 0
+                            return -1 if not Base::rh_bytes_equal_span(restored_name, 0, restored_name.count.i64(), raw, start.i64(), line_end.i64())
+                            restored_out[0] <- restored_out[0] + 1
                 if stop < 0:
                     start <- raw.count
                 else:
@@ -320,6 +321,20 @@ module Ops:
             while k < want.count.usize() |k: usize = 0, raw, want|:
                 return false if raw[k] != want[k]
                 k <- k + 1
+            rh_backup_names_valid(raw, want.count.usize())
+
+        # Validate the complete newline-separated transfer list before reading
+        # source paths or publishing destination objects.
+        def rh_backup_names_valid(raw: darray[u8]&, offset: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            while start < raw.count |start: usize = offset, raw|:
+                stop: i64 = Base::rh_find_byte(raw, start, 10)
+                end: usize = stop.usize() if stop >= 0 else raw.count
+                return false if end - start != 16
+                while i < end |i: usize = start, raw|:
+                    b: u8 = raw[i]
+                    return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
+                    i <- i + 1
+                start <- end + 1 if stop >= 0 else raw.count
             true
 
         # (private to this file)
