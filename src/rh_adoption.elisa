@@ -51,6 +51,26 @@ module Adoption:
             present_out[0] <- 1
             true
 
+        def rh_adoption_metric(out: mutable darray[u8]&, key: u8&, value: i64, population_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, ",{\"key\":\"")
+            Base::rh_push_text(out, key)
+            Base::rh_push_text(out, "\",\"version\":\"1.0.0\",\"status\":\"")
+            Base::rh_push_text(out, "observed\",\"value\":") if population_count > 0 else Base::rh_push_text(out, "not_applicable\",\"value\":null")
+            Base::rh_push_decimal_i64(out, value) if population_count > 0
+            Base::rh_push_text(out, ",\"evidence\":[\"adoption-input\"]}")
+
+        def rh_adoption_ratio_metric(out: mutable darray[u8]&, numerator: i64, denominator: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, ",{\"key\":\"downstream_condition.supported_version_adoption_share\",\"version\":\"1.0.0\",\"status\":\"")
+            if denominator > 0:
+                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
+                Base::rh_push_decimal_i64(out, numerator)
+                Base::rh_push_text(out, ",\"den\":")
+                Base::rh_push_decimal_i64(out, denominator)
+                Base::rh_push_text(out, "}")
+            else:
+                Base::rh_push_text(out, "not_applicable\",\"value\":null")
+            Base::rh_push_text(out, ",\"evidence\":[\"adoption-input\"]}")
+
     public:
         def rh_adoption_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             nodes: mutable darray[Json::RhJsonNode] = []
@@ -67,8 +87,8 @@ module Adoption:
             raw_loop: mutable darray[u8]& = raw
             arr_idx: i64 = Adoption::rh_adoption_get(nodes, texts, root, "adoptions")
             return -1 if arr_idx < 0 or nodes[arr_idx.usize()].kind != Json::RH_JSON_ARR
-            body, unknown, first_seen_only, confirmed_intro, confirmed_removal =
-                while child >= 0 |child: i64 = nodes[arr_idx.usize()].first_child, first_child: i64 = nodes[arr_idx.usize()].first_child, body: darray[u8] = [91], unknown: i64 = 0, first_seen_only: i64 = 0, confirmed_intro: i64 = 0, confirmed_removal: i64 = 0, nodes, raw_loop, texts, cutoff| -> body, unknown, first_seen_only, confirmed_intro, confirmed_removal:
+            body, adoption_count, unknown, first_seen_only, confirmed_intro, confirmed_removal, version_comparisons, observed_upgrades, supported_line_assessments, supported_line_adoptions, duration_confirmed, duration_censored, duration_unknown =
+                while child >= 0 |child: i64 = nodes[arr_idx.usize()].first_child, first_child: i64 = nodes[arr_idx.usize()].first_child, body: darray[u8] = [91], adoption_count: i64 = 0, unknown: i64 = 0, first_seen_only: i64 = 0, confirmed_intro: i64 = 0, confirmed_removal: i64 = 0, version_comparisons: i64 = 0, observed_upgrades: i64 = 0, supported_line_assessments: i64 = 0, supported_line_adoptions: i64 = 0, duration_confirmed: i64 = 0, duration_censored: i64 = 0, duration_unknown: i64 = 0, nodes, raw_loop, texts, cutoff| -> body, adoption_count, unknown, first_seen_only, confirmed_intro, confirmed_removal, version_comparisons, observed_upgrades, supported_line_assessments, supported_line_adoptions, duration_confirmed, duration_censored, duration_unknown:
                     return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
                     first: mutable i64 = 0
                     intro: mutable i64 = 0
@@ -95,6 +115,7 @@ module Adoption:
                     if child != first_child:
                         body.push(44)
                     Downstream::rh_adoption_write(body, adoption, cutoff, first_version, has_first_version != 0, latest_version, has_latest_version != 0, supported_major, has_supported_major != 0)
+                    adoption_count <- adoption_count + 1
                     state: u8 = Downstream::rh_adoption_status(adoption)
                     if state == Downstream::RH_ADOPT_UNKNOWN:
                         unknown <- unknown + 1
@@ -104,6 +125,18 @@ module Adoption:
                         confirmed_intro <- confirmed_intro + 1
                     else:
                         confirmed_removal <- confirmed_removal + 1
+                    if has_first_version != 0 and has_latest_version != 0:
+                        version_comparisons <- version_comparisons + 1
+                        observed_upgrades <- observed_upgrades + 1 if Downstream::rh_observed_upgrade(first_version, latest_version)
+                    if has_latest_version != 0 and has_supported_major != 0:
+                        supported_line_assessments <- supported_line_assessments + 1
+                        supported_line_adoptions <- supported_line_adoptions + 1 if Downstream::rh_on_supported_line(latest_version, supported_major)
+                    if has_intro == 0:
+                        duration_unknown <- duration_unknown + 1
+                    elif has_removal == 0:
+                        duration_censored <- duration_censored + 1
+                    else:
+                        duration_confirmed <- duration_confirmed + 1
                     child <- nodes[child.usize()].next_sibling
             body.push(93)
             Base::rh_push_text(out, "{\"schema\":\"rh-adoption-result/1\",\"cutoff\":")
@@ -118,6 +151,20 @@ module Adoption:
             Base::rh_push_decimal_i64(out, confirmed_intro)
             Base::rh_push_text(out, ",\"confirmed_removal\":")
             Base::rh_push_decimal_i64(out, confirmed_removal)
+            Base::rh_push_text(out, "},\"evidence_counts\":{\"version_comparison\":")
+            Base::rh_push_decimal_i64(out, version_comparisons)
+            Base::rh_push_text(out, ",\"version_comparison_unknown\":")
+            Base::rh_push_decimal_i64(out, adoption_count - version_comparisons)
+            Base::rh_push_text(out, ",\"supported_line_assessed\":")
+            Base::rh_push_decimal_i64(out, supported_line_assessments)
+            Base::rh_push_text(out, ",\"supported_line_unknown\":")
+            Base::rh_push_decimal_i64(out, adoption_count - supported_line_assessments)
+            Base::rh_push_text(out, "},\"duration_counts\":{\"confirmed\":")
+            Base::rh_push_decimal_i64(out, duration_confirmed)
+            Base::rh_push_text(out, ",\"right_censored\":")
+            Base::rh_push_decimal_i64(out, duration_censored)
+            Base::rh_push_text(out, ",\"unknown\":")
+            Base::rh_push_decimal_i64(out, duration_unknown)
             Base::rh_push_text(out, "},\"metrics\":[")
             Base::rh_push_text(out, "{\"key\":\"adoption.unknown_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, unknown)
@@ -130,5 +177,14 @@ module Adoption:
             Base::rh_push_text(out, ",\"evidence\":[\"adoption-input\"]},")
             Base::rh_push_text(out, "{\"key\":\"adoption.confirmed_removal_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
             Base::rh_push_decimal_i64(out, confirmed_removal)
-            Base::rh_push_text(out, ",\"evidence\":[\"adoption-input\"]}],\"note\":\"first_seen is a collector observation; confirmed introduction/removal remain separate assertions; missing follow-up is right-censored and an observed upgrade is not proof of migration\"}")
+            Base::rh_push_text(out, ",\"evidence\":[\"adoption-input\"]}")
+            Adoption::rh_adoption_metric(out, "adoption.observed_upgrade_count", observed_upgrades, adoption_count)
+            Adoption::rh_adoption_metric(out, "adoption.version_comparison_count", version_comparisons, adoption_count)
+            Adoption::rh_adoption_metric(out, "adoption.supported_line_adoption_count", supported_line_adoptions, adoption_count)
+            Adoption::rh_adoption_metric(out, "adoption.supported_line_assessed_count", supported_line_assessments, adoption_count)
+            Adoption::rh_adoption_metric(out, "adoption.duration_confirmed_count", duration_confirmed, adoption_count)
+            Adoption::rh_adoption_metric(out, "adoption.duration_right_censored_count", duration_censored, adoption_count)
+            Adoption::rh_adoption_metric(out, "adoption.duration_unknown_count", duration_unknown, adoption_count)
+            Adoption::rh_adoption_ratio_metric(out, supported_line_adoptions, supported_line_assessments)
+            Base::rh_push_text(out, "],\"note\":\"first_seen is a collector observation; confirmed introduction/removal remain separate assertions; elapsed duration is seconds and right-censored at last_seen or cutoff; missing follow-up is right-censored and an observed upgrade is not proof of migration\"}")
             0

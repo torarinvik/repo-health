@@ -19,7 +19,7 @@ import json, glob
 keys = sorted(json.load(open(p))['key'] for p in glob.glob('$ROOT/metrics/definitions/*.json'))
 print('\n'.join(keys))")"
 keys_count="$(echo "$keys_json" | wc -l | tr -d ' ')"
-[[ "$keys_count" == "212" ]] || { echo "[m00] FAIL: expected 212 definitions, got $keys_count"; exit 1; }
+[[ "$keys_count" == "220" ]] || { echo "[m00] FAIL: expected 220 definitions, got $keys_count"; exit 1; }
 # The runtime registry mirrors exactly the PUBLISHED definitions: every
 # implemented/prototype (key, version) must be present, and a planned metric
 # must NOT be in the registry, so the system never implies availability.
@@ -39,8 +39,8 @@ for p in sorted(glob.glob(os.path.join(root, "metrics", "definitions", "*.json")
     else:
         assert ('"%s"' % d["key"]) in reg, ("published metric missing from registry", d["key"])
         assert ('"%s"' % d["version"]) in reg, ("version missing from registry", d["version"])
-assert impl == 210, ("implemented definitions", impl)
-print("[m00] registry mirror OK: published are present, planned are absent; 210 implemented")
+assert impl == 218, ("implemented definitions", impl)
+print("[m00] registry mirror OK: published are present, planned are absent; 218 implemented")
 EOF
 # The M09 admission template is enforced mechanically for every definition.
 bash "$ROOT/tools/metric-lint.sh" | tail -n 1
@@ -52,7 +52,7 @@ grep -q "M04 continuity/identity.*in_progress" "$ROOT/STATUS.md" || { echo "[m00
 grep -q "M05 temporal/downstream.*in_progress" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md misstates M05"; exit 1; }
 grep -q "M06 API/policy/corrections.*in_progress" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md misstates M06"; exit 1; }
 grep -q "M07 beta gate.*in_progress" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md misstates M07"; exit 1; }
-grep -q "226 of the 360 Architecture metric keys" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md must state exact Architecture key coverage"; exit 1; }
+grep -q "225 of the 360 Architecture metric keys" "$ROOT/STATUS.md" || { echo "[m00] FAIL: STATUS.md must state exact Architecture key coverage"; exit 1; }
 # Derive Architecture key coverage from the real candidate table and implemented definitions.
 python3 - "$ROOT/Architecture.md" "$ROOT/metrics/definitions" "$ROOT/STATUS.md" <<'EOF'
 import glob, json, re, sys
@@ -65,10 +65,10 @@ implemented = {
 }
 covered = len(set(keys) & implemented)
 missing = len(set(keys) - implemented)
-assert (covered, missing) == (134, 226), ("architecture key coverage", covered, missing)
+assert (covered, missing) == (135, 225), ("architecture key coverage", covered, missing)
 status = open(sys.argv[3]).read()
-assert "134 Architecture keys have at least one implemented definition" in status
-assert "226 of the 360 Architecture metric keys lack an implemented definition" in status
+assert "135 Architecture keys have at least one implemented definition" in status
+assert "225 of the 360 Architecture metric keys lack an implemented definition" in status
 print("[m00] Architecture key coverage OK: %d matched, %d without definitions" % (covered, missing))
 EOF
 # STATUS metric table and JSON definitions must agree on the implemented set.

@@ -38,8 +38,37 @@ assert metrics["adoption.unknown_count"]["value"] == 1, metrics
 assert metrics["adoption.first_seen_only_count"]["value"] == 1, metrics
 assert metrics["adoption.confirmed_introduction_count"]["value"] == 2, metrics
 assert metrics["adoption.confirmed_removal_count"]["value"] == 2, metrics
+for key, value in {
+    "adoption.observed_upgrade_count": 1,
+    "adoption.version_comparison_count": 3,
+    "adoption.supported_line_adoption_count": 2,
+    "adoption.supported_line_assessed_count": 3,
+    "adoption.duration_confirmed_count": 1,
+    "adoption.duration_right_censored_count": 2,
+    "adoption.duration_unknown_count": 3,
+}.items():
+    assert metrics[key]["status"] == "observed" and metrics[key]["value"] == value, (key, metrics[key])
+assert metrics["downstream_condition.supported_version_adoption_share"] == {
+    "key": "downstream_condition.supported_version_adoption_share",
+    "version": "1.0.0", "status": "observed", "value": {"num": 2, "den": 3},
+    "evidence": ["adoption-input"]
+}, metrics["downstream_condition.supported_version_adoption_share"]
+assert d["evidence_counts"] == {"version_comparison": 3, "version_comparison_unknown": 3, "supported_line_assessed": 3, "supported_line_unknown": 3}, d
+assert d["duration_counts"] == {"confirmed": 1, "right_censored": 2, "unknown": 3}, d
 assert "not proof of migration" in d["note"], d
 print("[adoption] staged states + right censoring OK")
+PY
+
+printf '{"schema":"rh-adoption-input/1","cutoff":1000,"adoptions":[]}' > "$T/empty.json"
+"$ROOT/build/rh_cli" adoption --input "$T/empty.json" --out "$T/empty.out" >/dev/null || fail "empty adoption population"
+python3 - "$T/empty.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["adoptions"] == [], d
+for metric in d["metrics"]:
+    if metric["key"].startswith("adoption.observed_upgrade") or metric["key"].startswith("adoption.version_comparison") or metric["key"].startswith("adoption.supported_line") or metric["key"].startswith("adoption.duration_") or metric["key"] == "downstream_condition.supported_version_adoption_share":
+        assert metric["status"] == "not_applicable" and metric["value"] is None, metric
+print("[adoption] empty evidence populations remain not_applicable")
 PY
 
 echo "[adoption] determinism + malformed input fails closed"
