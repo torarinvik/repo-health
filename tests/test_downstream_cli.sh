@@ -256,6 +256,23 @@ assert {n["id"] for n in d["direct"]} == {2, 3}, d["direct"]
 print("[downstream] fork distinctness OK")
 PY
 
+echo "[downstream] reviewed mappings obey known-time cutoffs"
+cat > "$T/mapping.json" <<'JSON'
+{"schema":"rh-mapping-input/1","revision":7,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"migration","source":"operator","reviewed_at":100,"evidence":[]}]}
+JSON
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/map-before" --mapping "$T/mapping.json" --known-as-of 50 >/dev/null || fail "pre-review mapping projection"
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/map-after" --mapping "$T/mapping.json" --known-as-of 100 >/dev/null || fail "post-review mapping projection"
+python3 - "$T/map-before/downstream.json" "$T/map-after/downstream.json" <<'PY'
+import json, sys
+before, after = [json.load(open(p)) for p in sys.argv[1:]]
+assert before["projection"]["mapping_revision"] == after["projection"]["mapping_revision"] == 7, (before, after)
+assert before["grouping"]["accepted_assertions"] == 0, before["grouping"]
+assert before["direct_count"] == 2, before
+assert after["grouping"]["accepted_assertions"] == 1, after["grouping"]
+assert after["direct_count"] == 1, after
+print("[downstream] mapping known-time cutoff OK")
+PY
+
 echo "[downstream] cycle terminates and reports SCCs"
 "$ROOT/build/rh_cli" downstream --graph "$T/cycle.json" --subject 1 --out "$T/c" >/dev/null || fail "cycle run"
 python3 - "$T/c/downstream.json" <<'PY'
