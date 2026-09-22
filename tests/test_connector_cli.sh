@@ -198,6 +198,10 @@ case "$url" in
     response_body="${RH_PROBE_REVIEW_BODY:-$RH_PROBE_ARRAY_BODY}"
     response_http="${RH_PROBE_REVIEW_HTTP:-200}"
     ;;
+  "https://api.github.com/repos/example/project/collaborators?per_page=1")
+    response_body="${RH_PROBE_COLLABORATORS_BODY:-$RH_PROBE_ARRAY_BODY}"
+    response_http="${RH_PROBE_COLLABORATORS_HTTP:-200}"
+    ;;
   "https://api.github.com/repos/example/project/traffic/views")
     response_http="${RH_PROBE_TRAFFIC_HTTP:-${RH_PROBE_HTTP:-200}}"
     ;;
@@ -283,6 +287,37 @@ PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/review-invalid.args" \
 review_invalid_rc=$?
 set -e
 [[ "$review_invalid_rc" -eq 2 && ! -e "$T/review-invalid.args" && ! -e "$T/review-invalid.out" ]] || fail "invalid review scope reached transport"
+
+echo "[connector] collaborator probe requires authentication and keeps account data out of its result"
+printf '%s\n' '[{"login":"private-account","permissions":{"pull":true}}]' > "$T/collaborator-response.json"
+PATH="$T/probe-bin:$PATH" RH_GITHUB_TOKEN="ghp_collaborator_probe_fixture" \
+  RH_PROBE_BODY="$T/probe-error.json" RH_PROBE_ARRAY_BODY="$T/probe-array.json" \
+  RH_PROBE_COLLABORATORS_BODY="$T/collaborator-response.json" RH_PROBE_CURL_ARGS="$T/collaborator-probe.args" \
+  RH_PROBE_CURL_CONFIG="$T/collaborator-probe.config" \
+  "$ROOT/build/rh_cli" connector probe --github-repo example/project --collaborators \
+    --out "$T/collaborator-probe.out" >/dev/null || fail "authenticated collaborator capability probe"
+python3 - "$T/collaborator-probe.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["schema"] == "rh-github-collaborator-probe-result/1", d
+assert d["scope"] == {"repository":"example/project"}, d
+assert d["authorization"]["credential"] == "configured", d
+assert d["capabilities"]["collaborators"] == {"declaration":"read-one-item-authenticated", "status":"observed", "http_status":200}, d
+assert "private-account" not in open(sys.argv[1]).read(), d
+assert (t / "collaborator-probe.out.github-collaborators.json").read_text().find("private-account") >= 0
+assert (t / "collaborator-probe.out.github-collaborators.url").read_text().strip() == "https://api.github.com/repos/example/project/collaborators?per_page=1"
+print("[connector] collaborator probe publishes only access and scope, with raw item retained locally")
+PY
+grep -Fxq 'header = "Authorization: Bearer ghp_collaborator_probe_fixture"' "$T/collaborator-probe.config" || fail "collaborator probe token header absent"
+! grep -Fq 'ghp_collaborator_probe_fixture' "$T/collaborator-probe.args" || fail "collaborator probe token leaked into curl arguments"
+set +e
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/collaborator-missing-token.args" \
+  "$ROOT/build/rh_cli" connector probe --github-repo example/project --collaborators \
+    --out "$T/collaborator-missing-token.out" >/dev/null 2>&1
+collaborator_missing_token_rc=$?
+set -e
+[[ "$collaborator_missing_token_rc" -eq 4 && ! -e "$T/collaborator-missing-token.args" && ! -e "$T/collaborator-missing-token.out" ]] || fail "collaborator probe ran without explicit credentials"
 
 echo "[connector] --all probes bounded GitHub routes with separate evidence"
 printf '%s\n' '[]' > "$T/probe-array.json"
