@@ -1,46 +1,77 @@
-# Optional verification of identity classification evidence references.
+# Optional verification of identity classification and link-review evidence.
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_store.elisa"
 
 module IdentityEvidence:
+    private:
+        def rh_identity_evidence_ref_verify(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, ref_idx: i64, evidence_root: cstr) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            start: mutable i64 = 0
+            finish: mutable i64 = 0
+            return false if not Json::rh_json_str_span(nodes, ref_idx, &start, &finish) or finish - start != 16
+            name: mutable darray[u8] = []
+            while i < 16 |i: i64 = 0, start, texts, name|:
+                byte: u8 = texts[(start + i).usize()]
+                return false if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
+                name.push(byte)
+                i <- i + 1
+            name.push(0)
+            valid: mutable i64 = 0
+            name_ptr: u8& = (&name[0]).cast[u8&] can Unsafe.PointerCast
+            Store::rh_store_blob_verify(evidence_root, name_ptr, &valid) == 0 and valid == 1
+
     public:
         def rh_identity_evidence_verify(raw: darray[u8]&, evidence_root: cstr,
-                                        verified_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+                                        verified_out: mutable i64&,
+                                        reviewed_link_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
             return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
-            refs_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "actor_kind_evidence_refs")
-            return 0 if refs_idx < 0
-            return -1 if nodes[refs_idx.usize()].kind != Json::RH_JSON_ARR
             fd: mutable i32 = -1
             return -1 if Store::rh_store_guard_acquire(evidence_root, &fd) != 0
             state: mutable i64 = 0
-            while child >= 0 |child: i64 = nodes[refs_idx.usize()].first_child, nodes, texts, state, verified_out|:
-                if nodes[child.usize()].kind != Json::RH_JSON_NULL:
-                    start: mutable i64 = 0
-                    finish: mutable i64 = 0
-                    if not Json::rh_json_str_span(nodes, child, &start, &finish) or finish - start != 16:
-                        state <- -1
-                    else:
-                        name: mutable darray[u8] = []
-                        while i < 16 and state == 0 |i: i64 = 0, start, texts, name, state|:
-                            byte: u8 = texts[(start + i).usize()]
-                            if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
-                                state <- -1
-                            else:
-                                name.push(byte)
-                            i <- i + 1
-                        if state == 0:
-                            name.push(0)
-                            valid: mutable i64 = 0
-                            name_ptr: u8& = (&name[0]).cast[u8&] can Unsafe.PointerCast
-                            if Store::rh_store_blob_verify(evidence_root, name_ptr, &valid) != 0 or valid != 1:
+            refs_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "actor_kind_evidence_refs")
+            if refs_idx >= 0:
+                if nodes[refs_idx.usize()].kind != Json::RH_JSON_ARR:
+                    state <- -1
+                else:
+                    while ref_node >= 0 |ref_node: i64 = nodes[refs_idx.usize()].first_child, nodes, texts, state, verified_out, evidence_root|:
+                        if nodes[ref_node.usize()].kind != Json::RH_JSON_NULL:
+                            if not IdentityEvidence::rh_identity_evidence_ref_verify(nodes, texts, ref_node, evidence_root):
                                 state <- -1
                             else:
                                 verified_out[0] <- verified_out[0] + 1
-                child <- nodes[child.usize()].next_sibling
+                        ref_node <- nodes[ref_node.usize()].next_sibling
+            links_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "links")
+            if links_idx < 0 or nodes[links_idx.usize()].kind != Json::RH_JSON_ARR:
+                state <- -1
+            else:
+                while link >= 0 |link: i64 = nodes[links_idx.usize()].first_child, nodes, texts, raw, state, verified_out, reviewed_link_out, evidence_root|:
+                    if nodes[link.usize()].kind != Json::RH_JSON_OBJ:
+                        state <- -1
+                    else:
+                        state_idx: i64 = Json::rh_json_obj_get(nodes, texts, link, "state")
+                        state_s: mutable i64 = 0
+                        state_e: mutable i64 = 0
+                        if not Json::rh_json_str_span(nodes, state_idx, &state_s, &state_e):
+                            state <- -1
+                        else:
+                            reviewed: bool = Base::rh_bytes_equal_literal(texts, state_s, state_e, "accepted") or Base::rh_bytes_equal_literal(texts, state_s, state_e, "rejected") or Base::rh_bytes_equal_literal(texts, state_s, state_e, "revoked")
+                            if reviewed:
+                                ref_idx: i64 = Json::rh_json_obj_get(nodes, texts, link, "evidence_ref")
+                                reviewer_idx: i64 = Json::rh_json_obj_get(nodes, texts, link, "reviewed_by")
+                                reviewed_at_idx: i64 = Json::rh_json_obj_get(nodes, texts, link, "reviewed_at")
+                                reviewer_s: mutable i64 = 0
+                                reviewer_e: mutable i64 = 0
+                                reviewed_at_ok: mutable i64 = 0
+                                reviewed_at: i64 = Json::rh_json_int(nodes, raw, reviewed_at_idx, &reviewed_at_ok)
+                                if not Json::rh_json_str_span(nodes, reviewer_idx, &reviewer_s, &reviewer_e) or reviewer_s == reviewer_e or reviewed_at_ok == 0 or reviewed_at < 0 or not IdentityEvidence::rh_identity_evidence_ref_verify(nodes, texts, ref_idx, evidence_root):
+                                    state <- -1
+                                else:
+                                    verified_out[0] <- verified_out[0] + 1
+                                    reviewed_link_out[0] <- reviewed_link_out[0] + 1
+                    link <- nodes[link.usize()].next_sibling
             released: i64 = Store::rh_store_guard_release(fd)
             return -1 if state != 0 or released != 0
             0
