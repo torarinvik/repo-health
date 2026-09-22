@@ -130,6 +130,14 @@ cat > "$T/invalid-runs.json" <<'JSON'
 {"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_runs":[{"from":100,"through":1000,"complete":true},{"from":900,"through":2000,"complete":true}]}]}
 JSON
 if "$ROOT/build/rh_cli" adoption --input "$T/invalid-runs.json" --out "$T/invalid-runs.out" >/dev/null 2>&1; then fail "overlapping snapshot history was accepted"; fi
+cat > "$T/invalid-runs-completeness.json" <<'JSON'
+{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_runs":[{"from":100,"through":2000,"complete":"true"}]}]}
+JSON
+if "$ROOT/build/rh_cli" adoption --input "$T/invalid-runs-completeness.json" --out "$T/invalid-runs-completeness.out" >/dev/null 2>&1; then fail "non-boolean snapshot-run completeness was accepted"; fi
+cat > "$T/ambiguous-coverage.json" <<'JSON'
+{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_coverage":[],"snapshot_runs":[]}]}
+JSON
+if "$ROOT/build/rh_cli" adoption --input "$T/ambiguous-coverage.json" --out "$T/ambiguous-coverage.out" >/dev/null 2>&1; then fail "mixed snapshot coverage sources were accepted"; fi
 
 echo "[adoption] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" adoption --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
