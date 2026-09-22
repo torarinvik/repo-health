@@ -68,6 +68,7 @@ include "./rh_vcs_report.elisa"
 include "./rh_gerrit.elisa"
 include "./rh_notify_report.elisa"
 include "./rh_identity_report.elisa"
+include "./rh_identity_evidence.elisa"
 include "./rh_identity_publication.elisa"
 include "./rh_distribution.elisa"
 include "./rh_rpm.elisa"
@@ -171,7 +172,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli vcs --format hg|svn|fossil --repo <path> --out <file>")
     rh_cli_err("       rh_cli notify --input <file> --out <file> [--state <file> | --state-store <dir>]")
     rh_cli_err("       rh_cli query --input <file> --out <file>")
-    rh_cli_err("       rh_cli identity --input <file> --out <file>")
+    rh_cli_err("       rh_cli identity --input <file> --out <file> [--evidence-store <root/evidence-dir>]")
     rh_cli_err("       rh_cli identity-publish --input <file> --out <file>")
     rh_cli_err("       rh_cli distribution --input <debian/control> --out <file>")
     rh_cli_err("       rh_cli rpm-spec --input <file.spec> --out <file>")
@@ -1967,8 +1968,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if qi_idx < 0 or qo_idx < 0
         return rh_do_query(slots[qi_idx], slots[qo_idx])
     if Base::rh_streq(cmd, "identity"):
-        idi_idx, ido_idx =
-            while idq < argc |idi_idx: i64 = -1, ido_idx: i64 = -1, idq: i64 = 2, slots| -> idi_idx, ido_idx:
+        idi_idx, ido_idx, ide_idx =
+            while idq < argc |idi_idx: i64 = -1, ido_idx: i64 = -1, ide_idx: i64 = -1, idq: i64 = 2, slots| -> idi_idx, ido_idx, ide_idx:
                 a18: u8& = slots[idq].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(a18, "--input"):
                     if idq + 1 < argc:
@@ -1982,11 +1983,19 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         ido_idx <- idq
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(a18, "--evidence-store"):
+                    if idq + 1 < argc:
+                        idq <- idq + 1
+                        ide_idx <- idq
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 idq <- idq + 1
         return rh_cli_usage(2) if idi_idx < 0 or ido_idx < 0
-        return rh_do_identity(slots[idi_idx], slots[ido_idx])
+        evidence_path: mutable cstr = ""
+        evidence_path <- slots[ide_idx] if ide_idx >= 0
+        return rh_do_identity(slots[idi_idx], slots[ido_idx], evidence_path, ide_idx >= 0)
     if Base::rh_streq(cmd, "identity-publish"):
         ipi_idx, ipo_idx =
             while ipq < argc |ipi_idx: i64 = -1, ipo_idx: i64 = -1, ipq: i64 = 2, slots| -> ipi_idx, ipo_idx:
@@ -7578,7 +7587,7 @@ def rh_do_query(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Ab
 # identity revision, clusters over ACCEPTED links only, and a per-actor
 # cluster map. Rejected/revoked links change nothing; malformed input fails
 # closed.
-def rh_do_identity(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_identity(input_path: cstr, out_path: cstr, evidence_root: cstr, has_evidence_root: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected identity argument (allowlist)")
         return 3
@@ -7592,6 +7601,11 @@ def rh_do_identity(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
     if Base::rh_io_read(ipp, raw) < 0:
         rh_cli_err("identity: cannot read --input")
         return 4
+    verified_reference_count: mutable i64 = 0
+    if has_evidence_root:
+        if not Git::rh_arg_safe(evidence_root) or IdentityEvidence::rh_identity_evidence_verify(raw, evidence_root, &verified_reference_count) != 0:
+            rh_cli_err("identity: evidence reference is malformed, missing, or corrupt")
+            return 4
     body: mutable darray[u8] = []
     if IdentityReport::rh_identity_report(raw, body) != 0:
         rh_cli_err("identity: not a valid rh-identity-input/1 document (fail closed)")
@@ -7606,6 +7620,24 @@ def rh_do_identity(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
     if not Base::rh_io_write(opp, body):
         rh_cli_err("identity: cannot write --out")
         return 4
+    if has_evidence_root:
+        verification: mutable darray[u8] = []
+        Base::rh_push_text(verification, "{\"schema\":\"rh-identity-evidence-verification/1\",\"state\":\"verified\",\"verified_reference_count\":")
+        Base::rh_push_decimal_i64(verification, verified_reference_count)
+        Base::rh_push_text(verification, ",\"source_input_sha256\":\"")
+        Sha256::rh_sha256(raw, verification)
+        Base::rh_push_text(verification, "\",\"identity_output_sha256\":\"")
+        Sha256::rh_sha256(body, verification)
+        Base::rh_push_text(verification, "\"}")
+        verification.push(10)
+        verification_path: mutable darray[u8] = []
+        Base::rh_push_cstr(verification_path, out_path)
+        Base::rh_push_text(verification_path, ".evidence-verification.json")
+        verification_path.push(0)
+        verification_ptr: cstr = (&verification_path[0]).cast[cstr] can Unsafe.PointerCast
+        if not Base::rh_io_write(verification_ptr, verification):
+            rh_cli_err("identity: cannot write evidence verification report")
+            return 4
     rh_cli_out("identity: ok")
     0
 

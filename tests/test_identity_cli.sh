@@ -122,4 +122,29 @@ for rc in "$rc_schema" "$rc_state" "$rc_actor" "$rc_kind" "$rc_kind_source" "$rc
   [[ "$rc" -eq 4 ]] || fail "malformed identity input must exit 4 (got $rc)"
 done
 
+echo "[identity] optional evidence-store verifies content-addressed actor evidence"
+mkdir -p "$T/evidence"
+printf 'actor-kind source evidence\n' > "$T/kind-evidence.txt"
+evidence_name=$("$ROOT/build/rh_cli" store put --root "$T/evidence" --file "$T/kind-evidence.txt" | awk '{print $3}')
+python3 - "$T/verified-input.json" "$evidence_name" <<'PY'
+import json, sys
+json.dump({"schema":"rh-identity-input/1","actor_count":1,"links":[],"actor_kinds":["human"],"actor_kind_evidence_refs":[sys.argv[2]]}, open(sys.argv[1], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" identity --input "$T/verified-input.json" --out "$T/verified.out" --evidence-store "$T/evidence" >/dev/null || fail "verified evidence reference"
+python3 - "$T/verified-input.json" "$T/verified.out" <<'PY'
+import hashlib, json, sys
+r = json.load(open(sys.argv[2] + ".evidence-verification.json"))
+assert r["schema"] == "rh-identity-evidence-verification/1" and r["state"] == "verified", r
+assert r["verified_reference_count"] == 1, r
+assert r["source_input_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), r
+assert r["identity_output_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), r
+print("[identity] evidence digest + output binding OK")
+PY
+printf 'corrupt\n' > "$T/evidence/$evidence_name"
+set +e
+"$ROOT/build/rh_cli" identity --input "$T/verified-input.json" --out "$T/corrupt.out" --evidence-store "$T/evidence" >/dev/null 2>&1
+rc_corrupt=$?
+set -e
+[[ "$rc_corrupt" -eq 4 && ! -f "$T/corrupt.out" ]] || fail "corrupt evidence must fail before identity publication"
+
 echo "test_identity_cli OK"

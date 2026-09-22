@@ -1,0 +1,46 @@
+# Optional verification of identity classification evidence references.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_store.elisa"
+
+module IdentityEvidence:
+    public:
+        def rh_identity_evidence_verify(raw: darray[u8]&, evidence_root: cstr,
+                                        verified_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            refs_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "actor_kind_evidence_refs")
+            return 0 if refs_idx < 0
+            return -1 if nodes[refs_idx.usize()].kind != Json::RH_JSON_ARR
+            fd: mutable i32 = -1
+            return -1 if Store::rh_store_guard_acquire(evidence_root, &fd) != 0
+            state: mutable i64 = 0
+            while child >= 0 |child: i64 = nodes[refs_idx.usize()].first_child, nodes, texts, state, verified_out|:
+                if nodes[child.usize()].kind != Json::RH_JSON_NULL:
+                    start: mutable i64 = 0
+                    finish: mutable i64 = 0
+                    if not Json::rh_json_str_span(nodes, child, &start, &finish) or finish - start != 16:
+                        state <- -1
+                    else:
+                        name: mutable darray[u8] = []
+                        while i < 16 and state == 0 |i: i64 = 0, start, texts, name, state|:
+                            byte: u8 = texts[(start + i).usize()]
+                            if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+                                state <- -1
+                            else:
+                                name.push(byte)
+                            i <- i + 1
+                        if state == 0:
+                            name.push(0)
+                            valid: mutable i64 = 0
+                            name_ptr: u8& = (&name[0]).cast[u8&] can Unsafe.PointerCast
+                            if Store::rh_store_blob_verify(evidence_root, name_ptr, &valid) != 0 or valid != 1:
+                                state <- -1
+                            else:
+                                verified_out[0] <- verified_out[0] + 1
+                child <- nodes[child.usize()].next_sibling
+            released: i64 = Store::rh_store_guard_release(fd)
+            return -1 if state != 0 or released != 0
+            0
