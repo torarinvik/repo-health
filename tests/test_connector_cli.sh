@@ -217,6 +217,10 @@ case "$url" in
     response_body="${RH_GLP_RELEASES_BODY:-$RH_PROBE_ARRAY_BODY}"
     response_http="${RH_GLP_RELEASES_HTTP:-200}"
     ;;
+  "https://codeberg.example.org/api/v1/repos/owner/project/issues?limit=1&type=issues"|"https://codeberg.example.org/api/v1/repos/owner/project/pulls?limit=1"|"https://codeberg.example.org/api/v1/repos/owner/project/releases?limit=1")
+    response_body="$RH_PROBE_ARRAY_BODY"
+    response_http="${RH_FORGE_HTTP:-200}"
+    ;;
   *) exit 21 ;;
 esac
 cp "$response_body" "$body_out"
@@ -383,6 +387,39 @@ PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/gitlab-invalid.args" \
 gitlab_invalid_rc=$?
 set -e
 [[ "$gitlab_invalid_rc" -eq 4 && ! -e "$T/gitlab-invalid.args" && ! -e "$T/gitlab-invalid.out" ]] || fail "invalid GitLab project path reached transport"
+
+echo "[connector] approved Gitea/Forgejo instance probes use only fixed routes"
+cat > "$T/forge-instance.json" <<'JSON'
+{"schema":"rh-connector-instance/1","connector_id":"gitea","base_url":"https://codeberg.example.org","approved":true}
+JSON
+: > "$T/forge.args"
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/forge.args" RH_PROBE_CURL_CONFIG="$T/forge.config" \
+  RH_PROBE_BODY="$T/probe-error.json" RH_PROBE_ARRAY_BODY="$T/probe-array.json" \
+  "$ROOT/build/rh_cli" connector probe --instance "$T/forge-instance.json" --repository owner/project --all \
+    --out "$T/forge-probe.out" >/dev/null || fail "approved Gitea capability probe"
+python3 - "$T/forge-probe.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-forge-capability-matrix/1", d
+assert d["provider"] == "gitea" and d["repository"] == "owner/project", d
+assert all(d["capabilities"][name]["status"] == "observed" for name in ("issues", "pulls", "releases")), d
+assert "private" not in open(sys.argv[1]).read()
+PY
+[[ "$(grep -c 'https://codeberg.example.org/api/v1/repos/owner/project/' "$T/forge.args")" -eq 3 ]] || fail "forge matrix must issue three fixed requests"
+for route in issues pulls releases; do
+  [[ -f "$T/forge-probe.out.forge-$route.json" && -f "$T/forge-probe.out.forge-$route.url" ]] || fail "forge $route evidence missing"
+done
+cat > "$T/forge-unapproved.json" <<'JSON'
+{"schema":"rh-connector-instance/1","connector_id":"forgejo","base_url":"https://codeberg.example.org","approved":false}
+JSON
+: > "$T/forge-unapproved.args"
+set +e
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/forge-unapproved.args" \
+  "$ROOT/build/rh_cli" connector probe --instance "$T/forge-unapproved.json" --repository owner/project --all \
+    --out "$T/forge-unapproved.out" >/dev/null 2>&1
+forge_unapproved_rc=$?
+set -e
+[[ "$forge_unapproved_rc" -eq 4 && ! -s "$T/forge-unapproved.args" && ! -e "$T/forge-unapproved.out" ]] || fail "unapproved forge reached transport"
 
 echo "[connector] --all probes bounded GitHub routes with separate evidence"
 printf '%s\n' '[]' > "$T/probe-array.json"
