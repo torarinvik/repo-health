@@ -30,6 +30,10 @@ for path in glob.glob(os.path.join(root, "connectors", "manifests", "*.json")):
 
 implemented = {"github", "gitlab", "gitea", "forgejo", "bitbucket"}
 assert implemented <= manifests.keys(), (implemented, manifests.keys())
+gitlab = manifests["gitlab"]
+assert any("read_api" in scope for scope in gitlab["auth_scopes"]), gitlab
+assert "https://docs.gitlab.com/api/project_members/" in gitlab["source_docs"], gitlab
+assert "100 rows per page" in gitlab["pagination"] and "scope-bound" in gitlab["pagination"], gitlab
 
 def runtime_label(capability, declaration):
     if declaration in {"unsupported", "unsupported-no-traffic-api"}:
