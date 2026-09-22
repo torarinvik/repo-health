@@ -194,6 +194,10 @@ case "$url" in
     response_body="${RH_PROBE_RELEASES_BODY:-$RH_PROBE_ARRAY_BODY}"
     response_http="${RH_PROBE_RELEASES_HTTP:-200}"
     ;;
+  "https://api.github.com/repos/example/project/pulls/23/reviews?per_page=1")
+    response_body="${RH_PROBE_REVIEW_BODY:-$RH_PROBE_ARRAY_BODY}"
+    response_http="${RH_PROBE_REVIEW_HTTP:-200}"
+    ;;
   "https://api.github.com/repos/example/project/traffic/views")
     response_http="${RH_PROBE_TRAFFIC_HTTP:-${RH_PROBE_HTTP:-200}}"
     ;;
@@ -248,6 +252,37 @@ else:
 print("[connector] mapped HTTP", sys.argv[3], "to", sys.argv[2])
 PY
 done
+
+echo "[connector] pull-request-scoped review probe keeps evidence and explicit scope"
+printf '%s\n' '[]' > "$T/probe-array.json"
+PATH="$T/probe-bin:$PATH" RH_GITHUB_TOKEN="ghp_review_probe_fixture" \
+  RH_PROBE_BODY="$T/probe-error.json" RH_PROBE_ARRAY_BODY="$T/probe-array.json" RH_PROBE_REVIEW_HTTP=403 \
+  RH_PROBE_CURL_ARGS="$T/review-probe.args" RH_PROBE_CURL_CONFIG="$T/review-probe.config" \
+  "$ROOT/build/rh_cli" connector probe --github-repo example/project --review-pull 23 \
+    --out "$T/review-probe.out" >/dev/null || fail "GitHub pull-request review probe"
+python3 - "$T/review-probe.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["schema"] == "rh-github-review-capability-probe-result/1", d
+assert d["scope"] == {"repository":"example/project", "pull_request_number":23}, d
+assert d["authorization"]["credential"] == "configured", d
+assert d["capabilities"]["reviews"] == {"declaration":"read-one-item", "status":"forbidden_or_rate_limited", "http_status":403}, d
+assert (t / "review-probe.out.github-pull-reviews.url").read_text().strip() == "https://api.github.com/repos/example/project/pulls/23/reviews?per_page=1"
+for ext in ("json", "status", "err", "url"):
+    assert (t / f"review-probe.out.github-pull-reviews.{ext}").exists(), ext
+print("[connector] one-item review probe preserves scope and ambiguous access state")
+PY
+grep -Fxq 'header = "Authorization: Bearer ghp_review_probe_fixture"' "$T/review-probe.config" || fail "review probe token header absent"
+! grep -Fq 'ghp_review_probe_fixture' "$T/review-probe.args" || fail "review probe token leaked into curl arguments"
+[[ "$(grep -c 'api.github.com/repos/example/project/pulls/23/reviews?per_page=1' "$T/review-probe.args")" -eq 1 ]] || fail "review probe must issue exactly one fixed request"
+set +e
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/review-invalid.args" \
+  "$ROOT/build/rh_cli" connector probe --github-repo example/project --review-pull 0 \
+    --out "$T/review-invalid.out" >/dev/null 2>&1
+review_invalid_rc=$?
+set -e
+[[ "$review_invalid_rc" -eq 2 && ! -e "$T/review-invalid.args" && ! -e "$T/review-invalid.out" ]] || fail "invalid review scope reached transport"
 
 echo "[connector] --all probes bounded GitHub routes with separate evidence"
 printf '%s\n' '[]' > "$T/probe-array.json"
