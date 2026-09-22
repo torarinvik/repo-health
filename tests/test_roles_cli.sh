@@ -17,7 +17,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":true,"review_actor_id":4,"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"observed_actions":[{"actor_id":1,"actor_type":"bot","kind":"release","at":120},{"actor_id":2,"actor_type":"human","kind":"release","at":130},{"kind":"release","at":135},{"actor_id":null,"kind":"release","at":136},{"actor_id":3,"kind":"merge","at":140},{"actor_id":4,"kind":"review","at":150},{"actor_id":4,"kind":"review","at":160}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
+{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":true,"review_actor_id":4,"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"observed_actions":[{"actor_id":1,"actor_type":"bot","kind":"release","at":120},{"actor_id":2,"identity_actor_id":1,"actor_type":"human","kind":"release","at":130},{"kind":"release","at":135},{"actor_id":null,"kind":"release","at":136},{"actor_id":3,"kind":"merge","at":140},{"actor_id":4,"kind":"review","at":150},{"actor_id":4,"kind":"review","at":160}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
 JSON
 "$ROOT/build/rh_cli" roles --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
 python3 - "$T/out.json" <<'PY'
@@ -41,7 +41,7 @@ assert metrics["maintainer.role_assignments_with_end_dates"]["value"] == 1, metr
 assert metrics["maintainer.declared_current"]["value"] == 1 and metrics["maintainer.declared_current"]["as_of"] == 350, metrics
 assert metrics["maintainer.permission_observed_current"]["value"] == 1, metrics
 assert metrics["maintainer.permission_inventory_coverage"]["value"] == {"num": 1, "den": 1}, metrics
-assert metrics["maintainer.observed_release_actors"]["value"] == 2, metrics
+assert metrics["maintainer.observed_release_actors"]["value"] == 1, metrics
 assert metrics["maintainer.observed_merge_actors"]["value"] == 1, metrics
 assert metrics["maintainer.observed_review_actors"]["value"] == 1, metrics
 assert d["action_events_by_actor_type"] == {
@@ -53,7 +53,7 @@ assert d["action_events_by_actor_type"] == {
 assert metrics["maintainer.unattributed_release_count"]["value"] == 2, metrics
 assert metrics["maintainer.release_role_automation_share"]["value"] == {"num": 1, "den": 2}, metrics
 assert metrics["maintainer.review_share"]["value"] == {"num": 2, "den": 2}, metrics
-assert metrics["concentration.release_actor_count_80"]["value"] == 2, metrics
+assert metrics["concentration.release_actor_count_80"]["value"] == 1, metrics
 assert metrics["concentration.review_actor_count_80"]["value"] == 1, metrics
 roles = [(q["actor_id"], q["as_of"], q["declared_role"]) for q in d["queries"]]
 assert roles == [(1, 150, "owner"), (2, 150, "triager"), (2, 250, "unknown"),
