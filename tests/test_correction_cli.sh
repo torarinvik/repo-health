@@ -17,7 +17,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/corr.json" <<'JSON'
-{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"measurement","target_id":7,"state":"accepted","evidence_ref":"evidence-accepted"},{"kind":"identity","target_id":7,"state":"rejected","evidence_ref":"evidence-rejected"},{"kind":"mapping","target_id":9,"state":"open","evidence_ref":"evidence-open"},{"kind":"mapping","target_id":7,"state":"accepted","evidence_ref":"evidence-accepted"}],"derived":[{"subject_id":7,"revision_used":0,"superseded":false},{"subject_id":8,"revision_used":0,"superseded":false},{"subject_id":7,"revision_used":1,"superseded":false}],"replay":[{"subject_id":7,"raw_a":2,"raw_b":3,"combine":"add"},{"subject_id":7,"raw_a":9,"raw_b":4,"combine":"subtract"},{"subject_id":7,"raw_a":11,"raw_b":0,"combine":"identity"}]}
+{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"measurement","target_id":7,"state":"accepted","reviewed_by":"reviewer-a","reviewed_at":1700000000,"evidence_ref":"evidence-accepted"},{"kind":"identity","target_id":7,"state":"rejected","reviewed_by":"reviewer-b","reviewed_at":1700000100,"evidence_ref":"evidence-rejected"},{"kind":"mapping","target_id":9,"state":"open","evidence_ref":"evidence-open"},{"kind":"mapping","target_id":7,"state":"accepted","reviewed_by":"reviewer-a","reviewed_at":1700000000,"evidence_ref":"evidence-accepted"}],"derived":[{"subject_id":7,"revision_used":0,"superseded":false},{"subject_id":8,"revision_used":0,"superseded":false},{"subject_id":7,"revision_used":1,"superseded":false}],"replay":[{"subject_id":7,"raw_a":2,"raw_b":3,"combine":"add"},{"subject_id":7,"raw_a":9,"raw_b":4,"combine":"subtract"},{"subject_id":7,"raw_a":11,"raw_b":0,"combine":"identity"}]}
 JSON
 "$ROOT/build/rh_cli" correct --corrections "$T/corr.json" --out "$T/o" >/dev/null || fail "correct run"
 
@@ -29,6 +29,8 @@ assert d["final_revision"] == 2, d
 ap = d["applied"]
 assert [a["state"] for a in ap] == ["accepted", "rejected", "open", "accepted"], ap
 assert [a["evidence_ref"] for a in ap] == ["evidence-accepted", "evidence-rejected", "evidence-open", "evidence-accepted"], ap
+assert [a["reviewed_by"] for a in ap] == ["reviewer-a", "reviewer-b", None, "reviewer-a"], ap
+assert [a["reviewed_at"] for a in ap] == [1700000000, 1700000100, None, 1700000000], ap
 assert ap[0]["revision_before"] == 0 and ap[0]["revision_after"] == 1, ap[0]
 assert ap[1]["revision_before"] == 1 and ap[1]["revision_after"] == 1, ap[1]  # rejected: no change
 assert ap[2]["revision_before"] == 1 and ap[2]["revision_after"] == 1, ap[2]  # open: no change
@@ -49,7 +51,7 @@ PY
 
 echo "[correct] a rejected-only document changes nothing"
 cat > "$T/reject.json" <<'JSON'
-{"schema":"rh-corrections/1","current_revision":5,"corrections":[{"kind":"identity","target_id":1,"state":"rejected","evidence_ref":"evidence-rejected"}],"derived":[{"subject_id":1,"revision_used":5,"superseded":false}]}
+{"schema":"rh-corrections/1","current_revision":5,"corrections":[{"kind":"identity","target_id":1,"state":"rejected","reviewed_by":"reviewer-b","reviewed_at":1700000100,"evidence_ref":"evidence-rejected"}],"derived":[{"subject_id":1,"revision_used":5,"superseded":false}]}
 JSON
 "$ROOT/build/rh_cli" correct --corrections "$T/reject.json" --out "$T/r" >/dev/null || fail "reject run"
 python3 - "$T/r/corrections-result.json" <<'PY'
@@ -68,22 +70,23 @@ check_rc() { # payload
   "$ROOT/build/rh_cli" correct --corrections "$T/bad.json" --out "$T/bad" >/dev/null 2>&1
   echo $?
 }
-rc1=$(check_rc '{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"vibes","target_id":1,"state":"accepted","evidence_ref":"evidence-accepted"}]}')
+rc1=$(check_rc '{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"vibes","target_id":1,"state":"accepted","reviewed_by":"reviewer-a","reviewed_at":1700000000,"evidence_ref":"evidence-accepted"}]}')
 rc2=$(check_rc '{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"identity","target_id":1,"state":"maybe"}]}')
 rc3=$(check_rc '{"schema":"rh-corrections/2","current_revision":0,"corrections":[]}')
 rc4=$(check_rc '{"schema":"rh-corrections/1","current_revision":0,"corrections":[],"replay":[{"subject_id":1,"raw_a":1,"raw_b":2,"combine":"modulo"}]}')
 rc5=$(check_rc 'not json')
-rc7=$(check_rc '{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"identity","target_id":1,"state":"accepted"}]}')
+rc7=$(check_rc '{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"identity","target_id":1,"state":"accepted","evidence_ref":"x"}]}')
+rc8=$(check_rc '{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"identity","target_id":1,"state":"rejected","evidence_ref":"x","reviewed_at":12}]}')
 "$ROOT/build/rh_cli" correct --corrections "$T/nope.json" --out "$T/nope" >/dev/null 2>&1
 rc6=$?
 set -e
-for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7"; do
+for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7" "$rc8"; do
   [[ "$rc" -eq 4 ]] || fail "malformed correction input must exit 4 (got $rc)"
 done
 
 echo "[correct] durable ledger makes replay idempotent across runs"
 cat > "$T/dur.json" <<'JSON'
-{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"measurement","target_id":7,"state":"accepted","evidence_ref":"evidence-accepted"},{"kind":"mapping","target_id":7,"state":"accepted","evidence_ref":"evidence-accepted"}],"derived":[{"subject_id":7,"revision_used":0,"superseded":false}]}
+{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"measurement","target_id":7,"state":"accepted","reviewed_by":"reviewer-a","reviewed_at":1700000000,"evidence_ref":"evidence-accepted"},{"kind":"mapping","target_id":7,"state":"accepted","reviewed_by":"reviewer-a","reviewed_at":1700000000,"evidence_ref":"evidence-accepted"}],"derived":[{"subject_id":7,"revision_used":0,"superseded":false}]}
 JSON
 "$ROOT/build/rh_cli" correct --corrections "$T/dur.json" --out "$T/d1" --state "$T/state.json" >/dev/null || fail "first durable run"
 rev1="$(python3 -c "import json;print(json.load(open('$T/d1/corrections-result.json'))['final_revision'])")"

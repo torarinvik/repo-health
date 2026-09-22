@@ -149,7 +149,10 @@ module CorrectionReport:
             app_super: mutable darray[i64] = []
             app_evidence_s: mutable darray[i64] = []
             app_evidence_e: mutable darray[i64] = []
-            while cchild >= 0 |cchild: i64 = carr.first_child, ordinal: i64 = 0, nodes, texts, raw, derived, rev, wm, app_kind, app_target, app_state, app_before, app_after, app_super, app_evidence_s, app_evidence_e, new_superseded|:
+            app_reviewer_s: mutable darray[i64] = []
+            app_reviewer_e: mutable darray[i64] = []
+            app_reviewed_at: mutable darray[i64] = []
+            while cchild >= 0 |cchild: i64 = carr.first_child, ordinal: i64 = 0, nodes, texts, raw, derived, rev, wm, app_kind, app_target, app_state, app_before, app_after, app_super, app_evidence_s, app_evidence_e, app_reviewer_s, app_reviewer_e, app_reviewed_at, new_superseded|:
                 return -1 if nodes[cchild.usize()].kind != Json::RH_JSON_OBJ
                 ordinal <- ordinal + 1
                 ks: mutable i64 = 0
@@ -167,6 +170,17 @@ module CorrectionReport:
                 evidence_s: mutable i64 = 0
                 evidence_e: mutable i64 = 0
                 return -1 if not rh_cr_str(nodes, texts, cchild, "evidence_ref", &evidence_s, &evidence_e) or evidence_s == evidence_e
+                reviewer_s: mutable i64 = -1
+                reviewer_e: mutable i64 = -1
+                reviewer_idx: i64 = Json::rh_json_obj_get(nodes, texts, cchild, "reviewed_by")
+                if reviewer_idx >= 0:
+                    return -1 if not Json::rh_json_str_span(nodes, reviewer_idx, &reviewer_s, &reviewer_e) or reviewer_s == reviewer_e
+                reviewed_at_ok: mutable i64 = 0
+                reviewed_at: mutable i64 = rh_cr_int(nodes, raw, texts, cchild, "reviewed_at", &reviewed_at_ok)
+                reviewed_at <- -1 if reviewed_at_ok == 0
+                return -1 if state != Correction::RH_CORR_OPEN and (reviewer_idx < 0 or reviewed_at_ok == 0 or reviewed_at < 0)
+                return -1 if reviewer_idx >= 0 and (reviewed_at_ok == 0 or reviewed_at < 0)
+                return -1 if reviewer_idx < 0 and reviewed_at_ok != 0
                 before: i64 = rev
                 # Idempotent replay: a correction at or below the watermark ordinal
                 # was folded in by a prior run, so it is recorded as already-applied
@@ -199,12 +213,15 @@ module CorrectionReport:
                 app_super.push(scount)
                 app_evidence_s.push(evidence_s)
                 app_evidence_e.push(evidence_e)
+                app_reviewer_s.push(reviewer_s)
+                app_reviewer_e.push(reviewer_e)
+                app_reviewed_at.push(reviewed_at)
                 cchild <- nodes[cchild.usize()].next_sibling
 
             Base::rh_push_text(out, "{\"schema\":\"rh-corrections-result/1\",\"final_revision\":")
             Base::rh_push_decimal_i64(out, rev)
             Base::rh_push_text(out, ",\"applied\":[")
-            while i < app_kind.count.i64() |i: i64 = 0, app_kind, app_target, app_state, app_before, app_after, app_super, app_evidence_s, app_evidence_e, texts, out|:
+            while i < app_kind.count.i64() |i: i64 = 0, app_kind, app_target, app_state, app_before, app_after, app_super, app_evidence_s, app_evidence_e, app_reviewer_s, app_reviewer_e, app_reviewed_at, texts, out|:
                 if i > 0:
                     out.push(44)
                 Base::rh_push_text(out, "{\"kind\":\"")
@@ -221,7 +238,18 @@ module CorrectionReport:
                 Base::rh_push_decimal_i64(out, app_super[i.usize()])
                 Base::rh_push_text(out, ",\"evidence_ref\":\"")
                 Base::rh_json_escape(out, texts, app_evidence_s[i.usize()].usize(), app_evidence_e[i.usize()].usize())
-                Base::rh_push_text(out, "\"")
+                Base::rh_push_text(out, "\",\"reviewed_by\":")
+                if app_reviewer_s[i.usize()] < 0:
+                    Base::rh_push_text(out, "null")
+                else:
+                    Base::rh_push_text(out, "\"")
+                    Base::rh_json_escape(out, texts, app_reviewer_s[i.usize()].usize(), app_reviewer_e[i.usize()].usize())
+                    Base::rh_push_text(out, "\"")
+                Base::rh_push_text(out, ",\"reviewed_at\":")
+                if app_reviewed_at[i.usize()] < 0:
+                    Base::rh_push_text(out, "null")
+                else:
+                    Base::rh_push_decimal_i64(out, app_reviewed_at[i.usize()])
                 Base::rh_push_text(out, "}")
                 i <- i + 1
             Base::rh_push_text(out, "],\"derived\":[")

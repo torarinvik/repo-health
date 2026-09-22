@@ -712,7 +712,7 @@ absent.
 
 **M06-07: Correction workflow.** Accept identity, mapping, and measurement disputes with supporting evidence. Implement review states, accepted corrections, publication notices, and invalidation/replay.
 
-The correction CLI now requires a nonempty `evidence_ref` on every dispute and retains it on the corresponding result entry across open, accepted, and rejected states. The reference remains opaque; registration and access-policy verification, reviewer identity, and publication notices remain open work.
+The correction CLI now requires a nonempty `evidence_ref` on every dispute and retains it on the corresponding result entry across open, accepted, and rejected states. Accepted and rejected records also require `reviewed_by` and nonnegative `reviewed_at`; open records emit null review metadata. Evidence references remain opaque; registration/access-policy verification and publication notices remain open work.
 
 **M06-08: Notifications.** Support authorized user-configured destinations, alert deduplication, cooldowns, acknowledgment, resolution, and source-outage suppression. Do not send unsolicited accusations to upstream maintainers.
 
