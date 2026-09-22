@@ -31,6 +31,7 @@ echo "[resolution] separate package identity from graph instance"
 "$ROOT/build/rh_cli" resolution --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "resolution run"
 python3 - "$T/in.json" "$T/out.json" <<'PY'
 import json, sys
+import hashlib
 raw = open(sys.argv[1], "rb").read()
 digest = 14695981039346656037
 for b in raw:
@@ -38,6 +39,11 @@ for b in raw:
     digest = (digest * 1099511628211) & ((1 << 64) - 1)
 digest = f"{digest:016x}"
 d = json.load(open(sys.argv[2]))
+tr = json.load(open(sys.argv[2] + ".transformations.json"))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "dependency-resolution-instances", tr
+assert tr["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/dependency-resolution-instances/1").hexdigest(), tr
 assert d["schema"] == "rh-resolution-instance/1", d
 assert d["graph_snapshot"] == {"digest": digest, "schema": "rh-dep-graph/1", "ecosystem": "cargo"}, d["graph_snapshot"]
 assert d["unresolved_count"] == 2, d
