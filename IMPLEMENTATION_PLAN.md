@@ -712,6 +712,8 @@ absent.
 
 **M06-07: Correction workflow.** Accept identity, mapping, and measurement disputes with supporting evidence. Implement review states, accepted corrections, publication notices, and invalidation/replay.
 
+The correction CLI now requires a nonempty `evidence_ref` on every dispute and retains it on the corresponding result entry across open, accepted, and rejected states. The reference remains opaque; registration and access-policy verification, reviewer identity, and publication notices remain open work.
+
 **M06-08: Notifications.** Support authorized user-configured destinations, alert deduplication, cooldowns, acknowledgment, resolution, and source-outage suppression. Do not send unsolicited accusations to upstream maintainers.
 
 **M06-09: Structured external findings.** Add an optional Scorecard findings adapter preserving original tool/check/probe version, subject revision, assessment time, typed outcome, polarity, locations and remediation. Unknown, omitted, inconclusive and error are distinct from false or failed. Three delivery paths for one run remain one origin assessment. Bind decisions to these findings and local rule versions; delivery time does not refresh assessment age. Evidence drill-down must reach both source payload and transformation/loss metadata. (Paper §§11, 20.)
