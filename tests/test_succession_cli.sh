@@ -42,6 +42,41 @@ assert metrics["succession.observed_activity_overlap_months"]["value"] == 3, met
 print("[succession] overlap OK")
 PY
 
+echo "[succession] explicit follow-up reports activity and right censoring"
+python3 - "$T/follow-up.json" <<'PY'
+import json, sys
+alice = [True]*6 + [False]*6
+bob = [False]*3 + [True]*9
+open(sys.argv[1], "w").write(json.dumps({
+  "schema":"rh-succession-input/2","complete_months":12,
+  "predecessor":0,"successor":1,"handover_month":5,"follow_up_months":6,
+  "presence":[alice,bob]}))
+PY
+"$ROOT/build/rh_cli" succession --input "$T/follow-up.json" --out "$T/follow-up.out" >/dev/null || fail "follow-up run"
+python3 - "$T/follow-up.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["handover_month"] == 5, d
+assert d["follow_up"] == {"requested_months":6,"observed_months":6,"successor_active_months":6}, d
+m = {x["key"]: x for x in d["metrics"]}["succession.successor_follow_up_active_months"]
+assert m["status"] == "observed" and m["value"] == 6, m
+print("[succession] complete follow-up OK")
+PY
+python3 - "$T/follow-up.json" "$T/censored.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["follow_up_months"] = 10
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" succession --input "$T/censored.json" --out "$T/censored.out" >/dev/null || fail "censored follow-up run"
+python3 - "$T/censored.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["follow_up"] == {"requested_months":10,"observed_months":6,"successor_active_months":6}, d
+m = {x["key"]: x for x in d["metrics"]}["succession.successor_follow_up_active_months"]
+assert m["status"] == "partial" and m["value"] == 6 and m["requested_months"] == 10, m
+print("[succession] right-censored follow-up OK")
+PY
+
 echo "[succession] absent declared pair is not_applicable (never zero)"
 python3 - "$T/nopair.json" <<'PY'
 import json, sys
@@ -96,10 +131,11 @@ rc3=$(check_rc '{"schema":"rh-succession-input/1","complete_months":12}')
 rc4=$(check_rc '{"schema":"rh-succession-input/1","complete_months":12,"presence":[[true,false]]}')
 rc5=$(check_rc '{"schema":"rh-succession-input/1","complete_months":12,"predecessor":0,"successor":1,"presence":[[1,0]]}')
 rc6=$(check_rc 'not json')
+rc8=$(check_rc '{"schema":"rh-succession-input/2","complete_months":12,"presence":[]}')
 "$ROOT/build/rh_cli" succession --input "$T/nope.json" --out "$T/x.out" >/dev/null 2>&1
 rc7=$?
 set -e
-for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7"; do
+for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7" "$rc8"; do
   [[ "$rc" -eq 4 ]] || fail "malformed succession input must exit 4 (got $rc)"
 done
 

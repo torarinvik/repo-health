@@ -760,11 +760,27 @@ module Continuity:
         # `not_applicable` — an absent declaration is not a claim of zero overlap.
         # A non-positive complete-month count is `not_applicable` too (no window,
         # nothing to measure). The count is a plain count (unit: count), not a ratio.
-        def rh_succession_metrics_write(out: mutable darray[u8]&, presence: darray[u8]&, predecessor: i64, successor: i64, n_months: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_succession_metrics_write(out: mutable darray[u8]&, presence: darray[u8]&, predecessor: i64, successor: i64, n_months: i64, handover_month: i64, follow_up_months: i64) -> void can[Memory.Allocate, Abort.Panic]:
             pair_valid: bool = predecessor >= 0 and successor >= 0 and predecessor != successor and n_months > 0
             overlap: mutable i64 = -1
             if pair_valid:
                 overlap <- rh_overlap_months(presence, predecessor, successor, n_months)
+            follow_start: i64 = handover_month + 1
+            follow_observed_months: i64 =
+                if handover_month >= 0 and follow_up_months > 0 and follow_start < n_months:
+                    follow_up_months if follow_start + follow_up_months <= n_months else n_months - follow_start
+                else:
+                    0
+            follow_presence: mutable darray[u8]& = presence
+            follow_successor: mutable i64 = successor
+            follow_month_count: mutable i64 = n_months
+            follow_start_month: mutable i64 = follow_start
+            follow_active_months: i64 =
+                while m < follow_observed_months |active: i64 = 0, m: i64 = 0, follow_presence, follow_successor, follow_month_count, follow_start_month| -> active:
+                    if rh_presence_get(follow_presence, follow_successor, follow_month_count, follow_start_month + m):
+                        active <- active + 1
+                    m <- m + 1
+            follow_complete: bool = follow_up_months > 0 and follow_observed_months == follow_up_months
             Base::rh_push_text(out, "{\"schema\":\"rh-continuity-metrics/1\",\"metric\":\"succession.handover_overlap_months\",\"version\":\"1.0.0\",\"status\":\"")
             if predecessor < 0 or successor < 0 or n_months <= 0:
                 Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-declared-predecessor-successor-pair\"")
@@ -779,7 +795,24 @@ module Continuity:
             Base::rh_push_decimal_i64(out, successor)
             Base::rh_push_text(out, "},\"window_complete_months\":")
             Base::rh_push_decimal_i64(out, n_months)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"],\"note\":\"explicit declared handover overlap only; an activity-derived primary-change interval is a different measure and is never substituted here (no motive attribution)\",\"metrics\":[")
+            Base::rh_push_text(out, ",\"handover_month\":")
+            if handover_month < 0:
+                Base::rh_push_text(out, "null")
+            else:
+                Base::rh_push_decimal_i64(out, handover_month)
+            Base::rh_push_text(out, ",\"follow_up\":{\"requested_months\":")
+            if follow_up_months < 0:
+                Base::rh_push_text(out, "null")
+            else:
+                Base::rh_push_decimal_i64(out, follow_up_months)
+            Base::rh_push_text(out, ",\"observed_months\":")
+            Base::rh_push_decimal_i64(out, follow_observed_months)
+            Base::rh_push_text(out, ",\"successor_active_months\":")
+            if handover_month < 0 or follow_up_months <= 0:
+                Base::rh_push_text(out, "null")
+            else:
+                Base::rh_push_decimal_i64(out, follow_active_months)
+            Base::rh_push_text(out, "},\"evidence\":[\"evidence/git-log.bin\"],\"note\":\"declared predecessor/successor overlap and successor activity after the explicit handover month; incomplete follow-up is censored; no motive attribution or causal transfer is inferred\",\"metrics\":[")
             Base::rh_push_text(out, "{\"key\":\"succession.declared_handovers\",\"version\":\"1.0.0\",\"status\":\"")
             if pair_valid:
                 Base::rh_push_text(out, "observed\",\"value\":1")
@@ -796,6 +829,17 @@ module Continuity:
                 Base::rh_push_text(out, "not_applicable\",\"reason\":\"predecessor-and-successor-are-the-same-actor\"")
             else:
                 Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-declared-predecessor-successor-pair\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]}, {\"key\":\"succession.successor_follow_up_active_months\",\"version\":\"1.0.0\",\"status\":\"")
+            if handover_month < 0 or follow_up_months <= 0 or successor < 0:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-explicit-handover-follow-up-window\"")
+            else:
+                Base::rh_push_text(out, "partial\",\"value\":") if not follow_complete
+                Base::rh_push_text(out, "observed\",\"value\":") if follow_complete
+                Base::rh_push_decimal_i64(out, follow_active_months)
+                Base::rh_push_text(out, ",\"observed_months\":")
+                Base::rh_push_decimal_i64(out, follow_observed_months)
+                Base::rh_push_text(out, ",\"requested_months\":")
+                Base::rh_push_decimal_i64(out, follow_up_months)
             Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]}]}")
 
     private:
