@@ -29,6 +29,7 @@ include "./rh_nuget_lock.elisa"
 include "./rh_artifact_observation.elisa"
 include "./rh_osv_query.elisa"
 include "./rh_depsdev.elisa"
+include "./rh_depsdev_transformation.elisa"
 include "./rh_ecosystem_lookup.elisa"
 include "./rh_ecosystem_lookup_transformation.elisa"
 include "./rh_adapter_manifest.elisa"
@@ -4750,6 +4751,25 @@ module OsvQueryCli:
 # Captures one provider version response with bounded transport evidence and
 # emits a provenance/coverage record. This sidecar never changes the local
 # dependency graph and therefore remains optional when the provider is down.
+def rh_depsdev_write_transformation(input: darray[u8]&, output: darray[u8]&, out_path: cstr) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    configuration: mutable darray[u8] = []
+    Base::rh_push_text(configuration, "repo-health/deps.dev-version/1")
+    configuration_sha: mutable darray[u8] = []
+    input_sha: mutable darray[u8] = []
+    output_sha: mutable darray[u8] = []
+    Sha256::rh_sha256(configuration, configuration_sha)
+    Sha256::rh_sha256(input, input_sha)
+    Sha256::rh_sha256(output, output_sha)
+    report: mutable darray[u8] = []
+    DepsDevTransformation::rh_depsdev_transformation_report(configuration_sha, input_sha, output_sha, report)
+    report.push(10)
+    report_path: mutable darray[u8] = []
+    Base::rh_push_cstr(report_path, out_path)
+    Base::rh_push_text(report_path, ".transformations.json")
+    report_path.push(0)
+    report_ptr: cstr = (&report_path[0]).cast[cstr] can Unsafe.PointerCast
+    Base::rh_io_write(report_ptr, report)
+
 def rh_do_depsdev(input_path: cstr, out_path: cstr, source_url: cstr, has_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected depsdev output argument (allowlist)")
@@ -4811,6 +4831,9 @@ def rh_do_depsdev(input_path: cstr, out_path: cstr, source_url: cstr, has_url: b
         return 4
     body.push(10)
     return 4 if not Base::rh_io_write(out_path, body)
+    if not rh_depsdev_write_transformation(raw, body, out_path):
+        rh_cli_err("depsdev: cannot write transformation report")
+        return 4
     rh_cli_out("depsdev: enrichment observed")
     0
 

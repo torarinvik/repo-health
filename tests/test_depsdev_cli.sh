@@ -27,6 +27,12 @@ assert d["coverage"] == {"scope": "one-version", "status": "complete", "fields":
 assert d["package"] == {"system": "npm", "name": "left", "version": "1.0.0", "published_at": "2024-03-10T12:00:00Z"}, d["package"]
 assert d["dependency_count"] == 3, d
 assert d["advisory_keys"] == ["GHSA-aaaa-bbbb-cccc", "CVE-2025-0002"], d
+import hashlib
+tr = json.load(open(sys.argv[1] + ".transformations.json"))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "deps.dev-version", tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[1].replace("offline.json", "in.json"), "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert any(x["state"] == "unknown" for x in tr["fields"]), tr
 print("[depsdev] origin + coverage OK")
 PY
 
@@ -39,6 +45,9 @@ assert d["origin"] == {"provider": "deps.dev", "transport": "online", "source_ur
 s = json.load(open(sys.argv[2]))
 assert s["schema"] == "rh-depsdev-fetch/1" and s["status"] == "000", s
 assert s["state"] == "collected" and s["body_file"] == "depsdev-fetch-body.json", s
+tr = json.load(open(sys.argv[1] + ".transformations.json"))
+assert tr["source_input_sha256"] == __import__("hashlib").sha256(open("/tmp/rh-depsdev/depsdev-fetch-body.json", "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == __import__("hashlib").sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
 print("[depsdev] transport provenance OK")
 PY
 cmp -s "$T/in.json" "$T/depsdev-fetch-body.json" || fail "body evidence not retained"
