@@ -34,6 +34,23 @@ module Adoption:
             present_out[0] <- 1
             true
 
+        def rh_adoption_optional_field(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Adoption::rh_adoption_get(nodes, texts, obj, key)
+            if idx < 0:
+                value_out[0] <- 0
+                present_out[0] <- 0
+                return true
+            if nodes[idx.usize()].kind == Json::RH_JSON_NULL:
+                value_out[0] <- 0
+                present_out[0] <- 0
+                return true
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
+            return false if ok == 0 or value < 0
+            value_out[0] <- value
+            present_out[0] <- 1
+            true
+
     public:
         def rh_adoption_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             nodes: mutable darray[Json::RhJsonNode] = []
@@ -60,12 +77,24 @@ module Adoption:
                     has_intro: mutable i64 = 0
                     has_removal: mutable i64 = 0
                     return -1 if not Adoption::rh_adoption_optional(nodes, raw_loop, texts, child, "first_seen", &first, &has_first) or not Adoption::rh_adoption_optional(nodes, raw_loop, texts, child, "confirmed_introduction", &intro, &has_intro) or not Adoption::rh_adoption_optional(nodes, raw_loop, texts, child, "confirmed_removal", &removal, &has_removal)
-                    return -1 if has_first != 0 and first > cutoff or has_intro != 0 and intro > cutoff or has_removal != 0 and removal > cutoff
+                    last: mutable i64 = 0
+                    first_version: mutable i64 = 0
+                    latest_version: mutable i64 = 0
+                    supported_major: mutable i64 = 0
+                    has_last: mutable i64 = 0
+                    has_first_version: mutable i64 = 0
+                    has_latest_version: mutable i64 = 0
+                    has_supported_major: mutable i64 = 0
+                    return -1 if not Adoption::rh_adoption_optional_field(nodes, raw_loop, texts, child, "last_seen", &last, &has_last) or not Adoption::rh_adoption_optional_field(nodes, raw_loop, texts, child, "first_version_ord", &first_version, &has_first_version) or not Adoption::rh_adoption_optional_field(nodes, raw_loop, texts, child, "latest_version_ord", &latest_version, &has_latest_version) or not Adoption::rh_adoption_optional_field(nodes, raw_loop, texts, child, "supported_major", &supported_major, &has_supported_major)
+                    return -1 if has_first != 0 and first > cutoff or has_last != 0 and last > cutoff or has_intro != 0 and intro > cutoff or has_removal != 0 and removal > cutoff
                     return -1 if has_intro != 0 and has_removal != 0 and removal < intro
-                    adoption: Downstream::RhAdoption = Downstream::RhAdoption{first_seen: first, confirmed_intro: intro, last_seen: 0, confirmed_removal: removal}
+                    return -1 if has_first != 0 and has_last != 0 and last < first
+                    return -1 if has_intro != 0 and has_last != 0 and last < intro
+                    return -1 if has_first_version != 0 and first_version <= 0 or has_latest_version != 0 and latest_version <= 0 or has_supported_major != 0 and supported_major <= 0
+                    adoption: Downstream::RhAdoption = Downstream::RhAdoption{first_seen: first, has_first_seen: has_first != 0, confirmed_intro: intro, has_confirmed_intro: has_intro != 0, last_seen: last, has_last_seen: has_last != 0, confirmed_removal: removal, has_confirmed_removal: has_removal != 0}
                     if child != first_child:
                         body.push(44)
-                    Downstream::rh_adoption_write(body, adoption, cutoff)
+                    Downstream::rh_adoption_write(body, adoption, cutoff, first_version, has_first_version != 0, latest_version, has_latest_version != 0, supported_major, has_supported_major != 0)
                     state: u8 = Downstream::rh_adoption_status(adoption)
                     if state == Downstream::RH_ADOPT_UNKNOWN:
                         unknown <- unknown + 1

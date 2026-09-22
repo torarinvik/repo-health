@@ -27,14 +27,18 @@ module Downstream:
 
         struct RhAdoption:
             first_seen: mutable i64
+            has_first_seen: mutable bool
             confirmed_intro: mutable i64
+            has_confirmed_intro: mutable bool
             last_seen: mutable i64
+            has_last_seen: mutable bool
             confirmed_removal: mutable i64
+            has_confirmed_removal: mutable bool
 
         def rh_adoption_status(a: RhAdoption&) -> u8:
-            return RH_ADOPT_CONFIRMED_REMOVAL if a.confirmed_removal > 0
-            return RH_ADOPT_CONFIRMED_INTRO if a.confirmed_intro > 0
-            return RH_ADOPT_FIRST_SEEN_ONLY if a.first_seen > 0
+            return RH_ADOPT_CONFIRMED_REMOVAL if a.has_confirmed_removal
+            return RH_ADOPT_CONFIRMED_INTRO if a.has_confirmed_intro
+            return RH_ADOPT_FIRST_SEEN_ONLY if a.has_first_seen
             RH_ADOPT_UNKNOWN
 
         # Observed upgrade: two distinct version ordinals seen, newer is higher.
@@ -123,7 +127,7 @@ module Downstream:
 
         # Adoption report fields for one dependency edge: staged evidence with
         # censoring, so a reader can tell observation from confirmation.
-        def rh_adoption_write(out: mutable darray[u8]&, a: RhAdoption&, cutoff: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_adoption_write(out: mutable darray[u8]&, a: RhAdoption&, cutoff: i64, first_version_ord: i64, has_first_version_ord: bool, latest_version_ord: i64, has_latest_version_ord: bool, supported_major: i64, has_supported_major: bool) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"status\":\"")
             s: u8 = rh_adoption_status(a)
             if s == RH_ADOPT_CONFIRMED_REMOVAL:
@@ -135,22 +139,48 @@ module Downstream:
             else:
                 Base::rh_push_text(out, "unknown")
             Base::rh_push_text(out, "\",\"first_seen\":")
-            if a.first_seen > 0:
+            if a.has_first_seen:
                 Base::rh_push_decimal_i64(out, a.first_seen)
             else:
                 Base::rh_push_text(out, "null")
             Base::rh_push_text(out, ",\"confirmed_introduction\":")
-            if a.confirmed_intro > 0:
+            if a.has_confirmed_intro:
                 Base::rh_push_decimal_i64(out, a.confirmed_intro)
             else:
                 Base::rh_push_text(out, "null")
             Base::rh_push_text(out, ",\"confirmed_removal\":")
-            if a.confirmed_removal > 0:
+            if a.has_confirmed_removal:
                 Base::rh_push_decimal_i64(out, a.confirmed_removal)
             else:
                 Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"last_seen\":")
+            Base::rh_push_decimal_i64(out, a.last_seen) if a.has_last_seen else Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"observed_upgrade\":")
+            if has_first_version_ord and has_latest_version_ord:
+                Base::rh_push_text(out, "true") if Downstream::rh_observed_upgrade(first_version_ord, latest_version_ord) else Base::rh_push_text(out, "false")
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"supported_line\":")
+            if has_latest_version_ord and has_supported_major:
+                Base::rh_push_text(out, "true") if Downstream::rh_on_supported_line(latest_version_ord, supported_major) else Base::rh_push_text(out, "false")
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"duration_seconds\":")
+            if a.has_confirmed_intro:
+                duration_end: i64 = a.confirmed_removal if a.has_confirmed_removal else a.last_seen if a.has_last_seen else cutoff
+                Base::rh_push_decimal_i64(out, duration_end - a.confirmed_intro)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"duration_status\":\"")
+            if not a.has_confirmed_intro:
+                Base::rh_push_text(out, "unknown")
+            elif a.has_confirmed_removal:
+                Base::rh_push_text(out, "confirmed_removal")
+            else:
+                Base::rh_push_text(out, "right_censored")
+            Base::rh_push_text(out, "\"")
             Base::rh_push_text(out, ",\"duration_censored\":")
-            if a.confirmed_removal > 0 and a.confirmed_intro > 0:
+            if a.has_confirmed_removal and a.has_confirmed_intro:
                 d: i64 = a.confirmed_removal - a.confirmed_intro
                 Base::rh_push_decimal_i64(out, d)
             else:

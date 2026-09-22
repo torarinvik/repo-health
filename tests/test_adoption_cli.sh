@@ -12,7 +12,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-adoption-input/1","cutoff":1000,"adoptions":[{"first_seen":100,"confirmed_introduction":null,"confirmed_removal":null},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":null},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":500},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null}]}
+{"schema":"rh-adoption-input/1","cutoff":1000,"adoptions":[{"first_seen":0,"confirmed_introduction":null,"confirmed_removal":null,"last_seen":900,"first_version_ord":1001001,"latest_version_ord":2000001,"supported_major":2},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":null,"last_seen":850,"first_version_ord":1001001,"latest_version_ord":1001000,"supported_major":2},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":500,"last_seen":500,"first_version_ord":1001001,"latest_version_ord":1001001,"supported_major":1},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":500},{"first_seen":null,"confirmed_introduction":0,"confirmed_removal":null,"last_seen":900}]}
 JSON
 "$ROOT/build/rh_cli" adoption --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "adoption run"
 python3 - "$T/out.json" <<'PY'
@@ -20,15 +20,24 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-adoption-result/1", d
 assert d["cutoff"] == 1000, d
-assert [a["status"] for a in d["adoptions"]] == ["first_seen_only", "confirmed_introduced", "confirmed_removal", "unknown"], d
+assert [a["status"] for a in d["adoptions"]] == ["first_seen_only", "confirmed_introduced", "confirmed_removal", "unknown", "confirmed_removal", "confirmed_introduced"], d
 assert d["adoptions"][0]["duration_censored"] is True, d
 assert d["adoptions"][2]["duration_censored"] == 300, d
-assert d["status_counts"] == {"unknown": 1, "first_seen_only": 1, "confirmed_introduced": 1, "confirmed_removal": 1}, d
+assert d["adoptions"][0]["last_seen"] == 900, d
+assert d["adoptions"][0]["first_seen"] == 0, d
+assert d["adoptions"][0]["observed_upgrade"] is True and d["adoptions"][0]["supported_line"] is True, d
+assert d["adoptions"][1]["observed_upgrade"] is False and d["adoptions"][1]["supported_line"] is False, d
+assert d["adoptions"][1]["duration_seconds"] == 650 and d["adoptions"][1]["duration_status"] == "right_censored", d
+assert d["adoptions"][2]["duration_seconds"] == 300 and d["adoptions"][2]["duration_status"] == "confirmed_removal", d
+assert d["adoptions"][3]["observed_upgrade"] is None and d["adoptions"][3]["supported_line"] is None, d
+assert d["adoptions"][4]["duration_seconds"] is None and d["adoptions"][4]["duration_status"] == "unknown", d
+assert d["adoptions"][5]["confirmed_introduction"] == 0 and d["adoptions"][5]["duration_seconds"] == 900, d
+assert d["status_counts"] == {"unknown": 1, "first_seen_only": 1, "confirmed_introduced": 2, "confirmed_removal": 2}, d
 metrics = {m["key"]: m for m in d["metrics"]}
 assert metrics["adoption.unknown_count"]["value"] == 1, metrics
 assert metrics["adoption.first_seen_only_count"]["value"] == 1, metrics
-assert metrics["adoption.confirmed_introduction_count"]["value"] == 1, metrics
-assert metrics["adoption.confirmed_removal_count"]["value"] == 1, metrics
+assert metrics["adoption.confirmed_introduction_count"]["value"] == 2, metrics
+assert metrics["adoption.confirmed_removal_count"]["value"] == 2, metrics
 assert "not proof of migration" in d["note"], d
 print("[adoption] staged states + right censoring OK")
 PY
@@ -41,9 +50,13 @@ sed 's/"confirmed_removal":500/"confirmed_removal":50/' "$T/in.json" > "$T/bad-o
 "$ROOT/build/rh_cli" adoption --input "$T/bad-order.json" --out "$T/x" >/dev/null 2>&1; rc_order=$?
 sed 's/"cutoff":1000/"cutoff":150/' "$T/in.json" > "$T/bad-cutoff.json"
 "$ROOT/build/rh_cli" adoption --input "$T/bad-cutoff.json" --out "$T/x" >/dev/null 2>&1; rc_cutoff=$?
+sed 's/"last_seen":850/"last_seen":150/' "$T/in.json" > "$T/bad-last-seen.json"
+"$ROOT/build/rh_cli" adoption --input "$T/bad-last-seen.json" --out "$T/x" >/dev/null 2>&1; rc_last=$?
+sed 's/"latest_version_ord":2000001/"latest_version_ord":0/' "$T/in.json" > "$T/bad-version.json"
+"$ROOT/build/rh_cli" adoption --input "$T/bad-version.json" --out "$T/x" >/dev/null 2>&1; rc_version=$?
 printf '{"schema":"rh-adoption-input/1","cutoff":1,"adoptions":[{"first_seen":null,"confirmed_introduction":null}]}' > "$T/missing.json"
 "$ROOT/build/rh_cli" adoption --input "$T/missing.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-[[ "$rc_order" -eq 4 && "$rc_cutoff" -eq 4 && "$rc_missing" -eq 4 ]] || fail "invalid adoption must exit 4 (got $rc_order/$rc_cutoff/$rc_missing)"
+[[ "$rc_order" -eq 4 && "$rc_cutoff" -eq 4 && "$rc_last" -eq 4 && "$rc_version" -eq 4 && "$rc_missing" -eq 4 ]] || fail "invalid adoption must exit 4 (got $rc_order/$rc_cutoff/$rc_last/$rc_version/$rc_missing)"
 
 echo "test_adoption_cli OK"
