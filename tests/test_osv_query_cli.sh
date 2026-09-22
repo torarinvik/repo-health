@@ -105,6 +105,12 @@ assert args[args.index("--resolve") + 1] == "api.osv.dev:443:93.184.216.34", arg
 assert args[args.index("--data-binary") + 1].startswith("@"), args
 assert "-L" not in args and not any(x.startswith("Authorization:") for x in args)
 result = json.load(open(out / "osv-query-result.json"))
+transformation = json.load(open(out / "osv-query-transformations.json"))
+assert transformation["schema"] == "rh-adapter-transformation-report/1", transformation
+assert transformation["adapter"] == "osv-package-version-query", transformation
+assert transformation["source_input_sha256"] == hashlib.sha256((t / "query.json").read_bytes()).hexdigest(), transformation
+assert transformation["normalized_output_sha256"] == hashlib.sha256((out / "osv-query-response.json").read_bytes()).hexdigest(), transformation
+assert transformation["configuration_sha256"] == hashlib.sha256(b"repo-health/osv-package-version-query/1").hexdigest(), transformation
 assert result["schema"] == "rh-osv-query-result/1" and result["state"] == "collected", result
 assert result["query_kind"] == "package_version", result
 assert result["http_status"] == 200 and result["pagination"] == "complete", result

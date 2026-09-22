@@ -29,6 +29,7 @@ include "./rh_pylock_observation.elisa"
 include "./rh_nuget_lock.elisa"
 include "./rh_artifact_observation.elisa"
 include "./rh_osv_query.elisa"
+include "./rh_osv_query_transformation.elisa"
 include "./rh_depsdev.elisa"
 include "./rh_depsdev_transformation.elisa"
 include "./rh_ecosystem_lookup.elisa"
@@ -4763,6 +4764,28 @@ module OsvQueryCli:
                 result
             if not Base::rh_io_write(result_ptr, result):
                 rh_osv_query_err("osv-query: cannot write result envelope")
+                return 4
+            normalized_response: mutable darray[u8] = []
+            if Base::rh_io_read(response_ptr, normalized_response) < 0:
+                rh_osv_query_err("osv-query: cannot read normalized response for transformation report")
+                return 4
+            configuration: mutable darray[u8] = []
+            Base::rh_push_text(configuration, "repo-health/osv-package-version-query/1")
+            configuration_sha: mutable darray[u8] = []
+            input_sha: mutable darray[u8] = []
+            output_sha: mutable darray[u8] = []
+            Sha256::rh_sha256(configuration, configuration_sha)
+            Sha256::rh_sha256(input_raw, input_sha)
+            Sha256::rh_sha256(normalized_response, output_sha)
+            transformations: mutable darray[u8] = []
+            OsvQueryTransformation::rh_osv_query_transformation_report(configuration_sha, input_sha, output_sha, transformations)
+            transformations.push(10)
+            transformation_path: mutable darray[u8] = []
+            return 4 if not rh_osv_output_path(out, "osv-query-transformations.json", transformation_path)
+            transformation_path.push(0)
+            transformation_ptr: cstr = (&transformation_path[0]).cast[cstr] can Unsafe.PointerCast
+            if not Base::rh_io_write(transformation_ptr, transformations):
+                rh_osv_query_err("osv-query: cannot write transformation report")
                 return 4
             rh_osv_query_out("osv-query: captured bounded paginated response" if continue_pages and not more_available else "osv-query: pagination bound reached; result is partial" if more_available else "osv-query: captured response for the supplied query")
             0
