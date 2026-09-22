@@ -57,6 +57,43 @@ import json, sys
 assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))
 assert json.load(open(sys.argv[3]))["status"] == "duplicate"
 PY
+python3 - "$ROOT/fixtures/postgres/staged-github-issues-input.json" "$T/staged-normalize-postgres-input.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+value["source_id"] = "00000000-0000-0000-0000-000000000001"
+value["collection_run_id"] = "00000000-0000-0000-0000-000000000030"
+json.dump(value, open(sys.argv[2], "w"), separators=(",", ":"))
+with open(sys.argv[2], "a") as output:
+    output.write("\n")
+PY
+for mode in committed duplicate; do
+  RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+    RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=staged_normalize RH_FAKE_PG_EXPECT="$mode" \
+    "$ROOT/build/rh_cli" staged-normalize --input "$T/staged-normalize-postgres-input.json" \
+      --out "$T/staged-normalize-postgres-$mode.json" --postgres >/dev/null \
+    || fail "staged-normalize --postgres $mode"
+done
+python3 - "$T/staged-normalize-postgres-committed.json" "$T/staged-normalize-postgres-duplicate.json" "$ROOT/fixtures/postgres/staged-normalize-postgres-result.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[3]))
+assert json.load(open(sys.argv[2]))["status"] == "duplicate"
+PY
+cp "$T/staged-normalize-postgres-input.json" "$T/staged-normalize-postgres-invalid-input.json"
+python3 - "$T/staged-normalize-postgres-invalid-input.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.load(open(path))
+value["pages"][1]["evidence_id"] = "not-a-uuid"
+json.dump(value, open(path, "w"), separators=(",", ":"))
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=staged_normalize RH_FAKE_PG_CONNECT_MARK="$T/staged-normalize-invalid-connected" \
+    "$ROOT/build/rh_cli" staged-normalize --input "$T/staged-normalize-postgres-invalid-input.json" \
+      --out "$T/staged-normalize-postgres-invalid-result.json" --postgres >/dev/null 2>&1; then
+  fail "staged-normalize --postgres accepted bad evidence provenance"
+fi
+[[ ! -e "$T/staged-normalize-invalid-connected" ]] || fail "invalid staged normalization connected to PostgreSQL"
+[[ ! -e "$T/staged-normalize-postgres-invalid-result.json" ]] || fail "invalid staged normalization wrote a result"
 cp "$ROOT/fixtures/postgres/commit-staged-normalization-command.json" "$T/staged-normalization-invalid.json"
 python3 - "$T/staged-normalization-invalid.json" <<'PY'
 import json, sys

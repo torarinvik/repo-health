@@ -56,8 +56,9 @@ and Bitbucket staged rows through their allowlisted capability tokens. Its
 provenance, the normalizer/output schema, and a SHA-256 digest of the exact
 provider/capability field-transformation map; missing optional timestamps and
 URLs remain unknown. `tests/test_staged_forge_cli.sh` checks the supported
-provider/capability matrix and fail-closed cases. Canonical event write-back
-from this replay path remains open.
+provider/capability matrix and fail-closed cases. `staged-normalize --postgres`
+routes that result through canonical PostgreSQL write-back and returns the
+commit/replay result; `tests/test_postgres_cli.sh` covers the direct path.
 Capability manifests
 (5 connectors), bounded JSON parser, ISO8601, fetch guard + curl transport, GitHub/GitLab/Gitea/Forgejo
 normalizers with goldens, per-capability status mapping, durable
