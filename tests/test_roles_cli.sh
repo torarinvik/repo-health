@@ -17,13 +17,14 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":true,"review_actor_id":4,"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"observed_actions":[{"actor_id":1,"actor_type":"bot","kind":"release","at":120},{"actor_id":2,"identity_actor_id":1,"actor_type":"human","kind":"release","at":130},{"kind":"release","at":135},{"actor_id":null,"kind":"release","at":136},{"actor_id":3,"kind":"merge","at":140},{"actor_id":4,"kind":"review","at":150},{"actor_id":4,"kind":"review","at":160}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
+{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":true,"identity_revision":8,"review_actor_id":4,"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"observed_actions":[{"actor_id":1,"actor_type":"bot","kind":"release","at":120},{"actor_id":2,"identity_actor_id":1,"actor_type":"human","kind":"release","at":130},{"kind":"release","at":135},{"actor_id":null,"kind":"release","at":136},{"actor_id":3,"kind":"merge","at":140},{"actor_id":4,"kind":"review","at":150},{"actor_id":4,"kind":"review","at":160}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
 JSON
 "$ROOT/build/rh_cli" roles --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
 python3 - "$T/out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-roles-result/1", d
+assert d["identity_revision"] == 8, d
 assert d["declaration_count"] == 4, d
 assert d["authorization_state"] == "authorized", d
 assert d["source_tally"] == {"provider": 1, "file": 2, "operator": 1}, d["source_tally"]
@@ -144,11 +145,13 @@ printf '{"schema":"rh-roles-input/1","authorization":{"state":"maybe"},"declarat
 "$ROOT/build/rh_cli" roles --input "$T/bauth.json" --out "$T/x" >/dev/null 2>&1; rc_auth=$?
 printf '{"schema":"rh-roles-input/1","declarations":[],"observed_actions":[{"actor_id":1,"actor_type":"robot","kind":"release","at":1}]}' > "$T/bactor-type.json"
 "$ROOT/build/rh_cli" roles --input "$T/bactor-type.json" --out "$T/x" >/dev/null 2>&1; rc_actor_type=$?
+printf '{"schema":"rh-roles-input/1","declarations":[],"observed_actions":[{"actor_id":1,"identity_actor_id":0,"kind":"release","at":1}]}' > "$T/bidentity-revision.json"
+"$ROOT/build/rh_cli" roles --input "$T/bidentity-revision.json" --out "$T/x" >/dev/null 2>&1; rc_identity_revision=$?
 printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" roles --input "$T/notjson.json" --out "$T/x" >/dev/null 2>&1; rc_json=$?
 "$ROOT/build/rh_cli" roles --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_src" "$rc_decls" "$rc_id" "$rc_auth" "$rc_actor_type" "$rc_json" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_src" "$rc_decls" "$rc_id" "$rc_auth" "$rc_actor_type" "$rc_identity_revision" "$rc_json" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed roles input must exit 4 (got $rc)"
 done
 
