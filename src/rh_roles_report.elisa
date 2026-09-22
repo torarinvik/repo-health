@@ -94,12 +94,36 @@ module RolesReport:
             provider_e: mutable i64 = 0
             provider_is_gitlab: bool = provider_idx >= 0 and Json::rh_json_str_span(nodes, provider_idx, &provider_s, &provider_e) and rh_rr_eq(texts, provider_s, provider_e, "gitlab")
             identity_revision_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "identity_revision")
-            has_identity_revision: bool = identity_revision_idx >= 0
+            has_identity_revision: mutable bool = identity_revision_idx >= 0
             identity_revision: mutable i64 = -1
             if has_identity_revision:
                 identity_revision_ok: mutable i64 = 0
                 identity_revision <- Json::rh_json_int(nodes, raw, identity_revision_idx, &identity_revision_ok)
                 return -1 if identity_revision_ok == 0 or identity_revision < 0
+            identity_clusters: mutable darray[i64] = []
+            identity_snapshot_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "identity_snapshot")
+            has_identity_snapshot: bool = identity_snapshot_idx >= 0
+            if has_identity_snapshot:
+                return -1 if nodes[identity_snapshot_idx.usize()].kind != Json::RH_JSON_OBJ
+                snapshot_revision_idx: i64 = Json::rh_json_obj_get(nodes, texts, identity_snapshot_idx, "identity_revision")
+                snapshot_revision_ok: mutable i64 = 0
+                snapshot_revision: i64 = Json::rh_json_int(nodes, raw, snapshot_revision_idx, &snapshot_revision_ok)
+                return -1 if snapshot_revision_ok == 0 or snapshot_revision < 0
+                return -1 if has_identity_revision and identity_revision != snapshot_revision
+                identity_revision <- snapshot_revision
+                has_identity_revision <- true
+                identity_clusters_idx: i64 = Json::rh_json_obj_get(nodes, texts, identity_snapshot_idx, "cluster_id_by_actor")
+                return -1 if identity_clusters_idx < 0 or nodes[identity_clusters_idx.usize()].kind != Json::RH_JSON_ARR
+                clusters_array: Json::RhJsonNode = nodes[identity_clusters_idx.usize()]
+                while ic >= 0 |ic: i64 = clusters_array.first_child, nodes, raw, identity_clusters|:
+                    cluster_ok: mutable i64 = 0
+                    cluster_id: i64 = Json::rh_json_int(nodes, raw, ic, &cluster_ok)
+                    return -1 if cluster_ok == 0 or cluster_id < 0
+                    identity_clusters.push(cluster_id)
+                    ic <- nodes[ic.usize()].next_sibling
+                while icheck < identity_clusters.count |icheck: usize = 0, identity_clusters|:
+                    return -1 if identity_clusters[icheck] >= identity_clusters.count.i64()
+                    icheck <- icheck + 1
             decls: mutable darray[Roles::RhRoleDecl] = []
             actions: mutable darray[Roles::RhObservedAction] = []
             identity_override_count: mutable i64 = 0
@@ -158,10 +182,18 @@ module RolesReport:
                             return -1 if actor_ok == 0 or actor_action < 0
                     identity_actor_action: mutable i64 = actor_action
                     identity_actor_idx: i64 = Json::rh_json_obj_get(nodes, texts, ac, "identity_actor_id")
+                    identity_actor_index_idx: i64 = Json::rh_json_obj_get(nodes, texts, ac, "identity_actor_index")
+                    return -1 if identity_actor_idx >= 0 and identity_actor_index_idx >= 0
                     if identity_actor_idx >= 0:
                         identity_actor_ok: mutable i64 = 0
                         identity_actor_action <- Json::rh_json_int(nodes, raw, identity_actor_idx, &identity_actor_ok)
                         return -1 if identity_actor_ok == 0 or identity_actor_action < 0 or actor_action < 0
+                        identity_override_count <- identity_override_count + 1
+                    if identity_actor_index_idx >= 0:
+                        identity_actor_index_ok: mutable i64 = 0
+                        identity_actor_index: i64 = Json::rh_json_int(nodes, raw, identity_actor_index_idx, &identity_actor_index_ok)
+                        return -1 if not has_identity_snapshot or identity_actor_index_ok == 0 or identity_actor_index < 0 or identity_actor_index >= identity_clusters.count.i64() or actor_action < 0
+                        identity_actor_action <- identity_clusters[identity_actor_index.usize()]
                         identity_override_count <- identity_override_count + 1
                     at_action: i64 = rh_rr_int(nodes, raw, texts, ac, "at", -1)
                     kind_s: mutable i64 = 0
