@@ -1,0 +1,117 @@
+# Bounded public Bitbucket Cloud capability probes.
+include "./rh_base.elisa"
+include "./rh_git.elisa"
+include "./rh_json.elisa"
+
+module BitbucketProbe:
+    private:
+        struct RhBbpCapture:
+            status: mutable darray[u8]
+            transport: i64
+            valid: bool
+            ok: bool
+
+        def rh_bbp_char(byte: u8) -> bool:
+            (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95
+
+        def rh_bbp_repository_valid(repository: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            length: usize = Base::rh_cstr_len_c(repository)
+            return false if length < 3 or length > 255
+            slash: mutable usize = 0
+            while i < length |i: usize = 0, slash, repository|:
+                if repository[i] == 47:
+                    return false if slash != 0 or i == 0 or i + 1 == length
+                    slash <- i + 1
+                else:
+                    return false if not BitbucketProbe::rh_bbp_char(repository[i])
+                i <- i + 1
+            slash > 0 and not (slash == 1 and repository[0] == 46) and not (length - slash == 1 and repository[slash] == 46)
+
+        def rh_bbp_evidence_path(base: cstr, name: cstr, extension: cstr) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
+            path: mutable darray[u8] = []
+            Base::rh_push_cstr(path, base)
+            Base::rh_push_text(path, ".bitbucket-")
+            Base::rh_push_cstr(path, name)
+            Base::rh_push_text(path, ".")
+            Base::rh_push_cstr(path, extension)
+            path.push(0)
+            path
+
+        def rh_bbp_capture(repository: cstr, route: cstr, capability: cstr, evidence: cstr) -> RhBbpCapture can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            url: mutable darray[u8] = []
+            Base::rh_push_text(url, "https://api.bitbucket.org/2.0/repositories/")
+            Base::rh_push_cstr(url, repository)
+            Base::rh_push_text(url, "/")
+            Base::rh_push_cstr(url, route)
+            url.push(0)
+            url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
+            body_path: mutable darray[u8] = BitbucketProbe::rh_bbp_evidence_path(evidence, capability, "json")
+            status_path: mutable darray[u8] = BitbucketProbe::rh_bbp_evidence_path(evidence, capability, "status")
+            error_path: mutable darray[u8] = BitbucketProbe::rh_bbp_evidence_path(evidence, capability, "err")
+            url_path: mutable darray[u8] = BitbucketProbe::rh_bbp_evidence_path(evidence, capability, "url")
+            body_ptr: cstr = (&body_path[0]).cast[cstr] can Unsafe.PointerCast
+            status_ptr: cstr = (&status_path[0]).cast[cstr] can Unsafe.PointerCast
+            error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
+            url_file: cstr = (&url_path[0]).cast[cstr] can Unsafe.PointerCast
+            request_evidence: mutable darray[u8] = []
+            Base::rh_push_cstr(request_evidence, url_ptr)
+            request_evidence.push(10)
+            return RhBbpCapture{status: [], transport: -1, valid: false, ok: false} if not Base::rh_io_write(url_file, request_evidence)
+            transport: i64 = Git::rh_run_https_get(url_ptr, body_ptr, status_ptr, error_ptr)
+            return RhBbpCapture{status: [], transport: transport, valid: false, ok: false} if transport < 0
+            status: mutable darray[u8] = []
+            _ = Base::rh_io_read(status_ptr, status)
+            body: mutable darray[u8] = []
+            body_read: i64 = Base::rh_io_read(body_ptr, body)
+            return RhBbpCapture{status: status, transport: -1, valid: false, ok: false} if body_read < 0 or body.count.i64() > 3145728
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(body, nodes, texts) if Base::rh_bytes_equal_literal(status, 0, status.count.i64(), "200") else -1
+            values: i64 = Json::rh_json_obj_get(nodes, texts, root, "values") if root >= 0 and nodes[root.usize()].kind == Json::RH_JSON_OBJ else -1
+            RhBbpCapture{status: status, transport: transport, valid: values >= 0 and nodes[values.usize()].kind == Json::RH_JSON_ARR, ok: true}
+
+        def rh_bbp_status(capture: RhBbpCapture&) -> u8&:
+            return "unavailable" if capture.transport != 0
+            return "observed" if Base::rh_bytes_equal_literal(capture.status, 0, capture.status.count.i64(), "200") and capture.valid
+            return "malformed" if Base::rh_bytes_equal_literal(capture.status, 0, capture.status.count.i64(), "200")
+            return "unauthorized" if Base::rh_bytes_equal_literal(capture.status, 0, capture.status.count.i64(), "401")
+            return "forbidden_or_rate_limited" if Base::rh_bytes_equal_literal(capture.status, 0, capture.status.count.i64(), "403")
+            return "not_found_or_private" if Base::rh_bytes_equal_literal(capture.status, 0, capture.status.count.i64(), "404")
+            return "rate_limited" if Base::rh_bytes_equal_literal(capture.status, 0, capture.status.count.i64(), "429")
+            "unavailable"
+
+        def rh_bbp_emit_capability(out: mutable darray[u8]&, name: cstr, capture: RhBbpCapture&) -> void can[Memory.Allocate, Abort.Panic]:
+            label: u8& = BitbucketProbe::rh_bbp_status(capture)
+            Base::rh_push_text(out, "\"")
+            Base::rh_push_cstr(out, name)
+            Base::rh_push_text(out, "\":{\"declaration\":\"read-one-item\",\"status\":\"")
+            Base::rh_push_text(out, label)
+            Base::rh_push_text(out, "\",\"coverage_state\":\"")
+            Base::rh_push_text(out, "observed" if Base::rh_streq(label, "observed") else "partial" if Base::rh_streq(label, "malformed") else "unauthorized" if Base::rh_streq(label, "unauthorized") else "unavailable")
+            Base::rh_push_text(out, "\"}")
+
+        def rh_bbp_emit_unsupported(out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "\"releases\":{\"declaration\":\"unsupported\",\"status\":\"unsupported\",\"coverage_state\":\"unavailable\"}")
+
+    public:
+        # Tests two documented list endpoints. This API has no repository release-list resource.
+        def rh_bitbucket_capability_matrix(repository: cstr, evidence: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if not BitbucketProbe::rh_bbp_repository_valid(repository) or not Git::rh_arg_safe(evidence)
+            issues: RhBbpCapture = BitbucketProbe::rh_bbp_capture(repository, "issues?pagelen=1", "issues", evidence)
+            return -1 if not issues.ok
+            pulls: RhBbpCapture = BitbucketProbe::rh_bbp_capture(repository, "pullrequests?pagelen=1", "pulls", evidence)
+            return -1 if not pulls.ok
+            captured: i64 = Base::rh_now()
+            return -1 if captured < 0
+            Base::rh_push_text(out, "{\"schema\":\"rh-bitbucket-capability-matrix/1\",\"provider\":\"bitbucket\",\"captured_at\":")
+            Base::rh_push_decimal_i64(out, captured)
+            Base::rh_push_text(out, ",\"scope\":{\"repository\":\"")
+            Base::rh_push_cstr(out, repository)
+            Base::rh_push_text(out, "\"},\"capabilities\":{")
+            BitbucketProbe::rh_bbp_emit_capability(out, "issues", issues)
+            Base::rh_push_text(out, ",")
+            BitbucketProbe::rh_bbp_emit_capability(out, "pulls", pulls)
+            Base::rh_push_text(out, ",")
+            BitbucketProbe::rh_bbp_emit_unsupported(out)
+            Base::rh_push_text(out, "},\"note\":\"Issues and pull requests use fixed one-item REST list requests; Bitbucket Cloud exposes repository downloads but no release-list endpoint.\"}")
+            0

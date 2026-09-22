@@ -221,6 +221,10 @@ case "$url" in
     response_body="$RH_PROBE_ARRAY_BODY"
     response_http="${RH_FORGE_HTTP:-200}"
     ;;
+  "https://api.bitbucket.org/2.0/repositories/workspace/project/issues?pagelen=1"|"https://api.bitbucket.org/2.0/repositories/workspace/project/pullrequests?pagelen=1")
+    response_body="${RH_BITBUCKET_BODY:-$RH_PROBE_ARRAY_BODY}"
+    response_http="${RH_BITBUCKET_HTTP:-200}"
+    ;;
   *) exit 21 ;;
 esac
 cp "$response_body" "$body_out"
@@ -420,6 +424,59 @@ PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/forge-unapproved.args" \
 forge_unapproved_rc=$?
 set -e
 [[ "$forge_unapproved_rc" -eq 4 && ! -s "$T/forge-unapproved.args" && ! -e "$T/forge-unapproved.out" ]] || fail "unapproved forge reached transport"
+
+echo "[connector] Bitbucket Cloud probes issues and pull requests while releases stay unsupported"
+printf '%s\n' '{"values":[{"account_id":"private-account-must-stay-local"}]}' > "$T/bitbucket-array.json"
+: > "$T/bitbucket.args"
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/bitbucket.args" RH_PROBE_CURL_CONFIG="$T/bitbucket.config" \
+  RH_PROBE_BODY="$T/probe-error.json" RH_BITBUCKET_BODY="$T/bitbucket-array.json" \
+  "$ROOT/build/rh_cli" connector probe --bitbucket-repo workspace/project --all \
+    --out "$T/bitbucket-probe.out" >/dev/null || fail "Bitbucket capability matrix probe"
+python3 - "$T/bitbucket-probe.out" "$T" <<'PY'
+import json, os, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-bitbucket-capability-matrix/1", d
+assert d["provider"] == "bitbucket" and d["scope"] == {"repository":"workspace/project"}, d
+assert d["capabilities"]["issues"]["status"] == "observed", d
+assert d["capabilities"]["pulls"]["status"] == "observed", d
+assert d["capabilities"]["releases"] == {"declaration":"unsupported", "status":"unsupported", "coverage_state":"unavailable"}, d
+assert "private-account-must-stay-local" not in open(sys.argv[1]).read()
+assert "private-account-must-stay-local" in open(os.path.join(sys.argv[2], "bitbucket-probe.out.bitbucket-issues.json")).read()
+PY
+[[ "$(grep -c 'https://api.bitbucket.org/2.0/repositories/workspace/project/' "$T/bitbucket.args")" -eq 2 ]] || fail "Bitbucket matrix must issue two fixed requests"
+! grep -Fq 'private-account-must-stay-local' "$T/bitbucket.args" || fail "Bitbucket evidence content leaked to curl args"
+for http_state in "403 forbidden_or_rate_limited" "404 not_found_or_private" "429 rate_limited"; do
+  read -r http expected <<< "$http_state"
+  : > "$T/bitbucket-state.args"
+  PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/bitbucket-state.args" RH_PROBE_CURL_CONFIG="$T/bitbucket-state.config" \
+    RH_PROBE_BODY="$T/probe-error.json" RH_BITBUCKET_BODY="$T/bitbucket-array.json" RH_BITBUCKET_HTTP="$http" \
+    "$ROOT/build/rh_cli" connector probe --bitbucket-repo workspace/project --all \
+      --out "$T/bitbucket-state-$http.out" >/dev/null || fail "Bitbucket HTTP $http probe"
+  python3 - "$T/bitbucket-state-$http.out" "$expected" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["issues"]["status"] == sys.argv[2], d
+assert d["capabilities"]["issues"]["coverage_state"] == "unavailable", d
+PY
+done
+printf '%s\n' '[]' > "$T/bitbucket-malformed.json"
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/bitbucket-malformed.args" RH_PROBE_CURL_CONFIG="$T/bitbucket-malformed.config" \
+  RH_PROBE_BODY="$T/probe-error.json" RH_BITBUCKET_BODY="$T/bitbucket-malformed.json" \
+  "$ROOT/build/rh_cli" connector probe --bitbucket-repo workspace/project --all \
+    --out "$T/bitbucket-malformed.out" >/dev/null || fail "Bitbucket malformed response probe"
+python3 - "$T/bitbucket-malformed.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["issues"]["status"] == "malformed", d
+assert d["capabilities"]["issues"]["coverage_state"] == "partial", d
+PY
+set +e
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/bitbucket-invalid.args" \
+  "$ROOT/build/rh_cli" connector probe --bitbucket-repo 'workspace/../project' --all \
+    --out "$T/bitbucket-invalid.out" >/dev/null 2>&1
+bitbucket_invalid_rc=$?
+set -e
+[[ "$bitbucket_invalid_rc" -eq 4 && ! -e "$T/bitbucket-invalid.args" && ! -e "$T/bitbucket-invalid.out" ]] || fail "invalid Bitbucket repository reached transport"
 
 echo "[connector] --all probes bounded GitHub routes with separate evidence"
 printf '%s\n' '[]' > "$T/probe-array.json"
