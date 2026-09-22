@@ -235,6 +235,13 @@ assert report["schema"] == "rh-pylock-audit/1", report
 assert report["parser"] == "bounded-core-projection", report
 assert report["created_by"] == "uv" and report["requires_python"] == ">=3.12", report
 assert report["input_sha256"] == hashlib.sha256(source).hexdigest(), report
+transformations = json.load(open(sys.argv[1] + ".transformations.json"))
+assert transformations["schema"] == "rh-adapter-transformation-report/1", transformations
+assert transformations["adapter"] == "pep751-lock-audit", transformations
+assert transformations["source_input_sha256"] == hashlib.sha256(source).hexdigest(), transformations
+assert transformations["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), transformations
+assert transformations["configuration_sha256"] == hashlib.sha256(b"repo-health/pep751-lock-audit/1").hexdigest(), transformations
+assert any(field["state"] == "unknown" for field in transformations["fields"]), transformations
 assert report["root_relationship"] == "not_recorded", report
 assert report["dependency_semantics"] == "informational_only", report
 assert report["environments"] == ["sys_platform == 'win32'", "sys_platform == 'linux'"], report
