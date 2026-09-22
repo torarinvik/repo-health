@@ -71,6 +71,26 @@ module Adoption:
                 Base::rh_push_text(out, "not_applicable\",\"value\":null")
             Base::rh_push_text(out, ",\"evidence\":[\"adoption-input\"]}")
 
+        def rh_adoption_duration_bin(duration: i64) -> i64:
+            return 0 if duration < 604800
+            return 1 if duration < 2592000
+            return 2 if duration < 7776000
+            return 3 if duration < 31536000
+            4
+
+        def rh_adoption_duration_metric(out: mutable darray[u8]&, key: u8&, counts: darray[i64]&, population_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, ",{\"key\":\"")
+            Base::rh_push_text(out, key)
+            Base::rh_push_text(out, "\",\"version\":\"1.0.0\",\"status\":\"")
+            Base::rh_push_text(out, "observed\",\"value\":{\"bucket_upper_seconds\":[604799,2591999,7775999,31535999,null],\"counts\":[") if population_count > 0 else Base::rh_push_text(out, "not_applicable\",\"value\":null")
+            if population_count > 0:
+                while i < counts.count |i: usize = 0, counts, out|:
+                    Base::rh_push_text(out, ",") if i > 0
+                    Base::rh_push_decimal_i64(out, counts[i])
+                    i <- i + 1
+                Base::rh_push_text(out, "]}")
+            Base::rh_push_text(out, ",\"evidence\":[\"adoption-input\"]}")
+
     public:
         def rh_adoption_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             nodes: mutable darray[Json::RhJsonNode] = []
@@ -87,8 +107,8 @@ module Adoption:
             raw_loop: mutable darray[u8]& = raw
             arr_idx: i64 = Adoption::rh_adoption_get(nodes, texts, root, "adoptions")
             return -1 if arr_idx < 0 or nodes[arr_idx.usize()].kind != Json::RH_JSON_ARR
-            body, adoption_count, unknown, first_seen_only, confirmed_intro, confirmed_removal, version_comparisons, observed_upgrades, supported_line_assessments, supported_line_adoptions, duration_confirmed, duration_censored, duration_unknown =
-                while child >= 0 |child: i64 = nodes[arr_idx.usize()].first_child, first_child: i64 = nodes[arr_idx.usize()].first_child, body: darray[u8] = [91], adoption_count: i64 = 0, unknown: i64 = 0, first_seen_only: i64 = 0, confirmed_intro: i64 = 0, confirmed_removal: i64 = 0, version_comparisons: i64 = 0, observed_upgrades: i64 = 0, supported_line_assessments: i64 = 0, supported_line_adoptions: i64 = 0, duration_confirmed: i64 = 0, duration_censored: i64 = 0, duration_unknown: i64 = 0, nodes, raw_loop, texts, cutoff| -> body, adoption_count, unknown, first_seen_only, confirmed_intro, confirmed_removal, version_comparisons, observed_upgrades, supported_line_assessments, supported_line_adoptions, duration_confirmed, duration_censored, duration_unknown:
+            body, adoption_count, unknown, first_seen_only, confirmed_intro, confirmed_removal, version_comparisons, observed_upgrades, supported_line_assessments, supported_line_adoptions, duration_confirmed, duration_censored, duration_unknown, confirmed_duration_bins, censored_duration_bins =
+                while child >= 0 |child: i64 = nodes[arr_idx.usize()].first_child, first_child: i64 = nodes[arr_idx.usize()].first_child, body: darray[u8] = [91], adoption_count: i64 = 0, unknown: i64 = 0, first_seen_only: i64 = 0, confirmed_intro: i64 = 0, confirmed_removal: i64 = 0, version_comparisons: i64 = 0, observed_upgrades: i64 = 0, supported_line_assessments: i64 = 0, supported_line_adoptions: i64 = 0, duration_confirmed: i64 = 0, duration_censored: i64 = 0, duration_unknown: i64 = 0, confirmed_duration_bins: darray[i64] = [0, 0, 0, 0, 0], censored_duration_bins: darray[i64] = [0, 0, 0, 0, 0], nodes, raw_loop, texts, cutoff| -> body, adoption_count, unknown, first_seen_only, confirmed_intro, confirmed_removal, version_comparisons, observed_upgrades, supported_line_assessments, supported_line_adoptions, duration_confirmed, duration_censored, duration_unknown, confirmed_duration_bins, censored_duration_bins:
                     return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
                     first: mutable i64 = 0
                     intro: mutable i64 = 0
@@ -135,8 +155,13 @@ module Adoption:
                         duration_unknown <- duration_unknown + 1
                     elif has_removal == 0:
                         duration_censored <- duration_censored + 1
+                        duration_end: i64 = last if has_last != 0 else cutoff
+                        censored_bin: i64 = Adoption::rh_adoption_duration_bin(duration_end - intro)
+                        censored_duration_bins[censored_bin.usize()] <- censored_duration_bins[censored_bin.usize()] + 1
                     else:
                         duration_confirmed <- duration_confirmed + 1
+                        confirmed_bin: i64 = Adoption::rh_adoption_duration_bin(removal - intro)
+                        confirmed_duration_bins[confirmed_bin.usize()] <- confirmed_duration_bins[confirmed_bin.usize()] + 1
                     child <- nodes[child.usize()].next_sibling
             body.push(93)
             Base::rh_push_text(out, "{\"schema\":\"rh-adoption-result/1\",\"cutoff\":")
@@ -185,6 +210,8 @@ module Adoption:
             Adoption::rh_adoption_metric(out, "adoption.duration_confirmed_count", duration_confirmed, adoption_count)
             Adoption::rh_adoption_metric(out, "adoption.duration_right_censored_count", duration_censored, adoption_count)
             Adoption::rh_adoption_metric(out, "adoption.duration_unknown_count", duration_unknown, adoption_count)
+            Adoption::rh_adoption_duration_metric(out, "adoption.confirmed_duration_distribution", confirmed_duration_bins, duration_confirmed)
+            Adoption::rh_adoption_duration_metric(out, "adoption.right_censored_duration_distribution", censored_duration_bins, duration_censored)
             Adoption::rh_adoption_ratio_metric(out, supported_line_adoptions, supported_line_assessments)
             Base::rh_push_text(out, "],\"note\":\"first_seen is a collector observation; confirmed introduction/removal remain separate assertions; elapsed duration is seconds and right-censored at last_seen or cutoff; missing follow-up is right-censored and an observed upgrade is not proof of migration\"}")
             0

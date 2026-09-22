@@ -55,6 +55,12 @@ assert metrics["downstream_condition.supported_version_adoption_share"] == {
 }, metrics["downstream_condition.supported_version_adoption_share"]
 assert d["evidence_counts"] == {"version_comparison": 3, "version_comparison_unknown": 3, "supported_line_assessed": 3, "supported_line_unknown": 3}, d
 assert d["duration_counts"] == {"confirmed": 1, "right_censored": 2, "unknown": 3}, d
+assert metrics["adoption.confirmed_duration_distribution"]["value"] == {
+    "bucket_upper_seconds": [604799, 2591999, 7775999, 31535999, None], "counts": [1, 0, 0, 0, 0]
+}, metrics["adoption.confirmed_duration_distribution"]
+assert metrics["adoption.right_censored_duration_distribution"]["value"] == {
+    "bucket_upper_seconds": [604799, 2591999, 7775999, 31535999, None], "counts": [2, 0, 0, 0, 0]
+}, metrics["adoption.right_censored_duration_distribution"]
 assert "not proof of migration" in d["note"], d
 print("[adoption] staged states + right censoring OK")
 PY
@@ -66,9 +72,27 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["adoptions"] == [], d
 for metric in d["metrics"]:
-    if metric["key"].startswith("adoption.observed_upgrade") or metric["key"].startswith("adoption.version_comparison") or metric["key"].startswith("adoption.supported_line") or metric["key"].startswith("adoption.duration_") or metric["key"] == "downstream_condition.supported_version_adoption_share":
+    if metric["key"].startswith("adoption.observed_upgrade") or metric["key"].startswith("adoption.version_comparison") or metric["key"].startswith("adoption.supported_line") or metric["key"].startswith("adoption.duration_") or metric["key"].endswith("duration_distribution") or metric["key"] == "downstream_condition.supported_version_adoption_share":
         assert metric["status"] == "not_applicable" and metric["value"] is None, metric
 print("[adoption] empty evidence populations remain not_applicable")
+PY
+
+python3 - "$T/buckets.json" <<'PY'
+import json, sys
+edges = [0, 604799, 604800, 2592000, 7776000, 31536000]
+doc = {"schema": "rh-adoption-input/1", "cutoff": 31536000,
+       "adoptions": [{"first_seen": None, "confirmed_introduction": 0, "confirmed_removal": end} for end in edges]}
+json.dump(doc, open(sys.argv[1], "w"))
+PY
+"$ROOT/build/rh_cli" adoption --input "$T/buckets.json" --out "$T/buckets.out" >/dev/null || fail "duration bucket boundaries"
+python3 - "$T/buckets.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+assert m["adoption.confirmed_duration_distribution"]["value"] == {
+    "bucket_upper_seconds": [604799, 2591999, 7775999, 31535999, None], "counts": [2, 1, 1, 1, 1]
+}, m
+print("[adoption] duration histogram boundaries include exact cutoffs")
 PY
 
 echo "[adoption] determinism + malformed input fails closed"
