@@ -73,7 +73,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["adoptions"] == [], d
 for metric in d["metrics"]:
-    if metric["key"].startswith("adoption.observed_upgrade") or metric["key"].startswith("adoption.version_comparison") or metric["key"].startswith("adoption.supported_line") or metric["key"].startswith("adoption.duration_") or metric["key"].endswith("duration_distribution") or metric["key"].endswith("upgrade_lag_distribution") or metric["key"] == "downstream_condition.supported_version_adoption_share":
+    if metric["key"].startswith("adoption.observed_upgrade") or metric["key"].startswith("adoption.version_comparison") or metric["key"].startswith("adoption.supported_line") or metric["key"].startswith("adoption.duration_") or metric["key"].startswith("adoption.snapshot_coverage_") or metric["key"].endswith("duration_distribution") or metric["key"].endswith("upgrade_lag_distribution") or metric["key"] == "downstream_condition.supported_version_adoption_share":
         assert metric["status"] == "not_applicable" and metric["value"] is None, metric
 print("[adoption] empty evidence populations remain not_applicable")
 PY
@@ -97,25 +97,34 @@ print("[adoption] duration histogram boundaries include exact cutoffs")
 PY
 
 cat > "$T/upgrade-lag.json" <<'JSON'
-{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"first_qualifying_version_ord":2001000,"first_qualifying_snapshot_at":1000},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"first_qualifying_version_ord":2001000,"complete_followup_through":2000}]}
+{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"first_qualifying_version_ord":2001000,"first_qualifying_snapshot_at":1000,"snapshot_coverage":[{"from":100,"through":500},{"from":600,"through":1000}]},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_coverage":[{"from":100,"through":900},{"from":1000,"through":2000}]},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"first_qualifying_version_ord":2001000,"complete_followup_through":2000},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_coverage":[{"from":100,"through":2000}]}]}
 JSON
 "$ROOT/build/rh_cli" adoption --input "$T/upgrade-lag.json" --out "$T/upgrade-lag.out" >/dev/null || fail "upgrade lag distribution"
 python3 - "$T/upgrade-lag.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
-assert [x["upgrade_lag"]["status"] for x in d["adoptions"]] == ["observed", "right_censored", "unknown", "unknown"], d
+assert [x["upgrade_lag"]["status"] for x in d["adoptions"]] == ["observed", "unknown", "unknown", "unknown", "right_censored"], d
 assert d["adoptions"][0]["upgrade_lag"]["seconds"] == 900, d
-assert d["adoptions"][1]["upgrade_lag"] == {"status": "right_censored", "seconds": 1900, "through": 2000}, d
-assert d["upgrade_lag_counts"] == {"observed": 1, "right_censored": 1, "unknown": 2}, d
+assert d["adoptions"][0]["snapshot_coverage"]["gap_count"] == 1 and d["adoptions"][0]["snapshot_coverage"]["uncovered_seconds"] == 100, d
+assert d["adoptions"][1]["snapshot_coverage"]["gap_count"] == 1 and d["adoptions"][1]["upgrade_lag"]["status"] == "unknown", d
+assert d["adoptions"][4]["upgrade_lag"] == {"status": "right_censored", "seconds": 1900, "through": 2000}, d
+assert d["snapshot_coverage_summary"] == {"records": 3, "gaps": 2, "uncovered_seconds": 200}, d
+assert d["upgrade_lag_counts"] == {"observed": 1, "right_censored": 1, "unknown": 3}, d
 assert m["adoption.observed_upgrade_lag_distribution"]["value"]["counts"] == [1, 0, 0, 0, 0], m
 assert m["adoption.right_censored_upgrade_lag_distribution"]["value"]["counts"] == [1, 0, 0, 0, 0], m
+assert m["adoption.snapshot_coverage_gap_count"]["value"] == 2, m
+assert m["adoption.snapshot_coverage_uncovered_seconds"]["value"] == 200, m
 print("[adoption] release-to-first-qualifying-snapshot lag and censoring OK")
 PY
 cat > "$T/invalid-lag.json" <<'JSON'
 {"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":1000,"target_version_ord":2000000,"first_qualifying_version_ord":2000000,"first_qualifying_snapshot_at":999}]}
 JSON
 if "$ROOT/build/rh_cli" adoption --input "$T/invalid-lag.json" --out "$T/invalid-lag.out" >/dev/null 2>&1; then fail "reversed release-to-snapshot lag was accepted"; fi
+cat > "$T/invalid-coverage.json" <<'JSON'
+{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_coverage":[{"from":100,"through":1000},{"from":900,"through":2000}]}]}
+JSON
+if "$ROOT/build/rh_cli" adoption --input "$T/invalid-coverage.json" --out "$T/invalid-coverage.out" >/dev/null 2>&1; then fail "overlapping snapshot coverage was accepted"; fi
 
 echo "[adoption] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" adoption --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
