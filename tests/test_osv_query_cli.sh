@@ -143,6 +143,11 @@ args = open(t / "batch.args").read().splitlines()
 assert "https://api.osv.dev/v1/querybatch" in args, args
 assert args[args.index("--resolve") + 1] == "api.osv.dev:443:93.184.216.34", args
 r = json.load(open(out / "osv-query-batch-result.json"))
+transformation = json.load(open(out / "osv-query-batch-transformations.json"))
+assert transformation["adapter"] == "osv-graph-batch-query", transformation
+assert transformation["source_input_sha256"] == hashlib.sha256((t / "graph.json").read_bytes()).hexdigest(), transformation
+assert transformation["normalized_output_sha256"] == hashlib.sha256((out / "osv-query-batch-result.json").read_bytes()).hexdigest(), transformation
+assert transformation["configuration_sha256"] == hashlib.sha256(b"repo-health/osv-graph-batch-query/1;continue=0;hydrate=0").hexdigest(), transformation
 assert r["schema"] == "rh-osv-query-batch-result/1" and r["state"] == "partial", r
 assert r["response_detail"] == "advisory_ids_only", r
 assert r["query_count"] == 6 and r["skipped_node_count"] == 1 and r["omitted_node_count"] == 0, r
