@@ -79,6 +79,38 @@ PY
 [[ "$time_sid_a" != "$time_sid_c" ]] || fail "a changed valid-time projection must create a new snapshot"
 echo "[downstream] temporal projection snapshot identity OK"
 
+echo "[downstream] identity revision is explicit and part of snapshot identity"
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/identity-snapshot-a" --snapshot-root "$T/identity-snapshots" --valid-as-of 300 --known-as-of 350 --identity-revision 7 >/dev/null || fail "identity revision snapshot run"
+identity_sid_a=$(python3 - "$T/identity-snapshot-a/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["projection"]["identity_revision"] == 7, d["projection"]
+print(d["projection"]["snapshot_id"])
+PY
+)
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/identity-snapshot-b" --snapshot-root "$T/identity-snapshots" --valid-as-of 300 --known-as-of 350 --identity-revision 7 >/dev/null || fail "identity revision replay"
+identity_sid_b=$(python3 - "$T/identity-snapshot-b/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["projection"]["identity_revision"] == 7, d["projection"]
+print(d["projection"]["snapshot_id"])
+PY
+)
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/identity-snapshot-c" --snapshot-root "$T/identity-snapshots" --valid-as-of 300 --known-as-of 350 --identity-revision 8 >/dev/null || fail "changed identity revision snapshot"
+identity_sid_c=$(python3 - "$T/identity-snapshot-c/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["projection"]["identity_revision"] == 8, d["projection"]
+print(d["projection"]["snapshot_id"])
+PY
+)
+[[ "$identity_sid_a" == "$identity_sid_b" ]] || fail "identical identity revision must replay the same snapshot"
+[[ "$identity_sid_a" != "$identity_sid_c" ]] || fail "a changed identity revision must create a new snapshot"
+if "$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/identity-revision-invalid" --identity-revision -1 >/dev/null 2>&1; then
+  fail "negative identity revision must be rejected"
+fi
+echo "[downstream] identity revision snapshot identity OK"
+
 # Cycle: 1->2, 2->1 (plus an isolated node 0).
 cat > "$T/cycle.json" <<'JSON'
 {"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"iso","version":"1"},{"id":1,"name":"a","version":"1"},{"id":2,"name":"b","version":"1"}],"edges":[{"from":1,"to":2,"scope":"normal"},{"from":2,"to":1,"scope":"normal"}],"unresolved":[],"advisories":[]}
