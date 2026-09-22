@@ -695,14 +695,30 @@ module Git:
                 index <- index + 1
             1
 
+        # GitLab credentials are scoped to its exact public REST API host.
+        def rh_gitlab_api_auth_state(url: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return 0 if not Base::rh_cstr_starts_with(url, "https://gitlab.com/api/v4/")
+            token: u8&? = getenv("RH_GITLAB_TOKEN")
+            return 0 if token == null
+            token_ptr: cstr = token.cast[cstr] can Unsafe.PointerCast
+            length: usize = Base::rh_cstr_len_c(token_ptr)
+            return -1 if length == 0 or length > 512
+            while index < length |index: usize = 0, token_ptr|:
+                byte: u8 = token_ptr[index]
+                return -1 if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 95)
+                index <- index + 1
+            1
+
         # Assemble the fixed transport policy in one private helper so the
         # public operation only validates, prepares the pin, and runs it.
-        def rh_https_get_command(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&, max_secs: i64, github_api: bool, github_auth: bool) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def rh_https_get_command(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&, max_secs: i64, api_kind: i64, api_auth: bool) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             cmd: mutable darray[u8] = []
-            if github_auth:
+            if api_auth and api_kind == 1:
                 Base::rh_push_text(cmd, "printf '%s\\n' \"header = \\\"Authorization: Bearer $RH_GITHUB_TOKEN\\\"\" | ")
+            elif api_auth and api_kind == 2:
+                Base::rh_push_text(cmd, "printf '%s\\n' \"header = \\\"PRIVATE-TOKEN: $RH_GITLAB_TOKEN\\\"\" | ")
             Base::rh_push_text(cmd, "curl --disable")
-            Base::rh_push_text(cmd, " --config -") if github_auth
+            Base::rh_push_text(cmd, " --config -") if api_auth
             Base::rh_push_text(cmd, " -sS --noproxy '*' --proto '=https,file' --max-redirs 0")
             if pin.count > 0:
                 Base::rh_push_text(cmd, " --resolve ")
@@ -712,7 +728,7 @@ module Git:
             Base::rh_push_text(cmd, " --max-filesize ")
             Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_BYTES)
             Base::rh_push_text(cmd, " -H 'User-Agent: repo-health-m02' -H 'Accept: application/json'")
-            if github_api:
+            if api_kind == 1:
                 Base::rh_push_text(cmd, " -H 'X-GitHub-Api-Version: ")
                 Base::rh_push_text(cmd, RH_GITHUB_REST_API_VERSION)
                 cmd.push(39)
@@ -727,21 +743,21 @@ module Git:
             cmd.push(0)
             cmd
 
-        def rh_run_https_get_with_timeout(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64, github_api: bool) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_run_https_get_with_timeout(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64, api_kind: i64) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if max_secs <= 0 or max_secs > RH_FETCH_MAX_SECS
             return -1 if not rh_fetch_guard(url)
             return -1 if not rh_fetch_arg_safe(url)
             return -1 if not rh_arg_safe(body_file)
             return -1 if not rh_arg_safe(code_file)
             return -1 if not rh_arg_safe(err_file)
-            github_auth_state: i64 = rh_github_api_auth_state(url) if github_api else 0
-            return -1 if github_auth_state < 0
-            github_auth: bool = github_auth_state == 1
+            api_auth_state: i64 = rh_github_api_auth_state(url) if api_kind == 1 else (rh_gitlab_api_auth_state(url) if api_kind == 2 else 0)
+            return -1 if api_auth_state < 0
+            api_auth: bool = api_auth_state == 1
             pin: mutable darray[u8] = []
             if Base::rh_cstr_starts_with(url, "https://"):
                 return -1 if not rh_prepare_https_pin(url, err_file, pin)
             transport: i64 =
-                cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin, max_secs, github_api, github_auth)
+                cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin, max_secs, api_kind, api_auth)
                 block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
                 block_result
             transport
@@ -810,14 +826,19 @@ module Git:
         const RH_OSV_VULNERABILITY_GET_MAX_SECS: i64 = 10
 
         def rh_run_https_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, false)
+            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 0)
 
         # GitHub's REST API requires an explicit supported-version header for
         # stable interpretation. The endpoint remains caller-supplied under the
         # same HTTPS/DNS/redirect/size policy; optional bearer auth is scoped to
         # the exact api.github.com host.
         def rh_run_github_api_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, true)
+            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 1)
+
+        # GitLab API authentication uses a distinct header and exact host.
+        def rh_run_gitlab_api_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if not Base::rh_cstr_starts_with(url, "https://gitlab.com/api/v4/")
+            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 2)
 
         # Run a single bounded JSON package/version query to OSV. The endpoint
         # is fixed here, so this POST cannot be redirected to a caller URL. DNS
@@ -847,7 +868,7 @@ module Git:
             url.extend(bytes_view(advisory_id))
             url.push(0)
             url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
-            rh_run_https_get_with_timeout(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS, false)
+            rh_run_https_get_with_timeout(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS, 0)
 
         # Run a bounded bare clone for https remotes (M01-03): no worktree, no
         # checkout (so no smudge/clean filters, no hooks execute), blob-less and

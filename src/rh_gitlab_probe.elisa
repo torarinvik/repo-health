@@ -1,0 +1,177 @@
+# rh_gitlab_probe.elisa — bounded fixed-route GitLab capability probes.
+
+include "./rh_base.elisa"
+include "./rh_git.elisa"
+include "./rh_json.elisa"
+
+module GitLabProbe:
+    private:
+        const RH_GLP_MAX_BODY_BYTES: i64 = 3145728
+
+        struct RhGlpCapture:
+            status: mutable darray[u8]
+            transport: i64
+            response_valid: bool
+            ok: bool
+
+        def rh_glp_component_char(byte: u8) -> bool:
+            (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95
+
+        def rh_glp_project_path_valid(project: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            length: usize = Base::rh_cstr_len_c(project)
+            return false if length < 3 or length > 255
+            segment_start: mutable usize = 0
+            while index < length |index: usize = 0, project, segment_start|:
+                byte: u8 = project[index]
+                if byte == 47:
+                    segment_length: usize = index - segment_start
+                    return false if segment_length == 0 or (segment_length == 1 and project[segment_start] == 46) or (segment_length == 2 and project[segment_start] == 46 and project[segment_start + 1] == 46)
+                    segment_start <- index + 1
+                else:
+                    return false if not GitLabProbe::rh_glp_component_char(byte)
+                index <- index + 1
+            segment_length: usize = length - segment_start
+            segment_length > 0 and not (segment_length == 1 and project[segment_start] == 46) and not (segment_length == 2 and project[segment_start] == 46 and project[segment_start + 1] == 46)
+
+        def rh_glp_encode_project_path(project: cstr) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            encoded: mutable darray[u8] = []
+            while index < Base::rh_cstr_len_c(project) |index: usize = 0, project, encoded|:
+                if project[index] == 47:
+                    Base::rh_push_text(encoded, "%2F")
+                else:
+                    encoded.push(project[index])
+                index <- index + 1
+            encoded
+
+        def rh_glp_evidence_path(base: cstr, capability: cstr, extension: cstr) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
+            path: mutable darray[u8] = []
+            Base::rh_push_cstr(path, base)
+            Base::rh_push_text(path, ".gitlab-")
+            Base::rh_push_cstr(path, capability)
+            path.push(46)
+            Base::rh_push_cstr(path, extension)
+            path.push(0)
+            path
+
+        def rh_glp_is(status: darray[u8]&, expected: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(status, 0, status.count.i64(), expected)
+
+        def rh_glp_array_valid(raw: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            root >= 0 and nodes[root.usize()].kind == Json::RH_JSON_ARR
+
+        def rh_glp_provider_status(transport: i64, status: darray[u8]&, response_valid: bool) -> u8&:
+            return "unavailable" if transport != 0
+            return "observed" if GitLabProbe::rh_glp_is(status, "200") and response_valid
+            return "malformed" if GitLabProbe::rh_glp_is(status, "200")
+            return "unauthorized" if GitLabProbe::rh_glp_is(status, "401")
+            return "forbidden_or_rate_limited" if GitLabProbe::rh_glp_is(status, "403")
+            return "not_found_or_private" if GitLabProbe::rh_glp_is(status, "404")
+            return "rate_limited" if GitLabProbe::rh_glp_is(status, "429")
+            "unavailable"
+
+        def rh_glp_coverage_state(provider_status: u8&) -> u8&:
+            return "observed" if Base::rh_streq(provider_status, "observed")
+            return "partial" if Base::rh_streq(provider_status, "malformed")
+            return "unauthorized" if Base::rh_streq(provider_status, "unauthorized")
+            "unavailable"
+
+        def rh_glp_capture(project_path: darray[u8]&, route: cstr, capability: cstr, evidence_base: cstr) -> RhGlpCapture can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            url: mutable darray[u8] = []
+            Base::rh_push_text(url, "https://gitlab.com/api/v4/projects/")
+            url.extend(bytes_view(project_path))
+            Base::rh_push_text(url, "/")
+            Base::rh_push_cstr(url, route)
+            url.push(0)
+            url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
+            url_file: mutable darray[u8] = GitLabProbe::rh_glp_evidence_path(evidence_base, capability, "url")
+            body_file: mutable darray[u8] = GitLabProbe::rh_glp_evidence_path(evidence_base, capability, "json")
+            status_file: mutable darray[u8] = GitLabProbe::rh_glp_evidence_path(evidence_base, capability, "status")
+            error_file: mutable darray[u8] = GitLabProbe::rh_glp_evidence_path(evidence_base, capability, "err")
+            url_ptr_file: cstr = (&url_file[0]).cast[cstr] can Unsafe.PointerCast
+            body_ptr: cstr = (&body_file[0]).cast[cstr] can Unsafe.PointerCast
+            status_ptr: cstr = (&status_file[0]).cast[cstr] can Unsafe.PointerCast
+            error_ptr: cstr = (&error_file[0]).cast[cstr] can Unsafe.PointerCast
+            url_evidence: mutable darray[u8] = []
+            Base::rh_push_cstr(url_evidence, url_ptr)
+            url_evidence.push(10)
+            return RhGlpCapture{status: [], transport: -1, response_valid: false, ok: false} if not Base::rh_io_write(url_ptr_file, url_evidence)
+            transport: i64 = Git::rh_run_gitlab_api_get(url_ptr, body_ptr, status_ptr, error_ptr)
+            return RhGlpCapture{status: [], transport: transport, response_valid: false, ok: false} if transport < 0
+            status: mutable darray[u8] = []
+            _ = Base::rh_io_read(status_ptr, status)
+            body: mutable darray[u8] = []
+            body_read: i64 = Base::rh_io_read(body_ptr, body)
+            return RhGlpCapture{status: status, transport: transport, response_valid: false, ok: false} if body_read >= 0 and body.count.i64() > RH_GLP_MAX_BODY_BYTES
+            response_valid: bool = body_read >= 0 and GitLabProbe::rh_glp_array_valid(body) if GitLabProbe::rh_glp_is(status, "200") else false
+            RhGlpCapture{status: status, transport: transport, response_valid: response_valid, ok: true}
+
+        def rh_glp_emit_capability(out: mutable darray[u8]&, capture: RhGlpCapture&) -> void can[Memory.Allocate, Abort.Panic]:
+            label: u8& = GitLabProbe::rh_glp_provider_status(capture.transport, capture.status, capture.response_valid)
+            status_ok: mutable i64 = 0
+            http_status: mutable i64 = 0
+            if capture.status.count > 0 and not GitLabProbe::rh_glp_is(capture.status, "000"):
+                http_status <- Base::rh_parse_i64(capture.status, 0, capture.status.count, &status_ok)
+            Base::rh_push_text(out, "{\"declaration\":\"read-one-item\",\"status\":\"")
+            Base::rh_push_text(out, label)
+            Base::rh_push_text(out, "\",\"http_status\":")
+            if status_ok == 1:
+                Base::rh_push_decimal_i64(out, http_status)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"coverage_state\":\"")
+            Base::rh_push_text(out, GitLabProbe::rh_glp_coverage_state(label))
+            Base::rh_push_text(out, "\"}")
+
+        def rh_glp_emit_evidence(out: mutable darray[u8]&, evidence_base: cstr, capability: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            url_file: mutable darray[u8] = GitLabProbe::rh_glp_evidence_path(evidence_base, capability, "url")
+            body_file: mutable darray[u8] = GitLabProbe::rh_glp_evidence_path(evidence_base, capability, "json")
+            status_file: mutable darray[u8] = GitLabProbe::rh_glp_evidence_path(evidence_base, capability, "status")
+            error_file: mutable darray[u8] = GitLabProbe::rh_glp_evidence_path(evidence_base, capability, "err")
+            Base::rh_push_text(out, "{\"url\":\"")
+            Base::rh_push_cstr(out, (&url_file[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(out, "\",\"body\":\"")
+            Base::rh_push_cstr(out, (&body_file[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(out, "\",\"status\":\"")
+            Base::rh_push_cstr(out, (&status_file[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(out, "\",\"error\":\"")
+            Base::rh_push_cstr(out, (&error_file[0]).cast[cstr] can Unsafe.PointerCast)
+            Base::rh_push_text(out, "\"}")
+
+    public:
+        # Probes three fixed list routes. Results contain only access metadata;
+        # response bodies stay in adjacent local evidence files.
+        def rh_gitlab_capability_matrix_live(project: cstr, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if not GitLabProbe::rh_glp_project_path_valid(project) or not Git::rh_arg_safe(evidence_base)
+            project_path: mutable darray[u8] = GitLabProbe::rh_glp_encode_project_path(project)
+            issues: RhGlpCapture = GitLabProbe::rh_glp_capture(project_path, "issues?per_page=1", "issues", evidence_base)
+            return -1 if not issues.ok
+            merge_requests: RhGlpCapture = GitLabProbe::rh_glp_capture(project_path, "merge_requests?per_page=1", "merge-requests", evidence_base)
+            return -1 if not merge_requests.ok
+            releases: RhGlpCapture = GitLabProbe::rh_glp_capture(project_path, "releases?per_page=1", "releases", evidence_base)
+            return -1 if not releases.ok
+            captured_at: i64 = Base::rh_now()
+            return -1 if captured_at < 0
+            token: u8&? = getenv("RH_GITLAB_TOKEN")
+            Base::rh_push_text(out, "{\"schema\":\"rh-gitlab-capability-matrix/1\",\"provider\":\"gitlab\",\"captured_at\":")
+            Base::rh_push_decimal_i64(out, captured_at)
+            Base::rh_push_text(out, ",\"scope\":{\"project_path\":\"")
+            Base::rh_push_cstr(out, project)
+            Base::rh_push_text(out, "\"},\"authorization\":{\"credential\":\"")
+            Base::rh_push_text(out, "configured" if token != null else "not_requested")
+            Base::rh_push_text(out, "\"},\"capabilities\":{\"issues\":")
+            GitLabProbe::rh_glp_emit_capability(out, issues)
+            Base::rh_push_text(out, ",\"merge_requests\":")
+            GitLabProbe::rh_glp_emit_capability(out, merge_requests)
+            Base::rh_push_text(out, ",\"releases\":")
+            GitLabProbe::rh_glp_emit_capability(out, releases)
+            Base::rh_push_text(out, "},\"evidence\":{\"issues\":")
+            GitLabProbe::rh_glp_emit_evidence(out, evidence_base, "issues")
+            Base::rh_push_text(out, ",\"merge_requests\":")
+            GitLabProbe::rh_glp_emit_evidence(out, evidence_base, "merge-requests")
+            Base::rh_push_text(out, ",\"releases\":")
+            GitLabProbe::rh_glp_emit_evidence(out, evidence_base, "releases")
+            Base::rh_push_text(out, "},\"note\":\"Each fixed GitLab API route is a one-item access probe, not a complete or atomic snapshot; private project absence may be indistinguishable from an inaccessible project.\"}")
+            0

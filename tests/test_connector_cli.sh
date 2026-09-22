@@ -205,6 +205,18 @@ case "$url" in
   "https://api.github.com/repos/example/project/traffic/views")
     response_http="${RH_PROBE_TRAFFIC_HTTP:-${RH_PROBE_HTTP:-200}}"
     ;;
+  "https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/issues?per_page=1")
+    response_body="${RH_GLP_ISSUES_BODY:-$RH_PROBE_ARRAY_BODY}"
+    response_http="${RH_GLP_ISSUES_HTTP:-200}"
+    ;;
+  "https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/merge_requests?per_page=1")
+    response_body="${RH_GLP_MERGE_REQUESTS_BODY:-$RH_PROBE_ARRAY_BODY}"
+    response_http="${RH_GLP_MERGE_REQUESTS_HTTP:-200}"
+    ;;
+  "https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/releases?per_page=1")
+    response_body="${RH_GLP_RELEASES_BODY:-$RH_PROBE_ARRAY_BODY}"
+    response_http="${RH_GLP_RELEASES_HTTP:-200}"
+    ;;
   *) exit 21 ;;
 esac
 cp "$response_body" "$body_out"
@@ -320,6 +332,57 @@ PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/collaborator-missing-token.args
 collaborator_missing_token_rc=$?
 set -e
 [[ "$collaborator_missing_token_rc" -eq 4 && ! -e "$T/collaborator-missing-token.args" && ! -e "$T/collaborator-missing-token.out" ]] || fail "collaborator probe ran without explicit credentials"
+
+echo "[connector] GitLab capability matrix uses encoded project paths and host-scoped token auth"
+PATH="$T/probe-bin:$PATH" RH_GITLAB_TOKEN="glpat_fixture_token" \
+  RH_PROBE_ARRAY_BODY="$T/probe-array.json" RH_PROBE_BODY="$T/probe-error.json" \
+  RH_GLP_ISSUES_HTTP=200 RH_GLP_MERGE_REQUESTS_HTTP=403 RH_GLP_RELEASES_HTTP=404 \
+  RH_PROBE_CURL_ARGS="$T/gitlab-probe.args" RH_PROBE_CURL_CONFIG="$T/gitlab-probe.config" \
+  "$ROOT/build/rh_cli" connector probe --gitlab-project group/subgroup/project --all \
+    --out "$T/gitlab-probe.out" >/dev/null || fail "GitLab capability matrix probe"
+python3 - "$T/gitlab-probe.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["schema"] == "rh-gitlab-capability-matrix/1", d
+assert d["provider"] == "gitlab" and d["scope"] == {"project_path":"group/subgroup/project"}, d
+assert d["authorization"]["credential"] == "configured", d
+caps = d["capabilities"]
+assert caps["issues"]["status"] == "observed" and caps["issues"]["coverage_state"] == "observed", caps
+assert caps["merge_requests"]["status"] == "forbidden_or_rate_limited" and caps["merge_requests"]["coverage_state"] == "unavailable", caps
+assert caps["releases"]["status"] == "not_found_or_private" and caps["releases"]["coverage_state"] == "unavailable", caps
+assert "login" not in json.dumps(d) and "permissions" not in json.dumps(d), d
+for route in ("issues", "merge_requests", "releases"):
+    assert (t / f"gitlab-probe.out.gitlab-{route.replace('_','-')}.url").read_text().strip() == f"https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/{route}?per_page=1"
+    for ext in ("json", "status", "err", "url"):
+        assert (t / f"gitlab-probe.out.gitlab-{route.replace('_','-')}.{ext}").exists()
+print("[connector] GitLab preserves endpoint status and maps to shared coverage without publishing response records")
+PY
+grep -Fxq 'header = "PRIVATE-TOKEN: glpat_fixture_token"' "$T/gitlab-probe.config" || fail "GitLab token header absent from curl stdin config"
+! grep -Fq 'glpat_fixture_token' "$T/gitlab-probe.args" || fail "GitLab token leaked into curl arguments"
+[[ "$(grep -c 'https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/' "$T/gitlab-probe.args")" -eq 3 ]] || fail "GitLab matrix must issue exactly three fixed requests"
+for evidence in "$T"/gitlab-probe.out.gitlab-*; do
+  ! grep -Fq 'glpat_fixture_token' "$evidence" || fail "GitLab token leaked into evidence"
+done
+env -u RH_GITLAB_TOKEN PATH="$T/probe-bin:$PATH" RH_PROBE_ARRAY_BODY="$T/probe-array.json" \
+  RH_PROBE_BODY="$T/probe-error.json" RH_PROBE_CURL_ARGS="$T/gitlab-public.args" \
+  "$ROOT/build/rh_cli" connector probe --gitlab-project group/subgroup/project --all \
+    --out "$T/gitlab-public.out" >/dev/null || fail "unauthenticated public GitLab capability matrix"
+python3 - "$T/gitlab-public.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["authorization"]["credential"] == "not_requested", d
+assert all(cap["status"] == "observed" for cap in d["capabilities"].values()), d
+print("[connector] public GitLab probing works without configuring credentials")
+PY
+[[ ! -e "$T/gitlab-public.config" ]] || fail "unauthenticated GitLab probe unexpectedly supplied curl credentials"
+set +e
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/gitlab-invalid.args" \
+  "$ROOT/build/rh_cli" connector probe --gitlab-project 'group/../project' --all \
+    --out "$T/gitlab-invalid.out" >/dev/null 2>&1
+gitlab_invalid_rc=$?
+set -e
+[[ "$gitlab_invalid_rc" -eq 4 && ! -e "$T/gitlab-invalid.args" && ! -e "$T/gitlab-invalid.out" ]] || fail "invalid GitLab project path reached transport"
 
 echo "[connector] --all probes bounded GitHub routes with separate evidence"
 printf '%s\n' '[]' > "$T/probe-array.json"
