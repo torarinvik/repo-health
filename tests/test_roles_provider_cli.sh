@@ -146,9 +146,14 @@ while (($#)); do
 done
 [[ -n "$body_out" && -n "$url" ]]
 if [[ "$config_stdin" == "1" ]]; then cat > "$RH_CURL_CONFIG_LOG"; fi
-body="$RH_CURL_COLLABORATORS_PAGE1"
-[[ "$url" != *'page=2' ]] || body="$RH_CURL_COLLABORATORS_PAGE2"
-[[ "$url" != *'page=3' ]] || body="$RH_CURL_COLLABORATORS_PAGE3"
+if [[ "$url" == https://gitlab.com/* ]]; then
+  body="$RH_CURL_GITLAB_PAGE1"
+  [[ "$url" != *'page=2' ]] || body="$RH_CURL_GITLAB_PAGE2"
+else
+  body="$RH_CURL_COLLABORATORS_PAGE1"
+  [[ "$url" != *'page=2' ]] || body="$RH_CURL_COLLABORATORS_PAGE2"
+  [[ "$url" != *'page=3' ]] || body="$RH_CURL_COLLABORATORS_PAGE3"
+fi
 cp "$body" "$body_out"
 printf '%s' 200
 SH
@@ -178,6 +183,65 @@ PY
 grep -Fxq 'header = "Authorization: Bearer ghp_roles_fixture"' "$T/roles-curl.config" || fail "permission token header absent from curl stdin config"
 ! grep -Fq 'ghp_roles_fixture' "$T/roles-curl.args" || fail "permission token leaked into curl arguments"
 ! grep -Fq 'ghp_roles_fixture' "$T/github-live.json.github-collaborators-page-1.json" || fail "permission token leaked into raw evidence"
+
+echo "[roles-provider] authenticated GitLab project-member inventory is bounded and resumable"
+python3 - "$T/gitlab-page-full.json" "$T/gitlab-page-short.json" <<'PY'
+import json, sys
+full = [{"id": 10000 + i, "access_level": 20 if i == 0 else 30, "username": f"person-{i}"} for i in range(100)]
+short = [{"id": 10000, "access_level": 40, "username": "person-0"}, {"id": 20001, "access_level": 50, "username": "person-final"}]
+json.dump(full, open(sys.argv[1], "w"), separators=(",", ":"))
+json.dump(short, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+rm -f "$T/gitlab-partial.json" "$T/gitlab-partial.json.gitlab-members-page-"* "$T/gitlab-roles-curl.args" "$T/gitlab-roles-curl.config"
+PATH="$T/bin:$PATH" RH_GITLAB_TOKEN="glpat_roles_fixture" RH_CURL_GITLAB_PAGE1="$T/gitlab-page-full.json" RH_CURL_GITLAB_PAGE2="$T/gitlab-page-short.json" \
+  RH_CURL_LOG="$T/gitlab-roles-curl.args" RH_CURL_CONFIG_LOG="$T/gitlab-roles-curl.config" \
+  "$ROOT/build/rh_cli" roles-import --gitlab-project group/subgroup/project --max-pages 1 --out "$T/gitlab-partial.json" >/dev/null || fail "GitLab project-member fetch"
+python3 - "$T/gitlab-partial.json" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["provider"] == "gitlab" and d["scope"] == {"project_path": "group/subgroup/project"}, d
+assert d["pagination"] == {"next": "page=2", "complete": False} and d["permission_inventory_complete"] is False, d
+assert len(d["declarations"]) == 100 and d["declarations"][0]["role"] == "member", d
+url = (t / "gitlab-partial.json.gitlab-members-page-1.url").read_text().strip()
+assert url == "https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/members/all?per_page=100&page=1", url
+assert "person-0" not in open(sys.argv[1]).read()
+print("[roles-provider] GitLab partial inventory and nested project scope OK")
+PY
+grep -Fxq 'header = "PRIVATE-TOKEN: glpat_roles_fixture"' "$T/gitlab-roles-curl.config" || fail "GitLab token header absent from curl stdin config"
+! grep -Fq 'glpat_roles_fixture' "$T/gitlab-roles-curl.args" || fail "GitLab token leaked into curl arguments"
+rm -f "$T/gitlab-complete.json" "$T/gitlab-complete.json.gitlab-members-page-"* "$T/gitlab-resume-curl.args" "$T/gitlab-resume-curl.config"
+PATH="$T/bin:$PATH" RH_GITLAB_TOKEN="glpat_roles_fixture" RH_CURL_GITLAB_PAGE1="$T/gitlab-page-full.json" RH_CURL_GITLAB_PAGE2="$T/gitlab-page-short.json" \
+  RH_CURL_LOG="$T/gitlab-resume-curl.args" RH_CURL_CONFIG_LOG="$T/gitlab-resume-curl.config" \
+  "$ROOT/build/rh_cli" roles-import --gitlab-project group/subgroup/project --resume-from "$T/gitlab-partial.json" --max-pages 1 --out "$T/gitlab-complete.json" >/dev/null || fail "resume GitLab project-member inventory"
+python3 - "$T/gitlab-complete.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["provider"] == "gitlab" and d["scope"] == {"project_path": "group/subgroup/project"}, d
+assert d["pagination"] == {"next": None, "complete": True} and d["permission_inventory_complete"] is True, d
+assert d["pages_fetched"] == 2 and len(d["declarations"]) == 101, d
+assert next(x for x in d["declarations"] if x["actor_id"] == 10000)["role"] == "maintainer", d
+assert next(x for x in d["declarations"] if x["actor_id"] == 20001)["role"] == "owner", d
+print("[roles-provider] resumed GitLab inventory merges IDs and completes scope")
+PY
+grep -Fxq 'https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/members/all?per_page=100&page=2' "$T/gitlab-resume-curl.args" || fail "GitLab resume did not fetch cursor page 2"
+! grep -Fxq 'https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/members/all?per_page=100&page=1' "$T/gitlab-resume-curl.args" || fail "GitLab resume restarted at page 1"
+python3 - "$T/gitlab-complete.json" "$T/gitlab-complete-ready.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["as_of"] = max(x["declared_at"] for x in d["declarations"])
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" roles --input "$T/gitlab-complete-ready.json" --out "$T/gitlab-roles-result.json" >/dev/null || fail "GitLab permission coverage report"
+python3 - "$T/gitlab-roles-result.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+assert d["scope"] == {"project_path": "group/subgroup/project"}, d
+assert m["maintainer.permission_inventory_coverage"]["status"] == "observed", m
+assert m["maintainer.permission_inventory_coverage"]["value"] == {"num": 101, "den": 101}, m
+print("[roles-provider] GitLab inventory scope and coverage reach roles report")
+PY
 python3 - "$T/github-live.json" "$T/github-live-ready.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -326,6 +390,13 @@ PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="" RH_CURL_LOG="$T/no-token-curl.args" RH_CU
 rc_no_token=$?
 set -e
 [[ "$rc_no_token" -eq 4 && ! -e "$T/no-token-curl.args" && ! -e "$T/no-token.out" ]] || fail "permission fetch proceeded without an explicit token"
+rm -f "$T/gitlab-no-token.out" "$T/gitlab-no-token-curl.args"
+set +e
+PATH="$T/bin:$PATH" RH_GITLAB_TOKEN="" RH_CURL_LOG="$T/gitlab-no-token-curl.args" RH_CURL_CONFIG_LOG="$T/gitlab-no-token.config" \
+  "$ROOT/build/rh_cli" roles-import --gitlab-project group/project --out "$T/gitlab-no-token.out" >/dev/null 2>&1
+rc_gitlab_no_token=$?
+set -e
+[[ "$rc_gitlab_no_token" -eq 4 && ! -e "$T/gitlab-no-token-curl.args" && ! -e "$T/gitlab-no-token.out" ]] || fail "GitLab permission fetch proceeded without an explicit token"
 
 echo "[roles-provider] malformed input fails closed"
 set +e

@@ -1,0 +1,166 @@
+# rh_gitlab_roles.elisa — bounded authenticated GitLab member inventory.
+
+include "./rh_base.elisa"
+include "./rh_git.elisa"
+include "./rh_json.elisa"
+include "./rh_roles_provider.elisa"
+
+module GitLabRoles:
+    private:
+        const RH_GLR_MAX_PAGES: i64 = 10
+        const RH_GLR_PAGE_SIZE: i64 = 100
+        const RH_GLR_MAX_BYTES: i64 = 3145728
+
+        def rh_glr_component_char(byte: u8) -> bool:
+            (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95
+
+        def rh_glr_project_valid(project: cstr) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            length: usize = Base::rh_cstr_len_c(project)
+            return false if length < 3 or length > 255
+            segment_start: mutable usize = 0
+            while index < length |index: usize = 0, project, segment_start|:
+                byte: u8 = project[index]
+                if byte == 47:
+                    segment_length: usize = index - segment_start
+                    return false if segment_length == 0 or (segment_length == 1 and project[segment_start] == 46) or (segment_length == 2 and project[segment_start] == 46 and project[segment_start + 1] == 46)
+                    segment_start <- index + 1
+                else:
+                    return false if not GitLabRoles::rh_glr_component_char(byte)
+                index <- index + 1
+            segment_length: usize = length - segment_start
+            segment_length > 0 and not (segment_length == 1 and project[segment_start] == 46) and not (segment_length == 2 and project[segment_start] == 46 and project[segment_start + 1] == 46)
+
+        def rh_glr_encode_project(project: cstr) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            encoded: mutable darray[u8] = []
+            while index < Base::rh_cstr_len_c(project) |index: usize = 0, project, encoded|:
+                if project[index] == 47:
+                    Base::rh_push_text(encoded, "%2F")
+                else:
+                    encoded.push(project[index])
+                index <- index + 1
+            encoded
+
+        def rh_glr_path(base: cstr, page: i64, suffix: cstr) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
+            path: mutable darray[u8] = []
+            Base::rh_push_cstr(path, base)
+            Base::rh_push_text(path, ".gitlab-members-page-")
+            Base::rh_push_decimal_i64(path, page)
+            Base::rh_push_text(path, ".")
+            Base::rh_push_cstr(path, suffix)
+            path.push(0)
+            path
+
+        def rh_glr_append_page(raw: darray[u8]&, members: mutable darray[u8]&, member_total: mutable i64&, byte_total: mutable i64&, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return false if raw.count == 0 or byte_total[0] + raw.count.i64() > RH_GLR_MAX_BYTES
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_ARR or nodes[root.usize()].child_count > RH_GLR_PAGE_SIZE
+            first, last =
+                first: mutable usize = 0
+                last: mutable usize = raw.count
+                while first < last |first, raw|:
+                    break if raw[first] != 32 and raw[first] != 9 and raw[first] != 10 and raw[first] != 13
+                    first <- first + 1
+                while last > first |last, raw|:
+                    byte: u8 = raw[last - 1]
+                    break if byte != 32 and byte != 9 and byte != 10 and byte != 13
+                    last <- last - 1
+                first, last
+            return false if last - first < 2 or raw[first] != 91 or raw[last - 1] != 93
+            count_out[0] <- nodes[root.usize()].child_count
+            if count_out[0] > 0:
+                members.push(44) if member_total[0] > 0
+                raw_ptr: u8& = (&raw[first + 1]).cast[u8&] can Unsafe.PointerCast
+                Base::rh_push_raw(members, raw_ptr, last - first - 2)
+                member_total[0] <- member_total[0] + count_out[0]
+            byte_total[0] <- byte_total[0] + raw.count.i64()
+            true
+
+        def rh_glr_fetch(project: cstr, start_page: i64, max_pages: i64, evidence_base: cstr, members: mutable darray[u8]&, member_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return false if start_page < 1 or max_pages < 1 or max_pages > RH_GLR_MAX_PAGES or start_page > 2147483640
+            encoded: mutable darray[u8] = GitLabRoles::rh_glr_encode_project(project)
+            page: mutable i64 = start_page
+            last_page: i64 = start_page + max_pages - 1
+            return false if last_page < start_page
+            fetched: mutable i64 = 0
+            complete: mutable i64 = 0
+            while page <= last_page and complete == 0 |page, last_page, fetched, complete, members, member_total, byte_total, encoded, evidence_base, project|:
+                url: mutable darray[u8] = []
+                Base::rh_push_text(url, "https://gitlab.com/api/v4/projects/")
+                url.extend(bytes_view(encoded))
+                Base::rh_push_text(url, "/members/all?per_page=100&page=")
+                Base::rh_push_decimal_i64(url, page)
+                url.push(0)
+                url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
+                body_path: mutable darray[u8] = GitLabRoles::rh_glr_path(evidence_base, page, "json")
+                status_path: mutable darray[u8] = GitLabRoles::rh_glr_path(evidence_base, page, "status")
+                error_path: mutable darray[u8] = GitLabRoles::rh_glr_path(evidence_base, page, "err")
+                url_path: mutable darray[u8] = GitLabRoles::rh_glr_path(evidence_base, page, "url")
+                body_ptr: cstr = (&body_path[0]).cast[cstr] can Unsafe.PointerCast
+                status_ptr: cstr = (&status_path[0]).cast[cstr] can Unsafe.PointerCast
+                error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
+                url_file_ptr: cstr = (&url_path[0]).cast[cstr] can Unsafe.PointerCast
+                url_evidence: mutable darray[u8] = []
+                Base::rh_push_cstr(url_evidence, url_ptr)
+                url_evidence.push(10)
+                return false if not Base::rh_io_write(url_file_ptr, url_evidence)
+                return false if Git::rh_run_gitlab_api_get(url_ptr, body_ptr, status_ptr, error_ptr) != 0
+                status: mutable darray[u8] = []
+                return false if Base::rh_io_read(status_ptr, status) < 0 or not Base::rh_bytes_equal_literal(status, 0, status.count.i64(), "200")
+                raw: mutable darray[u8] = []
+                return false if Base::rh_io_read(body_ptr, raw) < 0
+                page_items: mutable i64 = 0
+                return false if not GitLabRoles::rh_glr_append_page(raw, members, &member_total[0], &byte_total[0], &page_items)
+                fetched <- fetched + 1
+                if page_items < RH_GLR_PAGE_SIZE:
+                    complete <- 1
+                else:
+                    page <- page + 1
+            complete_out[0] <- complete
+            next_page_out[0] <- page
+            fetched > 0
+
+    public:
+        def rh_roles_gitlab_live(project: cstr, max_pages: i64, evidence_base: cstr, previous: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if not GitLabRoles::rh_glr_project_valid(project) or max_pages < 1 or max_pages > RH_GLR_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
+            token: u8&? = getenv("RH_GITLAB_TOKEN")
+            return -1 if token == null
+            token_ptr: cstr = token.cast[cstr] can Unsafe.PointerCast
+            return -1 if Base::rh_cstr_len_c(token_ptr) == 0
+            start_page: mutable i64 = 1
+            previous_pages: mutable i64 = 0
+            if previous.count > 0:
+                return -1 if RolesProvider::rh_roles_provider_next_page(previous, project, &start_page, &previous_pages) != 0
+            members: mutable darray[u8] = []
+            member_total: mutable i64 = 0
+            byte_total: mutable i64 = 0
+            complete: mutable i64 = 0
+            next_page: mutable i64 = start_page
+            return -1 if not GitLabRoles::rh_glr_fetch(project, start_page, max_pages, evidence_base, members, &member_total, &byte_total, &complete, &next_page)
+            segment_pages: i64 = next_page - start_page + (1 if complete == 1 else 0)
+            return -1 if segment_pages < 1 or segment_pages > max_pages
+            captured_at: i64 = Base::rh_now()
+            return -1 if captured_at < 0
+            capture: mutable darray[u8] = []
+            Base::rh_push_text(capture, "{\"schema\":\"rh-provider-roles-input/1\",\"provider\":\"gitlab\",\"captured_at\":")
+            Base::rh_push_decimal_i64(capture, captured_at)
+            Base::rh_push_text(capture, ",\"authorization\":{\"state\":\"authorized\"},\"scope\":{\"project_path\":\"")
+            Base::rh_push_cstr(capture, project)
+            Base::rh_push_text(capture, "\"},\"members\":[")
+            capture.extend(bytes_view(members))
+            Base::rh_push_text(capture, "],\"pagination\":{\"next\":")
+            if complete == 1:
+                Base::rh_push_text(capture, "null,\"complete\":true")
+            else:
+                Base::rh_push_text(capture, "\"page=")
+                Base::rh_push_decimal_i64(capture, next_page)
+                Base::rh_push_text(capture, "\",\"complete\":false")
+            Base::rh_push_text(capture, "},\"pages_fetched\":")
+            Base::rh_push_decimal_i64(capture, previous_pages + segment_pages)
+            capture.push(125)
+            if previous.count > 0:
+                latest: mutable darray[u8] = []
+                return -1 if RolesProvider::rh_roles_provider_import(capture, latest) != 0
+                return RolesProvider::rh_roles_provider_merge(previous, latest, project, out)
+            RolesProvider::rh_roles_provider_import(capture, out)

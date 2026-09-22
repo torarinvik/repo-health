@@ -53,22 +53,19 @@ module RolesProvider:
             (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95
 
         def rh_rp_repository_valid(texts: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            return false if s < 0 or e <= s or e - s < 3 or e - s > 201
-            slash: mutable i64 = -1
-            while i < e |i: i64 = s, e, texts, slash|:
+            return false if s < 0 or e <= s or e - s < 3 or e - s > 255
+            segment_start: mutable i64 = s
+            while i < e |i: i64 = s, e, texts, segment_start|:
                 byte: u8 = texts[i.usize()]
                 if byte == 47:
-                    return false if slash >= 0
-                    slash <- i
+                    segment_length: i64 = i - segment_start
+                    return false if segment_length == 0 or (segment_length == 1 and texts[segment_start.usize()] == 46) or (segment_length == 2 and texts[segment_start.usize()] == 46 and texts[(segment_start + 1).usize()] == 46)
+                    segment_start <- i + 1
                 else:
                     return false if not RolesProvider::rh_rp_repository_char(byte)
                 i <- i + 1
-            return false if slash <= s or slash + 1 >= e
-            owner_dot: bool = slash == s + 1 and texts[s.usize()] == 46
-            owner_dotdot: bool = slash == s + 2 and texts[s.usize()] == 46 and texts[(s + 1).usize()] == 46
-            repo_dot: bool = slash + 2 == e and texts[(slash + 1).usize()] == 46
-            repo_dotdot: bool = slash + 3 == e and texts[(slash + 1).usize()] == 46 and texts[(slash + 2).usize()] == 46
-            not owner_dot and not owner_dotdot and not repo_dot and not repo_dotdot
+            segment_length: i64 = e - segment_start
+            segment_length > 0 and not (segment_length == 1 and texts[segment_start.usize()] == 46) and not (segment_length == 2 and texts[segment_start.usize()] == 46 and texts[(segment_start + 1).usize()] == 46)
 
         def rh_rp_cstr_eq(texts: darray[u8]&, s: i64, e: i64, value: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
             length: usize = Base::rh_cstr_len_c(value)
@@ -101,7 +98,8 @@ module RolesProvider:
             return false if not RolesProvider::rh_rp_str(nodes, texts, root, "schema", &schema_s, &schema_e) or not RolesProvider::rh_rp_eq(texts, schema_s, schema_e, "rh-roles-input/1")
             provider_s: mutable i64 = 0
             provider_e: mutable i64 = 0
-            return false if not RolesProvider::rh_rp_str(nodes, texts, root, "provider", &provider_s, &provider_e) or not RolesProvider::rh_rp_eq(texts, provider_s, provider_e, "github")
+            return false if not RolesProvider::rh_rp_str(nodes, texts, root, "provider", &provider_s, &provider_e) or (not RolesProvider::rh_rp_eq(texts, provider_s, provider_e, "github") and not RolesProvider::rh_rp_eq(texts, provider_s, provider_e, "gitlab"))
+            scope_key: u8& = "repository" if RolesProvider::rh_rp_eq(texts, provider_s, provider_e, "github") else "project_path"
             auth: i64 = Json::rh_json_obj_get(nodes, texts, root, "authorization")
             return false if auth < 0 or nodes[auth.usize()].kind != Json::RH_JSON_OBJ
             auth_s: mutable i64 = 0
@@ -111,7 +109,7 @@ module RolesProvider:
             return false if scope_idx < 0 or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
             scope_s: mutable i64 = 0
             scope_e: mutable i64 = 0
-            return false if not RolesProvider::rh_rp_str(nodes, texts, scope_idx, "repository", &scope_s, &scope_e) or not RolesProvider::rh_rp_repository_valid(texts, scope_s, scope_e) or not RolesProvider::rh_rp_cstr_eq(texts, scope_s, scope_e, repository)
+            return false if not RolesProvider::rh_rp_str(nodes, texts, scope_idx, scope_key, &scope_s, &scope_e) or not RolesProvider::rh_rp_repository_valid(texts, scope_s, scope_e) or not RolesProvider::rh_rp_cstr_eq(texts, scope_s, scope_e, repository)
             pagination: i64 = Json::rh_json_obj_get(nodes, texts, root, "pagination")
             return false if pagination < 0 or nodes[pagination.usize()].kind != Json::RH_JSON_OBJ
             cursor_s: mutable i64 = 0
@@ -236,9 +234,9 @@ module RolesProvider:
             -1
 
     public:
-        # Resume only an authenticated, incomplete GitHub snapshot for the same
-        # repository. The opaque cursor is constrained to the numeric page form
-        # emitted by this adapter before it is used in a fixed route.
+        # Resume only an authenticated, incomplete GitHub or GitLab snapshot
+        # for the same repository/project path. The opaque cursor is constrained
+        # to the numeric page form emitted by these adapters before use.
         def rh_roles_provider_next_page(raw: darray[u8]&, repository: cstr, start_page_out: mutable i64&, pages_fetched_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if raw.count > 4194304
             nodes: mutable darray[Json::RhJsonNode] = []
@@ -272,6 +270,17 @@ module RolesProvider:
             latest_texts: mutable darray[u8] = []
             latest_root: i64 = Json::rh_json_parse(latest, latest_nodes, latest_texts)
             return -1 if not RolesProvider::rh_rp_roles_snapshot_valid(latest_nodes, latest, latest_texts, latest_root, repository, false)
+            previous_provider_s: mutable i64 = 0
+            previous_provider_e: mutable i64 = 0
+            latest_provider_s: mutable i64 = 0
+            latest_provider_e: mutable i64 = 0
+            return -1 if not RolesProvider::rh_rp_str(previous_nodes, previous_texts, previous_root, "provider", &previous_provider_s, &previous_provider_e) or not RolesProvider::rh_rp_str(latest_nodes, latest_texts, latest_root, "provider", &latest_provider_s, &latest_provider_e)
+            return -1 if previous_provider_e - previous_provider_s != latest_provider_e - latest_provider_s
+            while provider_byte < previous_provider_e - previous_provider_s |provider_byte: i64 = 0, previous_provider_s, latest_provider_s, previous_texts, latest_texts|:
+                return -1 if previous_texts[(previous_provider_s + provider_byte).usize()] != latest_texts[(latest_provider_s + provider_byte).usize()]
+                provider_byte <- provider_byte + 1
+            gitlab: bool = RolesProvider::rh_rp_eq(previous_texts, previous_provider_s, previous_provider_e, "gitlab")
+            scope_key: u8& = "project_path" if gitlab else "repository"
             latest_pagination: i64 = Json::rh_json_obj_get(latest_nodes, latest_texts, latest_root, "pagination")
             next_s: mutable i64 = 0
             next_e: mutable i64 = 0
@@ -290,7 +299,11 @@ module RolesProvider:
             declarations: mutable darray[RhProviderDeclaration] = []
             return -1 if not RolesProvider::rh_rp_read_normalized_declarations(previous_nodes, previous, previous_texts, previous_root, declarations)
             return -1 if not RolesProvider::rh_rp_read_normalized_declarations(latest_nodes, latest, latest_texts, latest_root, declarations)
-            Base::rh_push_text(out, "{\"schema\":\"rh-roles-input/1\",\"provider\":\"github\",\"authorization\":{\"state\":\"authorized\"},\"scope\":{\"repository\":\"")
+            Base::rh_push_text(out, "{\"schema\":\"rh-roles-input/1\",\"provider\":\"")
+            Base::rh_json_escape(out, previous_texts, previous_provider_s.usize(), previous_provider_e.usize())
+            Base::rh_push_text(out, "\",\"authorization\":{\"state\":\"authorized\"},\"scope\":{\"")
+            Base::rh_push_text(out, scope_key)
+            Base::rh_push_text(out, "\":\"")
             Base::rh_push_cstr(out, repository)
             Base::rh_push_text(out, "\"},\"pagination\":{\"next\":")
             if next_present == 1:
@@ -313,8 +326,8 @@ module RolesProvider:
             0
 
         # Provider input shape:
-        # {schema, provider: github|gitlab, authorization:{state},
-        #  captured_at: unix-seconds, members:[provider records]}
+        # {schema, provider: github|gitlab, authorization:{state}, scope?:
+        #  {repository|project_path}, captured_at: unix-seconds, members:[...]}
         # Output is an `rh-roles-input/1` document for the normal role
         # engine.  The provider's native actor IDs remain internal evidence.
         def rh_roles_provider_import(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -364,8 +377,9 @@ module RolesProvider:
             scope_repository_s: mutable i64 = 0
             scope_repository_e: mutable i64 = 0
             if scope_present:
-                return -1 if not github or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
-                return -1 if not RolesProvider::rh_rp_str(nodes, texts, scope_idx, "repository", &scope_repository_s, &scope_repository_e)
+                return -1 if (not github and not gitlab) or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
+                scope_key: u8& = "repository" if github else "project_path"
+                return -1 if not RolesProvider::rh_rp_str(nodes, texts, scope_idx, scope_key, &scope_repository_s, &scope_repository_e)
                 return -1 if not RolesProvider::rh_rp_repository_valid(texts, scope_repository_s, scope_repository_e)
             pages_fetched_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "pages_fetched")
             pages_fetched_present: bool = pages_fetched_idx >= 0
@@ -373,7 +387,7 @@ module RolesProvider:
             if pages_fetched_present:
                 pages_ok: mutable i64 = 0
                 pages_fetched <- Json::rh_json_int(nodes, raw, pages_fetched_idx, &pages_ok)
-                return -1 if not github or not scope_present or auth_state != 1 or not pagination_present or pages_ok == 0 or pages_fetched < 1 or pages_fetched >= 10000
+                return -1 if (not github and not gitlab) or not scope_present or auth_state != 1 or not pagination_present or pages_ok == 0 or pages_fetched < 1 or pages_fetched >= 10000
                 if complete >= 0 and not Json::rh_json_is_true(nodes, raw, complete):
                     cursor_page: i64 = RolesProvider::rh_rp_cursor_page(texts, next_s, next_e)
                     return -1 if next_present == 0 or cursor_page != pages_fetched + 1
@@ -384,7 +398,9 @@ module RolesProvider:
             Base::rh_push_text(out, RolesProvider::rh_rp_auth_label(auth_state))
             Base::rh_push_text(out, "\"}")
             if scope_present:
-                Base::rh_push_text(out, ",\"scope\":{\"repository\":\"")
+                Base::rh_push_text(out, ",\"scope\":{\"")
+                Base::rh_push_text(out, "repository" if github else "project_path")
+                Base::rh_push_text(out, "\":\"")
                 Base::rh_json_escape(out, texts, scope_repository_s.usize(), scope_repository_e.usize())
                 Base::rh_push_text(out, "\"}")
             if pagination_present:
