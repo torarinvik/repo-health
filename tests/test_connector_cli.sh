@@ -225,7 +225,7 @@ t = pathlib.Path(sys.argv[2])
 assert d["schema"] == "rh-github-capability-probe-result/1", d
 assert d["scope"] == {"repository":"example/project"}, d
 assert d["authorization"]["credential"] == "configured", d
-assert d["capabilities"]["traffic"] == {"declaration":"authorized-14-day-window","status":"observed","http_status":200,"window_days":14}, d
+assert d["capabilities"]["traffic"] == {"declaration":"authorized-14-day-window","status":"observed","http_status":200,"coverage_state":"observed","window_days":14}, d
 published = open(sys.argv[1]).read()
 assert "count" not in d and '"count":12' not in published and '"uniques":8' not in published and '"views":[]' not in published, d
 for ext in ("json", "status", "err", "url"):
@@ -249,6 +249,8 @@ for case_spec in "401:unauthorized:$T/probe-error.json" "403:forbidden_or_rate_l
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["capabilities"]["traffic"]["status"] == sys.argv[2], d
+coverage = {"observed":"observed", "malformed":"partial", "unauthorized":"unauthorized", "forbidden_or_rate_limited":"unavailable", "not_found_or_private":"unavailable", "rate_limited":"unavailable", "unavailable":"unavailable"}
+assert d["capabilities"]["traffic"]["coverage_state"] == coverage[sys.argv[2]], d
 if sys.argv[3] == "000":
     assert d["capabilities"]["traffic"]["http_status"] is None, d
 else:
@@ -271,7 +273,7 @@ t = pathlib.Path(sys.argv[2])
 assert d["schema"] == "rh-github-review-capability-probe-result/1", d
 assert d["scope"] == {"repository":"example/project", "pull_request_number":23}, d
 assert d["authorization"]["credential"] == "configured", d
-assert d["capabilities"]["reviews"] == {"declaration":"read-one-item", "status":"forbidden_or_rate_limited", "http_status":403}, d
+assert d["capabilities"]["reviews"] == {"declaration":"read-one-item", "status":"forbidden_or_rate_limited", "http_status":403,"coverage_state":"unavailable"}, d
 assert (t / "review-probe.out.github-pull-reviews.url").read_text().strip() == "https://api.github.com/repos/example/project/pulls/23/reviews?per_page=1"
 for ext in ("json", "status", "err", "url"):
     assert (t / f"review-probe.out.github-pull-reviews.{ext}").exists(), ext
@@ -303,7 +305,7 @@ t = pathlib.Path(sys.argv[2])
 assert d["schema"] == "rh-github-collaborator-probe-result/1", d
 assert d["scope"] == {"repository":"example/project"}, d
 assert d["authorization"]["credential"] == "configured", d
-assert d["capabilities"]["collaborators"] == {"declaration":"read-one-item-authenticated", "status":"observed", "http_status":200}, d
+assert d["capabilities"]["collaborators"] == {"declaration":"read-one-item-authenticated", "status":"observed", "http_status":200,"coverage_state":"observed"}, d
 assert "private-account" not in open(sys.argv[1]).read(), d
 assert (t / "collaborator-probe.out.github-collaborators.json").read_text().find("private-account") >= 0
 assert (t / "collaborator-probe.out.github-collaborators.url").read_text().strip() == "https://api.github.com/repos/example/project/collaborators?per_page=1"
@@ -337,6 +339,7 @@ assert caps["issues"]["status"] == "observed" and caps["issues"]["http_status"] 
 assert caps["pull_requests"]["status"] == "observed" and caps["pull_requests"]["http_status"] == 200, caps
 assert caps["releases"]["status"] == "forbidden_or_rate_limited" and caps["releases"]["http_status"] == 403, caps
 assert caps["traffic"]["status"] == "not_found_or_private" and caps["traffic"]["http_status"] == 404, caps
+assert caps["releases"]["coverage_state"] == "unavailable" and caps["traffic"]["coverage_state"] == "unavailable", caps
 assert "count" not in json.dumps(caps) and "uniques" not in json.dumps(caps), caps
 for key in ("issues", "pull_requests", "releases", "traffic"):
     for evidence in d["evidence"][key].values():
@@ -362,7 +365,7 @@ PATH="$T/probe-bin:$PATH" RH_GITHUB_TOKEN="ghp_probe_fixture" \
 python3 - "$T/malformed-matrix.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["capabilities"]["issues"] == {"declaration":"read", "status":"malformed", "http_status":200}, d
+assert d["capabilities"]["issues"] == {"declaration":"read", "status":"malformed", "http_status":200,"coverage_state":"partial"}, d
 print("[connector] matrix marks a 200 non-array response malformed")
 PY
 
