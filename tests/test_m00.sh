@@ -19,7 +19,7 @@ import json, glob
 keys = sorted(json.load(open(p))['key'] for p in glob.glob('$ROOT/metrics/definitions/*.json'))
 print('\n'.join(keys))")"
 keys_count="$(echo "$keys_json" | wc -l | tr -d ' ')"
-[[ "$keys_count" == "211" ]] || { echo "[m00] FAIL: expected 211 definitions, got $keys_count"; exit 1; }
+[[ "$keys_count" == "212" ]] || { echo "[m00] FAIL: expected 212 definitions, got $keys_count"; exit 1; }
 # The runtime registry mirrors exactly the PUBLISHED definitions: every
 # implemented/prototype (key, version) must be present, and a planned metric
 # must NOT be in the registry, so the system never implies availability.
@@ -39,8 +39,8 @@ for p in sorted(glob.glob(os.path.join(root, "metrics", "definitions", "*.json")
     else:
         assert ('"%s"' % d["key"]) in reg, ("published metric missing from registry", d["key"])
         assert ('"%s"' % d["version"]) in reg, ("version missing from registry", d["version"])
-assert impl == 209, ("implemented definitions", impl)
-print("[m00] registry mirror OK: published are present, planned are absent; 209 implemented")
+assert impl == 210, ("implemented definitions", impl)
+print("[m00] registry mirror OK: published are present, planned are absent; 210 implemented")
 EOF
 # The M09 admission template is enforced mechanically for every definition.
 bash "$ROOT/tools/metric-lint.sh" | tail -n 1

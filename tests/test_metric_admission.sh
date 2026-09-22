@@ -9,13 +9,13 @@ fail() { echo "[metric-admission] FAIL: $1" >&2; exit 1; }
 
 echo "[metric-admission] all versioned metric definitions are classified and crosswalked"
 out="$(bash "$ROOT/tools/metric-lint.sh" "$ROOT")" || fail "metric lint"
-[[ "$out" == *"211 definitions (implemented=209, prototype=2)"* ]] || fail "unexpected metric catalog: $out"
+[[ "$out" == *"212 definitions (implemented=210, prototype=2)"* ]] || fail "unexpected metric catalog: $out"
 
 python3 - "$ROOT" <<'PY'
 import glob, json, sys
 root = sys.argv[1]
 defs = [json.load(open(p)) for p in glob.glob(root + "/metrics/definitions/*.json")]
-assert len(defs) == 211, len(defs)
+assert len(defs) == 212, len(defs)
 assert {d["measurement_class"] for d in defs} == {"raw", "derived", "modeled"}
 assert all(d["measurement_class"] == "modeled" for d in defs if d.get("group") == "experimental")
 mapped = [

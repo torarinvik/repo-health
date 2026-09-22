@@ -5492,12 +5492,13 @@ def rh_do_succession(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
         return 4
     input_v1: bool = Job::rh_job_lit_eq(texts, ss, se, "rh-succession-input/1")
     input_v2: bool = Job::rh_job_lit_eq(texts, ss, se, "rh-succession-input/2")
-    if not input_v1 and not input_v2:
+    input_v3: bool = Job::rh_job_lit_eq(texts, ss, se, "rh-succession-input/3")
+    if not input_v1 and not input_v2 and not input_v3:
         rh_cli_err("succession: not a valid rh-succession-input/1 document (fail closed)")
         return 4
     handover_month: mutable i64 = -1
     follow_up_months: mutable i64 = -1
-    if input_v2:
+    if input_v2 or input_v3:
         okh: mutable i64 = 0
         handover_month <- Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, root, "handover_month"), &okh)
         okf: mutable i64 = 0
@@ -5534,7 +5535,8 @@ def rh_do_succession(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
         rh_cli_err("succession: missing presence matrix (fail closed)")
         return 4
     rows: mutable darray[u8] = []
-    while row >= 0 |row: i64 = nodes[midx.usize()].first_child, nodes, rows|:
+    presence_rows: mutable i64 = 0
+    while row >= 0 |row: i64 = nodes[midx.usize()].first_child, nodes, rows, presence_rows|:
         if nodes[row.usize()].kind != Json::RH_JSON_ARR:
             rh_cli_err("succession: presence row is not an array (fail closed)")
             return 4
@@ -5550,12 +5552,49 @@ def rh_do_succession(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
         if months > 0 and rows.count.i64() % months != 0:
             rh_cli_err("succession: presence matrix is not complete_months wide (fail closed)")
             return 4
+        presence_rows <- presence_rows + 1
         row <- nodes[row.usize()].next_sibling
     if handover_month >= months:
         rh_cli_err("succession: handover_month must fall within complete history (fail closed)")
         return 4
+    activity_counts: mutable darray[i64] = []
+    activity_counts_present: bool = input_v3
+    if input_v3:
+        counts_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "activity_counts")
+        if counts_idx < 0 or nodes[counts_idx.usize()].kind != Json::RH_JSON_ARR:
+            rh_cli_err("succession: missing activity_counts matrix (fail closed)")
+            return 4
+        count_rows: mutable i64 = 0
+        while count_row >= 0 |count_row: i64 = nodes[counts_idx.usize()].first_child, nodes, raw, months, activity_counts, count_rows|:
+            if count_rows >= presence_rows:
+                rh_cli_err("succession: activity counts contain an unmatched actor row (fail closed)")
+                return 4
+            if nodes[count_row.usize()].kind != Json::RH_JSON_ARR:
+                rh_cli_err("succession: activity count row is not an array (fail closed)")
+                return 4
+            row_width: mutable i64 = 0
+            while count_cell >= 0 |count_cell: i64 = nodes[count_row.usize()].first_child, nodes, raw, activity_counts, row_width|:
+                ok_count: mutable i64 = 0
+                count: i64 = Json::rh_json_int(nodes, raw, count_cell, &ok_count)
+                if ok_count == 0 or count < 0:
+                    rh_cli_err("succession: activity counts must be nonnegative integers (fail closed)")
+                    return 4
+                if (rows[activity_counts.count.usize()] == 1) != (count > 0):
+                    rh_cli_err("succession: activity counts disagree with presence matrix (fail closed)")
+                    return 4
+                activity_counts.push(count)
+                row_width <- row_width + 1
+                count_cell <- nodes[count_cell.usize()].next_sibling
+            if row_width != months:
+                rh_cli_err("succession: activity count row width differs from complete_months (fail closed)")
+                return 4
+            count_rows <- count_rows + 1
+            count_row <- nodes[count_row.usize()].next_sibling
+        if months <= 0 or count_rows != presence_rows:
+            rh_cli_err("succession: invalid complete history for activity counts (fail closed)")
+            return 4
     body: mutable darray[u8] = []
-    Continuity::rh_succession_metrics_write(body, rows, pred, succ, months, handover_month, follow_up_months)
+    Continuity::rh_succession_metrics_write(body, rows, pred, succ, months, handover_month, follow_up_months, activity_counts, activity_counts_present)
     body.push(10)
     op: mutable darray[u8] =
         op: mutable darray[u8] = []
