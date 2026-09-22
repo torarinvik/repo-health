@@ -162,6 +162,24 @@ set +e
 rc_unverified_link=$?
 set -e
 [[ "$rc_unverified_link" -eq 4 && ! -f "$T/unverified-link.out" ]] || fail "reviewed identity link without evidence must fail closed"
+python3 - "$T/reviewed-link-input.json" "$T" <<'PY'
+import json, sys
+source, root = sys.argv[1:]
+for name, field, value in (("missing-reviewer", "reviewed_by", None), ("negative-review-time", "reviewed_at", -1)):
+    d = json.load(open(source))
+    if value is None:
+        d["links"][0].pop(field)
+    else:
+        d["links"][0][field] = value
+    json.dump(d, open(f"{root}/{name}.json", "w"), separators=(",", ":"))
+PY
+for invalid_review in missing-reviewer negative-review-time; do
+    set +e
+    "$ROOT/build/rh_cli" identity --input "$T/$invalid_review.json" --out "$T/$invalid_review.out" --evidence-store "$T/evidence" >/dev/null 2>&1
+    rc_invalid_review=$?
+    set -e
+    [[ "$rc_invalid_review" -eq 4 && ! -f "$T/$invalid_review.out" ]] || fail "invalid reviewed identity metadata must fail closed: $invalid_review"
+done
 printf 'corrupt\n' > "$T/evidence/$evidence_name"
 set +e
 "$ROOT/build/rh_cli" identity --input "$T/verified-input.json" --out "$T/corrupt.out" --evidence-store "$T/evidence" >/dev/null 2>&1
