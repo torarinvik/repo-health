@@ -48,6 +48,9 @@ assert [a["state"] for a in ap] == ["accepted", "rejected", "open", "accepted"],
 assert [a["evidence_ref"] for a in ap] == ["evidence-accepted", "evidence-rejected", "evidence-open", "evidence-accepted"], ap
 assert [a["reviewed_by"] for a in ap] == ["reviewer-a", "reviewer-b", None, "reviewer-a"], ap
 assert [a["reviewed_at"] for a in ap] == [1700000000, 1700000100, None, 1700000000], ap
+assert len(d["notices"]) == 2, d["notices"]
+assert [(n["subject_id"], n["correction_revision"], n["kind"]) for n in d["notices"]] == [(7, 1, "measurement"), (7, 2, "mapping")], d["notices"]
+assert all(n["evidence_ref"] and n["reviewed_by"] and n["reviewed_at"] >= 0 for n in d["notices"]), d["notices"]
 assert ap[0]["revision_before"] == 0 and ap[0]["revision_after"] == 1, ap[0]
 assert ap[1]["revision_before"] == 1 and ap[1]["revision_after"] == 1, ap[1]  # rejected: no change
 assert ap[2]["revision_before"] == 1 and ap[2]["revision_after"] == 1, ap[2]  # open: no change
@@ -121,6 +124,11 @@ cp "$T/state.json" "$T/state.snap"
 "$ROOT/build/rh_cli" correct --corrections "$T/dur.json" --out "$T/d2" --state "$T/state.json" >/dev/null || fail "second durable run"
 rev2="$(python3 -c "import json;print(json.load(open('$T/d2/corrections-result.json'))['final_revision'])")"
 [[ "$rev2" == "2" ]] || fail "replayed ledger must stay at rev 2 (got $rev2)"
+python3 - "$T/d2/corrections-result.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["notices"] == []
+print("[correct] replay emits no duplicate notices")
+PY
 cmp -s "$T/state.json" "$T/state.snap" || fail "state write-back must be deterministic"
 # A persisted revision floor with a watermark covering the document lifts the
 # result even with no new corrections folded in.

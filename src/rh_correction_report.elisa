@@ -152,7 +152,8 @@ module CorrectionReport:
             app_reviewer_s: mutable darray[i64] = []
             app_reviewer_e: mutable darray[i64] = []
             app_reviewed_at: mutable darray[i64] = []
-            while cchild >= 0 |cchild: i64 = carr.first_child, ordinal: i64 = 0, nodes, texts, raw, derived, rev, wm, app_kind, app_target, app_state, app_before, app_after, app_super, app_evidence_s, app_evidence_e, app_reviewer_s, app_reviewer_e, app_reviewed_at, new_superseded|:
+            app_newly_applied: mutable darray[u8] = []
+            while cchild >= 0 |cchild: i64 = carr.first_child, ordinal: i64 = 0, nodes, texts, raw, derived, rev, wm, app_kind, app_target, app_state, app_before, app_after, app_super, app_evidence_s, app_evidence_e, app_reviewer_s, app_reviewer_e, app_reviewed_at, app_newly_applied, new_superseded|:
                 return -1 if nodes[cchild.usize()].kind != Json::RH_JSON_OBJ
                 ordinal <- ordinal + 1
                 ks: mutable i64 = 0
@@ -216,12 +217,13 @@ module CorrectionReport:
                 app_reviewer_s.push(reviewer_s)
                 app_reviewer_e.push(reviewer_e)
                 app_reviewed_at.push(reviewed_at)
+                app_newly_applied.push(1 if not already else 0)
                 cchild <- nodes[cchild.usize()].next_sibling
 
             Base::rh_push_text(out, "{\"schema\":\"rh-corrections-result/1\",\"final_revision\":")
             Base::rh_push_decimal_i64(out, rev)
             Base::rh_push_text(out, ",\"applied\":[")
-            while i < app_kind.count.i64() |i: i64 = 0, app_kind, app_target, app_state, app_before, app_after, app_super, app_evidence_s, app_evidence_e, app_reviewer_s, app_reviewer_e, app_reviewed_at, texts, out|:
+            while i < app_kind.count.i64() |i: i64 = 0, app_kind, app_target, app_state, app_before, app_after, app_super, app_evidence_s, app_evidence_e, app_reviewer_s, app_reviewer_e, app_reviewed_at, app_newly_applied, texts, out|:
                 if i > 0:
                     out.push(44)
                 Base::rh_push_text(out, "{\"kind\":\"")
@@ -234,6 +236,9 @@ module CorrectionReport:
                 Base::rh_push_decimal_i64(out, app_before[i.usize()])
                 Base::rh_push_text(out, ",\"revision_after\":")
                 Base::rh_push_decimal_i64(out, app_after[i.usize()])
+                Base::rh_push_text(out, ",\"newly_applied\":")
+                Base::rh_push_text(out, "true") if app_newly_applied[i.usize()] == 1
+                Base::rh_push_text(out, "false") if app_newly_applied[i.usize()] == 0
                 Base::rh_push_text(out, ",\"superseded_count\":")
                 Base::rh_push_decimal_i64(out, app_super[i.usize()])
                 Base::rh_push_text(out, ",\"evidence_ref\":\"")
@@ -252,6 +257,29 @@ module CorrectionReport:
                     Base::rh_push_decimal_i64(out, app_reviewed_at[i.usize()])
                 Base::rh_push_text(out, "}")
                 i <- i + 1
+            Base::rh_push_text(out, "],\"notices\":[")
+            notice_first: mutable bool = true
+            while ni < app_kind.count.i64() |ni: i64 = 0, app_kind, app_target, app_state, app_after, app_super, app_evidence_s, app_evidence_e, app_reviewer_s, app_reviewer_e, app_reviewed_at, app_newly_applied, texts, out, notice_first|:
+                if app_state[ni.usize()] == Correction::RH_CORR_ACCEPTED and app_newly_applied[ni.usize()] == 1:
+                    if not notice_first:
+                        out.push(44)
+                    notice_first <- false
+                    Base::rh_push_text(out, "{\"subject_id\":")
+                    Base::rh_push_decimal_i64(out, app_target[ni.usize()])
+                    Base::rh_push_text(out, ",\"correction_revision\":")
+                    Base::rh_push_decimal_i64(out, app_after[ni.usize()])
+                    Base::rh_push_text(out, ",\"kind\":\"")
+                    Base::rh_push_text(out, rh_cr_kind_label(app_kind[ni.usize()]))
+                    Base::rh_push_text(out, "\",\"evidence_ref\":\"")
+                    Base::rh_json_escape(out, texts, app_evidence_s[ni.usize()].usize(), app_evidence_e[ni.usize()].usize())
+                    Base::rh_push_text(out, "\",\"reviewed_by\":\"")
+                    Base::rh_json_escape(out, texts, app_reviewer_s[ni.usize()].usize(), app_reviewer_e[ni.usize()].usize())
+                    Base::rh_push_text(out, "\",\"reviewed_at\":")
+                    Base::rh_push_decimal_i64(out, app_reviewed_at[ni.usize()])
+                    Base::rh_push_text(out, ",\"superseded_count\":")
+                    Base::rh_push_decimal_i64(out, app_super[ni.usize()])
+                    Base::rh_push_text(out, "}")
+                ni <- ni + 1
             Base::rh_push_text(out, "],\"derived\":[")
             while d2 < derived.count.i64() |d2: i64 = 0, derived, out|:
                 if d2 > 0:
