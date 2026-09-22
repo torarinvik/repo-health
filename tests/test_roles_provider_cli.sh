@@ -210,6 +210,26 @@ print("[roles-provider] GitLab partial inventory and nested project scope OK")
 PY
 grep -Fxq 'header = "PRIVATE-TOKEN: glpat_roles_fixture"' "$T/gitlab-roles-curl.config" || fail "GitLab token header absent from curl stdin config"
 ! grep -Fq 'glpat_roles_fixture' "$T/gitlab-roles-curl.args" || fail "GitLab token leaked into curl arguments"
+python3 - "$T/gitlab-partial.json" "$T/gitlab-wrong-scope.json" "$T/gitlab-skipped-cursor.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+wrong_scope = dict(d)
+wrong_scope["scope"] = {"project_path": "group/other/project"}
+json.dump(wrong_scope, open(sys.argv[2], "w"), separators=(",", ":"))
+bad_cursor = dict(d)
+bad_cursor["pagination"] = {"next": "page=3", "complete": False}
+json.dump(bad_cursor, open(sys.argv[3], "w"), separators=(",", ":"))
+PY
+for resume_case in wrong-scope skipped-cursor; do
+  rm -f "$T/gitlab-$resume_case.out" "$T/gitlab-$resume_case-curl.args"
+  set +e
+  PATH="$T/bin:$PATH" RH_GITLAB_TOKEN="glpat_roles_fixture" RH_CURL_LOG="$T/gitlab-$resume_case-curl.args" RH_CURL_CONFIG_LOG="$T/gitlab-$resume_case.config" \
+    "$ROOT/build/rh_cli" roles-import --gitlab-project group/subgroup/project --resume-from "$T/gitlab-$resume_case.json" --out "$T/gitlab-$resume_case.out" >/dev/null 2>&1
+  resume_rc=$?
+  set -e
+  [[ "$resume_rc" -eq 4 && ! -e "$T/gitlab-$resume_case-curl.args" && ! -e "$T/gitlab-$resume_case.out" ]] || fail "GitLab resume accepted $resume_case or made a request before validation"
+done
+echo "[roles-provider] GitLab resume rejects wrong scope and skipped cursor before network access"
 rm -f "$T/gitlab-complete.json" "$T/gitlab-complete.json.gitlab-members-page-"* "$T/gitlab-resume-curl.args" "$T/gitlab-resume-curl.config"
 PATH="$T/bin:$PATH" RH_GITLAB_TOKEN="glpat_roles_fixture" RH_CURL_GITLAB_PAGE1="$T/gitlab-page-full.json" RH_CURL_GITLAB_PAGE2="$T/gitlab-page-short.json" \
   RH_CURL_LOG="$T/gitlab-resume-curl.args" RH_CURL_CONFIG_LOG="$T/gitlab-resume-curl.config" \
