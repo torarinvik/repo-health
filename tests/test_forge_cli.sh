@@ -25,6 +25,8 @@ echo "[forge] github + gitlab + gitea + forgejo reproduce their canonical golden
 "$ROOT/build/rh_cli" forge normalize --connector bitbucket --input "$T/bitbucket-repo.json" --out "$T/bb.out" --fetched-at 1700000000 >/dev/null || fail "bitbucket normalize"
 python3 - "$T" <<'PY'
 import sys
+import hashlib
+import json
 t = sys.argv[1]
 def norm(p):
     b = open(p, "rb").read()
@@ -35,7 +37,25 @@ assert norm(t + "/gt.out") == norm(t + "/gitea-repo.canonical.json"), "gitea gol
 assert norm(t + "/fj.out") == norm(t + "/forgejo-project.canonical.json"), "forgejo golden mismatch"
 assert norm(t + "/bb.out") == norm(t + "/bitbucket-repo.canonical.json"), "bitbucket golden mismatch"
 assert b"rh-canonical-repo/1" in open(t + "/gh.out", "rb").read()
+for provider, source, output in [("github", "github-repo.json", "gh.out"),
+                                ("gitlab", "gitlab-project.json", "gl.out"),
+                                ("gitea", "gitea-repo.json", "gt.out"),
+                                ("forgejo", "forgejo-project.json", "fj.out"),
+                                ("bitbucket", "bitbucket-repo.json", "bb.out")]:
+    report = json.load(open(t + "/" + output + ".transformations.json"))
+    assert report["schema"] == "rh-forge-transformation-report/1", report
+    assert report["provider"] == provider, report
+    assert report["normalized_schema"] == "rh-canonical-repo/1" and report["normalizer_version"] == "1.0.0", report
+    assert report["configuration_sha256"] == hashlib.sha256(("repo-health/forge-repo-normalizer/1:" + provider).encode()).hexdigest(), report
+    assert report["input_sha256"] == hashlib.sha256(open(t + "/" + source, "rb").read()).hexdigest(), report
+    assert report["normalized_sha256"] == hashlib.sha256(open(t + "/" + output, "rb").read()).hexdigest(), report
+    assert {f["state"] for f in report["fields"]} >= {"preserved", "transformed", "inferred", "discarded"}, report
+assert any(f["source"] == "web_url" for f in json.load(open(t + "/gl.out.transformations.json"))["fields"])
+assert any(f["source"] == "links.html.href" and f["state"] == "transformed" for f in json.load(open(t + "/bb.out.transformations.json"))["fields"])
+assert any(f["source"] == "pushed_at" and f["state"] == "transformed" for f in json.load(open(t + "/gh.out.transformations.json"))["fields"])
+assert any(f["source"] == "not provided by this provider" and f["target"] == "pushed_at" and f["state"] == "unknown" for f in json.load(open(t + "/gl.out.transformations.json"))["fields"])
 print("[forge] goldens reproduced byte-for-byte")
+print("[forge] per-provider field-loss reports bind exact input and normalized digests")
 PY
 
 echo "[forge] determinism at a pinned time"
