@@ -47,6 +47,12 @@ assert v[2]["deprecated"] is None and v[2]["deprecation_notice"] is None, v[2]
 assert v[2]["source_link"] is None and v[2]["source_link_kind"] is None, v[2]
 assert "assertion, not identity" in d["note"], d["note"]
 assert "retained, not deleted" in d["note"], d["note"]
+tr = json.load(open(sys.argv[1] + ".transformations.json"))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "registry-version-metadata", tr
+assert tr["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/registry-version-metadata/1").hexdigest(), tr
+assert any(x["state"] == "unknown" for x in tr["fields"]), tr
 print("[registry-meta] counts + honest states OK")
 PY
 

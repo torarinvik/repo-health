@@ -72,6 +72,7 @@ include "./rh_homebrew.elisa"
 include "./rh_arch.elisa"
 include "./rh_release_feed_report.elisa"
 include "./rh_registry_meta_report.elisa"
+include "./rh_registry_meta_transformation.elisa"
 include "./rh_pep440_report.elisa"
 include "./rh_ops_report.elisa"
 include "./rh_pilot_review.elisa"
@@ -7806,6 +7807,25 @@ def rh_do_release_feed(input_path: cstr, out_path: cstr, source_url: cstr, has_u
 # Yanked versions are retained; absent yank/date fields stay null (unknown);
 # repository links are assertions, not identity; declared deps are counts;
 # reports bind exact input bytes to origin without publishing raw locators.
+def rh_registry_meta_write_transformation(input: darray[u8]&, output: darray[u8]&, out_path: cstr) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    configuration: mutable darray[u8] = []
+    Base::rh_push_text(configuration, "repo-health/registry-version-metadata/1")
+    configuration_sha: mutable darray[u8] = []
+    input_sha: mutable darray[u8] = []
+    output_sha: mutable darray[u8] = []
+    Sha256::rh_sha256(configuration, configuration_sha)
+    Sha256::rh_sha256(input, input_sha)
+    Sha256::rh_sha256(output, output_sha)
+    report: mutable darray[u8] = []
+    RegistryMetaTransformation::rh_registry_meta_transformation_report(configuration_sha, input_sha, output_sha, report)
+    report.push(10)
+    report_path: mutable darray[u8] = []
+    Base::rh_push_cstr(report_path, out_path)
+    Base::rh_push_text(report_path, ".transformations.json")
+    report_path.push(0)
+    report_ptr: cstr = (&report_path[0]).cast[cstr] can Unsafe.PointerCast
+    Base::rh_io_write(report_ptr, report)
+
 def rh_do_registry_meta(input_path: cstr, out_path: cstr, source_url: cstr, has_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected registry-meta argument (allowlist)")
@@ -7889,6 +7909,9 @@ def rh_do_registry_meta(input_path: cstr, out_path: cstr, source_url: cstr, has_
     opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
     if not Base::rh_io_write(opp, body):
         rh_cli_err("registry-meta: cannot write --out")
+        return 4
+    if not rh_registry_meta_write_transformation(raw, body, out_path):
+        rh_cli_err("registry-meta: cannot write transformation report")
         return 4
     rh_cli_out("registry-meta: ok")
     0
