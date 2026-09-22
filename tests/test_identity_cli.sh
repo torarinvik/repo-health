@@ -142,15 +142,48 @@ print("[identity] evidence digest + output binding OK")
 PY
 python3 - "$T/reviewed-link-input.json" "$evidence_name" <<'PY'
 import json, sys
-json.dump({"schema":"rh-identity-input/1","actor_count":2,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1,"reviewed_by":"maintainer","reviewed_at":1700000000,"evidence_ref":sys.argv[2]}]}, open(sys.argv[1], "w"), separators=(",", ":"))
+json.dump({"schema":"rh-identity-input/1","actor_count":2,"actors":[{"source":"github","source_instance":"github.com/acme","native_object_id":"1","display_name":"a","aliases":[]},{"source":"gitlab","source_instance":"gitlab.com/acme","native_object_id":"1","display_name":"b","aliases":[]}],"links":[{"a":0,"b":1,"state":"accepted","revision_added":1,"reviewed_by":"maintainer","reviewed_at":1700000000,"review_reason":"Verified shared ownership evidence","evidence_ref":sys.argv[2]}]}, open(sys.argv[1], "w"), separators=(",", ":"))
 PY
 "$ROOT/build/rh_cli" identity --input "$T/reviewed-link-input.json" --out "$T/reviewed-link.out" --evidence-store "$T/evidence" >/dev/null || fail "evidence-backed accepted identity link"
 python3 - "$T/reviewed-link.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1] + ".evidence-verification.json"))
-assert d["verified_reference_count"] == 1 and d["reviewed_link_count"] == 1, d
-print("[identity] reviewed link evidence + reviewer/time OK")
+assert d["verified_reference_count"] == 1 and d["reviewed_link_count"] == 1 and d["reviewed_cross_source_link_count"] == 1, d
+print("[identity] cross-source review evidence + reviewer/time/reason OK")
 PY
+cp "$T/reviewed-link-input.json" "$T/reviewed-link-valid.json"
+python3 - "$T/reviewed-link-valid.json" "$T/same-source-link.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["actors"][1]["source"] = d["actors"][0]["source"]
+d["actors"][1]["source_instance"] = d["actors"][0]["source_instance"]
+d["actors"][1]["native_object_id"] = "same-source-distinct-account"
+d["links"][0].pop("review_reason")
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" identity --input "$T/same-source-link.json" --out "$T/same-source-link.out" --evidence-store "$T/evidence" >/dev/null || fail "same-source reviewed identity link"
+python3 - "$T/same-source-link.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1] + ".evidence-verification.json"))
+assert d["reviewed_link_count"] == 1 and d["reviewed_cross_source_link_count"] == 0, d
+print("[identity] same-source review does not require cross-source rationale")
+PY
+python3 - "$T/reviewed-link-valid.json" "$T" <<'PY'
+import json, sys
+source, root = sys.argv[1:]
+for state in ("rejected", "revoked"):
+    d = json.load(open(source)); d["links"][0]["state"] = state
+    json.dump(d, open(f"{root}/{state}-cross-source.json", "w"), separators=(",", ":"))
+PY
+for review_state in rejected revoked; do
+    "$ROOT/build/rh_cli" identity --input "$T/$review_state-cross-source.json" --out "$T/$review_state-cross-source.out" --evidence-store "$T/evidence" >/dev/null || fail "evidence-backed $review_state cross-source link"
+    python3 - "$T/$review_state-cross-source.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1] + ".evidence-verification.json"))
+assert d["reviewed_link_count"] == 1 and d["reviewed_cross_source_link_count"] == 1, d
+PY
+done
+printf '[identity] reviewed rejected/revoked cross-source links\n'
 python3 - "$T/reviewed-link-input.json" <<'PY'
 import json, sys
 p = sys.argv[1]
@@ -162,10 +195,10 @@ set +e
 rc_unverified_link=$?
 set -e
 [[ "$rc_unverified_link" -eq 4 && ! -f "$T/unverified-link.out" ]] || fail "reviewed identity link without evidence must fail closed"
-python3 - "$T/reviewed-link-input.json" "$T" <<'PY'
+python3 - "$T/reviewed-link-valid.json" "$T" <<'PY'
 import json, sys
 source, root = sys.argv[1:]
-for name, field, value in (("missing-reviewer", "reviewed_by", None), ("negative-review-time", "reviewed_at", -1)):
+for name, field, value in (("missing-reviewer", "reviewed_by", None), ("negative-review-time", "reviewed_at", -1), ("missing-cross-source-reason", "review_reason", None)):
     d = json.load(open(source))
     if value is None:
         d["links"][0].pop(field)

@@ -5,6 +5,30 @@ include "./rh_store.elisa"
 
 module IdentityEvidence:
     private:
+        def rh_identity_evidence_link_cross_source(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, link: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            actors_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "actors")
+            return 0 if actors_idx < 0
+            return -1 if nodes[actors_idx.usize()].kind != Json::RH_JSON_ARR
+            a_ok: mutable i64 = 0
+            b_ok: mutable i64 = 0
+            a: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, link, "a"), &a_ok)
+            b: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, link, "b"), &b_ok)
+            return -1 if a_ok == 0 or b_ok == 0 or a < 0 or b < 0
+            actor_a: i64 = Json::rh_json_arr_get(nodes, actors_idx, a)
+            actor_b: i64 = Json::rh_json_arr_get(nodes, actors_idx, b)
+            return -1 if actor_a < 0 or actor_b < 0 or nodes[actor_a.usize()].kind != Json::RH_JSON_OBJ or nodes[actor_b.usize()].kind != Json::RH_JSON_OBJ
+            source_a_start: mutable i64 = 0
+            source_a_end: mutable i64 = 0
+            source_b_start: mutable i64 = 0
+            source_b_end: mutable i64 = 0
+            instance_a_start: mutable i64 = 0
+            instance_a_end: mutable i64 = 0
+            instance_b_start: mutable i64 = 0
+            instance_b_end: mutable i64 = 0
+            return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, actor_a, "source"), &source_a_start, &source_a_end) or not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, actor_b, "source"), &source_b_start, &source_b_end) or not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, actor_a, "source_instance"), &instance_a_start, &instance_a_end) or not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, actor_b, "source_instance"), &instance_b_start, &instance_b_end)
+            return 1 if not Base::rh_bytes_equal_span(texts, source_a_start, source_a_end, texts, source_b_start, source_b_end) or not Base::rh_bytes_equal_span(texts, instance_a_start, instance_a_end, texts, instance_b_start, instance_b_end)
+            0
+
         def rh_identity_evidence_ref_verify(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, ref_idx: i64, evidence_root: cstr) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             start: mutable i64 = 0
             finish: mutable i64 = 0
@@ -23,7 +47,8 @@ module IdentityEvidence:
     public:
         def rh_identity_evidence_verify(raw: darray[u8]&, evidence_root: cstr,
                                         verified_out: mutable i64&,
-                                        reviewed_link_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+                                        reviewed_link_out: mutable i64&,
+                                        reviewed_cross_source_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -59,18 +84,25 @@ module IdentityEvidence:
                         else:
                             reviewed: bool = Base::rh_bytes_equal_literal(texts, state_s, state_e, "accepted") or Base::rh_bytes_equal_literal(texts, state_s, state_e, "rejected") or Base::rh_bytes_equal_literal(texts, state_s, state_e, "revoked")
                             if reviewed:
+                                cross_source: i64 = IdentityEvidence::rh_identity_evidence_link_cross_source(nodes, raw, texts, root, link)
                                 ref_idx: i64 = Json::rh_json_obj_get(nodes, texts, link, "evidence_ref")
                                 reviewer_idx: i64 = Json::rh_json_obj_get(nodes, texts, link, "reviewed_by")
                                 reviewed_at_idx: i64 = Json::rh_json_obj_get(nodes, texts, link, "reviewed_at")
+                                reason_idx: i64 = Json::rh_json_obj_get(nodes, texts, link, "review_reason")
                                 reviewer_s: mutable i64 = 0
                                 reviewer_e: mutable i64 = 0
+                                reason_s: mutable i64 = 0
+                                reason_e: mutable i64 = 0
                                 reviewed_at_ok: mutable i64 = 0
                                 reviewed_at: i64 = Json::rh_json_int(nodes, raw, reviewed_at_idx, &reviewed_at_ok)
-                                if not Json::rh_json_str_span(nodes, reviewer_idx, &reviewer_s, &reviewer_e) or reviewer_s == reviewer_e or reviewed_at_ok == 0 or reviewed_at < 0 or not IdentityEvidence::rh_identity_evidence_ref_verify(nodes, texts, ref_idx, evidence_root):
+                                if cross_source < 0 or not Json::rh_json_str_span(nodes, reviewer_idx, &reviewer_s, &reviewer_e) or reviewer_s == reviewer_e or reviewed_at_ok == 0 or reviewed_at < 0 or not IdentityEvidence::rh_identity_evidence_ref_verify(nodes, texts, ref_idx, evidence_root):
+                                    state <- -1
+                                elif cross_source == 1 and (not Json::rh_json_str_span(nodes, reason_idx, &reason_s, &reason_e) or reason_s == reason_e):
                                     state <- -1
                                 else:
                                     verified_out[0] <- verified_out[0] + 1
                                     reviewed_link_out[0] <- reviewed_link_out[0] + 1
+                                    reviewed_cross_source_out[0] <- reviewed_cross_source_out[0] + 1 if cross_source == 1
                     link <- nodes[link.usize()].next_sibling
             released: i64 = Store::rh_store_guard_release(fd)
             return -1 if state != 0 or released != 0
