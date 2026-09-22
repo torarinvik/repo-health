@@ -39,12 +39,19 @@ assert r["coverage"]["status"] == "observed", r
 assert "manifest" in r["coverage"]["fields"] and r["versions_count"] == 30, r
 assert "description" not in r and "title" not in r, r
 assert "independently review" in d["note"] and "link CC-BY-SA-4.0" in d["note"] and "indicate filtering" in d["note"], d
+tr = json.load(open(sys.argv[1] + ".transformations.json"))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "ecosyste.ms-package-lookup", tr
+assert tr["source_input_sha256"] == __import__("hashlib").sha256(open(sys.argv[1].replace("out.json", "input.json"), "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == __import__("hashlib").sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == __import__("hashlib").sha256(b"repo-health/ecosyste.ms-package-lookup/1").hexdigest(), tr
+assert any(x["state"] == "discarded" for x in tr["fields"]), tr
 print("[ecosystem-lookup] provenance + bounded enrichment OK")
 PY
 
 echo "[ecosystem-lookup] deterministic replay"
 "$ROOT/build/rh_cli" ecosystem lookup --input "$T/input.json" --out "$T/out2.json" >/dev/null || fail "lookup replay"
 cmp -s "$T/out.json" "$T/out2.json" || fail "lookup output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "transformation report not deterministic"
 
 echo "[ecosystem-lookup] fixed live route retains evidence and attribution (offline fake transport)"
 mkdir -p "$T/bin"
@@ -104,6 +111,11 @@ assert "maintainers" not in json.dumps(d) and "private@example.org" not in json.
 assert (t / "ecosystem-lookup-fetch-status.txt").read_text() == "200"
 assert (t / "ecosystem-lookup-fetch.err").exists()
 assert json.loads((t / "ecosystem-lookup-fetch-body.json").read_text())[0]["id"] == 43
+tr = json.loads((t / "live-result.json.transformations.json").read_text())
+import hashlib
+assert tr["source_input_sha256"] == hashlib.sha256((t / "provider-array.json").read_bytes()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256((t / "live-result.json").read_bytes()).hexdigest(), tr
+assert "private@example.org" not in json.dumps(tr), tr
 print("[ecosystem-lookup] guarded request + retained response/status/error + attributed output OK")
 PY
 

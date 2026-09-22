@@ -30,6 +30,7 @@ include "./rh_artifact_observation.elisa"
 include "./rh_osv_query.elisa"
 include "./rh_depsdev.elisa"
 include "./rh_ecosystem_lookup.elisa"
+include "./rh_ecosystem_lookup_transformation.elisa"
 include "./rh_adapter_manifest.elisa"
 include "./rh_findings.elisa"
 include "./rh_resolution.elisa"
@@ -4814,6 +4815,25 @@ def rh_do_depsdev(input_path: cstr, out_path: cstr, source_url: cstr, has_url: b
     0
 
 # --- M03-10 bounded ecosyste.ms package lookup capture. ---
+def rh_ecosystem_lookup_write_transformation(input: darray[u8]&, output: darray[u8]&, out_path: cstr) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    configuration: mutable darray[u8] = []
+    Base::rh_push_text(configuration, "repo-health/ecosyste.ms-package-lookup/1")
+    configuration_sha: mutable darray[u8] = []
+    input_sha: mutable darray[u8] = []
+    output_sha: mutable darray[u8] = []
+    Sha256::rh_sha256(configuration, configuration_sha)
+    Sha256::rh_sha256(input, input_sha)
+    Sha256::rh_sha256(output, output_sha)
+    report: mutable darray[u8] = []
+    EcosystemLookupTransformation::rh_ecosystem_lookup_transformation_report(configuration_sha, input_sha, output_sha, report)
+    report.push(10)
+    report_path: mutable darray[u8] = []
+    Base::rh_push_cstr(report_path, out_path)
+    Base::rh_push_text(report_path, ".transformations.json")
+    report_path.push(0)
+    report_ptr: cstr = (&report_path[0]).cast[cstr] can Unsafe.PointerCast
+    Base::rh_io_write(report_ptr, report)
+
 def rh_do_ecosystem_lookup(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected ecosystem lookup argument (allowlist)")
@@ -4828,6 +4848,9 @@ def rh_do_ecosystem_lookup(input_path: cstr, out_path: cstr) -> i32 can[Memory.A
         return 4
     body.push(10)
     return 4 if not Base::rh_io_write(out_path, body)
+    if not rh_ecosystem_lookup_write_transformation(raw, body, out_path):
+        rh_cli_err("ecosystem lookup: cannot write transformation report")
+        return 4
     rh_cli_out("ecosystem lookup: captured enrichment observed")
     0
 
@@ -4881,6 +4904,9 @@ def rh_do_ecosystem_lookup_live(ecosystem: cstr, name: cstr, out_path: cstr) -> 
     body.push(10)
     if not Base::rh_io_write(out_path, body):
         rh_cli_err("ecosystem lookup: cannot write result")
+        return 4
+    if not rh_ecosystem_lookup_write_transformation(raw, body, out_path):
+        rh_cli_err("ecosystem lookup: cannot write transformation report")
         return 4
     rh_cli_out("ecosystem lookup: one attributed package result captured")
     0
