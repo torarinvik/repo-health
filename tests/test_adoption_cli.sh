@@ -97,7 +97,7 @@ print("[adoption] duration histogram boundaries include exact cutoffs")
 PY
 
 cat > "$T/upgrade-lag.json" <<'JSON'
-{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"first_qualifying_version_ord":2001000,"first_qualifying_snapshot_at":1000,"snapshot_coverage":[{"from":100,"through":500},{"from":600,"through":1000}]},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_coverage":[{"from":100,"through":900},{"from":1000,"through":2000}]},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"first_qualifying_version_ord":2001000,"complete_followup_through":2000},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_coverage":[{"from":100,"through":2000}]}]}
+{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"first_qualifying_version_ord":2001000,"first_qualifying_snapshot_at":1000,"snapshot_coverage":[{"from":100,"through":500},{"from":600,"through":1000}]},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_runs":[{"from":100,"through":900,"complete":true},{"from":900,"through":1000,"complete":false},{"from":1000,"through":2000,"complete":true}]},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"first_qualifying_version_ord":2001000,"complete_followup_through":2000},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_runs":[{"from":100,"through":2000,"complete":true}]}]}
 JSON
 "$ROOT/build/rh_cli" adoption --input "$T/upgrade-lag.json" --out "$T/upgrade-lag.out" >/dev/null || fail "upgrade lag distribution"
 python3 - "$T/upgrade-lag.out" <<'PY'
@@ -108,6 +108,7 @@ assert [x["upgrade_lag"]["status"] for x in d["adoptions"]] == ["observed", "unk
 assert d["adoptions"][0]["upgrade_lag"]["seconds"] == 900, d
 assert d["adoptions"][0]["snapshot_coverage"]["gap_count"] == 1 and d["adoptions"][0]["snapshot_coverage"]["uncovered_seconds"] == 100, d
 assert d["adoptions"][1]["snapshot_coverage"]["gap_count"] == 1 and d["adoptions"][1]["upgrade_lag"]["status"] == "unknown", d
+assert d["adoptions"][1]["snapshot_coverage"]["status"] == "reconstructed" and d["adoptions"][1]["snapshot_coverage"]["interval_count"] == 3, d
 assert d["adoptions"][4]["upgrade_lag"] == {"status": "right_censored", "seconds": 1900, "through": 2000}, d
 assert d["snapshot_coverage_summary"] == {"records": 3, "gaps": 2, "uncovered_seconds": 200}, d
 assert d["upgrade_lag_counts"] == {"observed": 1, "right_censored": 1, "unknown": 3}, d
@@ -125,6 +126,10 @@ cat > "$T/invalid-coverage.json" <<'JSON'
 {"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_coverage":[{"from":100,"through":1000},{"from":900,"through":2000}]}]}
 JSON
 if "$ROOT/build/rh_cli" adoption --input "$T/invalid-coverage.json" --out "$T/invalid-coverage.out" >/dev/null 2>&1; then fail "overlapping snapshot coverage was accepted"; fi
+cat > "$T/invalid-runs.json" <<'JSON'
+{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"snapshot_runs":[{"from":100,"through":1000,"complete":true},{"from":900,"through":2000,"complete":true}]}]}
+JSON
+if "$ROOT/build/rh_cli" adoption --input "$T/invalid-runs.json" --out "$T/invalid-runs.out" >/dev/null 2>&1; then fail "overlapping snapshot history was accepted"; fi
 
 echo "[adoption] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" adoption --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"

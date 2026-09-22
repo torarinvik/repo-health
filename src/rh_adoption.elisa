@@ -17,6 +17,7 @@ module Adoption:
 
         struct RhAdoptionCoverage:
             present: bool
+            reconstructed: bool
             valid: bool
             interval_count: i64
             gap_count: i64
@@ -64,9 +65,14 @@ module Adoption:
             true
 
         def rh_adoption_coverage(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, adoption: i64, cutoff: i64, release_at: i64, has_release: bool, followup_through: i64, has_followup: bool) -> RhAdoptionCoverage can[Memory.Allocate, Abort.Panic]:
-            idx: i64 = Adoption::rh_adoption_get(nodes, texts, adoption, "snapshot_coverage")
-            return RhAdoptionCoverage{present: false, valid: true, interval_count: 0, gap_count: 0, uncovered_seconds: 0} if idx < 0 or nodes[idx.usize()].kind == Json::RH_JSON_NULL
-            return RhAdoptionCoverage{present: true, valid: false, interval_count: 0, gap_count: 0, uncovered_seconds: 0} if nodes[idx.usize()].kind != Json::RH_JSON_ARR
+            supplied_idx: i64 = Adoption::rh_adoption_get(nodes, texts, adoption, "snapshot_coverage")
+            history_idx: i64 = Adoption::rh_adoption_get(nodes, texts, adoption, "snapshot_runs")
+            has_supplied: bool = supplied_idx >= 0 and nodes[supplied_idx.usize()].kind != Json::RH_JSON_NULL
+            has_history: bool = history_idx >= 0 and nodes[history_idx.usize()].kind != Json::RH_JSON_NULL
+            return RhAdoptionCoverage{present: false, reconstructed: false, valid: true, interval_count: 0, gap_count: 0, uncovered_seconds: 0} if not has_supplied and not has_history
+            return RhAdoptionCoverage{present: true, reconstructed: has_history, valid: false, interval_count: 0, gap_count: 0, uncovered_seconds: 0} if has_supplied and has_history
+            idx: i64 = history_idx if has_history else supplied_idx
+            return RhAdoptionCoverage{present: true, reconstructed: has_history, valid: false, interval_count: 0, gap_count: 0, uncovered_seconds: 0} if nodes[idx.usize()].kind != Json::RH_JSON_ARR
             arr: Json::RhJsonNode = nodes[idx.usize()]
             nodes_loop: mutable darray[Json::RhJsonNode]& = nodes
             raw_loop: mutable darray[u8]& = raw
@@ -77,8 +83,9 @@ module Adoption:
             has_release_loop: mutable bool = has_release
             followup_loop: mutable i64 = followup_through
             has_followup_loop: mutable bool = has_followup
-            interval_count, gap_count_state, uncovered_state, previous_through, cursor, valid =
-                while child >= 0 |child: i64 = arr_loop.first_child, interval_count: i64 = 0, gap_count: i64 = 0, uncovered_seconds: i64 = 0, previous_through: i64 = -1, cursor: i64 = release_loop, valid: bool = true, nodes_loop, raw_loop, texts_loop, arr_loop, cutoff_loop, has_release_loop, has_followup_loop, followup_loop| -> interval_count, gap_count, uncovered_seconds, previous_through, cursor, valid:
+            history_loop: mutable bool = has_history
+            interval_count, gap_count_state, uncovered_state, previous_through, last_interval_through, cursor, valid =
+                while child >= 0 |child: i64 = arr_loop.first_child, interval_count: i64 = 0, gap_count: i64 = 0, uncovered_seconds: i64 = 0, previous_through: i64 = -1, last_interval_through: i64 = -1, cursor: i64 = release_loop, valid: bool = true, nodes_loop, raw_loop, texts_loop, arr_loop, cutoff_loop, has_release_loop, has_followup_loop, followup_loop, history_loop| -> interval_count, gap_count, uncovered_seconds, previous_through, last_interval_through, cursor, valid:
                     if nodes_loop[child.usize()].kind != Json::RH_JSON_OBJ:
                         valid <- false
                         break
@@ -86,14 +93,21 @@ module Adoption:
                     through_ok: mutable i64 = 0
                     start: i64 = Adoption::rh_adoption_int(nodes_loop, raw_loop, texts_loop, child, "from", &from_ok)
                     finish: i64 = Adoption::rh_adoption_int(nodes_loop, raw_loop, texts_loop, child, "through", &through_ok)
-                    if from_ok == 0 or through_ok == 0 or start < 0 or finish <= start or finish > cutoff_loop or previous_through >= 0 and start < previous_through:
+                    if from_ok == 0 or through_ok == 0 or start < 0 or finish <= start or finish > cutoff_loop or last_interval_through >= 0 and start < last_interval_through:
                         valid <- false
                         break
                     interval_count <- interval_count + 1
-                    if (not has_release_loop or not has_followup_loop) and previous_through >= 0 and start > previous_through:
+                    complete: mutable bool = true
+                    if history_loop:
+                        complete_idx: i64 = Adoption::rh_adoption_get(nodes_loop, texts_loop, child, "complete")
+                        if complete_idx < 0 or nodes_loop[complete_idx.usize()].kind != Json::RH_JSON_BOOL:
+                            valid <- false
+                            break
+                        complete <- Json::rh_json_is_true(nodes_loop, raw_loop, complete_idx)
+                    if complete and (not has_release_loop or not has_followup_loop) and previous_through >= 0 and start > previous_through:
                         gap_count <- gap_count + 1
                         uncovered_seconds <- uncovered_seconds + start - previous_through
-                    if has_release_loop and has_followup_loop:
+                    if complete and has_release_loop and has_followup_loop:
                         clipped_start: i64 = release_loop if start < release_loop else start
                         clipped_finish: i64 = followup_loop if finish > followup_loop else finish
                         if clipped_finish > clipped_start:
@@ -101,14 +115,15 @@ module Adoption:
                                 gap_count <- gap_count + 1
                                 uncovered_seconds <- uncovered_seconds + clipped_start - cursor
                             cursor <- clipped_finish if clipped_finish > cursor
-                    previous_through <- finish
+                    previous_through <- finish if complete
+                    last_interval_through <- finish
                     child <- nodes[child.usize()].next_sibling
             gap_count: mutable i64 = gap_count_state
             uncovered_seconds: mutable i64 = uncovered_state
             if has_release and has_followup and cursor < followup_through:
                 gap_count <- gap_count + 1
                 uncovered_seconds <- uncovered_seconds + followup_through - cursor
-            RhAdoptionCoverage{present: true, valid: valid, interval_count: interval_count, gap_count: gap_count, uncovered_seconds: uncovered_seconds}
+            RhAdoptionCoverage{present: true, reconstructed: has_history, valid: valid, interval_count: interval_count, gap_count: gap_count, uncovered_seconds: uncovered_seconds}
 
         def rh_adoption_metric(out: mutable darray[u8]&, key: u8&, value: i64, population_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, ",{\"key\":\"")
@@ -238,7 +253,7 @@ module Adoption:
                         coverage_gap_total <- coverage_gap_total + coverage.gap_count
                         uncovered_seconds_total <- uncovered_seconds_total + coverage.uncovered_seconds
                     lag: Adoption::RhAdoptionLag = Adoption::rh_adoption_lag(release_at, has_release_at != 0, target_version, has_target_version != 0, qualifying_version, has_qualifying_version != 0, qualifying_at, has_qualifying_at != 0, followup_through, has_followup_through != 0, coverage)
-                    Downstream::rh_adoption_write(body, adoption, cutoff, first_version, has_first_version != 0, latest_version, has_latest_version != 0, supported_major, has_supported_major != 0, lag.status, lag.seconds, lag.through, coverage.present, coverage.interval_count, coverage.gap_count, coverage.uncovered_seconds)
+                    Downstream::rh_adoption_write(body, adoption, cutoff, first_version, has_first_version != 0, latest_version, has_latest_version != 0, supported_major, has_supported_major != 0, lag.status, lag.seconds, lag.through, coverage.present, coverage.reconstructed, coverage.interval_count, coverage.gap_count, coverage.uncovered_seconds)
                     if lag.status == Downstream::RH_ADOPTION_LAG_OBSERVED:
                         lag_observed_count <- lag_observed_count + 1
                         lag_bin: i64 = Adoption::rh_adoption_duration_bin(lag.seconds)
