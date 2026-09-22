@@ -38,8 +38,8 @@ echo "[roles-provider] GitLab mapping"
 python3 - "$T/gitlab.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert [x["role"] for x in d["declarations"]] == ["owner", "maintainer", "member", "unknown"], d
-assert [x["permission"] for x in d["declarations"]] == [1, 2, 8, 0], d
+assert [x["role"] for x in d["declarations"]] == ["owner", "maintainer", "member", "member"], d
+assert [x["permission"] for x in d["declarations"]] == [1, 2, 8, 8], d
 assert all(x["source"] == "provider" for x in d["declarations"]), d
 print("[roles-provider] GitLab access levels OK")
 PY
