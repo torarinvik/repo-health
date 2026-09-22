@@ -48,7 +48,9 @@ module IdentityEvidence:
         def rh_identity_evidence_verify(raw: darray[u8]&, evidence_root: cstr,
                                         verified_out: mutable i64&,
                                         reviewed_link_out: mutable i64&,
-                                        reviewed_cross_source_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+                                        reviewed_cross_source_out: mutable i64&,
+                                        review_notice_count_out: mutable i64&,
+                                        review_notices_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -102,7 +104,39 @@ module IdentityEvidence:
                                 else:
                                     verified_out[0] <- verified_out[0] + 1
                                     reviewed_link_out[0] <- reviewed_link_out[0] + 1
-                                    reviewed_cross_source_out[0] <- reviewed_cross_source_out[0] + 1 if cross_source == 1
+                                    if cross_source == 1:
+                                        reviewed_cross_source_out[0] <- reviewed_cross_source_out[0] + 1
+                                        a_ok: mutable i64 = 0
+                                        b_ok: mutable i64 = 0
+                                        a: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, link, "a"), &a_ok)
+                                        b: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, link, "b"), &b_ok)
+                                        reason_s <- 0
+                                        reason_e <- 0
+                                        if not Json::rh_json_str_span(nodes, reason_idx, &reason_s, &reason_e):
+                                            state <- -1
+                                        else:
+                                            Base::rh_push_text(review_notices_out, ",") if review_notice_count_out[0] > 0
+                                            Base::rh_push_text(review_notices_out, "{\"state\":\"")
+                                            Base::rh_json_escape(review_notices_out, texts, state_s.usize(), state_e.usize())
+                                            Base::rh_push_text(review_notices_out, "\",\"actor_pair\":[")
+                                            Base::rh_push_decimal_i64(review_notices_out, a)
+                                            Base::rh_push_text(review_notices_out, ",")
+                                            Base::rh_push_decimal_i64(review_notices_out, b)
+                                            Base::rh_push_text(review_notices_out, "],\"reviewed_by\":\"")
+                                            Base::rh_json_escape(review_notices_out, texts, reviewer_s.usize(), reviewer_e.usize())
+                                            Base::rh_push_text(review_notices_out, "\",\"reviewed_at\":")
+                                            Base::rh_push_decimal_i64(review_notices_out, reviewed_at)
+                                            Base::rh_push_text(review_notices_out, ",\"evidence_ref\":\"")
+                                            evidence_s: mutable i64 = 0
+                                            evidence_e: mutable i64 = 0
+                                            if not Json::rh_json_str_span(nodes, ref_idx, &evidence_s, &evidence_e):
+                                                state <- -1
+                                            else:
+                                                Base::rh_json_escape(review_notices_out, texts, evidence_s.usize(), evidence_e.usize())
+                                                Base::rh_push_text(review_notices_out, "\",\"review_reason\":\"")
+                                                Base::rh_json_escape(review_notices_out, texts, reason_s.usize(), reason_e.usize())
+                                                Base::rh_push_text(review_notices_out, "\"}")
+                                                review_notice_count_out[0] <- review_notice_count_out[0] + 1
                     link <- nodes[link.usize()].next_sibling
             released: i64 = Store::rh_store_guard_release(fd)
             return -1 if state != 0 or released != 0

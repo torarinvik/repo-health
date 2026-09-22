@@ -7658,8 +7658,10 @@ def rh_do_identity(input_path: cstr, out_path: cstr, evidence_root: cstr, has_ev
     verified_reference_count: mutable i64 = 0
     reviewed_link_count: mutable i64 = 0
     reviewed_cross_source_link_count: mutable i64 = 0
+    review_notice_count: mutable i64 = 0
+    review_notices: mutable darray[u8] = []
     if has_evidence_root:
-        if not Git::rh_arg_safe(evidence_root) or IdentityEvidence::rh_identity_evidence_verify(raw, evidence_root, &verified_reference_count, &reviewed_link_count, &reviewed_cross_source_link_count) != 0:
+        if not Git::rh_arg_safe(evidence_root) or IdentityEvidence::rh_identity_evidence_verify(raw, evidence_root, &verified_reference_count, &reviewed_link_count, &reviewed_cross_source_link_count, &review_notice_count, &review_notices) != 0:
             rh_cli_err("identity: evidence reference is malformed, missing, or corrupt")
             return 4
     body: mutable darray[u8] = []
@@ -7697,6 +7699,58 @@ def rh_do_identity(input_path: cstr, out_path: cstr, evidence_root: cstr, has_ev
         verification_ptr: cstr = (&verification_path[0]).cast[cstr] can Unsafe.PointerCast
         if not Base::rh_io_write(verification_ptr, verification):
             rh_cli_err("identity: cannot write evidence verification report")
+            return 4
+        notices: mutable darray[u8] = []
+        Base::rh_push_text(notices, "{\"schema\":\"rh-identity-review-notices/1\",\"scope\":\"restricted\",\"notice_count\":")
+        Base::rh_push_decimal_i64(notices, review_notice_count)
+        Base::rh_push_text(notices, ",\"source_input_sha256\":\"")
+        Sha256::rh_sha256(raw, notices)
+        Base::rh_push_text(notices, "\",\"identity_output_sha256\":\"")
+        Sha256::rh_sha256(body, notices)
+        Base::rh_push_text(notices, "\",\"notices\":[")
+        while notice_byte < review_notices.count |notice_byte: usize = 0, review_notices, notices|:
+            notices.push(review_notices[notice_byte])
+            notice_byte <- notice_byte + 1
+        Base::rh_push_text(notices, "]}")
+        notices.push(10)
+        notices_path: mutable darray[u8] = []
+        Base::rh_push_cstr(notices_path, out_path)
+        Base::rh_push_text(notices_path, ".identity-review-notices.json")
+        notices_path.push(0)
+        notices_ptr: cstr = (&notices_path[0]).cast[cstr] can Unsafe.PointerCast
+        if not Base::rh_io_write(notices_ptr, notices):
+            rh_cli_err("identity: cannot write identity review notices")
+            return 4
+    else:
+        verification: mutable darray[u8] = []
+        Base::rh_push_text(verification, "{\"schema\":\"rh-identity-evidence-verification/1\",\"state\":\"unverified\",\"verified_reference_count\":0,\"reviewed_link_count\":0,\"reviewed_cross_source_link_count\":0,\"source_input_sha256\":\"")
+        Sha256::rh_sha256(raw, verification)
+        Base::rh_push_text(verification, "\",\"identity_output_sha256\":\"")
+        Sha256::rh_sha256(body, verification)
+        Base::rh_push_text(verification, "\"}")
+        verification.push(10)
+        verification_path: mutable darray[u8] = []
+        Base::rh_push_cstr(verification_path, out_path)
+        Base::rh_push_text(verification_path, ".evidence-verification.json")
+        verification_path.push(0)
+        verification_ptr: cstr = (&verification_path[0]).cast[cstr] can Unsafe.PointerCast
+        if not Base::rh_io_write(verification_ptr, verification):
+            rh_cli_err("identity: cannot write unverified evidence status")
+            return 4
+        notices: mutable darray[u8] = []
+        Base::rh_push_text(notices, "{\"schema\":\"rh-identity-review-notices/1\",\"state\":\"unverified\",\"scope\":\"restricted\",\"notice_count\":0,\"source_input_sha256\":\"")
+        Sha256::rh_sha256(raw, notices)
+        Base::rh_push_text(notices, "\",\"identity_output_sha256\":\"")
+        Sha256::rh_sha256(body, notices)
+        Base::rh_push_text(notices, "\",\"notices\":[]}")
+        notices.push(10)
+        notices_path: mutable darray[u8] = []
+        Base::rh_push_cstr(notices_path, out_path)
+        Base::rh_push_text(notices_path, ".identity-review-notices.json")
+        notices_path.push(0)
+        notices_ptr: cstr = (&notices_path[0]).cast[cstr] can Unsafe.PointerCast
+        if not Base::rh_io_write(notices_ptr, notices):
+            rh_cli_err("identity: cannot write unverified review status")
             return 4
     rh_cli_out("identity: ok")
     0

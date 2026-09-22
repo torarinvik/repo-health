@@ -24,6 +24,17 @@ cat > "$T/b.json" <<'JSON'
 JSON
 
 "$ROOT/build/rh_cli" identity --input "$T/a.json" --out "$T/a.out" >/dev/null || fail "A run"
+python3 - "$T/a.json" "$T/a.out" <<'PY'
+import hashlib, json, sys
+source, output = sys.argv[1:]
+v = json.load(open(output + ".evidence-verification.json"))
+n = json.load(open(output + ".identity-review-notices.json"))
+assert v["state"] == "unverified" and v["verified_reference_count"] == 0, v
+assert n["state"] == "unverified" and n["notice_count"] == 0 and n["notices"] == [], n
+assert v["source_input_sha256"] == n["source_input_sha256"] == hashlib.sha256(open(source, "rb").read()).hexdigest()
+assert v["identity_output_sha256"] == n["identity_output_sha256"] == hashlib.sha256(open(output, "rb").read()).hexdigest()
+print("[identity] absent evidence-store state is explicit and bound")
+PY
 python3 - "$T/a.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -145,10 +156,19 @@ import json, sys
 json.dump({"schema":"rh-identity-input/1","actor_count":2,"actors":[{"source":"github","source_instance":"github.com/acme","native_object_id":"1","display_name":"a","aliases":[]},{"source":"gitlab","source_instance":"gitlab.com/acme","native_object_id":"1","display_name":"b","aliases":[]}],"links":[{"a":0,"b":1,"state":"accepted","revision_added":1,"reviewed_by":"maintainer","reviewed_at":1700000000,"review_reason":"Verified shared ownership evidence","evidence_ref":sys.argv[2]}]}, open(sys.argv[1], "w"), separators=(",", ":"))
 PY
 "$ROOT/build/rh_cli" identity --input "$T/reviewed-link-input.json" --out "$T/reviewed-link.out" --evidence-store "$T/evidence" >/dev/null || fail "evidence-backed accepted identity link"
-python3 - "$T/reviewed-link.out" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1] + ".evidence-verification.json"))
+python3 - "$T/reviewed-link-input.json" "$T/reviewed-link.out" <<'PY'
+import hashlib, json, sys
+source, output = sys.argv[1:]
+d = json.load(open(output + ".evidence-verification.json"))
 assert d["verified_reference_count"] == 1 and d["reviewed_link_count"] == 1 and d["reviewed_cross_source_link_count"] == 1, d
+n = json.load(open(output + ".identity-review-notices.json"))
+assert n["schema"] == "rh-identity-review-notices/1" and n["scope"] == "restricted" and n["notice_count"] == 1, n
+input_bytes = open(source, "rb").read()
+output_bytes = open(output, "rb").read()
+assert n["source_input_sha256"] == hashlib.sha256(input_bytes).hexdigest(), n
+assert n["identity_output_sha256"] == hashlib.sha256(output_bytes).hexdigest(), n
+notice = n["notices"][0]
+assert notice == {"state":"accepted","actor_pair":[0,1],"reviewed_by":"maintainer","reviewed_at":1700000000,"evidence_ref":json.load(open(source))["links"][0]["evidence_ref"],"review_reason":"Verified shared ownership evidence"}, notice
 print("[identity] cross-source review evidence + reviewer/time/reason OK")
 PY
 cp "$T/reviewed-link-input.json" "$T/reviewed-link-valid.json"
@@ -166,6 +186,8 @@ python3 - "$T/same-source-link.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1] + ".evidence-verification.json"))
 assert d["reviewed_link_count"] == 1 and d["reviewed_cross_source_link_count"] == 0, d
+n = json.load(open(sys.argv[1] + ".identity-review-notices.json"))
+assert n["notice_count"] == 0 and n["notices"] == [], n
 print("[identity] same-source review does not require cross-source rationale")
 PY
 python3 - "$T/reviewed-link-valid.json" "$T" <<'PY'
