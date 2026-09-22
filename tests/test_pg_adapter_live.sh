@@ -63,6 +63,78 @@ run_postgres_ingest() {
       "$ROOT/build/rh_cli" ingest --postgres --root "$TMP_DIR" --input "$safe_input" --out "$output" >/dev/null
   fi
 }
+
+echo "[pg-adapter-live] filesystem cursor replay to PostgreSQL staged page"
+cat > "$TMP_DIR/legacy-replay-input.json" <<'JSON'
+{"schema":"rh-ingest-input/1","source":"gitea","capability":"issues","owner":"legacy-worker","lease_now":1000,"lease_ttl":100,"collection_start":1000,"collection_complete":true,"pages":[{"page":1,"status":"complete","commit":false,"events":[{"id":"issue:legacy-raw-1","line":"{\"id\":\"issue:legacy-raw-1\",\"state\":\"open\"}"}]},{"page":1,"status":"complete","commit":true,"events":[{"id":"issue:legacy-raw-1","line":"{\"id\":\"issue:legacy-raw-1\",\"state\":\"open\"}"}]}]}
+JSON
+"$ROOT/build/rh_cli" ingest --root "$TMP_DIR/legacy-replay-store" \
+  --input "$TMP_DIR/legacy-replay-input.json" --out "$TMP_DIR/legacy-replay-result.json" >/dev/null \
+  || fail "filesystem crash/retry conformance replay"
+python3 - "$ROOT/fixtures/postgres/ingest-staged-input.json" \
+    "$TMP_DIR/legacy-replay-input.json" "$TMP_DIR/legacy-replay-result.json" \
+    "$TMP_DIR/legacy-replay-postgres-input.json" <<'PY'
+import json, sys
+postgres = json.load(open(sys.argv[1]))
+postgres.update({
+    "source_id":"00000000-0000-0000-0000-000000000100",
+    "source_kind":"gitea", "source_base_url":"https://codeberg.example.org",
+    "source_created_at":"2026-09-21T00:00:00Z",
+    "run_id":"00000000-0000-0000-0000-000000000101",
+    "connector_name":"gitea", "connector_version":"1.0.0",
+    "started_at":"2026-09-21T00:00:00Z",
+    "job_id":"00000000-0000-0000-0000-000000000102",
+    "worker_id":"legacy-bridge-worker", "next_attempt_at":"2026-09-21T00:01:00Z",
+    "created_at":"2026-09-21T00:00:00Z", "claim_now":"2026-09-21T00:02:00Z",
+    "finish_now":"2026-09-21T00:03:30Z", "pages":[]
+})
+legacy_raw = open(sys.argv[2], "rb").read().decode("utf-8")
+result = json.load(open(sys.argv[3]))
+committed, previous = [], None
+for attempt, page in enumerate(result["pages"]):
+    if page["cursor_advanced"]:
+        committed.append({
+            "legacy_attempt":attempt,
+            "cursor_before_json":"" if previous is None else json.dumps({"page":previous}, separators=(",", ":")),
+            "cursor_after_json":json.dumps({"page":page["page"]}, separators=(",", ":")),
+            "committed_at":"2026-09-21T00:03:00Z"
+        })
+        previous = page["page"]
+assert [entry["legacy_attempt"] for entry in committed] == [1], committed
+bridge = {
+    "schema":"rh-postgres-legacy-ingest-input/1",
+    "postgres_input_json":json.dumps(postgres, separators=(",", ":")),
+    "legacy_input_json":legacy_raw,
+    "legacy_result_json":json.dumps(result, separators=(",", ":")),
+    "scope_hash":"legacy-postgres-live",
+    "committed_attempts":committed
+}
+json.dump(bridge, open(sys.argv[4], "w"), separators=(",", ":"))
+PY
+if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
+  RH_DATABASE_URL="$CONNINFO" RH_LIBPQ_PATH="$RH_LIBPQ_PATH" \
+    "$ROOT/build/rh_cli" ingest --postgres --root "$TMP_DIR" \
+      --input "$TMP_DIR/legacy-replay-postgres-input.json" \
+      --out "$TMP_DIR/legacy-replay-postgres-result.json" >/dev/null \
+      || fail "filesystem replay to PostgreSQL staged ingest"
+else
+  env -u RH_LIBPQ_PATH RH_DATABASE_URL="$CONNINFO" \
+    "$ROOT/build/rh_cli" ingest --postgres --root "$TMP_DIR" \
+      --input "$TMP_DIR/legacy-replay-postgres-input.json" \
+      --out "$TMP_DIR/legacy-replay-postgres-result.json" >/dev/null \
+      || fail "filesystem replay to PostgreSQL staged ingest"
+fi
+python3 - "$TMP_DIR/legacy-replay-postgres-result.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert result["schema"] == "rh-postgres-ingest-result/1", result
+assert result["status"] == "succeeded" and result["pages"] == [{"page_number":0, "status":"committed", "record_mode":"staged"}], result
+PY
+legacy_staged_state="$(docker exec "$CONTAINER" psql -At -U postgres -d repo_health -c "SELECT (SELECT count(*) FROM staged_source_record WHERE collection_run_id = '00000000-0000-0000-0000-000000000101'::uuid) || ':' || (SELECT min(raw_payload) FROM staged_source_record WHERE collection_run_id = '00000000-0000-0000-0000-000000000101'::uuid) || ':' || (SELECT status || '/' || completeness FROM collection_run WHERE id = '00000000-0000-0000-0000-000000000101'::uuid) || ':' || (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000102'::uuid)")"
+[[ "$legacy_staged_state" == '1:{"id":"issue:legacy-raw-1","state":"open"}:succeeded/complete:succeeded' ]] \
+  || fail "filesystem replay did not persist its exact committed cursor page: $legacy_staged_state"
+echo "[pg-adapter-live] committed filesystem page, cursor, staged bytes, and terminal run verified"
+
 run_cli "$ROOT/fixtures/postgres/begin-collection-run-command.json" "$TMP_DIR/run-started.json" || fail "CLI source and run registration"
 run_cli "$ROOT/fixtures/postgres/begin-collection-run-command.json" "$TMP_DIR/run-duplicate.json" || fail "CLI source and run replay"
 python3 - "$TMP_DIR" <<'PY'
