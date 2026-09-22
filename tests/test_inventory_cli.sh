@@ -23,8 +23,14 @@ echo "[inventory] CycloneDX 1.5 (supported) -> observed"
 cmp -s "$T/cdx.json" "$ROOT/fixtures/inventory-results/cyclonedx-1.5.json" || fail "CycloneDX result differs from golden"
 python3 - "$T/cdx.json" "$T/cyclonedx-1.5.json" <<'PY'
 import json, sys
+import hashlib
 d = json.load(open(sys.argv[1]))
 raw = open(sys.argv[2], "rb").read()
+tr = json.load(open(sys.argv[1] + ".transformations.json"))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["source_format"] == "cyclonedx", tr
+assert tr["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/software-inventory/1" + bytes([0])).hexdigest(), tr
 assert d["schema"] == "rh-inventory/1"
 assert d["format"] == "cyclonedx" and d["spec_version"] == "1.5", d
 assert d["status"] == "observed", d
@@ -88,6 +94,11 @@ python3 - "$T/spdx.json" "$T/spdx-2.3.json" <<'PY'
 import hashlib
 import json, sys
 d = json.load(open(sys.argv[1]))
+tr = json.load(open(sys.argv[1] + ".transformations.json"))
+assert tr["source_format"] == "spdx", tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/software-inventory/1" + bytes([1])).hexdigest(), tr
 assert d["provenance"]["input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), d
 assert d["format"] == "spdx" and d["spec_version"] == "SPDX-2.3", d
 assert d["status"] == "observed", d

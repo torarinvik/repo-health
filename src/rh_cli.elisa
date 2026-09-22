@@ -60,6 +60,7 @@ include "./rh_job.elisa"
 include "./rh_reconcile.elisa"
 include "./rh_worker.elisa"
 include "./rh_inventory_report.elisa"
+include "./rh_inventory_transformation.elisa"
 include "./rh_vcs_report.elisa"
 include "./rh_gerrit.elisa"
 include "./rh_notify_report.elisa"
@@ -7159,6 +7160,26 @@ def rh_do_worker_tick(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloca
 # a document of the wrong format fails closed (exit 4). The notice states
 # that validity does not imply completeness. URL input retains bounded
 # source/status/error evidence before parsing.
+def rh_inventory_write_transformation(format: u8, input: darray[u8]&, output: darray[u8]&, out_path: cstr) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    configuration: mutable darray[u8] = []
+    Base::rh_push_text(configuration, "repo-health/software-inventory/1")
+    configuration.push(format)
+    configuration_sha: mutable darray[u8] = []
+    input_sha: mutable darray[u8] = []
+    output_sha: mutable darray[u8] = []
+    Sha256::rh_sha256(configuration, configuration_sha)
+    Sha256::rh_sha256(input, input_sha)
+    Sha256::rh_sha256(output, output_sha)
+    report: mutable darray[u8] = []
+    InventoryTransformation::rh_inventory_transformation_report(format, configuration_sha, input_sha, output_sha, report)
+    report.push(10)
+    report_path: mutable darray[u8] = []
+    Base::rh_push_cstr(report_path, out_path)
+    Base::rh_push_text(report_path, ".transformations.json")
+    report_path.push(0)
+    report_ptr: cstr = (&report_path[0]).cast[cstr] can Unsafe.PointerCast
+    Base::rh_io_write(report_ptr, report)
+
 def rh_do_inventory(format: cstr, input_path: cstr, out_path: cstr, source_url: cstr, has_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(format) or not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected inventory argument (allowlist)")
@@ -7243,6 +7264,9 @@ def rh_do_inventory(format: cstr, input_path: cstr, out_path: cstr, source_url: 
     opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
     if not Base::rh_io_write(opp, body):
         rh_cli_err("inventory: cannot write --out")
+        return 4
+    if not rh_inventory_write_transformation(fmt, raw, body, out_path):
+        rh_cli_err("inventory: cannot write transformation report")
         return 4
     if rc == 1:
         rh_cli_err("inventory: declared spec version is unsupported (reported, not interpreted)")
