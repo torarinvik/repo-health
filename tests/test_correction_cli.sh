@@ -68,6 +68,13 @@ assert d["replay"] == [{"subject_id": 7, "value": 5},
 assert "raw inputs are never rewritten" in d["note"], d["note"]
 print("[correct] applied/superseded/replay OK")
 PY
+python3 - "$T/o/corrections-notices.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-correction-notices/1" and d["revision"] == 2, d
+assert len(d["notices"]) == 2, d
+print("[correct] publication notice artifact OK")
+PY
 
 echo "[correct] a rejected-only document changes nothing"
 cat > "$T/reject.json" <<'JSON'

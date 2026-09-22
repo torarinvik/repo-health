@@ -5714,9 +5714,10 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
 
 # --- M06 correction execution path. ---
 # Reads an rh-corrections/1 document, applies corrections in order, and
-# writes rh-corrections-result/1. Accepted corrections advance the revision
-# and supersede only that subject's older derived results; raw replay inputs
-# are never rewritten. Malformed/unknown kind/state/combine fails closed.
+# writes rh-corrections-result/1 and rh-correction-notices/1. Accepted
+# corrections advance the revision and supersede only that subject's older
+# derived results; raw replay inputs are never rewritten. Malformed/unknown
+# kind/state/combine fails closed.
 #
 # With --state <file>, an `rh-corrections-state/1` document carries the
 # revision floor, the greatest target_id already folded in (watermark), and
@@ -5749,6 +5750,29 @@ def rh_correct_verify_evidence(raw: darray[u8]&, evidence_root: cstr) -> i64 can
         ref_name: u8& = (&name[0]).cast[u8&] can Unsafe.PointerCast
         return -1 if Store::rh_store_blob_verify(evidence_root, ref_name, &ok) != 0 or ok != 1
         item <- nodes[item.usize()].next_sibling
+    0
+
+def rh_correct_notice_document(result: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[Json::RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = Json::rh_json_parse(result, nodes, texts)
+    return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+    notices_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "notices")
+    revision_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "final_revision")
+    return -1 if notices_idx < 0 or nodes[notices_idx.usize()].kind != Json::RH_JSON_ARR or revision_idx < 0
+    revision_ok: mutable i64 = 0
+    revision: i64 = Json::rh_json_int(nodes, result, revision_idx, &revision_ok)
+    return -1 if revision_ok == 0 or revision < 0
+    start: i64 = nodes[notices_idx.usize()].text_start
+    finish: i64 = nodes[notices_idx.usize()].text_end
+    return -1 if start < 0 or finish < start or finish > result.count.i64()
+    Base::rh_push_text(out, "{\"schema\":\"rh-correction-notices/1\",\"revision\":")
+    Base::rh_push_decimal_i64(out, revision)
+    Base::rh_push_text(out, ",\"notices\":")
+    while i < finish |i: i64 = start, result, out|:
+        out.push(result[i.usize()])
+        i <- i + 1
+    Base::rh_push_text(out, "}")
     0
 
 def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has_state: bool, state_root: cstr, has_state_root: bool, evidence_root: cstr, has_evidence_root: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
@@ -5827,6 +5851,17 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
     opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
     if not Base::rh_io_write(opp, body):
         rh_cli_err("correct: cannot write corrections-result.json")
+        return 4
+    notices: mutable darray[u8] = []
+    if rh_correct_notice_document(body, notices) != 0:
+        rh_cli_err("correct: cannot construct correction notice document")
+        return 4
+    notices.push(10)
+    notice_path: mutable darray[u8] = []
+    return 3 if not rh_out_path(out, "corrections-notices.json", notice_path)
+    notice_ptr: cstr = (&notice_path[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(notice_ptr, notices):
+        rh_cli_err("correct: cannot write corrections-notices.json")
         return 4
     if has_state or has_state_root:
         merged: mutable darray[i64] = []
