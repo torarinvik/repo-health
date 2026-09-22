@@ -138,7 +138,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--snapshot-root <dir>] [--mapping <file>] [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
     rh_cli_err("            [--max-nodes N] [--max-depth D] [--scope all|normal|dev|optional|peer] [--platform N] [--valid-as-of EPOCH] [--known-as-of EPOCH]")
     rh_cli_err("       rh_cli policy --policy <file> --input <file> --out <dir> [--state <file> | --state-store <dir>]")
-    rh_cli_err("       rh_cli correct --corrections <file> --out <dir> [--state <file> | --state-store <dir>]")
+    rh_cli_err("       rh_cli correct --corrections <file> --out <dir> [--state <file> | --state-store <dir>] [--evidence-store <dir>]")
     rh_cli_err("       rh_cli store put --root <dir> --file <path> | store verify --root <dir> --name <hex>")
     rh_cli_err("       rh_cli store lease --root <dir> --job <name> --input <file> --out <file>")
     rh_cli_err("       rh_cli ops backup --root <dir> --manifest <path> --names <file>")
@@ -1347,8 +1347,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[p_idx], false, slots[pt_idx], true) if pt_idx >= 0
         return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[p_idx], false, "", false)
     if Base::rh_streq(cmd, "correct"):
-        cr_idx, co_idx2, cs_idx, ct_idx =
-            while cw < argc |cr_idx: i64 = -1, co_idx2: i64 = -1, cs_idx: i64 = -1, ct_idx: i64 = -1, cw: i64 = 2, slots| -> cr_idx, co_idx2, cs_idx, ct_idx:
+        cr_idx, co_idx2, cs_idx, ct_idx, ce_idx =
+            while cw < argc |cr_idx: i64 = -1, co_idx2: i64 = -1, cs_idx: i64 = -1, ct_idx: i64 = -1, ce_idx: i64 = -1, cw: i64 = 2, slots| -> cr_idx, co_idx2, cs_idx, ct_idx, ce_idx:
                 a10: u8& = slots[cw].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(a10, "--corrections"):
                     if cw + 1 < argc:
@@ -1374,14 +1374,23 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         ct_idx <- cw
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(a10, "--evidence-store"):
+                    if cw + 1 < argc:
+                        cw <- cw + 1
+                        ce_idx <- cw
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 cw <- cw + 1
         return rh_cli_usage(2) if cr_idx < 0 or co_idx2 < 0
         return rh_cli_usage(2) if cs_idx >= 0 and ct_idx >= 0
-        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cs_idx], true, "", false) if cs_idx >= 0
-        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false, slots[ct_idx], true) if ct_idx >= 0
-        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false, "", false)
+        evidence_root: mutable cstr = ""
+        if ce_idx >= 0:
+            evidence_root <- slots[ce_idx]
+        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cs_idx], true, "", false, evidence_root, ce_idx >= 0) if cs_idx >= 0
+        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false, slots[ct_idx], true, evidence_root, ce_idx >= 0) if ct_idx >= 0
+        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false, "", false, evidence_root, ce_idx >= 0)
     if Base::rh_streq(cmd, "store"):
         return rh_cli_usage(2) if argc < 3
         sub11: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
@@ -5715,7 +5724,34 @@ def rh_do_policy_state(policy_path: cstr, input_path: cstr, out: cstr, state_pat
 # after. Replaying the same corrections file is therefore idempotent (no
 # second advance, no re-supersede), matching S005. A corrupt or wrong-schema
 # state file fails closed (exit 4), never defaults to permission.
-def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has_state: bool, state_root: cstr, has_state_root: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_correct_verify_evidence(raw: darray[u8]&, evidence_root: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    nodes: mutable darray[Json::RhJsonNode] = []
+    texts: mutable darray[u8] = []
+    root: i64 = Json::rh_json_parse(raw, nodes, texts)
+    return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+    corrections_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "corrections")
+    return -1 if corrections_idx < 0 or nodes[corrections_idx.usize()].kind != Json::RH_JSON_ARR
+    arr: Json::RhJsonNode = nodes[corrections_idx.usize()]
+    while item >= 0 |item: i64 = arr.first_child, nodes, texts, evidence_root|:
+        ref_idx: i64 = Json::rh_json_obj_get(nodes, texts, item, "evidence_ref")
+        ref_s: mutable i64 = 0
+        ref_e: mutable i64 = 0
+        return -1 if ref_idx < 0 or not Json::rh_json_str_span(nodes, ref_idx, &ref_s, &ref_e) or ref_e - ref_s != 16
+        name: mutable darray[u8] = []
+        while byte_idx < 16 |byte_idx: i64 = 0, ref_s, ref_e, texts, name|:
+            digit: u8 = texts[(ref_s + byte_idx).usize()]
+            valid: bool = (digit >= 48 and digit <= 57) or (digit >= 97 and digit <= 102)
+            return -1 if not valid
+            name.push(digit)
+            byte_idx <- byte_idx + 1
+        name.push(0)
+        ok: mutable i64 = 0
+        ref_name: u8& = (&name[0]).cast[u8&] can Unsafe.PointerCast
+        return -1 if Store::rh_store_blob_verify(evidence_root, ref_name, &ok) != 0 or ok != 1
+        item <- nodes[item.usize()].next_sibling
+    0
+
+def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has_state: bool, state_root: cstr, has_state_root: bool, evidence_root: cstr, has_evidence_root: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(corrections_path) or not Git::rh_arg_safe(out):
         rh_cli_err("rejected correct argument (allowlist)")
         return 3
@@ -5728,6 +5764,9 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
     if has_state_root and not Git::rh_arg_safe(state_root):
         rh_cli_err("rejected correct state-store argument (allowlist)")
         return 3
+    if has_evidence_root and not Git::rh_arg_safe(evidence_root):
+        rh_cli_err("rejected correct evidence-store argument (allowlist)")
+        return 3
     cp: mutable darray[u8] =
         cp: mutable darray[u8] = []
         Base::rh_push_cstr(cp, corrections_path)
@@ -5737,6 +5776,9 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
     raw: mutable darray[u8] = []
     if Base::rh_io_read(cpp, raw) < 0:
         rh_cli_err("correct: cannot read --corrections file")
+        return 4
+    if has_evidence_root and rh_correct_verify_evidence(raw, evidence_root) != 0:
+        rh_cli_err("correct: evidence reference is malformed, missing, or corrupt")
         return 4
     spath: mutable darray[u8] = []
     spp: mutable cstr = cpp

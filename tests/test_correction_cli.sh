@@ -16,6 +16,23 @@ bash "$ROOT/tools/build.sh" >/dev/null
 [[ -x "$ROOT/build/rh_cli" ]] || fail "rh_cli not built"
 
 rm -rf "$T"; mkdir -p "$T"
+mkdir -p "$T/evidence-store"
+printf 'review evidence payload\n' > "$T/evidence.bin"
+evidence_digest="$("$ROOT/build/rh_cli" store put --root "$T/evidence-store" --file "$T/evidence.bin" | awk '{print $3}')"
+[[ "${#evidence_digest}" -eq 16 ]] || fail "stored evidence digest was not returned"
+printf '{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"identity","target_id":1,"state":"accepted","evidence_ref":"%s","reviewed_by":"reviewer-a","reviewed_at":1700000000}]}' "$evidence_digest" > "$T/verified.json"
+"$ROOT/build/rh_cli" correct --corrections "$T/verified.json" --out "$T/verified-out" --evidence-store "$T/evidence-store" >/dev/null || fail "registered correction evidence should verify"
+python3 - "$T/verified.json" "$T/unverified.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["corrections"][0]["evidence_ref"] = "0000000000000000"
+json.dump(d, open(sys.argv[2], "w"))
+PY
+set +e
+"$ROOT/build/rh_cli" correct --corrections "$T/unverified.json" --out "$T/unverified-out" --evidence-store "$T/evidence-store" >/dev/null 2>&1; verify_rc=$?
+set -e
+[[ "$verify_rc" -eq 4 ]] || fail "missing correction evidence must fail closed (got $verify_rc)"
+
 cat > "$T/corr.json" <<'JSON'
 {"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"measurement","target_id":7,"state":"accepted","reviewed_by":"reviewer-a","reviewed_at":1700000000,"evidence_ref":"evidence-accepted"},{"kind":"identity","target_id":7,"state":"rejected","reviewed_by":"reviewer-b","reviewed_at":1700000100,"evidence_ref":"evidence-rejected"},{"kind":"mapping","target_id":9,"state":"open","evidence_ref":"evidence-open"},{"kind":"mapping","target_id":7,"state":"accepted","reviewed_by":"reviewer-a","reviewed_at":1700000000,"evidence_ref":"evidence-accepted"}],"derived":[{"subject_id":7,"revision_used":0,"superseded":false},{"subject_id":8,"revision_used":0,"superseded":false},{"subject_id":7,"revision_used":1,"superseded":false}],"replay":[{"subject_id":7,"raw_a":2,"raw_b":3,"combine":"add"},{"subject_id":7,"raw_a":9,"raw_b":4,"combine":"subtract"},{"subject_id":7,"raw_a":11,"raw_b":0,"combine":"identity"}]}
 JSON
