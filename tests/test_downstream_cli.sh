@@ -295,6 +295,7 @@ python3 - "$T/t/downstream.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["truncated"] is True, d
+assert d["transitive_count"] <= 1, d
 assert d["transitive_count"] < 3, d
 metrics = {m["key"]: m for m in d["metrics"]}
 assert metrics["graph.traversal_truncated"]["value"] is True, metrics
