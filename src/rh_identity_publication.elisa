@@ -16,6 +16,13 @@ struct RhPublicCorrection:
     id_e: mutable i64
     state: mutable u8
 
+struct RhPublicActorKindInterval:
+    actor_id: mutable i64
+    kind: mutable u8
+    valid_from: mutable i64
+    valid_until: mutable i64
+    source: mutable u8
+
 module IdentityPublication:
     private:
         def rh_ip_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -241,6 +248,73 @@ module IdentityPublication:
                 while kind_evidence_ref_unknown < actor_count |kind_evidence_ref_unknown, actor_count|:
                     kind_evidence_ref_unknown <- kind_evidence_ref_unknown + 1
 
+            kind_history_idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, root, "actor_kind_history")
+            kind_history: mutable darray[RhPublicActorKindInterval] = []
+            effective_at: mutable i64 = 0
+            kind_history_conflicts: mutable i64 = 0
+            kind_history_source_conflicts: mutable i64 = 0
+            if kind_history_idx >= 0:
+                return -1 if nodes[kind_history_idx.usize()].kind != Json::RH_JSON_ARR
+                effective_ok: mutable i64 = 0
+                effective_at <- IdentityPublication::rh_ip_int(nodes, raw, texts, root, "as_of", &effective_ok)
+                return -1 if effective_ok == 0 or effective_at < 0
+                while interval_node >= 0 |interval_node: i64 = nodes[kind_history_idx.usize()].first_child, nodes, texts, raw, kind_history, actor_count|:
+                    return -1 if kind_history.count.i64() >= 100000 or nodes[interval_node.usize()].kind != Json::RH_JSON_OBJ
+                    actor_id_ok: mutable i64 = 0
+                    actor_id: i64 = IdentityPublication::rh_ip_int(nodes, raw, texts, interval_node, "actor_id", &actor_id_ok)
+                    return -1 if actor_id_ok == 0 or actor_id < 0 or actor_id >= actor_count
+                    kind_s: mutable i64 = 0
+                    kind_e: mutable i64 = 0
+                    return -1 if not IdentityPublication::rh_ip_span(nodes, texts, interval_node, "kind", &kind_s, &kind_e)
+                    kind_code: i64 = IdentityPublication::rh_ip_kind(texts, kind_s, kind_e)
+                    return -1 if kind_code < 0
+                    from_ok: mutable i64 = 0
+                    valid_from: i64 = IdentityPublication::rh_ip_int(nodes, raw, texts, interval_node, "valid_from", &from_ok)
+                    return -1 if from_ok == 0 or valid_from < 0
+                    until_idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, interval_node, "valid_until")
+                    return -1 if until_idx < 0
+                    valid_until: mutable i64 = 9223372036854775807
+                    if until_idx >= 0 and nodes[until_idx.usize()].kind != Json::RH_JSON_NULL:
+                        until_ok: mutable i64 = 0
+                        valid_until <- Json::rh_json_int(nodes, raw, until_idx, &until_ok)
+                        return -1 if until_ok == 0 or valid_until <= valid_from
+                    source_s: mutable i64 = 0
+                    source_e: mutable i64 = 0
+                    return -1 if not IdentityPublication::rh_ip_span(nodes, texts, interval_node, "source", &source_s, &source_e)
+                    source_code: i64 = IdentityPublication::rh_ip_kind_source(texts, source_s, source_e)
+                    return -1 if source_code < 0
+                    if kind_history.count > 0:
+                        previous_interval: RhPublicActorKindInterval = kind_history[kind_history.count - 1]
+                        return -1 if actor_id < previous_interval.actor_id or (actor_id == previous_interval.actor_id and valid_from <= previous_interval.valid_from)
+                    kind_history.push(RhPublicActorKindInterval{actor_id: actor_id, kind: kind_code.u8(), valid_from: valid_from, valid_until: valid_until, source: source_code.u8()})
+                    interval_node <- nodes[interval_node.usize()].next_sibling
+                history_index: mutable usize = 0
+                while history_index < kind_history.count |history_index, kind_history, kinds, kind_sources, kind_history_conflicts, kind_history_source_conflicts, effective_at|:
+                    actor_id: i64 = kind_history[history_index].actor_id
+                    next_index: mutable usize = history_index
+                    selected_kind: mutable i64 = -1
+                    selected_source: mutable i64 = -1
+                    conflicting_kind: mutable bool = false
+                    conflicting_source: mutable bool = false
+                    while next_index < kind_history.count and kind_history[next_index].actor_id == actor_id |next_index, kind_history, actor_id, effective_at, selected_kind, selected_source, conflicting_kind, conflicting_source|:
+                        interval: RhPublicActorKindInterval = kind_history[next_index]
+                        active: bool = interval.valid_from <= effective_at and effective_at < interval.valid_until
+                        if active:
+                            if selected_kind < 0:
+                                selected_kind <- interval.kind.i64()
+                                selected_source <- interval.source.i64()
+                            else:
+                                conflicting_kind <- true if selected_kind != interval.kind.i64()
+                                conflicting_source <- true if selected_source != interval.source.i64()
+                        next_index <- next_index + 1
+                    kinds[actor_id.usize()] <- Identity::RH_ACTOR_UNRESOLVED if selected_kind < 0 or conflicting_kind
+                    kinds[actor_id.usize()] <- selected_kind.u8() if selected_kind >= 0 and not conflicting_kind
+                    kind_sources[actor_id.usize()] <- Identity::RH_ACTOR_SOURCE_UNKNOWN if selected_kind < 0 or conflicting_source
+                    kind_sources[actor_id.usize()] <- selected_source.u8() if selected_kind >= 0 and not conflicting_source
+                    kind_history_conflicts <- kind_history_conflicts + 1 if conflicting_kind
+                    kind_history_source_conflicts <- kind_history_source_conflicts + 1 if conflicting_source
+                    history_index <- next_index
+
             corrections: mutable darray[RhPublicCorrection] = []
             corrections_idx: i64 = IdentityPublication::rh_ip_get(nodes, texts, root, "correction_requests")
             if corrections_idx >= 0:
@@ -286,6 +360,16 @@ module IdentityPublication:
             Base::rh_push_decimal_i64(out, revision)
             Base::rh_push_text(out, ",\"cluster_count\":")
             Base::rh_push_decimal_i64(out, cluster_count)
+            if kind_history_idx >= 0:
+                Base::rh_push_text(out, ",\"actor_kind_history\":{\"as_of\":")
+                Base::rh_push_decimal_i64(out, effective_at)
+                Base::rh_push_text(out, ",\"assertions\":")
+                Base::rh_push_decimal_i64(out, kind_history.count.i64())
+                Base::rh_push_text(out, ",\"conflicted_actors\":")
+                Base::rh_push_decimal_i64(out, kind_history_conflicts)
+                Base::rh_push_text(out, ",\"source_conflicts\":")
+                Base::rh_push_decimal_i64(out, kind_history_source_conflicts)
+                Base::rh_push_text(out, "}")
             Base::rh_push_text(out, ",\"actor_kinds\":{\"human\":")
             Base::rh_push_decimal_i64(out, humans)
             Base::rh_push_text(out, ",\"bot_known\":")

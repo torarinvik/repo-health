@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/test_identity_publication_cli.sh — M04-09 project-focused identity
+# tests/test_identity_publication_cli.sh — M04-04/09 project-focused identity
 # publication: raw source identities stay restricted, aggregates are useful,
 # correction requests retain a review channel, and malformed/publication-scope
 # inputs fail closed.
@@ -59,6 +59,46 @@ assert d["cluster_size_histogram"] == [{"size": 1, "clusters": 2}], d
 print("[identity-publication] unknown kinds stay unresolved")
 PY
 
+echo "[identity-publication] effective-dated actor kinds resolve at the requested time"
+python3 - "$T/input.json" "$T/history.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["as_of"] = 200
+d["actor_kind_history"] = [
+    {"actor_id": 0, "kind": "human", "valid_from": 100, "valid_until": 200, "source": "provider"},
+    {"actor_id": 0, "kind": "bot_known", "valid_from": 200, "valid_until": None, "source": "provider"},
+    {"actor_id": 1, "kind": "human", "valid_from": 100, "valid_until": None, "source": "provider"},
+    {"actor_id": 1, "kind": "service_known", "valid_from": 150, "valid_until": 250, "source": "operator"},
+    {"actor_id": 2, "kind": "bot_known", "valid_from": 100, "valid_until": 150, "source": "provider"},
+    {"actor_id": 3, "kind": "service_known", "valid_from": 100, "valid_until": None, "source": "project"},
+]
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" identity-publish --input "$T/history.json" --out "$T/history.out" >/dev/null || fail "effective-dated identity publication"
+python3 - "$T/history.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["actor_kind_history"] == {"as_of": 200, "assertions": 6, "conflicted_actors": 1, "source_conflicts": 1}, d
+assert d["actor_kinds"] == {"human": 0, "bot_known": 1, "service_known": 2, "unresolved": 2}, d
+assert d["actor_kind_source_counts"] == {"provider": 1, "project": 2, "operator": 0, "unknown": 2}, d
+assert "actor_id" not in open(sys.argv[1]).read(), open(sys.argv[1]).read()
+print("[identity-publication] as-of history, half-open boundaries, and conflicts OK")
+PY
+python3 - "$T/history.json" "$T/history-earlier.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["as_of"] = 150
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" identity-publish --input "$T/history-earlier.json" --out "$T/history-earlier.out" >/dev/null || fail "earlier effective-date publication"
+python3 - "$T/history-earlier.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["actor_kind_history"]["as_of"] == 150, d
+assert d["actor_kinds"] == {"human": 1, "bot_known": 0, "service_known": 2, "unresolved": 2}, d
+print("[identity-publication] historical as-of recomputes actor-kind aggregates")
+PY
+
 echo "[identity-publication] malformed inputs fail closed"
 set +e
 printf '%s' '{"schema":"rh-identity-publication-input/2","project_id":"x","publication_scope":"public","actor_count":0,"links":[]}' > "$T/bad-schema.json"
@@ -79,11 +119,27 @@ printf '%s' '{"schema":"rh-identity-publication-input/1","project_id":"x","publi
 "$ROOT/build/rh_cli" identity-publish --input "$T/bad-kind-ref.json" --out "$T/bad-kind-ref.out" >/dev/null 2>&1; rc_kind_ref=$?
 printf '%s' '{"schema":"rh-identity-publication-input/1","project_id":"x","publication_scope":"public","actor_count":1,"links":[],"actor_kind_evidence_refs":["evidence:one"]}' > "$T/kind-ref-without-kind.json"
 "$ROOT/build/rh_cli" identity-publish --input "$T/kind-ref-without-kind.json" --out "$T/kind-ref-without-kind.out" >/dev/null 2>&1; rc_kind_ref_without_kind=$?
+python3 - "$T/history.json" "$T/history-no-as-of.json" "$T/history-unsorted.json" "$T/history-empty-interval.json" "$T/history-missing-until.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+no_as_of = dict(d); no_as_of.pop("as_of")
+unsorted = dict(d); unsorted["actor_kind_history"] = list(reversed(d["actor_kind_history"]))
+empty_interval = dict(d); empty_interval["actor_kind_history"] = list(d["actor_kind_history"])
+empty_interval["actor_kind_history"][0]["valid_until"] = 100
+missing_until = dict(d); missing_until["actor_kind_history"] = list(d["actor_kind_history"])
+missing_until["actor_kind_history"][0].pop("valid_until")
+for value, path in zip((no_as_of, unsorted, empty_interval, missing_until), sys.argv[2:]):
+    json.dump(value, open(path, "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" identity-publish --input "$T/history-no-as-of.json" --out "$T/history-no-as-of.out" >/dev/null 2>&1; rc_history_no_as_of=$?
+"$ROOT/build/rh_cli" identity-publish --input "$T/history-unsorted.json" --out "$T/history-unsorted.out" >/dev/null 2>&1; rc_history_unsorted=$?
+"$ROOT/build/rh_cli" identity-publish --input "$T/history-empty-interval.json" --out "$T/history-empty-interval.out" >/dev/null 2>&1; rc_history_empty_interval=$?
+"$ROOT/build/rh_cli" identity-publish --input "$T/history-missing-until.json" --out "$T/history-missing-until.out" >/dev/null 2>&1; rc_history_missing_until=$?
 set -e
-for rc in "$rc_schema" "$rc_scope" "$rc_link" "$rc_duplicate" "$rc_kind_time" "$rc_kind_time_count" "$rc_kind_ref_count" "$rc_kind_ref" "$rc_kind_ref_without_kind"; do
+for rc in "$rc_schema" "$rc_scope" "$rc_link" "$rc_duplicate" "$rc_kind_time" "$rc_kind_time_count" "$rc_kind_ref_count" "$rc_kind_ref" "$rc_kind_ref_without_kind" "$rc_history_no_as_of" "$rc_history_unsorted" "$rc_history_empty_interval" "$rc_history_missing_until"; do
     [[ "$rc" -eq 4 ]] || fail "malformed publication must exit 4 (got $rc)"
 done
-for path in "$T/bad-schema.out" "$T/bad-scope.out" "$T/bad-link.out" "$T/bad-duplicate.out" "$T/bad-kind-time.out" "$T/bad-kind-time-count.out" "$T/bad-kind-ref-count.out" "$T/bad-kind-ref.out" "$T/kind-ref-without-kind.out"; do
+for path in "$T/bad-schema.out" "$T/bad-scope.out" "$T/bad-link.out" "$T/bad-duplicate.out" "$T/bad-kind-time.out" "$T/bad-kind-time-count.out" "$T/bad-kind-ref-count.out" "$T/bad-kind-ref.out" "$T/kind-ref-without-kind.out" "$T/history-no-as-of.out" "$T/history-unsorted.out" "$T/history-empty-interval.out" "$T/history-missing-until.out"; do
     [[ ! -e "$path" ]] || fail "failed publication wrote partial output: $path"
 done
 
