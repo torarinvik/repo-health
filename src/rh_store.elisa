@@ -20,14 +20,20 @@ module Store:
         const RH_STORE_MAX_GC_CANDIDATES: i64 = 50000
         static if ELISA_TARGET_OS_MACOS:
             const RH_STORE_OPEN_CREATE: i32 = 512
+            const RH_STORE_OPEN_NOFOLLOW: i32 = 256
+            const RH_STORE_OPEN_EXCLUSIVE: i32 = 2048
             const RH_STORE_DIRENT_NAME_OFFSET: usize = 21
             extern __error() -> mutable i32&
         static elif ELISA_TARGET_OS_LINUX:
             const RH_STORE_OPEN_CREATE: i32 = 64
+            const RH_STORE_OPEN_NOFOLLOW: i32 = 131072
+            const RH_STORE_OPEN_EXCLUSIVE: i32 = 128
             const RH_STORE_DIRENT_NAME_OFFSET: usize = 19
             extern __errno_location() -> mutable i32&
         static else:
             const RH_STORE_OPEN_CREATE: i32 = 0
+            const RH_STORE_OPEN_NOFOLLOW: i32 = 0
+            const RH_STORE_OPEN_EXCLUSIVE: i32 = 0
 
     public:
         # Hold one advisory lock shared by every local process using this root.
@@ -40,8 +46,8 @@ module Store:
             Base::rh_push_text(lock_path, "/.rh-evidence.lock")
             lock_path.push(0)
             lock_ptr: cstr = (&lock_path[0]).cast[cstr] can Unsafe.PointerCast
-            fd: mutable i32 = open(lock_ptr, 2 | RH_STORE_OPEN_CREATE, 384)
-            fd <- open(lock_ptr, 0, 0) if fd < 0
+            fd: mutable i32 = open(lock_ptr, 2 | RH_STORE_OPEN_CREATE | RH_STORE_OPEN_NOFOLLOW, 384)
+            fd <- open(lock_ptr, RH_STORE_OPEN_NOFOLLOW, 0) if fd < 0
             return -1 if fd < 0
             if fchmod(fd, 384) != 0:
                 _ = close(fd)
@@ -50,6 +56,48 @@ module Store:
                 _ = close(fd)
                 return -1
             fd_out[0] <- fd
+            0
+
+        # Hold an advisory lock for one caller-selected state file. The `.lock`
+        # file is persistent; flock ownership is tied to the open descriptor.
+        def rh_store_path_guard_acquire(path: cstr, fd_out: mutable i32&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Unsafe.PointerCast]:
+            fd_out[0] <- -1
+            return -1 if Base::rh_cstr_len_c(path) == 0 or Base::rh_cstr_len_c(path) > 4096 or RH_STORE_OPEN_CREATE == 0
+            lock_path: mutable darray[u8] = []
+            Base::rh_push_cstr(lock_path, path)
+            Base::rh_push_text(lock_path, ".lock")
+            lock_path.push(0)
+            lock_ptr: cstr = (&lock_path[0]).cast[cstr] can Unsafe.PointerCast
+            fd: i32 = open(lock_ptr, 2 | RH_STORE_OPEN_CREATE | RH_STORE_OPEN_NOFOLLOW, 384)
+            return -1 if fd < 0
+            if fchmod(fd, 384) != 0:
+                _ = close(fd)
+                return -1
+            if flock(fd, RH_STORE_LOCK_EXCLUSIVE) != 0:
+                _ = close(fd)
+                return -1
+            fd_out[0] <- fd
+            0
+
+        # Restrict an existing state file to its owner and reject symlink paths.
+        def rh_store_private_file(path: cstr) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+            return -1 if Base::rh_cstr_len_c(path) == 0 or Base::rh_cstr_len_c(path) > 4096 or RH_STORE_OPEN_NOFOLLOW == 0
+            fd: i32 = open(path, RH_STORE_OPEN_NOFOLLOW, 0)
+            return -1 if fd < 0
+            changed: i32 = fchmod(fd, 384)
+            closed: i32 = close(fd)
+            return -1 if changed != 0 or closed != 0
+            0
+
+        # Create a new private file without following an existing final path
+        # component. O_EXCL also rejects dangling symlinks.
+        def rh_store_private_file_create(path: cstr) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+            return -1 if Base::rh_cstr_len_c(path) == 0 or Base::rh_cstr_len_c(path) > 4096 or RH_STORE_OPEN_NOFOLLOW == 0
+            fd: i32 = open(path, 1 | RH_STORE_OPEN_CREATE | RH_STORE_OPEN_NOFOLLOW | RH_STORE_OPEN_EXCLUSIVE, 384)
+            return -1 if fd < 0
+            changed: i32 = fchmod(fd, 384)
+            closed: i32 = close(fd)
+            return -1 if changed != 0 or closed != 0
             0
 
         def rh_store_guard_release(fd: i32) -> i64 can[Blocking.IO]:

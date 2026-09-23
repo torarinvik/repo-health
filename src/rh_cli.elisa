@@ -187,7 +187,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli release-feed (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli registry-meta (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli pep440 --input <file> --out <file>")
-    rh_cli_err("       rh_cli privacy --input <file> --out <file>")
+    rh_cli_err("       rh_cli privacy --input <file> --out <file> [--history <file>]")
     rh_cli_err("       rh_cli roles (--input <file> | --url <https-or-file-url>) --out <file>")
     rh_cli_err("       rh_cli roles-import (--input <provider-permissions.json> | --github-repo <owner/repo> | --gitlab-project <group/path> [--resume-from <partial-roles-input>]) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli roles-publish --input <file> --out <file>")
@@ -2347,8 +2347,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if wi < 0 or wo < 0
         return rh_do_worker_tick(slots[wi], slots[wo])
     if Base::rh_streq(cmd, "privacy"):
-        pvi_idx, pvo_idx =
-            while pvq < argc |pvi_idx: i64 = -1, pvo_idx: i64 = -1, pvq: i64 = 2, slots| -> pvi_idx, pvo_idx:
+        pvi_idx, pvo_idx, pvh_idx =
+            while pvq < argc |pvi_idx: i64 = -1, pvo_idx: i64 = -1, pvh_idx: i64 = -1, pvq: i64 = 2, slots| -> pvi_idx, pvo_idx, pvh_idx:
                 a22: u8& = slots[pvq].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(a22, "--input"):
                     if pvq + 1 < argc:
@@ -2362,11 +2362,20 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         pvo_idx <- pvq
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(a22, "--history"):
+                    if pvq + 1 < argc:
+                        pvq <- pvq + 1
+                        pvh_idx <- pvq
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 pvq <- pvq + 1
         return rh_cli_usage(2) if pvi_idx < 0 or pvo_idx < 0
-        return rh_do_privacy(slots[pvi_idx], slots[pvo_idx])
+        history_path: mutable cstr = ""
+        if pvh_idx >= 0:
+            history_path <- slots[pvh_idx]
+        return rh_do_privacy(slots[pvi_idx], slots[pvo_idx], history_path, pvh_idx >= 0)
     if Base::rh_streq(cmd, "roles"):
         rl_idx, rlu_idx, rlo_idx =
             while rlq < argc |rl_idx: i64 = -1, rlu_idx: i64 = -1, rlo_idx: i64 = -1, rlq: i64 = 2, slots| -> rl_idx, rlu_idx, rlo_idx:
@@ -8510,13 +8519,44 @@ def rh_do_ops_quota(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate
     0
 
 # --- M07-07 publication suppression execution path. ---
-# Reads an rh-privacy-input/1 document and writes rh-privacy-result/1. A
+# Reads an rh-privacy-input/1 document and writes rh-privacy-result/2. A
 # cell publishes only when every contributing subject is public and the
 # threshold is met; private/unknown members withhold; small cells suppress.
-def rh_do_privacy(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+def rh_privacy_compute_with_history(raw: darray[u8]&, history_path: cstr, has_history: bool, body: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    history_raw: mutable darray[u8] = []
+    history_out: mutable darray[u8] = []
+    return PrivacyReport::rh_privacy_report(raw, history_raw, false, body, history_out) if not has_history
+    guard_fd: mutable i32 = -1
+    return -1 if Store::rh_store_path_guard_acquire(history_path, &guard_fd) != 0
+    result: mutable i64 = 0
+    if file_exists(history_path):
+        result <- -1 if Store::rh_store_private_file(history_path) != 0 or Base::rh_io_read(history_path, history_raw) < 0
+    else:
+        Base::rh_push_text(history_raw, "{\"schema\":\"rh-privacy-history/1\",\"published_cells\":[]}")
+    if result == 0 and PrivacyReport::rh_privacy_report(raw, history_raw, true, body, history_out) != 0:
+        result <- -1
+    if result == 0:
+        history_out.push(10)
+        if not file_exists(history_path) and Store::rh_store_private_file_create(history_path) != 0:
+            result <- -1
+        if result == 0 and (not Base::rh_io_write(history_path, history_out) or Store::rh_store_private_file(history_path) != 0):
+            result <- -1
+    released: i64 = Store::rh_store_guard_release(guard_fd)
+    return -1 if released != 0
+    result
+
+def rh_do_privacy(input_path: cstr, out_path: cstr, history_path: cstr, has_history: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path) or (has_history and not Git::rh_arg_safe(history_path)):
         rh_cli_err("rejected privacy argument (allowlist)")
         return 3
+    return 2 if has_history and (Base::rh_streq(input_path, history_path) or Base::rh_streq(out_path, history_path))
+    if has_history:
+        history_lock_path: mutable darray[u8] = []
+        Base::rh_push_cstr(history_lock_path, history_path)
+        Base::rh_push_text(history_lock_path, ".lock")
+        history_lock_path.push(0)
+        history_lock_ptr: cstr = (&history_lock_path[0]).cast[cstr] can Unsafe.PointerCast
+        return 2 if Base::rh_streq(out_path, history_lock_ptr)
     ip: mutable darray[u8] =
         ip: mutable darray[u8] = []
         Base::rh_push_cstr(ip, input_path)
@@ -8528,8 +8568,8 @@ def rh_do_privacy(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, 
         rh_cli_err("privacy: cannot read --input")
         return 4
     body: mutable darray[u8] = []
-    if PrivacyReport::rh_privacy_report(raw, body) != 0:
-        rh_cli_err("privacy: not a valid rh-privacy-input/1 document (fail closed)")
+    if rh_privacy_compute_with_history(raw, history_path, has_history, body) != 0:
+        rh_cli_err("privacy: invalid input or release history (fail closed)")
         return 4
     body.push(10)
     op: mutable darray[u8] =

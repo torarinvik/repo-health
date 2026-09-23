@@ -689,7 +689,8 @@ register (`ops/source-review-register.json`, schema-validated in
 (`src/rh_privacy.elisa`: unknown-visibility withholds before private
 withholds before the small-cell threshold; suppression is explicitly *not*
 anonymization). The gate is a real path too: `src/rh_privacy_report.elisa` +
-`rh_cli privacy --input <file> --out <file>` emit `rh-privacy-result/1`
+`rh_cli privacy --input <file> --out <file> [--history <file>]` emit
+`rh-privacy-result/2`
 where a cell publishes only when every contributing subject is public and
 the threshold is met, unknown-visibility withholds before private or
 authorized-only visibility, a small public cell suppresses, and unpublished
@@ -698,8 +699,14 @@ malformed counts and duplicate cell IDs fail closed; a request is capped at
 10,000 cells, and caller-supplied thresholds below the product floor of five
 are rejected (higher per-cell thresholds remain allowed). Published results still carry the
 "suppression is not anonymization" caveat (`tests/test_privacy_cli.sh`).
-Product-owned thresholds and differencing controls across overlapping or
-repeated releases remain open. Operational
+Optional `rh-privacy-history/1` history suppresses a repeated stable cell ID
+when its published count changes by less than the higher of the old and new
+thresholds; suppressed cells do not advance the baseline. Malformed or
+duplicate history IDs fail closed and history is capped at 10,000 published
+cells using an advisory lock that serializes local read/check/write cycles.
+History and lock files are owner-only; symlink paths fail closed. This does not detect overlapping queries under
+different IDs or verify caller ID stability. Product-owned thresholds and broader differencing
+controls remain open. Operational
 runbooks (`docs/operations/runbooks.md`,
 M07-13), and a deterministic release evidence packet generator
 (`tools/release-packet.sh` + `tests/test_release_packet.sh`). A deletion

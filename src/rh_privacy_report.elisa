@@ -1,7 +1,7 @@
 # rh_privacy_report.elisa — M07-07 publication suppression execution path.
 #
 # Turns an `rh-privacy-input/1` set of aggregate cells into
-# `rh-privacy-result/1`. A cell publishes only when every contributing
+# `rh-privacy-result/2`. A cell publishes only when every contributing
 # subject is public AND the cell meets the disclosure threshold; a private
 # or unknown-visibility member withholds, and a small public cell is
 # suppressed rather than rounded or hidden behind a score. The explanation
@@ -41,12 +41,43 @@ module PrivacyReport:
             return "withhold_private_member" if d == Privacy::RH_PUB_WITHHOLD_PRIVATE
             return "withhold_unknown_visibility" if d == Privacy::RH_PUB_WITHHOLD_UNKNOWN
             return "withhold_authorized_member" if d == Privacy::RH_PUB_WITHHOLD_AUTHORIZED
+            return "suppress_repeated_release_difference" if d == Privacy::RH_PUB_SUPPRESS_DIFFERENCE
             "unavailable"
 
     public:
-        def rh_privacy_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_privacy_report(raw: darray[u8]&, history_raw: darray[u8]&, use_history: bool, out: mutable darray[u8]&, history_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
+            history_nodes: mutable darray[Json::RhJsonNode] = []
+            history_texts: mutable darray[u8] = []
+            history_cells_idx: mutable i64 = -1
+            if use_history:
+                history_root: i64 = Json::rh_json_parse(history_raw, history_nodes, history_texts)
+                return -1 if history_root < 0 or history_nodes[history_root.usize()].kind != Json::RH_JSON_OBJ
+                history_schema_start: mutable i64 = 0
+                history_schema_end: mutable i64 = 0
+                history_schema: i64 = Json::rh_json_obj_get(history_nodes, history_texts, history_root, "schema")
+                return -1 if history_schema < 0 or not Json::rh_json_str_span(history_nodes, history_schema, &history_schema_start, &history_schema_end) or not rh_pv_eq(history_texts, history_schema_start, history_schema_end, "rh-privacy-history/1")
+                history_cells_idx <- Json::rh_json_obj_get(history_nodes, history_texts, history_root, "published_cells")
+                return -1 if history_cells_idx < 0 or history_nodes[history_cells_idx.usize()].kind != Json::RH_JSON_ARR or history_nodes[history_cells_idx.usize()].child_count > 10000
+                history_ids_start: mutable darray[i64] = []
+                history_ids_end: mutable darray[i64] = []
+                while old_cell >= 0 |old_cell: i64 = history_nodes[history_cells_idx.usize()].first_child, history_nodes, history_texts, history_raw, history_ids_start, history_ids_end|:
+                    return -1 if history_nodes[old_cell.usize()].kind != Json::RH_JSON_OBJ
+                    old_id_start: mutable i64 = 0
+                    old_id_end: mutable i64 = 0
+                    return -1 if not rh_pv_str(history_nodes, history_texts, old_cell, "id", &old_id_start, &old_id_end) or old_id_start == old_id_end
+                    duplicate_history_id: bool =
+                        while oi < history_ids_start.count |duplicate_history_id: bool = false, oi: usize = 0, history_ids_start, history_ids_end, history_texts, old_id_start, old_id_end| -> duplicate_history_id:
+                            duplicate_history_id <- duplicate_history_id or Base::rh_bytes_equal_span(history_texts, old_id_start, old_id_end, history_texts, history_ids_start[oi], history_ids_end[oi])
+                            oi <- oi + 1
+                    return -1 if duplicate_history_id
+                    history_ids_start.push(old_id_start)
+                    history_ids_end.push(old_id_end)
+                    old_count: i64 = rh_pv_int(history_nodes, history_raw, history_texts, old_cell, "public_count", -1)
+                    old_threshold: i64 = rh_pv_int(history_nodes, history_raw, history_texts, old_cell, "threshold", -1)
+                    return -1 if old_count < 0 or old_threshold < Privacy::RH_PUB_MIN_THRESHOLD
+                    old_cell <- history_nodes[old_cell.usize()].next_sibling
             cells_idx: i64 = |nodes, texts|
                 root: i64 = Json::rh_json_parse(raw, nodes, texts)
                 return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
@@ -59,11 +90,15 @@ module PrivacyReport:
                 block_result
             return -1 if cells_idx < 0 or nodes[cells_idx.usize()].kind != Json::RH_JSON_ARR
             return -1 if nodes[cells_idx.usize()].child_count > 10000
-            Base::rh_push_text(out, "{\"schema\":\"rh-privacy-result/1\",\"cells\":[")
+            Base::rh_push_text(out, "{\"schema\":\"rh-privacy-result/2\",\"cells\":[")
             arr: Json::RhJsonNode = nodes[cells_idx.usize()]
             cell_ids_start: mutable darray[i64] = []
             cell_ids_end: mutable darray[i64] = []
-            while child >= 0 |child: i64 = arr.first_child, i: i64 = 0, nodes, texts, raw, out, cell_ids_start, cell_ids_end|:
+            publish_ids_start: mutable darray[i64] = []
+            publish_ids_end: mutable darray[i64] = []
+            publish_counts: mutable darray[i64] = []
+            publish_thresholds: mutable darray[i64] = []
+            while child >= 0 |child: i64 = arr.first_child, i: i64 = 0, nodes, texts, raw, out, cell_ids_start, cell_ids_end, history_nodes, history_texts, history_cells_idx, history_raw, use_history, publish_ids_start, publish_ids_end, publish_counts, publish_thresholds|:
                 return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
                 ids: mutable i64 = 0
                 ide: mutable i64 = 0
@@ -82,7 +117,25 @@ module PrivacyReport:
                 unk: i64 = rh_pv_int(nodes, raw, texts, child, "unknown_count", 0)
                 thr: i64 = rh_pv_int(nodes, raw, texts, child, "threshold", 1)
                 return -1 if pub < 0 or aut < 0 or priv < 0 or unk < 0 or thr < Privacy::RH_PUB_MIN_THRESHOLD
-                decision: i64 = Privacy::rh_pub_decide(pub, aut, priv, unk, thr)
+                decision: mutable i64 = Privacy::rh_pub_decide(pub, aut, priv, unk, thr)
+                if use_history and decision == Privacy::RH_PUB_PUBLISH:
+                    while old_cell >= 0 |old_cell: i64 = history_nodes[history_cells_idx.usize()].first_child, history_nodes, history_texts, history_raw, texts, ids, ide, pub, thr, decision|:
+                        old_id_start: mutable i64 = 0
+                        old_id_end: mutable i64 = 0
+                        _ = rh_pv_str(history_nodes, history_texts, old_cell, "id", &old_id_start, &old_id_end)
+                        if Base::rh_bytes_equal_span(texts, ids, ide, history_texts, old_id_start, old_id_end):
+                            old_count: i64 = rh_pv_int(history_nodes, history_raw, history_texts, old_cell, "public_count", -1)
+                            old_threshold: i64 = rh_pv_int(history_nodes, history_raw, history_texts, old_cell, "threshold", -1)
+                            difference: i64 = pub - old_count if pub >= old_count else old_count - pub
+                            effective_threshold: i64 = thr if thr > old_threshold else old_threshold
+                            if difference > 0 and difference < effective_threshold:
+                                decision <- Privacy::RH_PUB_SUPPRESS_DIFFERENCE
+                        old_cell <- history_nodes[old_cell.usize()].next_sibling
+                if decision == Privacy::RH_PUB_PUBLISH:
+                    publish_ids_start.push(ids)
+                    publish_ids_end.push(ide)
+                    publish_counts.push(pub)
+                    publish_thresholds.push(thr)
                 if i > 0:
                     out.push(44)
                 i <- i + 1
@@ -114,5 +167,55 @@ module PrivacyReport:
                 Base::rh_json_escape(out, expl, 0, expl_end)
                 Base::rh_push_text(out, "\"}")
                 child <- nodes[child.usize()].next_sibling
-            Base::rh_push_text(out, "],\"note\":\"a cell publishes only when every contributing subject is public and the cell meets the threshold; suppression is not anonymization; no formal-anonymity claim is made without a stated method\"}")
+            Base::rh_push_text(out, "],\"note\":\"a cell publishes only when every contributing subject is public and the cell meets the threshold; when history is enabled, repeated stable cell IDs with count differences below either release threshold are suppressed; differently identified overlapping queries are not detected; suppression is not anonymization; no formal-anonymity claim is made without a stated method\"}")
+            if use_history:
+                new_ids: mutable darray[i64] = []
+                new_ids_end: mutable darray[i64] = []
+                while pi < publish_ids_start.count |pi: usize = 0, publish_ids_start, publish_ids_end, history_nodes, history_texts, history_cells_idx, texts, new_ids, new_ids_end|:
+                    seen: bool =
+                        while oi < history_nodes[history_cells_idx.usize()].child_count |seen: bool = false, oi: usize = 0, history_nodes, history_texts, history_cells_idx, texts, publish_ids_start, publish_ids_end, pi| -> seen:
+                            prior: i64 = Json::rh_json_arr_get(history_nodes, history_cells_idx, oi.i64())
+                            prior_s: mutable i64 = 0
+                            prior_e: mutable i64 = 0
+                            _ = rh_pv_str(history_nodes, history_texts, prior, "id", &prior_s, &prior_e)
+                            seen <- seen or Base::rh_bytes_equal_span(texts, publish_ids_start[pi], publish_ids_end[pi], history_texts, prior_s, prior_e)
+                            oi <- oi + 1
+                    if not seen:
+                        new_ids.push(publish_ids_start[pi])
+                        new_ids_end.push(publish_ids_end[pi])
+                    pi <- pi + 1
+                return -1 if history_nodes[history_cells_idx.usize()].child_count + new_ids.count.i64() > 10000
+                Base::rh_push_text(history_out, "{\"schema\":\"rh-privacy-history/1\",\"published_cells\":[")
+                while pi < publish_ids_start.count |pi: usize = 0, publish_ids_start, publish_ids_end, publish_counts, publish_thresholds, history_out|:
+                    if pi > 0:
+                        history_out.push(44)
+                    Base::rh_push_text(history_out, "{\"id\":\"")
+                    Base::rh_json_escape(history_out, texts, publish_ids_start[pi], publish_ids_end[pi])
+                    Base::rh_push_text(history_out, "\",\"public_count\":")
+                    Base::rh_push_decimal_i64(history_out, publish_counts[pi])
+                    Base::rh_push_text(history_out, ",\"threshold\":")
+                    Base::rh_push_decimal_i64(history_out, publish_thresholds[pi])
+                    Base::rh_push_text(history_out, "}")
+                    pi <- pi + 1
+                while oi < history_nodes[history_cells_idx.usize()].child_count |oi: usize = 0, history_nodes, history_texts, history_cells_idx, texts, publish_ids_start, publish_ids_end, history_out, history_raw|:
+                    prior: i64 = Json::rh_json_arr_get(history_nodes, history_cells_idx, oi.i64())
+                    prior_s: mutable i64 = 0
+                    prior_e: mutable i64 = 0
+                    _ = rh_pv_str(history_nodes, history_texts, prior, "id", &prior_s, &prior_e)
+                    updated: bool =
+                        while pi < publish_ids_start.count |updated: bool = false, pi: usize = 0, publish_ids_start, publish_ids_end, texts, history_texts, prior_s, prior_e| -> updated:
+                            updated <- updated or Base::rh_bytes_equal_span(texts, publish_ids_start[pi], publish_ids_end[pi], history_texts, prior_s, prior_e)
+                            pi <- pi + 1
+                    if not updated:
+                        if publish_ids_start.count > 0 or oi > 0:
+                            history_out.push(44)
+                        Base::rh_push_text(history_out, "{\"id\":\"")
+                        Base::rh_json_escape(history_out, history_texts, prior_s.usize(), prior_e.usize())
+                        Base::rh_push_text(history_out, "\",\"public_count\":")
+                        Base::rh_push_decimal_i64(history_out, rh_pv_int(history_nodes, history_raw, history_texts, prior, "public_count", 0))
+                        Base::rh_push_text(history_out, ",\"threshold\":")
+                        Base::rh_push_decimal_i64(history_out, rh_pv_int(history_nodes, history_raw, history_texts, prior, "threshold", Privacy::RH_PUB_MIN_THRESHOLD))
+                        Base::rh_push_text(history_out, "}")
+                    oi <- oi + 1
+                Base::rh_push_text(history_out, "]}")
             0
