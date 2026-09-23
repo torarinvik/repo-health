@@ -99,8 +99,9 @@ module MaintenanceExposure:
                 mapping_seen.push(false)
                 i <- i + 1
             actors: mutable darray[RhExposureActor] = []
+            actor_texts: mutable darray[u8] = []
             mapping_rows: mutable darray[RhExposureMapping] = []
-            while mapping >= 0 |mapping: i64 = nodes[mappings_idx.usize()].first_child, nodes, texts, raw, graph_nodes, node_count, mapped, mapping_seen, actors, mapping_rows|:
+            while mapping >= 0 |mapping: i64 = nodes[mappings_idx.usize()].first_child, nodes, texts, raw, graph_nodes, node_count, mapped, mapping_seen, actors, actor_texts, mapping_rows, evidence_root|:
                 return -1 if nodes[mapping.usize()].kind != Json::RH_JSON_OBJ
                 node_id: mutable i64 = -1
                 return -1 if not rh_exposure_int(nodes, raw, texts, mapping, "node", &node_id) or node_id < 0 or node_id >= node_count or mapping_seen[node_id.usize()]
@@ -127,48 +128,65 @@ module MaintenanceExposure:
                     name_cursor <- name_cursor + 1
                 evidence_name.push(0)
                 evidence_ptr: u8& = (&evidence_name[0]).cast[u8&] can Unsafe.PointerCast
-                evidence_ok: mutable i64 = 0
-                return -1 if Store::rh_store_blob_verify(evidence_root, evidence_ptr, &evidence_ok) != 0 or evidence_ok != 1
-                role_report: i64 = rh_exposure_member(nodes, texts, mapping, "role_evidence")
-                return -1 if role_report < 0 or nodes[role_report.usize()].kind != Json::RH_JSON_OBJ
-                role_schema: i64 = rh_exposure_member(nodes, texts, role_report, "schema")
+                evidence_path: mutable darray[u8] = []
+                Base::rh_push_cstr(evidence_path, evidence_root)
+                evidence_path.push(47)
+                while path_cursor < evidence_e - evidence_s |path_cursor: i64 = 0, texts, evidence_s, evidence_e, evidence_path|:
+                    evidence_path.push(texts[(evidence_s + path_cursor).usize()])
+                    path_cursor <- path_cursor + 1
+                evidence_path.push(0)
+                evidence_path_ptr: cstr = (&evidence_path[0]).cast[cstr] can Unsafe.PointerCast
+                evidence_size: i64 = Base::rh_file_size(evidence_path_ptr)
+                return -1 if evidence_size <= 0 or evidence_size > 1048576
+                role_raw: mutable darray[u8] = []
+                return -1 if Base::rh_io_read(evidence_path_ptr, role_raw) != evidence_size
+                return -1 if not Store::rh_store_blob_content_matches(evidence_ptr, role_raw)
+                role_nodes: mutable darray[Json::RhJsonNode] = []
+                role_texts: mutable darray[u8] = []
+                role_root: i64 = Json::rh_json_parse(role_raw, role_nodes, role_texts)
+                return -1 if role_root < 0 or role_nodes[role_root.usize()].kind != Json::RH_JSON_OBJ
+                role_schema: i64 = rh_exposure_member(role_nodes, role_texts, role_root, "schema")
                 role_schema_s: mutable i64 = -1
                 role_schema_e: mutable i64 = -1
-                return -1 if not Json::rh_json_str_span(nodes, role_schema, &role_schema_s, &role_schema_e) or not rh_exposure_span_eq(texts, role_schema_s, role_schema_e, "rh-role-grain-result/1")
+                return -1 if not Json::rh_json_str_span(role_nodes, role_schema, &role_schema_s, &role_schema_e) or not rh_exposure_span_eq(role_texts, role_schema_s, role_schema_e, "rh-role-grain-result/1")
                 identity_revision: mutable i64 = -1
-                return -1 if not rh_exposure_int(nodes, raw, texts, role_report, "identity_revision", &identity_revision) or identity_revision < 0
-                ledger: i64 = rh_exposure_member(nodes, texts, role_report, "current_event_ledger")
-                return -1 if ledger < 0 or nodes[ledger.usize()].kind != Json::RH_JSON_ARR or nodes[ledger.usize()].child_count > RH_EXPOSURE_MAX_ROLE_EVENTS
+                return -1 if not rh_exposure_int(role_nodes, role_raw, role_texts, role_root, "identity_revision", &identity_revision) or identity_revision < 0
+                ledger: i64 = rh_exposure_member(role_nodes, role_texts, role_root, "current_event_ledger")
+                return -1 if ledger < 0 or role_nodes[ledger.usize()].kind != Json::RH_JSON_ARR or role_nodes[ledger.usize()].child_count > RH_EXPOSURE_MAX_ROLE_EVENTS
                 mapping_seen[node_id.usize()] <- true
                 mapped[node_id.usize()] <- is_complete
                 mapping_rows.push(RhExposureMapping{node: node_id, evidence_s: evidence_s, evidence_e: evidence_e, complete: is_complete})
                 mapped_actor_count: mutable i64 = 0
                 if is_complete:
-                    while event >= 0 |event: i64 = nodes[ledger.usize()].first_child, nodes, texts, raw, actors, node_id|:
-                        return -1 if nodes[event.usize()].kind != Json::RH_JSON_OBJ
-                        event_id: i64 = rh_exposure_member(nodes, texts, event, "id")
+                    while event >= 0 |event: i64 = role_nodes[ledger.usize()].first_child, role_nodes, role_texts, role_raw, actors, actor_texts, node_id|:
+                        return -1 if role_nodes[event.usize()].kind != Json::RH_JSON_OBJ
+                        event_id: i64 = rh_exposure_member(role_nodes, role_texts, event, "id")
                         event_id_s: mutable i64 = -1
                         event_id_e: mutable i64 = -1
-                        return -1 if not Json::rh_json_str_span(nodes, event_id, &event_id_s, &event_id_e) or event_id_s == event_id_e
-                        actor: i64 = rh_exposure_member(nodes, texts, event, "actor")
+                        return -1 if not Json::rh_json_str_span(role_nodes, event_id, &event_id_s, &event_id_e) or event_id_s == event_id_e
+                        actor: i64 = rh_exposure_member(role_nodes, role_texts, event, "actor")
                         actor_s: mutable i64 = -1
                         actor_e: mutable i64 = -1
-                        return -1 if not Json::rh_json_str_span(nodes, actor, &actor_s, &actor_e) or actor_s == actor_e
-                        role: i64 = rh_exposure_member(nodes, texts, event, "role")
+                        return -1 if not Json::rh_json_str_span(role_nodes, actor, &actor_s, &actor_e) or actor_s == actor_e
+                        role: i64 = rh_exposure_member(role_nodes, role_texts, event, "role")
                         role_s: mutable i64 = -1
                         role_e: mutable i64 = -1
-                        return -1 if not Json::rh_json_str_span(nodes, role, &role_s, &role_e) or not rh_exposure_role(texts, role_s, role_e)
+                        return -1 if not Json::rh_json_str_span(role_nodes, role, &role_s, &role_e) or not rh_exposure_role(role_texts, role_s, role_e)
                         event_at: mutable i64 = -1
-                        return -1 if not rh_exposure_int(nodes, raw, texts, event, "at", &event_at) or event_at < 0
+                        return -1 if not rh_exposure_int(role_nodes, role_raw, role_texts, event, "at", &event_at) or event_at < 0
                         duplicate: mutable bool = false
-                        while i < actors.count |i: usize = 0, actors, texts, node_id, actor_s, actor_e, duplicate|:
-                            duplicate <- true if actors[i].node == node_id and Base::rh_bytes_equal_span(texts, actors[i].actor_s, actors[i].actor_e, texts, actor_s, actor_e)
+                        while i < actors.count |i: usize = 0, actors, actor_texts, node_id, role_texts, actor_s, actor_e, duplicate|:
+                            duplicate <- true if actors[i].node == node_id and Base::rh_bytes_equal_span(actor_texts, actors[i].actor_s, actors[i].actor_e, role_texts, actor_s, actor_e)
                             i <- i + 1
                         if not duplicate:
                             mapped_actor_count <- mapped_actor_count + 1
                             return -1 if mapped_actor_count > RH_EXPOSURE_MAX_ACTORS_PER_NODE
-                            actors.push(RhExposureActor{node: node_id, actor_s: actor_s, actor_e: actor_e})
-                        event <- nodes[event.usize()].next_sibling
+                            copied_actor_s: i64 = actor_texts.count.i64()
+                            while actor_copy_cursor < actor_e |actor_copy_cursor: i64 = actor_s, role_texts, actor_texts|:
+                                actor_texts.push(role_texts[actor_copy_cursor.usize()])
+                                actor_copy_cursor <- actor_copy_cursor + 1
+                            actors.push(RhExposureActor{node: node_id, actor_s: copied_actor_s, actor_e: actor_texts.count.i64()})
+                        event <- role_nodes[event.usize()].next_sibling
                 mapping <- nodes[mapping.usize()].next_sibling
             head: mutable darray[i64] = []
             while i < node_count |i: i64 = 0, node_count, head|:
@@ -209,7 +227,7 @@ module MaintenanceExposure:
             Base::rh_push_decimal_i64(out, subject)
             Base::rh_push_text(out, ",\"dependents\":[")
             wrote_pair: mutable bool = false
-            while node_id < node_count |node_id: i64 = 0, node_count, visited, mapped, mapping_rows, actors, texts, out, subject, known_pairs, unknown_pairs|:
+            while node_id < node_count |node_id: i64 = 0, node_count, visited, mapped, mapping_rows, actors, actor_texts, texts, out, subject, known_pairs, unknown_pairs|:
                 if visited[node_id.usize()] and node_id != subject:
                     if wrote_pair:
                         out.push(44)
@@ -219,11 +237,11 @@ module MaintenanceExposure:
                     if mapped[subject.usize()] and mapped[node_id.usize()]:
                         Base::rh_push_text(out, "known\",\"shared_actor_count\":")
                         overlap: mutable i64 = 0
-                        while i < actors.count |i: usize = 0, actors, texts, subject, node_id, overlap|:
+                        while i < actors.count |i: usize = 0, actors, actor_texts, subject, node_id, overlap|:
                             current_actor: RhExposureActor = actors[i]
                             if current_actor.node == subject:
-                                while j < actors.count |j: usize = 0, actors, texts, current_actor, node_id, overlap|:
-                                    overlap <- overlap + 1 if actors[j].node == node_id and Base::rh_bytes_equal_span(texts, current_actor.actor_s, current_actor.actor_e, texts, actors[j].actor_s, actors[j].actor_e)
+                                while j < actors.count |j: usize = 0, actors, actor_texts, current_actor, node_id, overlap|:
+                                    overlap <- overlap + 1 if actors[j].node == node_id and Base::rh_bytes_equal_span(actor_texts, current_actor.actor_s, current_actor.actor_e, actor_texts, actors[j].actor_s, actors[j].actor_e)
                                     j <- j + 1
                             i <- i + 1
                         Base::rh_push_decimal_i64(out, overlap)
