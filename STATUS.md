@@ -693,7 +693,8 @@ the threshold is met, unknown-visibility withholds before private or
 authorized-only visibility, a small public cell suppresses, and unpublished
 counts are omitted from both result counts and explanations. Negative and
 malformed counts and duplicate cell IDs fail closed; a request is capped at
-10,000 cells. Published results still carry the
+10,000 cells, and caller-supplied thresholds below the product floor of five
+are rejected (higher per-cell thresholds remain allowed). Published results still carry the
 "suppression is not anonymization" caveat (`tests/test_privacy_cli.sh`).
 Product-owned thresholds and differencing controls across overlapping or
 repeated releases remain open. Operational
