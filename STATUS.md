@@ -651,16 +651,17 @@ closed. The notify, policy, and correction CLI harnesses cover replay from
 that store. Policy exceptions are now durable too:
 `rh_cli policy --policy <file> --input <file> --out <dir> [--state
 <file>]` loads an `rh-policy-state/1` document of
-`rule_id`/`subject_id`/`digest`/`expires_at`/`state` rows and writes the
+`rule_id`/`subject_id`/`digest`/`context_digest`/`expires_at`/`state` rows and writes the
 merged set back, so an approved waiver survives process restarts and an
 *expired* waiver is re-evaluated rather than silently renewed (the emitters
 round-trip byte-stably). A persisted row is dropped when the same
-`(rule_id, subject_id, digest)` is declared inline in the current policy
+`(rule_id, subject_id, digest, context_digest)` is declared inline in the current policy
 document, so current intent wins over stale state; a corrupt or
 wrong-schema state file fails closed (exit 4), never default-allow.
 `tests/test_policy_cli.sh` proves cross-run persistence, deterministic
 write-back, expiry -> deny, revoked -> deny, inline-over-state precedence,
-and malformed-state exit 4. Public contract `policy-state` added
+context re-binding, and malformed-state exit 4. Approver identity and rationale
+are not yet retained in exception rows. Public contract `policy-state` added
 (`rh-policy-state/1`, additive; 32 contracts total). Corrections are durable
 as well: `rh_cli correct --corrections <file> --out <dir> [--state <file>]`
 loads an `rh-corrections-state/1` document carrying the revision floor, the

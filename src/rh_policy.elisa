@@ -65,6 +65,7 @@ module Policy:
             subject_id: mutable i64
             digest_high: mutable u64
             digest_low: mutable u64
+            context_digest: mutable u64
             expires_at: mutable i64
             state: mutable u8
 
@@ -107,8 +108,8 @@ module Policy:
             -1
 
         # Is an approved, unexpired exception covering rule+subject+digest?
-        def rh_exception_applies(excs: darray[RhException]&, rule_id: i64, subject_id: i64, digest_high: u64, digest_low: u64, now: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            while i < excs.count |i: usize = 0, excs, rule_id, subject_id, digest_high, digest_low, now|:
+        def rh_exception_applies(excs: darray[RhException]&, rule_id: i64, subject_id: i64, digest_high: u64, digest_low: u64, context_digest: u64, now: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < excs.count |i: usize = 0, excs, rule_id, subject_id, digest_high, digest_low, context_digest, now|:
                 x: RhException = excs[i]
                 i <- i + 1
                 continue if x.state != RH_EXC_APPROVED
@@ -116,6 +117,7 @@ module Policy:
                 continue if x.subject_id != subject_id
                 continue if x.expires_at <= now
                 continue if x.digest_high != digest_high or x.digest_low != digest_low
+                continue if x.context_digest != context_digest
                 return true
             false
 
@@ -123,20 +125,22 @@ module Policy:
         # applied to this evaluation. The same subject/digest/state checks as
         # rh_exception_applies are kept here so the metric cannot describe a
         # different exception population than the decision.
-        def rh_exception_expiry_days(excs: darray[RhException]&, applied: darray[i64]&, subject_id: i64, digest_high: u64, digest_low: u64, now: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_exception_expiry_days(excs: darray[RhException]&, applied: darray[i64]&, subject_id: i64, digest_high: u64, digest_low: u64, context_digest: u64, now: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             excs_loop: mutable darray[RhException]& = excs
             applied_loop: mutable darray[i64]& = applied
             subject_loop: mutable i64 = subject_id
             high_loop: mutable u64 = digest_high
             low_loop: mutable u64 = digest_low
+            context_loop: mutable u64 = context_digest
             now_loop: mutable i64 = now
-            while i < excs_loop.count |best: i64 = -1, i: usize = 0, excs_loop, applied_loop, subject_loop, high_loop, low_loop, now_loop| -> best:
+            while i < excs_loop.count |best: i64 = -1, i: usize = 0, excs_loop, applied_loop, subject_loop, high_loop, low_loop, context_loop, now_loop| -> best:
                 x: RhException = excs_loop[i]
                 i <- i + 1
                 continue if x.state != RH_EXC_APPROVED
                 continue if x.subject_id != subject_loop
                 continue if x.expires_at <= now_loop
                 continue if x.digest_high != high_loop or x.digest_low != low_loop
+                continue if x.context_digest != context_loop
                 continue if not Graph::rh_contains(applied_loop, x.rule_id)
                 days: i64 = (x.expires_at - now_loop) / 86400
                 if best < 0 or days < best:
@@ -164,14 +168,14 @@ module Policy:
         # suppress an individual rule to allow (recorded by the caller). The
         # overall decision is the lattice join, so warn can never override deny
         # and unknown can never be spent as permission.
-        def rh_policy_eval(rules: darray[RhRule]&, inputs: darray[RhPolicyInput]&, excs: darray[RhException]&, subject_id: i64, digest_high: u64, digest_low: u64, now: i64, fired_out: mutable darray[i64]&, excepted_out: mutable darray[i64]&) -> u8 can[Memory.Allocate, Abort.Panic]:
+        def rh_policy_eval(rules: darray[RhRule]&, inputs: darray[RhPolicyInput]&, excs: darray[RhException]&, subject_id: i64, digest_high: u64, digest_low: u64, context_digest: u64, now: i64, fired_out: mutable darray[i64]&, excepted_out: mutable darray[i64]&) -> u8 can[Memory.Allocate, Abort.Panic]:
             while i < rules.count |decision: u8 = RH_DEC_ALLOW, i: usize = 0, fired_out, excepted_out| -> decision:
                 r: RhRule = rules[i]
                 if r.state != RH_RULE_ACTIVE:
                     i <- i + 1
                     continue
                 if i < inputs.count:
-                    if rh_exception_applies(excs, r.id, subject_id, digest_high, digest_low, now):
+                    if rh_exception_applies(excs, r.id, subject_id, digest_high, digest_low, context_digest, now):
                         excepted_out.push(r.id)
                     else:
                         v: u8 =

@@ -90,7 +90,7 @@ import json, sys
 rules = [{"id":1,"op":">=","threshold":{"num":1,"den":2},"min_sample":10,"on_violation":"deny","requires_complete":True},
          {"id":2,"op":">","threshold":{"num":0,"den":1},"on_violation":"warn"}]
 out = {"schema":"rh-policy/1","rules":rules,
-       "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"expires_at":2000,"state":"approved"}]}
+       "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":2000,"state":"approved"}]}
 open(sys.argv[1],"w").write(json.dumps(out))
 PY
 "$ROOT/build/rh_cli" policy --policy "$T/pexc.json" --input "$T/deny.json" --out "$T/o6" >/dev/null || fail "exception run"
@@ -110,7 +110,7 @@ import json, sys
 rules = [{"id":1,"op":">=","threshold":{"num":1,"den":2},"min_sample":10,"on_violation":"deny","requires_complete":True},
          {"id":2,"op":">","threshold":{"num":0,"den":1},"on_violation":"warn"}]
 open(sys.argv[1],"w").write(json.dumps({"schema":"rh-policy/1","rules":rules,
-  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"expires_at":500,"state":"approved"}]}))
+  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":500,"state":"approved"}]}))
 PY
 "$ROOT/build/rh_cli" policy --policy "$T/pexp.json" --input "$T/deny.json" --out "$T/o7" | grep -q "decision=deny" || fail "expired exception must not authorize"
 cat > "$T/rev.json" <<'JSON'
@@ -118,6 +118,12 @@ cat > "$T/rev.json" <<'JSON'
 JSON
 d2="$("$ROOT/build/rh_cli" policy --policy "$T/pexc.json" --input "$T/rev.json" --out "$T/o8" >/dev/null; python3 -c "import json;print(json.load(open('$T/o8/policy-result.json'))['decision'])")"
 [[ "$d2" == "deny" ]] || fail "changed artifact digest must re-bind and drop the exception (got $d2)"
+python3 - "$T/context-change.json" "$T/deny.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[2])); d["context_digest"] = "0000000000000003"
+json.dump(d, open(sys.argv[1], "w"))
+PY
+"$ROOT/build/rh_cli" policy --policy "$T/pexc.json" --input "$T/context-change.json" --out "$T/context-change-out" | grep -q "decision=deny" || fail "changed deployment context must re-bind and drop the exception"
 
 echo "[policy] malformed inputs fail closed"
 set +e
@@ -166,7 +172,7 @@ PY
 python3 - "$T/st_allow.json" "$pdig" <<'PY'
 import json, sys
 open(sys.argv[1],"w").write(json.dumps({"schema":"rh-policy-state/1",
-  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"expires_at":2000,"state":"approved"}]}))
+  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":2000,"state":"approved"}]}))
 PY
 # run 1 with --state -> allow; state must be written back byte-stable
 "$ROOT/build/rh_cli" policy --policy "$T/st_base.json" --input "$T/deny.json" --out "$T/s1" --state "$T/st_allow.json" | grep -q "decision=allow" || fail "durable approved state must allow"
@@ -184,14 +190,14 @@ PY
 python3 - "$T/st_rev.json" "$pdig" <<'PY'
 import json, sys
 open(sys.argv[1],"w").write(json.dumps({"schema":"rh-policy-state/1",
-  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"expires_at":2000,"state":"revoked"}]}))
+  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":2000,"state":"revoked"}]}))
 PY
 "$ROOT/build/rh_cli" policy --policy "$T/st_base.json" --input "$T/deny.json" --out "$T/s4" --state "$T/st_rev.json" | grep -q "decision=deny" || fail "revoked durable exception must not authorize"
 # inline exception wins over a conflicting revoked persisted row (same key)
 python3 - "$T/st_conflict.json" "$pdig" <<'PY'
 import json, sys
 open(sys.argv[1],"w").write(json.dumps({"schema":"rh-policy-state/1",
-  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"expires_at":2000,"state":"revoked"}]}))
+  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":2000,"state":"revoked"}]}))
 PY
 "$ROOT/build/rh_cli" policy --policy "$T/pexc.json" --input "$T/deny.json" --out "$T/s5" --state "$T/st_conflict.json" | grep -q "decision=allow" || fail "inline exception must win over persisted state for the same key"
 # malformed persisted state fails closed (exit 4), never default allow

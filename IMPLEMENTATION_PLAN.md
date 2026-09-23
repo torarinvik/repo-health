@@ -709,7 +709,7 @@ absent.
 
 **M06-05: Agent integration.** Provide a small tool contract for checking exact dependencies or inventories and explaining findings. Do not allow repository prose to override policy rules.
 
-**M06-06: Exceptions.** Add scoped, approved, expiring waivers tied to rules, package versions/artifacts, and deployment contexts. Record who approved each exception and why.
+**M06-06: Exceptions.** Add scoped, approved, expiring waivers tied to rules, package versions/artifacts, and deployment contexts. Policy exceptions and durable state now carry a context digest; changing deployment context makes an otherwise matching waiver inapplicable. Duplicate exception keys fail closed. `tests/test_policy_cli.sh` proves artifact and context changes do not reuse an approval. Recording approver identity and rationale in the exception contract remains open.
 
 **M06-07: Correction workflow.** Accept identity, mapping, and measurement disputes with supporting evidence. Implement review states, accepted corrections, publication notices, and invalidation/replay. `correct --notify-template <rh-notify-input/3 template> --notify-now <unix-seconds>` can emit `corrections-notify-input.json` from newly accepted notices. The template carries the destination registry and cooldown; only explicitly opted-in destinations receive events. Each event uses the notice revision and subject and a 128-bit prefix of the SHA-256 hash of the exact serialized notice, then enters the existing fail-closed `notify` decision path. This generates decisions only; external message delivery remains a separate integration concern. `tests/test_correction_cli.sh` verifies opt-in filtering and the handoff to `notify`.
 
