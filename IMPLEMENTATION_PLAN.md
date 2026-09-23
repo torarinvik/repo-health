@@ -686,7 +686,7 @@ resource router now exposes fixed `/api/project`, `/api/metrics`,
 `/api/scan-status` paths that read only their corresponding JSON artifacts
 from the report root; absent artifacts remain 404. The query contract also
 accepts a caller-supplied bounded graph snapshot and returns iterative
-upstream/downstream traversal with explicit truncation metadata. Upstream and downstream walks enforce `max_nodes` for every candidate insertion and report truncation only when the selected projection actually hides an unseen node; `tests/test_query_cli.sh` covers high-degree upstream fan-out. Durable background graph execution remains follow-up work. A bounded `GET`/`HEAD` lookup now serves
+upstream/downstream traversal with explicit truncation metadata. Upstream and downstream walks enforce `max_nodes` for every candidate insertion and report truncation only when the selected projection actually hides an unseen node; `tests/test_query_cli.sh` covers high-degree upstream fan-out. Cursor pagination rejects negative, duplicate, or unsorted IDs at the request boundary because an ascending exclusive cursor would otherwise silently skip or repeat rows; malformed-order cases are covered by the same test. Durable background graph execution remains follow-up work. A bounded `GET`/`HEAD` lookup now serves
 verified content-addressed blobs below the report's `evidence/` directory at
 `/api/store/<16-hex-digest>`; missing blobs are 404 and digest mismatches are
 internal failures, never silently published. The
