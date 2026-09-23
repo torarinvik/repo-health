@@ -825,6 +825,9 @@ provider-specific authentication, pagination, and live permission collection
 remain separate admission work; bounded captured GitHub/GitLab permission
 imports are covered by `src/rh_roles_provider.elisa` and
 `tests/test_roles_provider_cli.sh`.
+Native VCS and patch normalizations also emit a digest-bound transformation
+sidecar that records field preservation, normalization, loss, and unsupported
+identity semantics alongside exact input/output digests.
 
 Registry enrichment now has one provider-shaped adapter at the boundary:
 `src/rh_registry_pypi.elisa` accepts bounded PyPI project JSON, normalizes its

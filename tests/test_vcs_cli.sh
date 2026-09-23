@@ -20,8 +20,8 @@ cat > "$T/hg.json" <<'JSON'
 [{"node":"0123456789abcdef0123456789abcdef01234567","rev":0,"user":"Ada Lovelace <ada@example.org>","date":[1609459200,-3600],"desc":"first change","branch":"default","tags":["tip"],"phase":"draft","parents":[]},{"node":"fedcba9876543210fedcba9876543210fedcba98","rev":1,"user":"Grace Hopper <grace@example.org>","date":[1612137600,7200],"desc":"second change","branch":"stable","tags":[],"phase":"public","parents":["0123456789abcdef0123456789abcdef01234567"]}]
 JSON
 "$ROOT/build/rh_cli" vcs --format hg --input "$T/hg.json" --out "$T/hg.out" >/dev/null || fail "hg run"
-python3 - "$T/hg.out" <<'PY'
-import json, sys
+python3 - "$T/hg.out" "$T/hg.json" "$T/hg.out.transformations.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-vcs/1" and d["format"] == "hg", d
 assert len(d["changes"]) == 2 and d["rejected"] == 0, d
@@ -33,6 +33,13 @@ assert c0["author"] == "Ada Lovelace <ada@example.org>", c0
 assert c0["tag_count"] == 1 and c1["tag_count"] == 0, (c0, c1)
 assert c1["phase"] == "public" and c1["rev"] == 1, c1
 assert "tags are not releases" in d["note"], d["note"]
+tr = json.load(open(sys.argv[3]))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "native-vcs", tr
+assert tr["output_schema"] == "rh-vcs/1", tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/native-vcs/1:hg:captured-input").hexdigest(), tr
+assert {field["state"] for field in tr["fields"]} == {"preserved", "transformed", "unsupported", "unknown", "discarded"}, tr
 print("[vcs] hg OK")
 PY
 

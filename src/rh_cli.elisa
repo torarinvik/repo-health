@@ -70,6 +70,7 @@ include "./rh_worker.elisa"
 include "./rh_inventory_report.elisa"
 include "./rh_inventory_transformation.elisa"
 include "./rh_vcs_report.elisa"
+include "./rh_vcs_transformation.elisa"
 include "./rh_gerrit.elisa"
 include "./rh_notify_report.elisa"
 include "./rh_identity_report.elisa"
@@ -7782,6 +7783,30 @@ def rh_do_vcs(format: cstr, input_path: cstr, out_path: cstr, repo_path: cstr, h
     opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
     if not Base::rh_io_write(opp, body):
         rh_cli_err("vcs: cannot write --out")
+        return 4
+    produced: mutable darray[u8] = []
+    produced.extend(bytes_view(body))
+    configuration: mutable darray[u8] = []
+    Base::rh_push_text(configuration, "repo-health/native-vcs/1:")
+    Base::rh_push_cstr(configuration, format)
+    Base::rh_push_text(configuration, ":repository-command" if has_repo else ":captured-input")
+    configuration_sha: mutable darray[u8] = []
+    input_sha: mutable darray[u8] = []
+    output_sha: mutable darray[u8] = []
+    Sha256::rh_sha256(configuration, configuration_sha)
+    Sha256::rh_sha256(raw, input_sha)
+    Sha256::rh_sha256(produced, output_sha)
+    output_token: cstr = "rh-patch/1" if fmt == 1 else "rh-vcs/1"
+    transformations: mutable darray[u8] = []
+    VcsTransformation::rh_vcs_transformation_report(output_token, configuration_sha, input_sha, output_sha, transformations)
+    transformations.push(10)
+    transformation_path: mutable darray[u8] = []
+    Base::rh_push_cstr(transformation_path, out_path)
+    Base::rh_push_text(transformation_path, ".transformations.json")
+    transformation_path.push(0)
+    transformation_ptr: cstr = (&transformation_path[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(transformation_ptr, transformations):
+        rh_cli_err("vcs: cannot write transformation report")
         return 4
     done: mutable darray[u8] =
         done: mutable darray[u8] = []

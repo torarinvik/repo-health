@@ -787,6 +787,10 @@ fixture form remains available. The non-PR lane is also a product path:
 `rh-patch/1` (mbox series), so R025's native non-Git history and non-PR
 workflow are both exercised off the test binary (`tests/test_vcs_cli.sh`;
 wrong shape/format fails closed, rejected entries are never guessed).
+Every successful VCS normalization also writes a `.transformations.json`
+sidecar that binds exact source/output bytes and format/acquisition
+configuration by SHA-256, while keeping raw author identifiers explicitly
+unsupported as person identity (`rh-adapter-transformation-report/1`).
 The non-PR workflow lane exists as `src/rh_patch.elisa`: a logical change
 is keyed by (base subject, patch index), so three revisions (v1/v2/v3) of
 one patch collapse to **one** change with `max_version` 3, while a
