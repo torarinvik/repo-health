@@ -2,9 +2,9 @@
 # tests/test_privacy_cli.sh — M07-07 publication suppression execution path:
 # `rh_cli privacy` turns rh-privacy-input/1 cells into rh-privacy-result/1.
 # A cell publishes only when every contributing subject is public and the
-# threshold is met; private/unknown members withhold (unknown first); small
-# public cells suppress. The explanation always carries "suppression is not
-# anonymization". Malformed input fails closed.
+# threshold is met; private/authorized/unknown members withhold (unknown
+# first); small public cells suppress. Nonpublished counts remain redacted.
+# The explanation carries "suppression is not anonymization".
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="/tmp/rh-privacy"
@@ -30,13 +30,16 @@ assert by["dependents"]["decision"] == "suppress_small_cell" and by["dependents"
 assert by["private_dep"]["decision"] == "withhold_private_member", by
 assert by["unknown_dep"]["decision"] == "withhold_unknown_visibility", by
 assert by["empty"]["decision"] == "unavailable", by
-# authorized members join the total but a public cell below threshold still suppresses
-assert by["auth_only"]["decision"] == "suppress_small_cell", by
+assert by["auth_only"]["decision"] == "withhold_authorized_member", by
 # unknown-visibility withholds before private
 assert by["priv_and_unknown"]["decision"] == "withhold_unknown_visibility", by
 for c in d["cells"]:
     assert "suppression is not anonymization" in c["explanation"], c
-    assert c["counts"]["public"] >= 0
+    if c["decision"] == "publish":
+        assert c["counts"] == {"public": 12, "authorized": 0, "private": 0, "unknown": 0}, c
+    else:
+        assert c["counts"] is None, c
+        assert "counts=withheld" in c["explanation"], c
 assert "no formal-anonymity claim" in d["note"], d["note"]
 print("[privacy] decisions + caveat OK")
 PY
@@ -53,11 +56,13 @@ printf '{"schema":"rh-privacy-input/1","cells":42}' > "$T/badcells.json"
 "$ROOT/build/rh_cli" privacy --input "$T/badcells.json" --out "$T/x" >/dev/null 2>&1; rc_cells=$?
 printf '{"schema":"rh-privacy-input/1","cells":[{"public_count":1}]}' > "$T/noid.json"
 "$ROOT/build/rh_cli" privacy --input "$T/noid.json" --out "$T/x" >/dev/null 2>&1; rc_id=$?
+printf '{"schema":"rh-privacy-input/1","cells":[{"id":"bad","public_count":10,"private_count":-1,"threshold":5}]}' > "$T/negative.json"
+"$ROOT/build/rh_cli" privacy --input "$T/negative.json" --out "$T/x" >/dev/null 2>&1; rc_negative=$?
 printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" privacy --input "$T/notjson.json" --out "$T/x" >/dev/null 2>&1; rc_json=$?
 "$ROOT/build/rh_cli" privacy --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_cells" "$rc_id" "$rc_json" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_cells" "$rc_id" "$rc_negative" "$rc_json" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed privacy input must exit 4 (got $rc)"
 done
 

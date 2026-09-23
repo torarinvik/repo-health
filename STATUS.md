@@ -689,9 +689,13 @@ withholds before the small-cell threshold; suppression is explicitly *not*
 anonymization). The gate is a real path too: `src/rh_privacy_report.elisa` +
 `rh_cli privacy --input <file> --out <file>` emit `rh-privacy-result/1`
 where a cell publishes only when every contributing subject is public and
-the threshold is met, unknown-visibility withholds before private, a small
-public cell suppresses, and each decision carries the "suppression is not
-anonymization" explanation (`tests/test_privacy_cli.sh`). operational
+the threshold is met, unknown-visibility withholds before private or
+authorized-only visibility, a small public cell suppresses, and unpublished
+counts are omitted from both result counts and explanations. Negative and
+malformed counts fail closed; published results still carry the
+"suppression is not anonymization" caveat (`tests/test_privacy_cli.sh`).
+Product-owned thresholds and differencing controls across overlapping or
+repeated releases remain open. Operational
 runbooks (`docs/operations/runbooks.md`,
 M07-13), and a deterministic release evidence packet generator
 (`tools/release-packet.sh` + `tests/test_release_packet.sh`). A deletion
