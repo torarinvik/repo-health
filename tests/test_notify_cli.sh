@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/test_notify_cli.sh — M06-08 notification execution path:
 # `rh_cli notify` applies authorization, dedup/cooldown, outage suppression,
-# and ack/resolve to an rh-notify-input/2 event stream, writing
-# rh-notify-result/2. The non-negotiable rule: an upstream maintainer is
+# and ack/resolve to an rh-notify-input/3 event stream, writing
+# rh-notify-result/3. The non-negotiable rule: an upstream maintainer is
 # refused unless explicitly subscribed, and a refusal records nothing (so it
 # cannot start a phantom cooldown).
 set -euo pipefail
@@ -17,24 +17,24 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-notify-input/2","cooldown_secs":3600,"events":[
-{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","target":"subscriber","authorized":true,"now":1000},
-{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","target":"upstream_maintainer","subscribed":false,"now":1000},
-{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","target":"subscriber","authorized":true,"now":2000},
-{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"bbbbbbbbbbbbbbbb","target":"subscriber","authorized":true,"now":2000},
-{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","target":"subscriber","authorized":true,"now":9000},
-{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","target":"subscriber","authorized":true,"now":9500,"outage":true},
-{"op":"ack","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa"},
-{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","target":"subscriber","authorized":true,"now":99999},
-{"op":"resolve","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa"},
-{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","target":"subscriber","authorized":true,"now":999999}
+{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"cooldown_secs":3600,"events":[
+{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","destination_id":1,"now":1000},
+{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","destination_id":2,"now":1000},
+{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","destination_id":1,"now":2000},
+{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"bbbbbbbbbbbbbbbb","destination_id":1,"now":2000},
+{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","destination_id":1,"now":9000},
+{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","destination_id":1,"now":9500,"outage":true},
+{"op":"ack","rule_id":1,"subject_id":7,"destination_id":1,"artifact_digest":"aaaaaaaaaaaaaaaa"},
+{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","destination_id":1,"now":99999},
+{"op":"resolve","rule_id":1,"subject_id":7,"destination_id":1,"artifact_digest":"aaaaaaaaaaaaaaaa"},
+{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","destination_id":1,"now":999999}
 ]}
 JSON
 "$ROOT/build/rh_cli" notify --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "notify run"
 python3 - "$T/out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema"] == "rh-notify-result/2", d
+assert d["schema"] == "rh-notify-result/3", d
 seq = [(x["op"], x.get("decision") or x.get("applied")) for x in d["decisions"]]
 assert seq[0] == ("notify", "new")
 assert seq[1] == ("notify", "suppressed_unauthorized")
@@ -57,9 +57,9 @@ PY
 
 echo "[notify] a refused upstream send records nothing (no phantom cooldown)"
 cat > "$T/phantom.json" <<'JSON'
-{"schema":"rh-notify-input/2","cooldown_secs":3600,"events":[
-{"op":"notify","rule_id":2,"subject_id":9,"artifact_digest":"cccccccccccccccc","target":"upstream_maintainer","subscribed":false,"now":1000},
-{"op":"notify","rule_id":2,"subject_id":9,"artifact_digest":"cccccccccccccccc","target":"subscriber","authorized":true,"now":1001}
+{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"cooldown_secs":3600,"events":[
+{"op":"notify","rule_id":2,"subject_id":9,"artifact_digest":"cccccccccccccccc","destination_id":2,"now":1000},
+{"op":"notify","rule_id":2,"subject_id":9,"artifact_digest":"cccccccccccccccc","destination_id":1,"now":1001}
 ]}
 JSON
 "$ROOT/build/rh_cli" notify --input "$T/phantom.json" --out "$T/phantom.out" >/dev/null || fail "phantom run"
@@ -72,7 +72,7 @@ PY
 
 echo "[notify] subscriber authorization is required explicitly"
 cat > "$T/missing-authorization.json" <<'JSON'
-{"schema":"rh-notify-input/2","events":[{"op":"notify","rule_id":11,"subject_id":9,"artifact_digest":"cccccccccccccccc","target":"subscriber","now":1000}]}
+{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"events":[{"op":"notify","rule_id":11,"subject_id":9,"artifact_digest":"cccccccccccccccc","destination_id":99,"now":1000}]}
 JSON
 "$ROOT/build/rh_cli" notify --input "$T/missing-authorization.json" --out "$T/missing-authorization.out" --state "$T/missing-authorization.state" >/dev/null || fail "missing authorization run"
 python3 - "$T/missing-authorization.out" "$T/missing-authorization.state" <<'PY'
@@ -84,10 +84,30 @@ assert json.load(open(sys.argv[2]))["rows"] == [], "unauthorized subscriber must
 print("[notify] missing subscriber authorization denied without recording state")
 PY
 
+echo "[notify] destination state is isolated per subscriber"
+cat > "$T/multiple-subscribers.json" <<'JSON'
+{"schema":"rh-notify-input/3","cooldown_secs":0,"destinations":[{"id":10,"target":"subscriber","authorized":true},{"id":11,"target":"subscriber","authorized":true}],"events":[
+{"op":"notify","rule_id":12,"subject_id":9,"destination_id":10,"artifact_digest":"dddddddddddddddd","now":1000},
+{"op":"notify","rule_id":12,"subject_id":9,"destination_id":11,"artifact_digest":"dddddddddddddddd","now":1000},
+{"op":"ack","rule_id":12,"subject_id":9,"destination_id":10,"artifact_digest":"dddddddddddddddd"},
+{"op":"notify","rule_id":12,"subject_id":9,"destination_id":10,"artifact_digest":"dddddddddddddddd","now":1001},
+{"op":"notify","rule_id":12,"subject_id":9,"destination_id":11,"artifact_digest":"dddddddddddddddd","now":1001}
+]}
+JSON
+"$ROOT/build/rh_cli" notify --input "$T/multiple-subscribers.json" --out "$T/multiple-subscribers.out" --state "$T/multiple-subscribers.state" >/dev/null || fail "multiple subscriber run"
+python3 - "$T/multiple-subscribers.out" "$T/multiple-subscribers.state" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert [e.get("decision", e.get("applied")) for e in d["decisions"]] == ["new", "new", True, "suppressed_acknowledged", "new"], d
+state = json.load(open(sys.argv[2]))
+assert {row["destination_id"] for row in state["rows"]} == {10, 11}, state
+print("[notify] multiple subscriber cooldown and acknowledgment state is independent")
+PY
+
 echo "[notify] an explicitly subscribed upstream destination is allowed"
 cat > "$T/sub.json" <<'JSON'
-{"schema":"rh-notify-input/2","cooldown_secs":0,"events":[
-{"op":"notify","rule_id":3,"subject_id":1,"artifact_digest":"1111111111111111","target":"upstream_maintainer","subscribed":true,"now":10}
+{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"cooldown_secs":0,"events":[
+{"op":"notify","rule_id":3,"subject_id":1,"artifact_digest":"1111111111111111","destination_id":3,"now":10}
 ]}
 JSON
 "$ROOT/build/rh_cli" notify --input "$T/sub.json" --out "$T/sub.out" >/dev/null || fail "subscribed run"
@@ -100,7 +120,7 @@ PY
 
 echo "[notify] ack on an unknown key is not applied"
 cat > "$T/ack.json" <<'JSON'
-{"schema":"rh-notify-input/2","events":[{"op":"ack","rule_id":9,"subject_id":9,"artifact_digest":"9999999999999999"}]}
+{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"events":[{"op":"ack","rule_id":9,"subject_id":9,"destination_id":1,"artifact_digest":"9999999999999999"}]}
 JSON
 "$ROOT/build/rh_cli" notify --input "$T/ack.json" --out "$T/ack.out" >/dev/null || fail "ack run"
 python3 - "$T/ack.out" <<'PY'
@@ -112,17 +132,17 @@ PY
 
 echo "[notify] durable state across runs (--state)"
 cat > "$T/pn.json" <<'JSON'
-{"schema":"rh-notify-input/2","cooldown_secs":3600,"events":[{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","target":"subscriber","authorized":true,"now":1000}]}
+{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"cooldown_secs":3600,"events":[{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","destination_id":1,"now":1000}]}
 JSON
 cat > "$T/pn2.json" <<'JSON'
-{"schema":"rh-notify-input/2","cooldown_secs":3600,"events":[{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","target":"subscriber","authorized":true,"now":2000}]}
+{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"cooldown_secs":3600,"events":[{"op":"notify","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa","destination_id":1,"now":2000}]}
 JSON
-printf '{"schema":"rh-notify-input/2","events":[{"op":"ack","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa"}]}' > "$T/pack.json"
-printf '{"schema":"rh-notify-input/2","events":[{"op":"resolve","rule_id":1,"subject_id":7,"artifact_digest":"aaaaaaaaaaaaaaaa"}]}' > "$T/pres.json"
+printf '{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"events":[{"op":"ack","rule_id":1,"subject_id":7,"destination_id":1,"artifact_digest":"aaaaaaaaaaaaaaaa"}]}' > "$T/pack.json"
+printf '{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"events":[{"op":"resolve","rule_id":1,"subject_id":7,"destination_id":1,"artifact_digest":"aaaaaaaaaaaaaaaa"}]}' > "$T/pres.json"
 S="$T/state.json"
 "$ROOT/build/rh_cli" notify --input "$T/pn.json" --out "$T/pn1.out" --state "$S" >/dev/null || fail "persist run1"
 [[ -f "$S" ]] || fail "state file not written"
-grep -q '"schema":"rh-notify-state/1"' "$S" || fail "state schema missing"
+grep -q '"schema":"rh-notify-state/2"' "$S" || fail "state schema missing"
 "$ROOT/build/rh_cli" notify --input "$T/pn2.json" --out "$T/pn2.out" --state "$S" >/dev/null || fail "persist run2"
 "$ROOT/build/rh_cli" notify --input "$T/pack.json" --out "$T/pack.out" --state "$S" >/dev/null || fail "persist ack"
 "$ROOT/build/rh_cli" notify --input "$T/pn2.json" --out "$T/pn3.out" --state "$S" >/dev/null || fail "persist run3"
@@ -136,7 +156,7 @@ assert r2["decision"] == "suppressed_cooldown", r2
 assert r3["decision"] == "suppressed_acknowledged", r3
 assert r4["decision"] == "suppressed_resolved", r4
 state = json.load(open(sys.argv[5]))
-assert state["schema"] == "rh-notify-state/1", state
+assert state["schema"] == "rh-notify-state/2", state
 assert len(state["rows"]) == 1 and state["rows"][0]["subject_id"] == 7, state
 print("[notify] durable state OK")
 PY
@@ -169,23 +189,29 @@ cmp -s "$T/out.json" "$T/out2.json" || fail "notify output not deterministic"
 echo "[notify] malformed inputs fail closed"
 set +e
 "$ROOT/build/rh_cli" notify --input "$T/sub.json" --out "$T/x" >/dev/null 2>&1; rc_ok=$?
-printf '{"schema":"rh-notify-input/3","events":[]}' > "$T/badschema.json"
+printf '{"schema":"rh-notify-input/4","events":[]}' > "$T/badschema.json"
 "$ROOT/build/rh_cli" notify --input "$T/badschema.json" --out "$T/x" >/dev/null 2>&1; rc_schema=$?
 printf '{"schema":"rh-notify-input/1","events":[]}' > "$T/legacy-schema.json"
 "$ROOT/build/rh_cli" notify --input "$T/legacy-schema.json" --out "$T/x" >/dev/null 2>&1; rc_legacy=$?
-printf '{"schema":"rh-notify-input/2","events":[{"op":"notify","rule_id":1,"subject_id":1,"artifact_digest":"1111111111111111","target":"stranger","now":1}]}' > "$T/badtarget.json"
+printf '{"schema":"rh-notify-input/2","events":[]}' > "$T/authorization-schema.json"
+"$ROOT/build/rh_cli" notify --input "$T/authorization-schema.json" --out "$T/x" >/dev/null 2>&1; rc_authorization=$?
+printf '{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":1,"target":"operator","authorized":true}],"events":[]}' > "$T/duplicate-destination.json"
+"$ROOT/build/rh_cli" notify --input "$T/duplicate-destination.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate_destination=$?
+printf '{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"events":[{"op":"notify","rule_id":1,"subject_id":1,"artifact_digest":"1111111111111111","target":"stranger","now":1}]}' > "$T/badtarget.json"
 "$ROOT/build/rh_cli" notify --input "$T/badtarget.json" --out "$T/x" >/dev/null 2>&1; rc_target=$?
-printf '{"schema":"rh-notify-input/2","events":[{"op":"notify","rule_id":1,"subject_id":1,"artifact_digest":"zz","target":"subscriber","now":1}]}' > "$T/baddigest.json"
+printf '{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"events":[{"op":"notify","rule_id":1,"subject_id":1,"artifact_digest":"zz","destination_id":99,"now":1}]}' > "$T/baddigest.json"
 "$ROOT/build/rh_cli" notify --input "$T/baddigest.json" --out "$T/x" >/dev/null 2>&1; rc_digest=$?
-printf '{"schema":"rh-notify-input/2","events":[{"op":"shout","rule_id":1,"subject_id":1,"artifact_digest":"1111111111111111"}]}' > "$T/badop.json"
+printf '{"schema":"rh-notify-input/3","destinations":[{"id":1,"target":"subscriber","authorized":true},{"id":2,"target":"upstream_maintainer","authorized":true,"subscribed":false},{"id":3,"target":"upstream_maintainer","authorized":true,"subscribed":true}],"events":[{"op":"shout","rule_id":1,"subject_id":1,"artifact_digest":"1111111111111111"}]}' > "$T/badop.json"
 "$ROOT/build/rh_cli" notify --input "$T/badop.json" --out "$T/x" >/dev/null 2>&1; rc_op=$?
 "$ROOT/build/rh_cli" notify --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 printf 'not a state' > "$T/badstate.json"
 "$ROOT/build/rh_cli" notify --input "$T/pn.json" --out "$T/x" --state "$T/badstate.json" >/dev/null 2>&1; rc_state=$?
+printf '{"schema":"rh-notify-state/1","rows":[]}' > "$T/legacy-state.json"
+"$ROOT/build/rh_cli" notify --input "$T/pn.json" --out "$T/x" --state "$T/legacy-state.json" >/dev/null 2>&1; rc_legacy_state=$?
 set -e
 [[ "$rc_ok" -eq 0 ]] || fail "valid input must exit 0 (got $rc_ok)"
-[[ "$rc_state" -eq 4 ]] || fail "corrupt state file must exit 4 (got $rc_state)"
-for rc in "$rc_schema" "$rc_legacy" "$rc_target" "$rc_digest" "$rc_op" "$rc_missing"; do
+[[ "$rc_state" -eq 4 && "$rc_legacy_state" -eq 4 ]] || fail "corrupt or old state file must exit 4 (got $rc_state/$rc_legacy_state)"
+for rc in "$rc_schema" "$rc_legacy" "$rc_authorization" "$rc_duplicate_destination" "$rc_target" "$rc_digest" "$rc_op" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed notify input must exit 4 (got $rc)"
 done
 

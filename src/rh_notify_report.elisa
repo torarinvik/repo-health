@@ -1,6 +1,6 @@
 # rh_notify_report.elisa — notification policy execution path (M06-08).
 #
-# Turns an `rh-notify-input/2` event stream into an `rh-notify-result/2`
+# Turns an `rh-notify-input/3` event stream into an `rh-notify-result/3`
 # report. The non-negotiable rule is enforced here too: configured subscriber,
 # maintainer-self, and operator destinations require explicit authorization;
 # an upstream maintainer also requires explicit subscription. Refusals are
@@ -15,6 +15,12 @@ include "./rh_notify.elisa"
 
 module NotifyReport:
     private:
+        struct RhDestination:
+            id: mutable i64
+            kind: mutable u8
+            authorized: mutable bool
+            subscribed: mutable bool
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_nr_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, lit)
@@ -26,6 +32,37 @@ module NotifyReport:
             return Notify::RH_TARGET_UPSTREAM_MAINTAINER if rh_nr_eq(texts, s, e, "upstream_maintainer")
             return Notify::RH_TARGET_OPERATOR if rh_nr_eq(texts, s, e, "operator")
             -1
+
+        def rh_nr_destinations(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, out: mutable darray[RhDestination]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            destinations_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "destinations")
+            return -1 if destinations_idx < 0 or nodes[destinations_idx.usize()].kind != Json::RH_JSON_ARR
+            arr: Json::RhJsonNode = nodes[destinations_idx.usize()]
+            while child >= 0 |child: i64 = arr.first_child, nodes, raw, texts, out|:
+                return -1 if out.count >= 1024 or nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                okid: mutable i64 = 0
+                id: mutable i64 = rh_nr_int(nodes, raw, texts, child, "id", &okid)
+                return -1 if okid == 0 or id < 0
+                duplicate: bool =
+                    while index < out.count |duplicate: bool = false, index: usize = 0, out, id| -> duplicate:
+                        duplicate <- duplicate or out[index].id == id
+                        index <- index + 1
+                return -1 if duplicate
+                ts: mutable i64 = 0
+                te: mutable i64 = 0
+                return -1 if not rh_nr_str(nodes, texts, child, "target", &ts, &te)
+                kind: i64 = rh_nr_target(texts, ts, te)
+                return -1 if kind < 0
+                authorized_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "authorized")
+                return -1 if authorized_idx < 0 or nodes[authorized_idx.usize()].kind != Json::RH_JSON_BOOL
+                subscribed_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "subscribed")
+                subscribed: mutable bool = false
+                if subscribed_idx >= 0:
+                    return -1 if nodes[subscribed_idx.usize()].kind != Json::RH_JSON_BOOL
+                    subscribed <- Json::rh_json_is_true(nodes, raw, subscribed_idx)
+                authorized: bool = Json::rh_json_is_true(nodes, raw, authorized_idx)
+                out.push(RhDestination{id: id, kind: kind.u8(), authorized: authorized, subscribed: subscribed})
+                child <- nodes[child.usize()].next_sibling
+            0
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_nr_hex_span(texts: darray[u8]&, s: i64, e: i64, hi_out: mutable u64&, lo_out: mutable u64&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -84,7 +121,7 @@ module NotifyReport:
             return "suppressed_acknowledged" if d == Notify::RH_NOTIFY_SUPPRESSED_ACKNOWLEDGED
             "suppressed_cooldown"
 
-        # Parse a persisted `rh-notify-state/1` document into state rows. Returns 0
+# Parse a persisted `rh-notify-state/2` document into state rows. Returns 0
         # ok, -1 malformed. An empty buffer is a fresh (empty) state.
         def rh_notify_parse_state(raw: darray[u8]&, states: mutable darray[Notify::RhNotifyState]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return 0 if raw.count == 0
@@ -96,7 +133,7 @@ module NotifyReport:
                 ss: mutable i64 = 0
                 se: mutable i64 = 0
                 return -1 if not rh_nr_str(nodes, texts, root, "schema", &ss, &se)
-                return -1 if not rh_nr_eq(texts, ss, se, "rh-notify-state/1")
+                return -1 if not rh_nr_eq(texts, ss, se, "rh-notify-state/2")
                 block_result: i64 = Json::rh_json_obj_get(nodes, texts, root, "rows")
                 block_result
             return -1 if rows < 0 or nodes[rows.usize()].kind != Json::RH_JSON_ARR
@@ -105,11 +142,13 @@ module NotifyReport:
                 return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
                 okr: mutable i64 = 0
                 oks: mutable i64 = 0
+                okd: mutable i64 = 0
                 okl: mutable i64 = 0
                 rule_id: i64 = rh_nr_int(nodes, raw, texts, child, "rule_id", &okr)
                 subject_id: i64 = rh_nr_int(nodes, raw, texts, child, "subject_id", &oks)
+                destination_id: i64 = rh_nr_int(nodes, raw, texts, child, "destination_id", &okd)
                 last_sent: i64 = rh_nr_int(nodes, raw, texts, child, "last_sent_at", &okl)
-                return -1 if okr == 0 or oks == 0 or okl == 0
+                return -1 if okr == 0 or oks == 0 or okd == 0 or destination_id < 0 or okl == 0
                 dgs: mutable i64 = 0
                 dge: mutable i64 = 0
                 return -1 if not rh_nr_str(nodes, texts, child, "artifact_digest", &dgs, &dge)
@@ -118,7 +157,7 @@ module NotifyReport:
                 return -1 if not rh_nr_hex_span(texts, dgs, dge, &hi, &lo)
                 ack: bool = rh_nr_bool(nodes, raw, texts, child, "acknowledged", false)
                 res: bool = rh_nr_bool(nodes, raw, texts, child, "resolved", false)
-                states.push(Notify::RhNotifyState{rule_id: rule_id, subject_id: subject_id, artifact_high: hi, artifact_low: lo, last_sent_at: last_sent, acknowledged: ack, resolved: res})
+                states.push(Notify::RhNotifyState{rule_id: rule_id, subject_id: subject_id, destination_id: destination_id, artifact_high: hi, artifact_low: lo, last_sent_at: last_sent, acknowledged: ack, resolved: res})
                 child <- nodes[child.usize()].next_sibling
             0
 
@@ -127,9 +166,9 @@ module NotifyReport:
             Base::rh_push_hex_u64(out, hi)
             Base::rh_push_hex_u64(out, lo)
 
-        # Emit the persisted `rh-notify-state/1` document (durable across runs).
+        # Emit the persisted `rh-notify-state/2` document (durable across runs).
         def rh_notify_emit_state(states: darray[Notify::RhNotifyState]&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-            Base::rh_push_text(out, "{\"schema\":\"rh-notify-state/1\",\"rows\":[")
+            Base::rh_push_text(out, "{\"schema\":\"rh-notify-state/2\",\"rows\":[")
             while i < states.count |i: usize = 0, states, out|:
                 s: Notify::RhNotifyState = states[i]
                 if i > 0:
@@ -138,6 +177,8 @@ module NotifyReport:
                 Base::rh_push_decimal_i64(out, s.rule_id)
                 Base::rh_push_text(out, ",\"subject_id\":")
                 Base::rh_push_decimal_i64(out, s.subject_id)
+                Base::rh_push_text(out, ",\"destination_id\":")
+                Base::rh_push_decimal_i64(out, s.destination_id)
                 Base::rh_push_text(out, ",\"artifact_digest\":\"")
                 rh_nr_push_digest(out, s.artifact_high, s.artifact_low)
                 Base::rh_push_text(out, "\",\"last_sent_at\":")
@@ -165,7 +206,9 @@ module NotifyReport:
             ss: mutable i64 = 0
             se: mutable i64 = 0
             return -1 if not rh_nr_str(nodes, texts, root, "schema", &ss, &se)
-            return -1 if not rh_nr_eq(texts, ss, se, "rh-notify-input/2")
+            return -1 if not rh_nr_eq(texts, ss, se, "rh-notify-input/3")
+            destinations: mutable darray[RhDestination] = []
+            return -1 if rh_nr_destinations(nodes, raw, texts, root, destinations) != 0
             cd_ok: mutable i64 = 0
             cooldown: mutable i64 = rh_nr_int(nodes, raw, texts, root, "cooldown_secs", &cd_ok)
             if cd_ok == 0:
@@ -180,12 +223,13 @@ module NotifyReport:
             ev_lbl: mutable darray[u8] = []
             ev_deliv: mutable darray[i64] = []
             ev_applied: mutable darray[i64] = []
+            ev_destination: mutable darray[i64] = []
             counts: mutable darray[i64] = []
             while c0 < 6 |c0: i64 = 0, counts|:
                 counts.push(0)
                 c0 <- c0 + 1
             arr: Json::RhJsonNode = nodes[ev_idx.usize()]
-            while child >= 0 |child: i64 = arr.first_child, nodes, texts, raw, states, cooldown, ev_op, ev_lbl, ev_deliv, ev_applied, counts|:
+            while child >= 0 |child: i64 = arr.first_child, nodes, texts, raw, destinations, states, cooldown, ev_op, ev_lbl, ev_deliv, ev_applied, ev_destination, counts|:
                 return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
                 ops: mutable i64 = 0
                 ope: mutable i64 = 0
@@ -195,29 +239,30 @@ module NotifyReport:
                 rule_id: i64 = rh_nr_int(nodes, raw, texts, child, "rule_id", &okr)
                 subject_id: i64 = rh_nr_int(nodes, raw, texts, child, "subject_id", &oku)
                 return -1 if okr == 0 or oku == 0
+                okd: mutable i64 = 0
+                destination_id: i64 = rh_nr_int(nodes, raw, texts, child, "destination_id", &okd)
+                return -1 if okd == 0 or destination_id < 0
                 dgs: mutable i64 = 0
                 dge: mutable i64 = 0
                 return -1 if not rh_nr_str(nodes, texts, child, "artifact_digest", &dgs, &dge)
                 hi: mutable u64 = 0
                 lo: mutable u64 = 0
                 return -1 if not rh_nr_hex_span(texts, dgs, dge, &hi, &lo)
-                key: Notify::RhFindingKey = Notify::RhFindingKey{rule_id: rule_id, subject_id: subject_id, artifact_high: hi, artifact_low: lo}
+                key: Notify::RhFindingKey = Notify::RhFindingKey{rule_id: rule_id, subject_id: subject_id, destination_id: destination_id, artifact_high: hi, artifact_low: lo}
                 if rh_nr_eq(texts, ops, ope, "notify"):
+                    return -1 if Json::rh_json_obj_get(nodes, texts, child, "target") >= 0 or Json::rh_json_obj_get(nodes, texts, child, "authorized") >= 0 or Json::rh_json_obj_get(nodes, texts, child, "subscribed") >= 0
                     okt: mutable i64 = 0
-                    tkind: i64 = |nodes, texts|
-                        ts: mutable i64 = 0
-                        te: mutable i64 = 0
-                        return -1 if not rh_nr_str(nodes, texts, child, "target", &ts, &te)
-                        block_result: i64 = rh_nr_target(texts, ts, te)
-                        block_result
-                    return -1 if tkind < 0
-                    authorized: bool =
-                        subscribed: bool = rh_nr_bool(nodes, raw, texts, child, "subscribed", false)
-                        subscribed if tkind == Notify::RH_TARGET_UPSTREAM_MAINTAINER.i64() else rh_nr_bool(nodes, raw, texts, child, "authorized", false)
+                    destination: mutable RhDestination = RhDestination{id: destination_id, kind: Notify::RH_TARGET_SUBSCRIBER, authorized: false, subscribed: false}
+                    while di < destinations.count |di: usize = 0, destinations, destination_id, destination|:
+                        configured: RhDestination = destinations[di]
+                        if configured.id == destination_id:
+                            destination <- configured
+                        di <- di + 1
+                    authorized: bool = destination.authorized and (destination.kind != Notify::RH_TARGET_UPSTREAM_MAINTAINER or destination.subscribed)
                     outage: bool = rh_nr_bool(nodes, raw, texts, child, "outage", false)
                     now: i64 = rh_nr_int(nodes, raw, texts, child, "now", &okt)
                     return -1 if okt == 0
-                    target: Notify::RhTarget = Notify::RhTarget{kind: tkind.u8(), authorized: authorized}
+                    target: Notify::RhTarget = Notify::RhTarget{kind: destination.kind, authorized: authorized}
                     dec: u8 = Notify::rh_notify_decide(states, &key, &target, now, cooldown, outage)
                     Notify::rh_notify_record(states, &key, &target, now, dec)
                     counts[dec.u32().usize()] <- counts[dec.u32().usize()] + 1
@@ -228,6 +273,7 @@ module NotifyReport:
                     else:
                         ev_deliv.push(0)
                     ev_applied.push(0)
+                    ev_destination.push(destination_id)
                 elif rh_nr_eq(texts, ops, ope, "ack"):
                     applied: bool = Notify::rh_notify_acknowledge(states, &key)
                     ev_op.push(1)
@@ -237,6 +283,7 @@ module NotifyReport:
                         ev_applied.push(1)
                     else:
                         ev_applied.push(0)
+                    ev_destination.push(destination_id)
                 elif rh_nr_eq(texts, ops, ope, "resolve"):
                     applied2: bool = Notify::rh_notify_resolve(states, &key)
                     ev_op.push(2)
@@ -246,18 +293,21 @@ module NotifyReport:
                         ev_applied.push(1)
                     else:
                         ev_applied.push(0)
+                    ev_destination.push(destination_id)
                 else:
                     return -1
                 child <- nodes[child.usize()].next_sibling
-            Base::rh_push_text(out, "{\"schema\":\"rh-notify-result/2\",\"cooldown_secs\":")
+            Base::rh_push_text(out, "{\"schema\":\"rh-notify-result/3\",\"cooldown_secs\":")
             Base::rh_push_decimal_i64(out, cooldown)
             Base::rh_push_text(out, ",\"decisions\":[")
-            while i < ev_op.count.i64() |i: i64 = 0, ev_op, ev_lbl, ev_deliv, ev_applied, out|:
+            while i < ev_op.count.i64() |i: i64 = 0, ev_op, ev_lbl, ev_deliv, ev_applied, ev_destination, out|:
                 if i > 0:
                     out.push(44)
                 op: u8 = ev_op[i.usize()]
                 Base::rh_push_text(out, "{\"event_index\":")
                 Base::rh_push_decimal_i64(out, i)
+                Base::rh_push_text(out, ",\"destination_id\":")
+                Base::rh_push_decimal_i64(out, ev_destination[i.usize()])
                 Base::rh_push_text(out, ",\"op\":\"")
                 if op == 0:
                     Base::rh_push_text(out, "notify")
