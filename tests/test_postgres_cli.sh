@@ -40,6 +40,9 @@ run_ok claim_graph committed claim-graph-query-job
 run_ok claim_graph duplicate claim-graph-query-job
 run_ok publish_graph committed publish-graph-query-result
 run_ok publish_graph duplicate publish-graph-query-result
+run_ok poll_graph committed get-graph-query-job
+run_ok poll_graph duplicate get-graph-query-job
+run_ok poll_graph empty get-graph-query-job
 python3 - "$T/enqueue-graph-query-job-committed.json" "$T/enqueue-graph-query-job-duplicate.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"enqueue_graph_query_job","status":"enqueued"}
@@ -54,6 +57,11 @@ python3 - "$T/publish-graph-query-result-committed.json" "$T/publish-graph-query
 import json, sys
 assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"publish_graph_query_result","status":"published"}
 assert json.load(open(sys.argv[2])) == {"schema":"rh-postgres-result/1","operation":"publish_graph_query_result","status":"fenced"}
+PY
+python3 - "$T/get-graph-query-job-committed.json" "$ROOT/fixtures/postgres/get-graph-query-job-result.json" "$T/get-graph-query-job-duplicate.json" "$ROOT/fixtures/postgres/get-graph-query-job-running-result.json" "$T/get-graph-query-job-empty.json" "$ROOT/fixtures/postgres/get-graph-query-job-not-found-result.json" <<'PY'
+import json, sys
+for actual, expected in zip(sys.argv[1::2], sys.argv[2::2]):
+    assert json.load(open(actual)) == json.load(open(expected))
 PY
 python3 - "$T/enqueue-graph-query-job-command.json" "$T/enqueue-graph-query-job-invalid.json" <<'PY'
 import json, sys

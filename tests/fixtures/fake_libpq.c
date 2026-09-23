@@ -28,6 +28,12 @@ static const char *graph_query_claimed_json =
     "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_graph_query_job\",\"status\":\"claimed\",\"job_id\":\"00000000-0000-0000-0000-000000000099\",\"fencing_token\":1,\"lease_expires_at\":\"2026-01-01T00:02:00+00:00\",\"request\":{\"schema\":\"rh-query-input/1\",\"kind\":\"downstream\",\"ids\":[1],\"graph\":{\"direction\":\"downstream\",\"subject\":1,\"nodes\":[1,2],\"edges\":[{\"from\":2,\"to\":1}],\"max_nodes\":20,\"max_depth\":5}}}";
 static const char *graph_query_empty_json =
     "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_graph_query_job\",\"status\":\"empty\"}";
+static const char *graph_query_poll_succeeded_json =
+    "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"get_graph_query_job\",\"status\":\"succeeded\",\"job_id\":\"00000000-0000-0000-0000-000000000099\",\"attempt_count\":1,\"next_attempt_at\":\"2026-01-01T00:01:00+00:00\",\"finished_at\":\"2026-01-01T00:02:00+00:00\",\"result\":{\"schema\":\"rh-query-result/1\",\"kind\":\"downstream\",\"graph\":{\"direction\":\"downstream\",\"nodes\":[2],\"truncated\":false,\"complete\":true}}}";
+static const char *graph_query_poll_running_json =
+    "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"get_graph_query_job\",\"status\":\"running\",\"job_id\":\"00000000-0000-0000-0000-000000000099\",\"attempt_count\":1,\"next_attempt_at\":\"2026-01-01T00:01:00+00:00\"}";
+static const char *graph_query_poll_not_found_json =
+    "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"get_graph_query_job\",\"status\":\"not_found\"}";
 static const char *adoption_history_json =
     "[{\"from\":100,\"through\":900,\"complete\":true},{\"from\":900,\"through\":1000,\"complete\":false},{\"from\":1000,\"through\":2000,\"complete\":true}]";
 
@@ -134,6 +140,9 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "00000000-0000-0000-0000-000000000099", "1", "2026-01-01T00:01:30Z",
         "{\"schema\":\"rh-query-result/1\",\"kind\":\"downstream\",\"graph\":{\"direction\":\"downstream\",\"nodes\":[2],\"truncated\":false,\"complete\":true}}"
     };
+    static const char *poll_graph_values[2] = {
+        "00000000-0000-0000-0000-000000000099", "public"
+    };
     static const char *begin_run_values[13] = {
         "00000000-0000-0000-0000-000000000001", "github", "https://api.github.com",
         "public", "1", "2026-01-01T00:00:00Z", "00000000-0000-0000-0000-000000000003",
@@ -232,6 +241,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = publish_graph_values;
         expected_count = 4;
         prefix = "SELECT public.rh_publish_graph_query_result(";
+    } else if (operation != NULL && strcmp(operation, "poll_graph") == 0) {
+        expected = poll_graph_values;
+        expected_count = 2;
+        prefix = "SELECT public.rh_get_graph_query_job(";
     } else if (operation != NULL && strcmp(operation, "page_events") == 0) {
         expected = page_events_values;
         expected_count = 14;
@@ -317,6 +330,14 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.rows = 1;
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
         result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? graph_query_empty_json : graph_query_claimed_json;
+        return &result;
+    }
+    if (operation != NULL && strcmp(operation, "poll_graph") == 0) {
+        result.columns = 1;
+        result.rows = 1;
+        result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+        result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? graph_query_poll_running_json :
+            mode != NULL && strcmp(mode, "empty") == 0 ? graph_query_poll_not_found_json : graph_query_poll_succeeded_json;
         return &result;
     }
     result.columns = 1;

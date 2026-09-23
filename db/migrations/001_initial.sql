@@ -1031,6 +1031,49 @@ AS $$
       AND j.lease_expires_at > p_now
 $$;
 
+-- Poll only within the job's visibility scope. A result is present only after
+-- successful fenced publication; absent or cross-scope jobs are indistinct.
+CREATE FUNCTION rh_get_graph_query_job(
+    p_job_id uuid,
+    p_visibility_scope rh_visibility_scope
+) RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_job_state text;
+    v_attempt_count integer;
+    v_next_attempt_at timestamptz;
+    v_finished_at timestamptz;
+    v_result jsonb;
+BEGIN
+    SELECT j.state, j.attempt_count, j.next_attempt_at, j.finished_at, g.result
+    INTO v_job_state, v_attempt_count, v_next_attempt_at, v_finished_at, v_result
+    FROM job AS j
+    JOIN graph_query_job AS g ON g.job_id = j.id
+    WHERE j.id = p_job_id
+      AND j.kind = 'graph_query'
+      AND j.visibility_scope = p_visibility_scope;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'schema', 'rh-postgres-result/1',
+            'operation', 'get_graph_query_job',
+            'status', 'not_found'
+        );
+    END IF;
+    RETURN jsonb_strip_nulls(jsonb_build_object(
+        'schema', 'rh-postgres-result/1',
+        'operation', 'get_graph_query_job',
+        'status', v_job_state,
+        'job_id', p_job_id::text,
+        'attempt_count', v_attempt_count,
+        'next_attempt_at', v_next_attempt_at,
+        'finished_at', v_finished_at,
+        'result', CASE WHEN v_job_state = 'succeeded' THEN v_result ELSE NULL END
+    ));
+END;
+$$;
+
 CREATE FUNCTION rh_heartbeat_job(
     p_job_id uuid,
     p_fencing_token bigint,

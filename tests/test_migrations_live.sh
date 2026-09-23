@@ -142,6 +142,10 @@ BEGIN
   IF rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000099', 'public', request_value, 3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
     RAISE EXCEPTION 'exact graph query job replay was not absorbed';
   END IF;
+  c := rh_get_graph_query_job('00000000-0000-0000-0000-000000000099', 'public');
+  IF c->>'status' <> 'queued' OR c ? 'result' THEN
+    RAISE EXCEPTION 'queued graph job exposed a result or wrong status: %', c;
+  END IF;
   c := rh_claim_graph_query_job('graph-worker', '2026-01-01T00:00:01Z', 60, '00000000-0000-0000-0000-000000000099');
   token_value := (c->>'fencing_token')::bigint;
   IF c->>'status' <> 'claimed' OR c->>'job_id' <> '00000000-0000-0000-0000-000000000099' OR token_value <> 1 OR c->'request' <> request_value THEN
@@ -179,6 +183,14 @@ BEGIN
       AND result_fencing_token = token_value AND completed_at = '2026-01-01T00:00:10Z'
   ) OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000099') <> 'succeeded' THEN
     RAISE EXCEPTION 'graph result and terminal job state were not committed together';
+  END IF;
+  c := rh_get_graph_query_job('00000000-0000-0000-0000-000000000099', 'public');
+  IF c->>'status' <> 'succeeded' OR c->'result' IS DISTINCT FROM result_value THEN
+    RAISE EXCEPTION 'poll did not return the published graph result: %', c;
+  END IF;
+  c := rh_get_graph_query_job('00000000-0000-0000-0000-000000000099', 'tenant-private');
+  IF c->>'status' <> 'not_found' THEN
+    RAISE EXCEPTION 'poll exposed a graph job across visibility scopes: %', c;
   END IF;
   c := rh_claim_graph_query_job('graph-worker', '2026-01-01T00:00:20Z', 60, NULL);
   IF c->>'status' <> 'empty' THEN
