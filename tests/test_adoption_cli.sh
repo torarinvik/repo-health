@@ -146,6 +146,52 @@ assert a["snapshot_coverage"] == {"status": "reconstructed", "interval_count": 0
 assert a["upgrade_lag"]["status"] == "unknown", a
 print("[adoption] missing stored history remains uncovered")
 PY
+mkdir -p "$T/store/sources/repo-b/coverage"
+cat > "$T/store/sources/repo-a/coverage/resolution.interval" <<'EOF'
+100 900 observed
+EOF
+cat > "$T/store/sources/repo-b/coverage/resolution.interval" <<'EOF'
+900 2000 observed
+EOF
+cat > "$T/store-multi.json" <<'JSON'
+{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"coverage_sources":["repo-a","repo-b"],"coverage_capability":"resolution"}]}
+JSON
+"$ROOT/build/rh_cli" adoption --input "$T/store-multi.json" --store-root "$T/store" --out "$T/store-multi.out" >/dev/null || fail "multi-source temporal continuity"
+python3 - "$T/store-multi.out" <<'PY'
+import json, sys
+a = json.load(open(sys.argv[1]))["adoptions"][0]
+assert a["snapshot_coverage"] == {"status": "reconstructed", "interval_count": 2, "gap_count": 0, "uncovered_seconds": 0}, a
+assert a["upgrade_lag"]["status"] == "right_censored", a
+print("[adoption] adjacent source histories complete one temporal interval")
+PY
+cat > "$T/store/sources/repo-b/coverage/resolution.interval" <<'EOF'
+900 2000 partial
+EOF
+"$ROOT/build/rh_cli" adoption --input "$T/store-multi.json" --store-root "$T/store" --out "$T/store-multi-partial.out" >/dev/null || fail "multi-source partial continuity"
+python3 - "$T/store-multi-partial.out" <<'PY'
+import json, sys
+a = json.load(open(sys.argv[1]))["adoptions"][0]
+assert a["snapshot_coverage"]["uncovered_seconds"] == 1100, a
+assert a["upgrade_lag"]["status"] == "unknown", a
+print("[adoption] incomplete later source preserves the uncovered follow-up")
+PY
+cat > "$T/store/sources/repo-b/coverage/resolution.interval" <<'EOF'
+900 2000 observed
+EOF
+python3 - "$T/store-multi.json" "$T/store-multi-reversed.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["adoptions"][0]["coverage_sources"] = ["repo-b", "repo-a"]
+json.dump(d, open(sys.argv[2], "w"))
+PY
+if "$ROOT/build/rh_cli" adoption --input "$T/store-multi-reversed.json" --store-root "$T/store" --out "$T/store-multi-reversed.out" >/dev/null 2>&1; then fail "out-of-order multi-source history was accepted"; fi
+python3 - "$T/over-limit-runs.json" <<'PY'
+import json, sys
+runs = [{"from": i * 2, "through": i * 2 + 2, "complete": True} for i in range(4097)]
+d = {"schema":"rh-adoption-input/1", "cutoff":8194, "adoptions":[{"first_seen":None,"confirmed_introduction":None,"confirmed_removal":None,"upstream_release_at":0,"target_version_ord":2000000,"complete_followup_through":8194,"snapshot_runs":runs}]}
+json.dump(d, open(sys.argv[1], "w"), separators=(",", ":"))
+PY
+if "$ROOT/build/rh_cli" adoption --input "$T/over-limit-runs.json" --out "$T/over-limit-runs.out" >/dev/null 2>&1; then fail "over-limit combined run history was accepted"; fi
 cat > "$T/store/sources/repo-a/coverage/resolution.interval" <<'EOF'
 100 1000 observed
 900 2000 observed

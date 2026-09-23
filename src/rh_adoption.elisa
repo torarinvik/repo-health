@@ -43,6 +43,33 @@ module Adoption:
             return false if finish - start == 2 and texts[start.usize()] == 46 and texts[(start + 1).usize()] == 46
             true
 
+        def rh_adoption_append_source_runs(texts: darray[u8]&, source_s: i64, source_e: i64, capability_s: i64, capability_e: i64, root_path: cstr, conninfo: cstr, use_postgres: bool, runs_out: mutable darray[u8]&) -> bool can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            history: mutable darray[u8] = []
+            if use_postgres:
+                source_id: mutable darray[u8] = []
+                capability: mutable darray[u8] = []
+                while i < source_e - source_s |i: i64 = 0, texts, source_s, source_e, source_id|:
+                    source_id.push(texts[(source_s + i).usize()])
+                    i <- i + 1
+                source_id.push(0)
+                while i < capability_e - capability_s |i: i64 = 0, texts, capability_s, capability_e, capability|:
+                    capability.push(texts[(capability_s + i).usize()])
+                    i <- i + 1
+                capability.push(0)
+                source_ptr: cstr = (&source_id[0]).cast[cstr] can Unsafe.PointerCast
+                capability_ptr: cstr = (&capability[0]).cast[cstr] can Unsafe.PointerCast
+                return false if Postgres::rh_pg_adoption_history(conninfo, source_ptr, capability_ptr, history) <= 0
+            else:
+                return false if not Adoption::rh_adoption_store_runs(root_path, texts, source_s, source_e, capability_s, capability_e, history)
+            return false if history.count < 2 or history[0] != 91 or history[history.count - 1] != 93
+            return false if runs_out.count + history.count > 1048576
+            if history.count > 2:
+                runs_out.push(44) if runs_out.count > 1
+                while i < history.count - 1 |i: usize = 1, history, runs_out|:
+                    runs_out.push(history[i])
+                    i <- i + 1
+            true
+
         def rh_adoption_store_status_known(raw: darray[u8]&, start: i64, finish: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(raw, start, finish, "observed") or Base::rh_bytes_equal_literal(raw, start, finish, "not_observed") or Base::rh_bytes_equal_literal(raw, start, finish, "unavailable") or Base::rh_bytes_equal_literal(raw, start, finish, "unauthorized") or Base::rh_bytes_equal_literal(raw, start, finish, "partial") or Base::rh_bytes_equal_literal(raw, start, finish, "stale") or Base::rh_bytes_equal_literal(raw, start, finish, "not_applicable") or Base::rh_bytes_equal_literal(raw, start, finish, "error") or Base::rh_bytes_equal_literal(raw, start, finish, "conflicted") or Base::rh_bytes_equal_literal(raw, start, finish, "suppressed") or Base::rh_bytes_equal_literal(raw, start, finish, "unsupported")
 
@@ -123,39 +150,56 @@ module Adoption:
             while child >= 0 |child: i64 = nodes[adoptions_idx.usize()].first_child, nodes, raw, texts, augmented, cursor, root_path|:
                 return false if nodes[child.usize()].kind != Json::RH_JSON_OBJ
                 source_idx: i64 = Adoption::rh_adoption_get(nodes, texts, child, "coverage_source")
+                sources_idx: i64 = Adoption::rh_adoption_get(nodes, texts, child, "coverage_sources")
                 capability_idx: i64 = Adoption::rh_adoption_get(nodes, texts, child, "coverage_capability")
-                if source_idx < 0 and capability_idx < 0:
+                if source_idx < 0 and sources_idx < 0 and capability_idx < 0:
                     child <- nodes[child.usize()].next_sibling
                     continue
-                return false if source_idx < 0 or capability_idx < 0
-                source_null: bool = nodes[source_idx.usize()].kind == Json::RH_JSON_NULL
+                return false if (source_idx < 0 and sources_idx < 0) or capability_idx < 0 or (source_idx >= 0 and sources_idx >= 0)
                 capability_null: bool = nodes[capability_idx.usize()].kind == Json::RH_JSON_NULL
-                return false if source_null or capability_null or nodes[source_idx.usize()].kind != Json::RH_JSON_STR or nodes[capability_idx.usize()].kind != Json::RH_JSON_STR
-                source_node: Json::RhJsonNode = nodes[source_idx.usize()]
+                return false if capability_null or nodes[capability_idx.usize()].kind != Json::RH_JSON_STR
                 capability_node: Json::RhJsonNode = nodes[capability_idx.usize()]
-                return false if not Adoption::rh_adoption_store_segment(texts, source_node.text_start, source_node.text_end) or not Adoption::rh_adoption_store_segment(texts, capability_node.text_start, capability_node.text_end)
+                return false if not Adoption::rh_adoption_store_segment(texts, capability_node.text_start, capability_node.text_end)
+                return false if source_idx >= 0 and (nodes[source_idx.usize()].kind != Json::RH_JSON_STR or nodes[source_idx.usize()].kind == Json::RH_JSON_NULL)
                 coverage_idx: i64 = Adoption::rh_adoption_get(nodes, texts, child, "snapshot_coverage")
                 history_idx: i64 = Adoption::rh_adoption_get(nodes, texts, child, "snapshot_runs")
                 return false if coverage_idx >= 0 and nodes[coverage_idx.usize()].kind != Json::RH_JSON_NULL
                 return false if history_idx >= 0 and nodes[history_idx.usize()].kind != Json::RH_JSON_NULL
                 runs: mutable darray[u8] = []
+                runs.push(91)
                 if use_postgres:
-                    source_id: mutable darray[u8] = []
-                    capability: mutable darray[u8] = []
-                    while i < source_node.text_end - source_node.text_start |i: i64 = 0, texts, source_node, source_id|:
-                        source_id.push(texts[(source_node.text_start + i).usize()])
-                        i <- i + 1
-                    source_id.push(0)
-                    while i < capability_node.text_end - capability_node.text_start |i: i64 = 0, texts, capability_node, capability|:
-                        capability.push(texts[(capability_node.text_start + i).usize()])
-                        i <- i + 1
-                    capability.push(0)
-                    source_ptr: cstr = (&source_id[0]).cast[cstr] can Unsafe.PointerCast
-                    capability_ptr: cstr = (&capability[0]).cast[cstr] can Unsafe.PointerCast
-                    history_status: i64 = Postgres::rh_pg_adoption_history(conninfo, source_ptr, capability_ptr, runs)
-                    return false if history_status <= 0
+                    if source_idx >= 0:
+                        source_node: Json::RhJsonNode = nodes[source_idx.usize()]
+                        return false if not Adoption::rh_adoption_store_segment(texts, source_node.text_start, source_node.text_end)
+                        return false if not Adoption::rh_adoption_append_source_runs(texts, source_node.text_start, source_node.text_end, capability_node.text_start, capability_node.text_end, root_path, conninfo, true, runs)
+                    else:
+                        return false if nodes[sources_idx.usize()].kind != Json::RH_JSON_ARR
+                        source_count: mutable i64 = 0
+                        while source_child >= 0 |source_child: i64 = nodes[sources_idx.usize()].first_child, nodes, texts, sources_idx, capability_node, source_count, root_path, conninfo, runs|:
+                            return false if source_count >= 16 or nodes[source_child.usize()].kind != Json::RH_JSON_STR
+                            source_node: Json::RhJsonNode = nodes[source_child.usize()]
+                            return false if not Adoption::rh_adoption_store_segment(texts, source_node.text_start, source_node.text_end)
+                            return false if not Adoption::rh_adoption_append_source_runs(texts, source_node.text_start, source_node.text_end, capability_node.text_start, capability_node.text_end, root_path, conninfo, true, runs)
+                            source_count <- source_count + 1
+                            source_child <- nodes[source_child.usize()].next_sibling
+                        return false if source_count == 0
                 else:
-                    return false if not Adoption::rh_adoption_store_runs(root_path, texts, source_node.text_start, source_node.text_end, capability_node.text_start, capability_node.text_end, runs)
+                    if source_idx >= 0:
+                        source_node: Json::RhJsonNode = nodes[source_idx.usize()]
+                        return false if not Adoption::rh_adoption_store_segment(texts, source_node.text_start, source_node.text_end)
+                        return false if not Adoption::rh_adoption_append_source_runs(texts, source_node.text_start, source_node.text_end, capability_node.text_start, capability_node.text_end, root_path, conninfo, false, runs)
+                    else:
+                        return false if nodes[sources_idx.usize()].kind != Json::RH_JSON_ARR
+                        source_count: mutable i64 = 0
+                        while source_child >= 0 |source_child: i64 = nodes[sources_idx.usize()].first_child, nodes, texts, sources_idx, capability_node, source_count, root_path, conninfo, runs|:
+                            return false if source_count >= 16 or nodes[source_child.usize()].kind != Json::RH_JSON_STR
+                            source_node: Json::RhJsonNode = nodes[source_child.usize()]
+                            return false if not Adoption::rh_adoption_store_segment(texts, source_node.text_start, source_node.text_end)
+                            return false if not Adoption::rh_adoption_append_source_runs(texts, source_node.text_start, source_node.text_end, capability_node.text_start, capability_node.text_end, root_path, conninfo, false, runs)
+                            source_count <- source_count + 1
+                            source_child <- nodes[source_child.usize()].next_sibling
+                        return false if source_count == 0
+                runs.push(93)
                 entry: Json::RhJsonNode = nodes[child.usize()]
                 return false if entry.text_start < cursor.i64() or entry.text_end <= entry.text_start or raw[(entry.text_end - 1).usize()] != 125
                 while i < entry.text_end - 1 - cursor.i64() |i: usize = 0, raw, augmented, cursor, entry|:
@@ -240,6 +284,9 @@ module Adoption:
                         valid <- false
                         break
                     interval_count <- interval_count + 1
+                    if interval_count > RH_ADOPTION_MAX_STORE_RUNS:
+                        valid <- false
+                        break
                     complete: mutable bool = true
                     if history_loop:
                         complete_idx: i64 = Adoption::rh_adoption_get(nodes_loop, texts_loop, child, "complete")
