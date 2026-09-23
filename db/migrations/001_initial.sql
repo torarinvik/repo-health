@@ -1250,6 +1250,7 @@ CREATE FUNCTION rh_retry_graph_query_job(
     p_job_id uuid,
     p_fencing_token bigint,
     p_attempt integer,
+    p_max_attempts integer,
     p_failure_kind text,
     p_phase integer,
     p_wake_at timestamptz,
@@ -1262,7 +1263,8 @@ DECLARE
     v_target_state text;
     v_outcome text;
 BEGIN
-    IF p_failure_kind IS NULL OR p_failure_kind NOT IN ('transient', 'rate_limit', 'auth', 'unsupported', 'malformed', 'budget')
+    IF p_max_attempts IS NULL OR p_max_attempts < 0
+       OR p_failure_kind IS NULL OR p_failure_kind NOT IN ('transient', 'rate_limit', 'auth', 'unsupported', 'malformed', 'budget')
        OR p_phase NOT IN (4, 6, 7) THEN
         RAISE EXCEPTION 'invalid graph query retry decision';
     END IF;
@@ -1277,6 +1279,8 @@ BEGIN
     IF (p_failure_kind IN ('auth', 'unsupported') AND p_phase <> 4)
        OR (p_failure_kind = 'malformed' AND p_phase <> 7)
        OR (p_failure_kind IN ('transient', 'rate_limit', 'budget') AND p_phase NOT IN (6, 7))
+       OR (p_failure_kind IN ('transient', 'rate_limit', 'budget') AND p_phase = 6 AND p_max_attempts > 0 AND p_attempt >= p_max_attempts)
+       OR (p_failure_kind IN ('transient', 'rate_limit', 'budget') AND p_phase = 7 AND (p_max_attempts = 0 OR p_attempt < p_max_attempts))
        OR (p_phase = 6 AND p_wake_at < p_now)
        OR (p_phase <> 6 AND p_wake_at IS DISTINCT FROM 'epoch'::timestamptz) THEN
         RAISE EXCEPTION 'retry decision does not match failure classification';

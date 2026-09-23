@@ -140,8 +140,8 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "00000000-0000-0000-0000-000000000099", "1", "2026-01-01T00:01:30Z",
         "{\"schema\":\"rh-query-result/1\",\"kind\":\"downstream\",\"graph\":{\"direction\":\"downstream\",\"nodes\":[2],\"truncated\":false,\"complete\":true}}"
     };
-    static const char *retry_graph_values[7] = {
-        "00000000-0000-0000-0000-000000000099", "1", "1", "transient", "6", "1767225602", "2026-01-01T00:00:00Z"
+    static const char *retry_graph_values[8] = {
+        "00000000-0000-0000-0000-000000000099", "1", "1", "5", "transient", "6", "1767225602", "2026-01-01T00:00:00Z"
     };
     static const char *poll_graph_values[2] = {
         "00000000-0000-0000-0000-000000000099", "public"
@@ -246,7 +246,7 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         prefix = "SELECT public.rh_publish_graph_query_result(";
     } else if (operation != NULL && strcmp(operation, "retry_graph") == 0) {
         expected = retry_graph_values;
-        expected_count = 7;
+        expected_count = 8;
         prefix = "SELECT public.rh_retry_graph_query_job(";
     } else if (operation != NULL && strcmp(operation, "poll_graph") == 0) {
         expected = poll_graph_values;

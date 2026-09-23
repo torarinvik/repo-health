@@ -209,10 +209,10 @@ BEGIN
   END IF;
   c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:01Z', 60, '00000000-0000-0000-0000-000000000098');
   first_token := (c->>'fencing_token')::bigint;
-  IF NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 'transient', 6, '2026-01-01T00:00:03Z', '2026-01-01T00:00:01Z') THEN
+  IF NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 2, 'transient', 6, '2026-01-01T00:00:03Z', '2026-01-01T00:00:01Z') THEN
     RAISE EXCEPTION 'current transient failure was not requeued';
   END IF;
-  IF rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 'transient', 6, '2026-01-01T00:00:03Z', '2026-01-01T00:00:01Z') THEN
+  IF rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 2, 'transient', 6, '2026-01-01T00:00:03Z', '2026-01-01T00:00:01Z') THEN
     RAISE EXCEPTION 'closed attempt retry was accepted twice';
   END IF;
   IF (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000098') <> 'queued'
@@ -221,7 +221,7 @@ BEGIN
   END IF;
   c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:04Z', 60, '00000000-0000-0000-0000-000000000098');
   second_token := (c->>'fencing_token')::bigint;
-  IF second_token <= first_token OR NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', second_token, 2, 'transient', 7, 'epoch', '2026-01-01T00:00:05Z') THEN
+  IF second_token <= first_token OR NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', second_token, 2, 2, 'transient', 7, 'epoch', '2026-01-01T00:00:05Z') THEN
     RAISE EXCEPTION 'exhausted retry was not dead-lettered';
   END IF;
   IF (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000098') <> 'dead_letter'
