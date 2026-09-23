@@ -5,6 +5,8 @@
 # revision and supersede only the target's older derived results (newly,
 # once), rejected/open corrections change nothing, replay recomputes from
 # unchanged raw inputs, and malformed kind/state/combine fails closed.
+# rh-correction-evidence-policy/1 checks operator grants, reviewer allowlists,
+# and retention deadlines against digest-verified evidence.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="/tmp/rh-correct"
@@ -22,6 +24,38 @@ evidence_digest="$("$ROOT/build/rh_cli" store put --root "$T/evidence-store" --f
 [[ "${#evidence_digest}" -eq 16 ]] || fail "stored evidence digest was not returned"
 printf '{"schema":"rh-corrections/1","current_revision":0,"corrections":[{"kind":"identity","target_id":1,"state":"accepted","evidence_ref":"%s","reviewed_by":"reviewer-a","reviewed_at":1700000000}]}' "$evidence_digest" > "$T/verified.json"
 "$ROOT/build/rh_cli" correct --corrections "$T/verified.json" --out "$T/verified-out" --evidence-store "$T/evidence-store" >/dev/null || fail "registered correction evidence should verify"
+cat > "$T/evidence-policy.json" <<JSON
+{"schema":"rh-correction-evidence-policy/1","authorized_reviewers":["reviewer-a"],"grants":[{"evidence_ref":"$evidence_digest","purpose":"correction_review","effect":"allow","retain_until":1800000000}]}
+JSON
+"$ROOT/build/rh_cli" correct --corrections "$T/verified.json" --out "$T/policy-allowed" --evidence-store "$T/evidence-store" --evidence-policy "$T/evidence-policy.json" --evidence-now 1700000100 >/dev/null || fail "active evidence grant and authorized reviewer should pass"
+python3 - "$T/verified.json" "$T/evidence-policy.json" "$T/policy-allowed/corrections-access-verification.json" <<'PY'
+import hashlib, json, sys
+source, policy, report = sys.argv[1:]
+d = json.load(open(report))
+assert d["schema"] == "rh-correction-evidence-verification/1" and d["status"] == "policy_satisfied", d
+assert d["evaluated_at"] == 1700000100 and d["correction_count"] == 1, d
+assert d["input_sha256"] == hashlib.sha256(open(source, "rb").read()).hexdigest(), d
+assert d["policy_sha256"] == hashlib.sha256(open(policy, "rb").read()).hexdigest(), d
+print("[correct] digest-bound evidence authorization record OK")
+PY
+python3 - "$T/evidence-policy.json" "$T/evidence-expired.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["grants"][0]["retain_until"] = 1700000100
+json.dump(d, open(sys.argv[2], "w"))
+d["grants"][0]["retain_until"] = 1800000000; d["authorized_reviewers"] = ["someone-else"]
+json.dump(d, open(sys.argv[1] + ".reviewer", "w"))
+PY
+set +e
+"$ROOT/build/rh_cli" correct --corrections "$T/verified.json" --out "$T/policy-expired" --evidence-store "$T/evidence-store" --evidence-policy "$T/evidence-expired.json" --evidence-now 1700000100 >/dev/null 2>&1; expired_rc=$?
+"$ROOT/build/rh_cli" correct --corrections "$T/verified.json" --out "$T/policy-reviewer" --evidence-store "$T/evidence-store" --evidence-policy "$T/evidence-policy.json.reviewer" --evidence-now 1700000100 >/dev/null 2>&1; reviewer_rc=$?
+python3 - "$T/evidence-policy.json" "$T/evidence-duplicate.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["grants"] = d["grants"] * 2
+json.dump(d, open(sys.argv[2], "w"))
+PY
+"$ROOT/build/rh_cli" correct --corrections "$T/verified.json" --out "$T/policy-duplicate" --evidence-store "$T/evidence-store" --evidence-policy "$T/evidence-duplicate.json" --evidence-now 1700000100 >/dev/null 2>&1; duplicate_rc=$?
+set -e
+[[ "$expired_rc" -eq 4 && "$reviewer_rc" -eq 4 && "$duplicate_rc" -eq 4 ]] || fail "expired/duplicate grants and unauthorized reviewers must fail closed"
 python3 - "$T/verified.json" "$T/unverified.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))

@@ -1,0 +1,118 @@
+# Correction evidence authorization and retention policy checks.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module CorrectionAccess:
+    private:
+        def rh_ca_eq(texts: darray[u8]&, start: i64, finish: i64, value: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            expected: mutable darray[u8] = []
+            Base::rh_push_cstr(expected, value)
+            Base::rh_bytes_equal_span(texts, start, finish, expected, 0, expected.count.i64())
+
+        def rh_ca_string(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: cstr, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            idx >= 0 and Json::rh_json_str_span(nodes, idx, start_out, end_out) and start_out < end_out
+
+        def rh_ca_reviewer_allowed(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, reviewer_texts: darray[u8]&, policy: i64, reviewer_s: i64, reviewer_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            reviewers_idx: i64 = Json::rh_json_obj_get(nodes, texts, policy, "authorized_reviewers")
+            return false if reviewers_idx < 0 or nodes[reviewers_idx.usize()].kind != Json::RH_JSON_ARR
+            reviewers: Json::RhJsonNode = nodes[reviewers_idx.usize()]
+            while item >= 0 |item: i64 = reviewers.first_child, nodes, texts, reviewer_texts, reviewer_s, reviewer_e|:
+                s: mutable i64 = 0
+                e: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, item, &s, &e) or s == e
+                return true if Base::rh_bytes_equal_span(texts, s, e, reviewer_texts, reviewer_s, reviewer_e)
+                item <- nodes[item.usize()].next_sibling
+            false
+
+        def rh_ca_reviewers_valid(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, policy: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            reviewers_idx: i64 = Json::rh_json_obj_get(nodes, texts, policy, "authorized_reviewers")
+            return false if reviewers_idx < 0 or nodes[reviewers_idx.usize()].kind != Json::RH_JSON_ARR
+            reviewers: Json::RhJsonNode = nodes[reviewers_idx.usize()]
+            while reviewer >= 0 |reviewer: i64 = reviewers.first_child, nodes, texts|:
+                s: mutable i64 = 0
+                e: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, reviewer, &s, &e) or s == e
+                next: i64 = nodes[reviewer.usize()].next_sibling
+                while other >= 0 |other: i64 = next, nodes, texts, s, e|:
+                    os: mutable i64 = 0
+                    oe: mutable i64 = 0
+                    return false if not Json::rh_json_str_span(nodes, other, &os, &oe)
+                    return false if Base::rh_bytes_equal_span(texts, s, e, texts, os, oe)
+                    other <- nodes[other.usize()].next_sibling
+                reviewer <- next
+            true
+
+        def rh_ca_grant_active(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, evidence_texts: darray[u8]&, grants_idx: i64, evidence_s: i64, evidence_e: i64, now: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            grants: Json::RhJsonNode = nodes[grants_idx.usize()]
+            matches: mutable i64 = 0
+            active: mutable bool = false
+            while grant >= 0 |grant: i64 = grants.first_child, nodes, raw, texts, evidence_texts, evidence_s, evidence_e, now, matches, active|:
+                return false if nodes[grant.usize()].kind != Json::RH_JSON_OBJ
+                ref_s: mutable i64 = 0
+                ref_e: mutable i64 = 0
+                return false if not rh_ca_string(nodes, texts, grant, "evidence_ref", &ref_s, &ref_e)
+                if Base::rh_bytes_equal_span(texts, ref_s, ref_e, evidence_texts, evidence_s, evidence_e):
+                    matches <- matches + 1
+                    purpose_s: mutable i64 = 0
+                    purpose_e: mutable i64 = 0
+                    effect_s: mutable i64 = 0
+                    effect_e: mutable i64 = 0
+                    expiry_ok: mutable i64 = 0
+                    expiry: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, grant, "retain_until"), &expiry_ok)
+                    active <- rh_ca_string(nodes, texts, grant, "purpose", &purpose_s, &purpose_e) and rh_ca_eq(texts, purpose_s, purpose_e, "correction_review") and rh_ca_string(nodes, texts, grant, "effect", &effect_s, &effect_e) and rh_ca_eq(texts, effect_s, effect_e, "allow") and expiry_ok == 1 and expiry > now
+                grant <- nodes[grant.usize()].next_sibling
+            active and matches == 1
+
+    public:
+        # A caller-owned policy is an operator authorization boundary. Grant
+        # records are unique, purpose-limited, and expire before evidence use.
+        def rh_correction_access_verify(corrections_raw: darray[u8]&, policy_raw: darray[u8]&, now: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if now < 0
+            c_nodes: mutable darray[Json::RhJsonNode] = []
+            c_texts: mutable darray[u8] = []
+            c_root: i64 = Json::rh_json_parse(corrections_raw, c_nodes, c_texts)
+            return -1 if c_root < 0 or c_nodes[c_root.usize()].kind != Json::RH_JSON_OBJ
+            corrections_idx: i64 = Json::rh_json_obj_get(c_nodes, c_texts, c_root, "corrections")
+            return -1 if corrections_idx < 0 or c_nodes[corrections_idx.usize()].kind != Json::RH_JSON_ARR
+
+            p_nodes: mutable darray[Json::RhJsonNode] = []
+            p_texts: mutable darray[u8] = []
+            p_root: i64 = Json::rh_json_parse(policy_raw, p_nodes, p_texts)
+            return -1 if p_root < 0 or p_nodes[p_root.usize()].kind != Json::RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not rh_ca_string(p_nodes, p_texts, p_root, "schema", &schema_s, &schema_e) or not rh_ca_eq(p_texts, schema_s, schema_e, "rh-correction-evidence-policy/1")
+            return -1 if not rh_ca_reviewers_valid(p_nodes, p_texts, p_root)
+            grants_idx: i64 = Json::rh_json_obj_get(p_nodes, p_texts, p_root, "grants")
+            return -1 if grants_idx < 0 or p_nodes[grants_idx.usize()].kind != Json::RH_JSON_ARR
+            grants: Json::RhJsonNode = p_nodes[grants_idx.usize()]
+            while grant >= 0 |grant: i64 = grants.first_child, p_nodes, p_texts|:
+                ref_s: mutable i64 = 0
+                ref_e: mutable i64 = 0
+                return -1 if p_nodes[grant.usize()].kind != Json::RH_JSON_OBJ or not rh_ca_string(p_nodes, p_texts, grant, "evidence_ref", &ref_s, &ref_e)
+                return -2 if not rh_ca_grant_active(p_nodes, policy_raw, p_texts, p_texts, grants_idx, ref_s, ref_e, -1)
+                next: i64 = p_nodes[grant.usize()].next_sibling
+                while other >= 0 |other: i64 = next, p_nodes, p_texts, ref_s, ref_e|:
+                    other_s: mutable i64 = 0
+                    other_e: mutable i64 = 0
+                    return -1 if not rh_ca_string(p_nodes, p_texts, other, "evidence_ref", &other_s, &other_e)
+                    return -3 if Base::rh_bytes_equal_span(p_texts, ref_s, ref_e, p_texts, other_s, other_e)
+                    other <- p_nodes[other.usize()].next_sibling
+                grant <- next
+
+            carr: Json::RhJsonNode = c_nodes[corrections_idx.usize()]
+            while correction >= 0 |correction: i64 = carr.first_child, c_nodes, c_texts, p_nodes, p_texts, grants_idx, now, p_root|:
+                evidence_s: mutable i64 = 0
+                evidence_e: mutable i64 = 0
+                return -1 if c_nodes[correction.usize()].kind != Json::RH_JSON_OBJ or not rh_ca_string(c_nodes, c_texts, correction, "evidence_ref", &evidence_s, &evidence_e)
+                return -4 if not rh_ca_grant_active(p_nodes, policy_raw, p_texts, c_texts, grants_idx, evidence_s, evidence_e, now)
+                state_s: mutable i64 = 0
+                state_e: mutable i64 = 0
+                return -1 if not rh_ca_string(c_nodes, c_texts, correction, "state", &state_s, &state_e)
+                if rh_ca_eq(c_texts, state_s, state_e, "accepted") or rh_ca_eq(c_texts, state_s, state_e, "rejected"):
+                    reviewer_s: mutable i64 = 0
+                    reviewer_e: mutable i64 = 0
+                    return -5 if not rh_ca_string(c_nodes, c_texts, correction, "reviewed_by", &reviewer_s, &reviewer_e) or not rh_ca_reviewer_allowed(p_nodes, p_texts, c_texts, p_root, reviewer_s, reviewer_e)
+                correction <- c_nodes[correction.usize()].next_sibling
+            0
