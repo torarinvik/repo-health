@@ -58,11 +58,13 @@ printf '{"schema":"rh-privacy-input/1","cells":[{"public_count":1}]}' > "$T/noid
 "$ROOT/build/rh_cli" privacy --input "$T/noid.json" --out "$T/x" >/dev/null 2>&1; rc_id=$?
 printf '{"schema":"rh-privacy-input/1","cells":[{"id":"bad","public_count":10,"private_count":-1,"threshold":5}]}' > "$T/negative.json"
 "$ROOT/build/rh_cli" privacy --input "$T/negative.json" --out "$T/x" >/dev/null 2>&1; rc_negative=$?
+printf '{"schema":"rh-privacy-input/1","cells":[{"id":"same","public_count":10,"threshold":5},{"id":"same","public_count":11,"threshold":5}]}' > "$T/duplicate.json"
+"$ROOT/build/rh_cli" privacy --input "$T/duplicate.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate=$?
 printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" privacy --input "$T/notjson.json" --out "$T/x" >/dev/null 2>&1; rc_json=$?
 "$ROOT/build/rh_cli" privacy --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_cells" "$rc_id" "$rc_negative" "$rc_json" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_cells" "$rc_id" "$rc_negative" "$rc_duplicate" "$rc_json" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed privacy input must exit 4 (got $rc)"
 done
 
