@@ -81,10 +81,10 @@ cat > "$T/specifier-project.toml" <<'SPECIFIER_PROJECT'
 [project]
 name = "specifier-fixture"
 version = "1.0"
-dependencies = ["alpha>=2,<3", "beta!=1.0", "gamma~=1.4", "delta<2", "prelib>=1.0", "localib>=1.0"]
+dependencies = ["alpha>=2,<3", "beta!=1.0", "gamma~=1.4", "delta<2", "eps==1.2.*", "zeta!=1.2.*", "prelib>=1.0", "localib>=1.0"]
 SPECIFIER_PROJECT
 cat > "$T/specifier-audit.json" <<'SPECIFIER_AUDIT'
-{"schema":"rh-pylock-audit/1","dependency_semantics":"informational_only","packages":[{"id":0,"name":"alpha","version":"2.1"},{"id":1,"name":"beta","version":"1.0"},{"id":2,"name":"beta","version":"1.1"},{"id":3,"name":"gamma","version":"1.4"},{"id":4,"name":"delta","version":"2.0"},{"id":5,"name":"prelib","version":"1.1rc1"},{"id":6,"name":"localib","version":"1.0+abc"}]}
+{"schema":"rh-pylock-audit/1","dependency_semantics":"informational_only","packages":[{"id":0,"name":"alpha","version":"2.1"},{"id":1,"name":"beta","version":"1.0"},{"id":2,"name":"beta","version":"1.1"},{"id":3,"name":"gamma","version":"1.4"},{"id":4,"name":"gamma","version":"1.5"},{"id":5,"name":"gamma","version":"2.0"},{"id":6,"name":"delta","version":"2.0"},{"id":7,"name":"eps","version":"1.2.9"},{"id":8,"name":"eps","version":"1.3"},{"id":9,"name":"zeta","version":"1.2.3"},{"id":10,"name":"zeta","version":"2.0"},{"id":11,"name":"prelib","version":"1.1rc1"},{"id":12,"name":"localib","version":"1.0+abc"}]}
 SPECIFIER_AUDIT
 "$ROOT/build/rh_cli" pylock-project --project "$T/specifier-project.toml" --audit "$T/specifier-audit.json" --out "$T/specifier-result.json" >/dev/null || fail "bounded specifier evaluation"
 python3 - "$T/specifier-result.json" <<'PY'
@@ -92,8 +92,10 @@ import json, sys
 rows = {row["name"]: row for row in json.load(open(sys.argv[1]))["packages"]}
 assert rows["alpha"]["state"] == "represented" and rows["alpha"]["specifier_candidate_count"] == 1, rows
 assert rows["beta"]["state"] == "represented" and rows["beta"]["specifier_candidate_count"] == 1, rows
-assert rows["gamma"]["state"] == "not_evaluated", rows
+assert rows["gamma"]["state"] == "represented" and rows["gamma"]["specifier_candidate_count"] == 2, rows
 assert rows["delta"]["state"] == "version_not_present", rows
+assert rows["eps"]["state"] == "represented" and rows["eps"]["specifier_candidate_count"] == 1, rows
+assert rows["zeta"]["state"] == "represented" and rows["zeta"]["specifier_candidate_count"] == 1, rows
 assert rows["prelib"]["state"] == "not_evaluated", rows
 assert rows["localib"]["state"] == "not_evaluated", rows
 PY

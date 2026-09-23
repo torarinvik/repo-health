@@ -20,6 +20,22 @@ module PylockProject:
                 digits <- digits + 1 if byte >= 48 and byte <= 57
             digits > 0
 
+        def rh_pylock_project_release_at(version: Pep440::RhPep440&, index: i64) -> i64:
+            return version.r0 if index == 0
+            return version.r1 if index == 1
+            return version.r2 if index == 2
+            return version.r3 if index == 3
+            return version.r4 if index == 4
+            return version.r5 if index == 5
+            return version.r6 if index == 6
+            version.r7 if index == 7 else 0
+
+        def rh_pylock_project_release_prefix(left: Pep440::RhPep440&, right: Pep440::RhPep440&, count: i64) -> bool:
+            return false if count < 1 or count > 8 or left.epoch != right.epoch
+            for index in 0..<count |index, left, right|:
+                return false if rh_pylock_project_release_at(left, index) != rh_pylock_project_release_at(right, index)
+            true
+
         def rh_pylock_project_specifier_match(requirement: darray[u8]&, start: i64, end: i64, version: darray[u8]&, version_start: i64, version_end: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if start < 0 or end <= start or version_start < 0 or version_end <= version_start
             clauses: mutable i64 = 0
@@ -34,23 +50,32 @@ module PylockProject:
                         clause_end <- clause_end - 1
                     return -1 if clause_start >= clause_end
                     operator_end: i64 =
-                        while operator_end < clause_end and (requirement[operator_end.usize()] == 60 or requirement[operator_end.usize()] == 62 or requirement[operator_end.usize()] == 61 or requirement[operator_end.usize()] == 33) |operator_end: i64 = clause_start, clause_end, requirement| -> operator_end:
+                        while operator_end < clause_end and (requirement[operator_end.usize()] == 60 or requirement[operator_end.usize()] == 62 or requirement[operator_end.usize()] == 61 or requirement[operator_end.usize()] == 33 or requirement[operator_end.usize()] == 126) |operator_end: i64 = clause_start, clause_end, requirement| -> operator_end:
                             operator_end <- operator_end + 1
                     return -1 if operator_end == clause_start or operator_end - clause_start > 2
                     value_start: mutable i64 = operator_end
                     while value_start < clause_end and (requirement[value_start.usize()] == 32 or requirement[value_start.usize()] == 9) |value_start, clause_end, requirement|:
                         value_start <- value_start + 1
                     return -1 if value_start >= clause_end
-                    return -1 if not rh_pylock_project_stable_version(version, version_start, version_end) or not rh_pylock_project_stable_version(requirement, value_start, clause_end)
-                    candidate: Pep440::RhPep440 = Pep440::rh_pep440_parse(version, version_start, version_end)
-                    bound: Pep440::RhPep440 = Pep440::rh_pep440_parse(requirement, value_start, clause_end)
-                    return -1 if candidate.ok != 1 or bound.ok != 1
-                    order: i64 = Pep440::rh_pep440_cmp(candidate, bound)
                     operator_width: i64 = operator_end - clause_start
                     first: u8 = requirement[clause_start.usize()]
                     second: u8 = requirement[(clause_start + 1).usize()] if operator_width == 2 else 0
+                    wildcard: bool = clause_end - value_start >= 2 and requirement[(clause_end - 2).usize()] == 46 and requirement[(clause_end - 1).usize()] == 42
+                    bound_end: i64 = clause_end - 2 if wildcard else clause_end
+                    return -1 if wildcard and not ((first == 61 or first == 33) and operator_width == 2)
+                    return -1 if not rh_pylock_project_stable_version(version, version_start, version_end) or not rh_pylock_project_stable_version(requirement, value_start, bound_end)
+                    candidate: Pep440::RhPep440 = Pep440::rh_pep440_parse(version, version_start, version_end)
+                    bound: Pep440::RhPep440 = Pep440::rh_pep440_parse(requirement, value_start, bound_end)
+                    return -1 if candidate.ok != 1 or bound.ok != 1
+                    order: i64 = Pep440::rh_pep440_cmp(candidate, bound)
                     accepted: bool =
-                        if first == 61 and operator_width == 2:
+                        if wildcard and first == 61:
+                            rh_pylock_project_release_prefix(candidate, bound, bound.n)
+                        elif wildcard and first == 33:
+                            not rh_pylock_project_release_prefix(candidate, bound, bound.n)
+                        elif first == 126 and second == 61:
+                            bound.n >= 2 and order >= 0 and rh_pylock_project_release_prefix(candidate, bound, bound.n - 1)
+                        elif first == 61 and operator_width == 2:
                             order == 0
                         elif first == 33 and operator_width == 2:
                             order != 0
