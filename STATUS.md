@@ -872,7 +872,7 @@ checks job kind, live fencing token, durable attempt number, configured
 attempt limit, and phase/failure-kind compatibility before it closes the
 attempt and requeues, fails, or dead-letters atomically. Fake-libpq tests
 verify exact bound retry parameters and backoff output. The opt-in migration
-rehearsal covers requeue, replay refusal, attempt history, and exhausted
+rehearsal covers requeue, replay refusal, attempt history, contradictory attempt-limit decisions, auth terminal failure, malformed dead-lettering, and exhausted
 dead-letter behavior; it has not run in this environment because the Docker
 daemon is unavailable. This database path supplements the HTTP query API;
 it does not claim a deployed PostgreSQL service.

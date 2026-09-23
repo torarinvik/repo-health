@@ -240,6 +240,22 @@ BEGIN
      OR (SELECT count(*) FROM job_attempt WHERE job_id = '00000000-0000-0000-0000-000000000098' AND finished_at IS NOT NULL) <> 2 THEN
     RAISE EXCEPTION 'dead-letter transition did not close both attempts';
   END IF;
+  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000097', 'public', '{"schema":"rh-query-input/1","kind":"upstream","ids":[1],"cursor":-1,"limit":10}'::jsonb, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
+    RAISE EXCEPTION 'terminal graph job was not enqueued';
+  END IF;
+  c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:06Z', 60, '00000000-0000-0000-0000-000000000097');
+  IF NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000097', (c->>'fencing_token')::bigint, 1, 5, 'auth', 4, 'epoch', '2026-01-01T00:00:07Z')
+     OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000097') <> 'failed' THEN
+    RAISE EXCEPTION 'auth failure did not terminate the graph job';
+  END IF;
+  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000096', 'public', '{"schema":"rh-query-input/1","kind":"upstream","ids":[1],"cursor":-1,"limit":10}'::jsonb, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
+    RAISE EXCEPTION 'malformed graph job was not enqueued';
+  END IF;
+  c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:08Z', 60, '00000000-0000-0000-0000-000000000096');
+  IF NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000096', (c->>'fencing_token')::bigint, 1, 5, 'malformed', 7, 'epoch', '2026-01-01T00:00:09Z')
+     OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000096') <> 'dead_letter' THEN
+    RAISE EXCEPTION 'malformed failure did not dead-letter the graph job';
+  END IF;
 END $$;
 
 DO $$
