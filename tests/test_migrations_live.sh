@@ -209,6 +209,12 @@ BEGIN
   END IF;
   c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:01Z', 60, '00000000-0000-0000-0000-000000000098');
   first_token := (c->>'fencing_token')::bigint;
+  BEGIN
+    PERFORM rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 2, 'transient', 7, 'epoch', '2026-01-01T00:00:01Z');
+    RAISE EXCEPTION 'retryable failure was dead-lettered before its configured attempt limit';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('retry decision does not match failure classification' IN SQLERRM) = 0 THEN RAISE; END IF;
+  END;
   IF NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 2, 'transient', 6, '2026-01-01T00:00:03Z', '2026-01-01T00:00:01Z') THEN
     RAISE EXCEPTION 'current transient failure was not requeued';
   END IF;
@@ -221,6 +227,12 @@ BEGIN
   END IF;
   c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:04Z', 60, '00000000-0000-0000-0000-000000000098');
   second_token := (c->>'fencing_token')::bigint;
+  BEGIN
+    PERFORM rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', second_token, 2, 2, 'transient', 6, '2026-01-01T00:00:07Z', '2026-01-01T00:00:05Z');
+    RAISE EXCEPTION 'exhausted retryable failure was requeued';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('retry decision does not match failure classification' IN SQLERRM) = 0 THEN RAISE; END IF;
+  END;
   IF second_token <= first_token OR NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', second_token, 2, 2, 'transient', 7, 'epoch', '2026-01-01T00:00:05Z') THEN
     RAISE EXCEPTION 'exhausted retry was not dead-lettered';
   END IF;
