@@ -344,12 +344,18 @@ python3 - "$T/escaped-string.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1]))["created_by"] == 'tool"name\nnext'
 PY
-printf 'lock-version = "1.0"\ncreated-by = "bad\\u0041"\n' > "$T/unsupported-unicode-escape.toml"
+printf 'lock-version = "1.0"\ncreated-by = "\\u00e9\\U0001F680"\n[[packages]]\nname = "x"\nversion = "1"\n' > "$T/unicode-escape.toml"
+"$ROOT/build/rh_cli" pylock --input "$T/unicode-escape.toml" --out "$T/unicode-escape.json" >/dev/null
+python3 - "$T/unicode-escape.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["created_by"] == "é🚀"
+PY
+printf 'lock-version = "1.0"\ncreated-by = "\\uD800"\n[[packages]]\nname = "x"\nversion = "1"\n' > "$T/invalid-unicode-escape.toml"
 set +e
-"$ROOT/build/rh_cli" pylock --input "$T/unsupported-unicode-escape.toml" --out "$T/unsupported-unicode-escape.json" >/dev/null 2>&1
+"$ROOT/build/rh_cli" pylock --input "$T/invalid-unicode-escape.toml" --out "$T/invalid-unicode-escape.json" >/dev/null 2>&1
 rc=$?
 set -e
-[[ "$rc" -eq 4 ]] || fail "unsupported Unicode escape must fail closed (got $rc)"
+[[ "$rc" -eq 4 ]] || fail "invalid Unicode scalar escape must fail closed (got $rc)"
 cat > "$T/missing-artifact-hash.toml" <<'EOF'
 lock-version = '1.0'
 created-by = 'uv'

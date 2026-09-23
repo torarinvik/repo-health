@@ -593,8 +593,8 @@ module Pylock:
                 i <- i + 1
             limit
 
-        # Parse one single-line TOML basic/literal string. Decode the standard
-        # one-byte escapes; Unicode escapes remain unsupported and fail closed.
+        # Parse one single-line TOML basic/literal string and decode TOML
+        # escapes to UTF-8; multiline strings remain unsupported and fail closed.
         def rh_pylock_string(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, value_s: mutable i64&, value_e: mutable i64&, next_out: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if start >= end or (data[start] != 34 and data[start] != 39)
             quote: mutable u8 = data[start]
@@ -611,6 +611,32 @@ module Pylock:
                     return false if quote != 34 or cursor + 1 >= end
                     cursor <- cursor + 1
                     escaped: u8 = data[cursor]
+                    if escaped == 117 or escaped == 85:
+                        digit_count: i64 = 4 if escaped == 117 else 8
+                        codepoint: mutable i64 = 0
+                        for digit_index in 0..<digit_count |digit_index, cursor, end, data, codepoint, digit_count|:
+                            return false if cursor + 1 + digit_index.usize() >= end
+                            digit: i64 = rh_pylock_integer_digit(data[cursor + 1 + digit_index.usize()])
+                            return false if digit < 0 or digit >= 16
+                            codepoint <- codepoint * 16 + digit
+                        return false if codepoint > 1114111 or (codepoint >= 55296 and codepoint <= 57343)
+                        cursor <- cursor + digit_count.usize()
+                        if codepoint <= 127:
+                            pool.push(codepoint.u8())
+                        elif codepoint <= 2047:
+                            pool.push((192 + codepoint / 64).u8())
+                            pool.push((128 + codepoint % 64).u8())
+                        elif codepoint <= 65535:
+                            pool.push((224 + codepoint / 4096).u8())
+                            pool.push((128 + (codepoint / 64) % 64).u8())
+                            pool.push((128 + codepoint % 64).u8())
+                        else:
+                            pool.push((240 + codepoint / 262144).u8())
+                            pool.push((128 + (codepoint / 4096) % 64).u8())
+                            pool.push((128 + (codepoint / 64) % 64).u8())
+                            pool.push((128 + codepoint % 64).u8())
+                        cursor <- cursor + 1
+                        continue
                     decoded: u8 =
                         if escaped == 34: 34
                         elif escaped == 92: 92
