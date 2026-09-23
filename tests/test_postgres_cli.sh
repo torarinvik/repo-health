@@ -34,6 +34,26 @@ run_ok begin_run committed begin-collection-run
 run_ok begin_run duplicate begin-collection-run
 run_ok enqueue committed enqueue-collection-job
 run_ok enqueue duplicate enqueue-collection-job
+run_ok enqueue_graph committed enqueue-graph-query-job
+run_ok enqueue_graph duplicate enqueue-graph-query-job
+python3 - "$T/enqueue-graph-query-job-committed.json" "$T/enqueue-graph-query-job-duplicate.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"enqueue_graph_query_job","status":"enqueued"}
+assert json.load(open(sys.argv[2])) == {"schema":"rh-postgres-result/1","operation":"enqueue_graph_query_job","status":"duplicate"}
+PY
+python3 - "$T/enqueue-graph-query-job-command.json" "$T/enqueue-graph-query-job-invalid.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+value["request"]["ids"] = [1, "malformed"]
+json.dump(value, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+set +e
+RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+  RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_CONNECT_MARK="$T/invalid-graph-connect" \
+  "$ROOT/build/rh_cli" postgres --input "$T/enqueue-graph-query-job-invalid.json" --out "$T/invalid-graph-result.json" >/dev/null 2>&1
+bad_graph_rc=$?
+set -e
+[[ "$bad_graph_rc" -eq 4 && ! -e "$T/invalid-graph-connect" ]] || fail "invalid graph requests must fail before database access"
 run_ok page committed page-commit
 run_ok page duplicate page-commit
 run_ok page_events committed page-events

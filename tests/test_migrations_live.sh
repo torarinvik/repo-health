@@ -141,7 +141,7 @@ BEGIN
   IF rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000099', 'public', request_value, 3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
     RAISE EXCEPTION 'exact graph query job replay was not absorbed';
   END IF;
-  SELECT * INTO c FROM rh_claim_next_job('graph-worker', '2026-01-01T00:00:01Z', 60, '00000000-0000-0000-0000-000000000099');
+  SELECT * INTO c FROM rh_claim_next_job('graph-worker', '2026-01-01T00:00:01Z', 60, '00000000-0000-0000-0000-000000000099', 'graph_query');
   IF c.job_id <> '00000000-0000-0000-0000-000000000099'::uuid OR c.fencing_token <> 1 THEN
     RAISE EXCEPTION 'graph query job was not claimed with a fence';
   END IF;

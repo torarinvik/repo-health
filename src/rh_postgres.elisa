@@ -322,6 +322,38 @@ module Postgres:
             params.push(created_at)
             Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_enqueue_collection_job($1::uuid, $2::uuid, $3::integer, $4::timestamptz, $5::timestamptz)", params)
 
+        # Persist a bounded graph query request. JSON remains a bound parameter,
+        # and exact job-ID replays are checked by PostgreSQL against the request.
+        def rh_pg_enqueue_graph_query_job(conninfo: cstr, job_id: cstr, visibility_scope: cstr, request_json: cstr, priority: i64, next_attempt_at: cstr, created_at: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if Base::rh_cstr_len_c(job_id) == 0 or Base::rh_cstr_len_c(job_id) > 64
+            return -1 if Base::rh_cstr_len_c(request_json) == 0 or Base::rh_cstr_len_c(request_json) > 1048576
+            return -1 if priority < -2147483648 or priority > 2147483647
+            priority_text: mutable darray[u8] = Postgres::rh_pg_decimal(priority)
+            priority_ptr: cstr = (&priority_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(job_id)
+            params.push(visibility_scope)
+            params.push(request_json)
+            params.push(priority_ptr)
+            params.push(next_attempt_at)
+            params.push(created_at)
+            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_enqueue_graph_query_job($1::uuid, $2::rh_visibility_scope, $3::jsonb, $4::integer, $5::timestamptz, $6::timestamptz)", params)
+
+        # Publish the result and complete the graph job in one fenced database
+        # transaction. A stale or expired worker receives false and cannot
+        # replace the current attempt's output.
+        def rh_pg_publish_graph_query_result(conninfo: cstr, job_id: cstr, fencing_token: i64, now: cstr, result_json: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if fencing_token <= 0 or Base::rh_cstr_len_c(job_id) == 0 or Base::rh_cstr_len_c(job_id) > 64
+            return -1 if Base::rh_cstr_len_c(result_json) == 0 or Base::rh_cstr_len_c(result_json) > 1048576
+            token_text: mutable darray[u8] = Postgres::rh_pg_decimal(fencing_token)
+            token_ptr: cstr = (&token_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(job_id)
+            params.push(token_ptr)
+            params.push(now)
+            params.push(result_json)
+            Postgres::rh_pg_boolean_query(conninfo, "SELECT public.rh_publish_graph_query_result($1::uuid, $2::bigint, $3::timestamptz, $4::jsonb)", params)
+
         # Commit one complete collection page through the migration's fenced,
         # idempotent transaction. Parameters use libpq's extended query protocol;
         # none are interpolated into SQL or passed through a shell. Empty optional
@@ -502,7 +534,7 @@ module Postgres:
     private:
         # Claim through SKIP LOCKED, optionally binding the claim to one
         # collection job. Returns 1 with its lease, 0 when no job is runnable.
-        def rh_pg_claim_job(conninfo: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, target_job_id: cstr, job_id_out: mutable darray[u8]&, fencing_token_out: mutable i64&, lease_expires_at_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_pg_claim_job(conninfo: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, target_job_id: cstr, target_job_kind: cstr, job_id_out: mutable darray[u8]&, fencing_token_out: mutable i64&, lease_expires_at_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             job_id_out <- []
             fencing_token_out[0] <- 0
             lease_expires_at_out <- []
@@ -548,8 +580,9 @@ module Postgres:
             params.push(now)
             params.push(lease_ptr)
             params.push(target_job_id)
+            params.push(target_job_kind)
             param_values: void& = (&params[0]).cast[void&] can Unsafe.PointerCast
-            query_result: void&? = exec_params(conn, "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job($1::text, $2::timestamptz, $3::integer, NULLIF($4, '')::uuid)", 4, null, param_values, null, null, 0)
+            query_result: void&? = exec_params(conn, "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job($1::text, $2::timestamptz, $3::integer, NULLIF($4, '')::uuid, NULLIF($5, '')::text)", 5, null, param_values, null, null, 0)
             result_code: mutable i64 = -1
             if query_result != null:
                 result: void& = query_result
@@ -590,10 +623,10 @@ module Postgres:
     public:
         # Claim the highest-priority runnable job in the queue.
         def rh_pg_claim_next_job(conninfo: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, job_id_out: mutable darray[u8]&, fencing_token_out: mutable i64&, lease_expires_at_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            Postgres::rh_pg_claim_job(conninfo, worker_id, now, lease_seconds, "", job_id_out, fencing_token_out, lease_expires_at_out)
+            Postgres::rh_pg_claim_job(conninfo, worker_id, now, lease_seconds, "", "", job_id_out, fencing_token_out, lease_expires_at_out)
 
         # Claim only the named queued/expired collection job. Other queued jobs
         # remain untouched when the requested job is not runnable.
         def rh_pg_claim_collection_job(conninfo: cstr, job_id: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, job_id_out: mutable darray[u8]&, fencing_token_out: mutable i64&, lease_expires_at_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if Base::rh_cstr_len_c(job_id) == 0 or Base::rh_cstr_len_c(job_id) > 64
-            Postgres::rh_pg_claim_job(conninfo, worker_id, now, lease_seconds, job_id, job_id_out, fencing_token_out, lease_expires_at_out)
+            Postgres::rh_pg_claim_job(conninfo, worker_id, now, lease_seconds, job_id, "collection", job_id_out, fencing_token_out, lease_expires_at_out)

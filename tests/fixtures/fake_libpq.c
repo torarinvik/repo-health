@@ -108,15 +108,20 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "succeeded", "succeeded", "complete", "{\"issues\":\"observed\"}", "ok", "",
         "2026-01-01T00:06:00Z"
     };
-    static const char *claim_values[4] = {
-        "worker-a", "2026-01-01T00:01:00Z", "60", ""
+    static const char *claim_values[5] = {
+        "worker-a", "2026-01-01T00:01:00Z", "60", "", ""
     };
-    static const char *claim_collection_values[4] = {
-        "worker-a", "2026-01-01T00:01:00Z", "60", "00000000-0000-0000-0000-00000000000a"
+    static const char *claim_collection_values[5] = {
+        "worker-a", "2026-01-01T00:01:00Z", "60", "00000000-0000-0000-0000-00000000000a", "collection"
     };
     static const char *enqueue_values[5] = {
         "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-00000000000a",
         "5", "2026-01-01T00:01:00Z", "2026-01-01T00:00:00Z"
+    };
+    static const char *enqueue_graph_values[6] = {
+        "00000000-0000-0000-0000-000000000099", "public",
+        "{\"schema\":\"rh-query-input/1\",\"kind\":\"downstream\",\"ids\":[1],\"graph\":{\"direction\":\"downstream\",\"subject\":1,\"nodes\":[1,2],\"edges\":[{\"from\":2,\"to\":1}],\"max_nodes\":20,\"max_depth\":5}}",
+        "3", "2026-01-01T00:01:00Z", "2026-01-01T00:00:00Z"
     };
     static const char *begin_run_values[13] = {
         "00000000-0000-0000-0000-000000000001", "github", "https://api.github.com",
@@ -132,8 +137,8 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "00000000-0000-0000-0000-000000000020", "00000000-0000-0000-0000-000000000021",
         "5", "2026-09-21T00:01:00Z", "2026-09-21T00:00:00Z"
     };
-    static const char *ingest_claim_values[4] = {
-        "integration-worker", "2026-09-21T00:02:00Z", "120", "00000000-0000-0000-0000-000000000021"
+    static const char *ingest_claim_values[5] = {
+        "integration-worker", "2026-09-21T00:02:00Z", "120", "00000000-0000-0000-0000-000000000021", "collection"
     };
     static const char *ingest_page_values[14] = {
         "00000000-0000-0000-0000-000000000020", "00000000-0000-0000-0000-000000000021", "1", "0",
@@ -194,16 +199,20 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         prefix = "SELECT public.rh_finish_collection_job(";
     } else if (operation != NULL && strcmp(operation, "claim") == 0) {
         expected = claim_values;
-        expected_count = 4;
+        expected_count = 5;
         prefix = "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job(";
     } else if (operation != NULL && strcmp(operation, "claim_collection") == 0) {
         expected = claim_collection_values;
-        expected_count = 4;
+        expected_count = 5;
         prefix = "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job(";
     } else if (operation != NULL && strcmp(operation, "enqueue") == 0) {
         expected = enqueue_values;
         expected_count = 5;
         prefix = "SELECT public.rh_enqueue_collection_job(";
+    } else if (operation != NULL && strcmp(operation, "enqueue_graph") == 0) {
+        expected = enqueue_graph_values;
+        expected_count = 6;
+        prefix = "SELECT public.rh_enqueue_graph_query_job(";
     } else if (operation != NULL && strcmp(operation, "page_events") == 0) {
         expected = page_events_values;
         expected_count = 14;
@@ -243,7 +252,7 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             prefix = "SELECT public.rh_enqueue_collection_job(";
         } else if (query != NULL && strncmp(query, "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job(", strlen("SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job(")) == 0) {
             expected = ingest_claim_values;
-            expected_count = 4;
+            expected_count = 5;
             prefix = "SELECT job_id::text, fencing_token::text, lease_expires_at::text FROM public.rh_claim_next_job(";
             claim_query = 1;
         } else if (query != NULL && strncmp(query, "SELECT public.rh_commit_collection_page_events(", strlen("SELECT public.rh_commit_collection_page_events(")) == 0) {

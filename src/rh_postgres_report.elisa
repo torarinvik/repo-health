@@ -5,6 +5,7 @@ include "./rh_json.elisa"
 include "./rh_postgres.elisa"
 include "./rh_sha256.elisa"
 include "./rh_store.elisa"
+include "./rh_query_report.elisa"
 
 module PostgresReport:
     private:
@@ -30,6 +31,18 @@ module PostgresReport:
             bytes: mutable darray[u8] = []
             while i < end |i: i64 = start, bytes, texts, end|:
                 bytes.push(texts[i.usize()])
+                i <- i + 1
+            bytes.push(0)
+            bytes
+
+        def rh_pg_report_raw_object(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, max_bytes: i64) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
+            bytes: mutable darray[u8] = []
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
+            return bytes if idx < 0 or nodes[idx.usize()].kind != Json::RH_JSON_OBJ
+            node: Json::RhJsonNode = nodes[idx.usize()]
+            return bytes if node.text_start < 0 or node.text_end <= node.text_start or node.text_end - node.text_start > max_bytes
+            while i < node.text_end |i: i64 = node.text_start, bytes, raw, node|:
+                bytes.push(raw[i.usize()])
                 i <- i + 1
             bytes.push(0)
             bytes
@@ -605,6 +618,57 @@ module PostgresReport:
                 enqueued: i64 = Postgres::rh_pg_enqueue_collection_job(conninfo, run_ptr, job_ptr, priority, next_ptr, created_ptr)
                 return -1 if enqueued < 0
                 Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"enqueue_collection_job\",\"status\":\"")
+                Base::rh_push_text(out, "enqueued" if enqueued == 1 else "duplicate")
+                Base::rh_push_text(out, "\"}")
+                return 0
+
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "enqueue_graph_query_job"):
+                job_s: mutable i64 = 0
+                job_e: mutable i64 = 0
+                visibility_s: mutable i64 = 0
+                visibility_e: mutable i64 = 0
+                next_s: mutable i64 = 0
+                next_e: mutable i64 = 0
+                created_s: mutable i64 = 0
+                created_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "job_id", &job_s, &job_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, job_s, job_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "visibility_scope", &visibility_s, &visibility_e, false) or not PostgresReport::rh_pg_report_visibility_ok(texts, visibility_s, visibility_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "next_attempt_at", &next_s, &next_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "created_at", &created_s, &created_e, false)
+                priority: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "priority", -2147483648, 2147483647, &priority)
+                request_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "request")
+                return -1 if request_idx < 0 or nodes[request_idx.usize()].kind != Json::RH_JSON_OBJ
+                request_schema_s: mutable i64 = 0
+                request_schema_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, request_idx, "schema", &request_schema_s, &request_schema_e, false)
+                return -1 if not PostgresReport::rh_pg_report_eq(texts, request_schema_s, request_schema_e, "rh-query-input/1")
+                request_kind_s: mutable i64 = 0
+                request_kind_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, request_idx, "kind", &request_kind_s, &request_kind_e, false)
+                return -1 if not PostgresReport::rh_pg_report_eq(texts, request_kind_s, request_kind_e, "upstream") and not PostgresReport::rh_pg_report_eq(texts, request_kind_s, request_kind_e, "downstream")
+                request_graph: i64 = Json::rh_json_obj_get(nodes, texts, request_idx, "graph")
+                return -1 if request_graph < 0 or nodes[request_graph.usize()].kind != Json::RH_JSON_OBJ
+                request_json: mutable darray[u8] = PostgresReport::rh_pg_report_raw_object(nodes, raw, texts, root, "request", 1048576)
+                return -1 if request_json.count < 2
+                request_validation: mutable darray[u8] = []
+                while i + 1 < request_json.count |i: usize = 0, request_json, request_validation|:
+                    request_validation.push(request_json[i])
+                    i <- i + 1
+                request_validation_out: mutable darray[u8] = []
+                return -1 if QueryReport::rh_query_report(request_validation, request_validation_out) != 0
+                job_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, job_s, job_e)
+                visibility: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, visibility_s, visibility_e)
+                next_attempt: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, next_s, next_e)
+                created_at: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, created_s, created_e)
+                job_ptr: cstr = (&job_id[0]).cast[cstr] can Unsafe.PointerCast
+                visibility_ptr: cstr = (&visibility[0]).cast[cstr] can Unsafe.PointerCast
+                request_ptr: cstr = (&request_json[0]).cast[cstr] can Unsafe.PointerCast
+                next_ptr: cstr = (&next_attempt[0]).cast[cstr] can Unsafe.PointerCast
+                created_ptr: cstr = (&created_at[0]).cast[cstr] can Unsafe.PointerCast
+                enqueued: i64 = Postgres::rh_pg_enqueue_graph_query_job(conninfo, job_ptr, visibility_ptr, request_ptr, priority, next_ptr, created_ptr)
+                return -1 if enqueued < 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"enqueue_graph_query_job\",\"status\":\"")
                 Base::rh_push_text(out, "enqueued" if enqueued == 1 else "duplicate")
                 Base::rh_push_text(out, "\"}")
                 return 0

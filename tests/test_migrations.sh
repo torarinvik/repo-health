@@ -80,7 +80,7 @@ assert "kind <> 'collection'" in clean and "kind = 'collection'" in clean
 assert "outcome = 'lease_expired'" in clean and "error_kind = 'lease_expired'" in clean
 assert "a.fencing_token < j.fencing_token" in clean
 assert "p_job_id IS NULL OR j.id = p_job_id" in clean
-assert "p_job_id IS NULL OR j.kind = 'collection'" in clean
+assert "p_job_kind IS NULL OR j.kind = p_job_kind" in clean
 assert "graph query request is malformed or exceeds the bounded payload limit" in clean
 assert "graph query result is malformed or exceeds the bounded payload limit" in clean
 assert "kind <> 'graph_query' OR p_state <> 'succeeded'" in clean
