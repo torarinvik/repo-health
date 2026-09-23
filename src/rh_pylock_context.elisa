@@ -60,6 +60,21 @@ module PylockContext:
                 child <- item.next_sibling
             spans.count.i64() == array.child_count
 
+        def rh_pylock_context_selection_declared(nodes: darray[Json::RhJsonNode]&, audit_texts: darray[u8]&, values: darray[u8]&, declared_idx: i64, selected: darray[Marker::RhMarkerSpan]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if declared_idx < 0 or nodes[declared_idx.usize()].kind != Json::RH_JSON_ARR
+            declared: Json::RhJsonNode = nodes[declared_idx.usize()]
+            for selection_index in 0..<selected.count |selection_index, nodes, audit_texts, values, declared|:
+                selection: Marker::RhMarkerSpan = selected[selection_index]
+                found: mutable bool = false
+                declared_child: mutable i64 = declared.first_child
+                while declared_child >= 0 and not found |declared_child, nodes, audit_texts, values, selection, found|:
+                    item: Json::RhJsonNode = nodes[declared_child.usize()]
+                    return false if item.kind != Json::RH_JSON_STR
+                    found <- Base::rh_bytes_equal_span(audit_texts, item.text_start, item.text_end, values, selection.start.usize(), selection.end.usize())
+                    declared_child <- item.next_sibling
+                return false if not found
+            true
+
         def rh_pylock_context_build(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, names: mutable darray[u8]&, values: mutable darray[u8]&, bindings: mutable darray[Marker::RhMarkerBinding]&, extras: mutable darray[Marker::RhMarkerSpan]&, groups: mutable darray[Marker::RhMarkerSpan]&, extra_s: mutable i64&, extra_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if not rh_pylock_context_schema(nodes, texts, root, "rh-pylock-evaluation-context/1")
             environment_idx: i64 = rh_pylock_context_member(nodes, texts, root, "environment")
@@ -182,7 +197,11 @@ module PylockContext:
             Sha256::rh_sha256(context_bytes, context_hash)
             environments_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, audit_root, "environments")
             packages_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, audit_root, "packages")
+            declared_extras_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, audit_root, "extras")
+            declared_groups_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, audit_root, "dependency_groups")
             return -1 if environments_idx < 0 or packages_idx < 0 or audit_nodes[environments_idx.usize()].kind != Json::RH_JSON_ARR or audit_nodes[packages_idx.usize()].kind != Json::RH_JSON_ARR
+            return -1 if not rh_pylock_context_selection_declared(audit_nodes, audit_texts, values, declared_extras_idx, extras)
+            return -1 if not rh_pylock_context_selection_declared(audit_nodes, audit_texts, values, declared_groups_idx, groups)
             environments: Json::RhJsonNode = audit_nodes[environments_idx.usize()]
             packages: Json::RhJsonNode = audit_nodes[packages_idx.usize()]
             return -1 if packages.child_count > RH_PYLOCK_CONTEXT_MAX_PACKAGES
