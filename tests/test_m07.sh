@@ -103,6 +103,7 @@ grep -Fxq -- "--disable" "$RH_TEST_CURL_LOG" || fail "curl user config was not d
 grep -Fxq -- "--noproxy" "$RH_TEST_CURL_LOG" || fail "curl proxy bypass missing"
 grep -Fxq -- "*" "$RH_TEST_CURL_LOG" || fail "curl proxy bypass does not cover all hosts"
 grep -Fxq -- "--resolve" "$RH_TEST_CURL_LOG" || fail "curl address pin missing"
+grep -Fxq -- "User-Agent: repo-health/0.2.0 (+https://github.com/torarinvik/repo-health/issues)" "$RH_TEST_CURL_LOG" || fail "curl contact identity missing"
 grep -Fxq -- "api.github.com:443:93.184.216.34,[2606:2800:220:1:248:1893:25c8:1946]" "$RH_TEST_CURL_LOG" || fail "full validated IPv4/IPv6 answer set was not pinned"
 ! grep -Fxq -- "--location" "$RH_TEST_CURL_LOG" || fail "curl redirects were enabled"
 ! grep -Fxq -- "-L" "$RH_TEST_CURL_LOG" || fail "curl redirects were enabled"

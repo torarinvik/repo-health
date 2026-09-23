@@ -777,7 +777,7 @@ Validate that the useful product can be operated without endangering its users, 
 
 **M07-11: Monitoring.** Instrument queue age, source freshness, error rates, parser rejection rates, cursor lag, evidence-object failures, policy unknown rates, and graph truncation rates. Separate service health from project health.
 
-**M07-12: Source-respect controls.** Apply per-host quotas, retry backoff, cancellation, contact identity, crawl exclusions where applicable, and a stop mechanism for a source operator's request.
+**M07-12: Source-respect controls.** Apply per-host quotas, retry backoff, cancellation, contact identity, crawl exclusions where applicable, and a stop mechanism for a source operator's request. The bounded HTTP transport identifies the project and its public issue/contact route in the User-Agent; it does not claim an individual operator contact. The current acquisition paths are fixed-route API lookups, not a recursive crawler, so robots/exclusion-list handling remains a prerequisite if crawling is added.
 
 **M07-13: Incident runbooks.** Define actions for credential leakage, corrupted evidence, incorrect identity mass merge, provider schema change, advisory mismatch, and publication of misleading findings.
 

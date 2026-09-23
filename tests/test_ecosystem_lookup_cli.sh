@@ -98,7 +98,7 @@ t = pathlib.Path(sys.argv[1])
 args = (t / "live-curl.args").read_text().splitlines()
 assert args[args.index("--resolve") + 1] == "packages.ecosyste.ms:443:93.184.216.34", args
 assert args[args.index("--max-redirs") + 1] == "0", args
-assert args[args.index("-H") + 1] == "User-Agent: repo-health-m02", args
+assert args[args.index("-H") + 1] == "User-Agent: repo-health/0.2.0 (+https://github.com/torarinvik/repo-health/issues)", args
 assert args[args.index("-H", args.index("-H") + 1) + 1] == "Accept: application/json", args
 assert "-L" not in args and not any(a.startswith("Authorization:") for a in args), args
 d = json.load(open(t / "live-result.json"))
