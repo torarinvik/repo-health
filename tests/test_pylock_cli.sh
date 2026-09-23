@@ -384,6 +384,19 @@ python3 - "$T/multiline-literal.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1]))["created_by"] == "tool\\literal\nsecond line"
 PY
+cat > "$T/multiline-continuation.toml" <<'EOF'
+lock-version = '1.0'
+created-by = """first \
+  second"""
+[[packages]]
+name = 'x'
+version = '1'
+EOF
+"$ROOT/build/rh_cli" pylock --input "$T/multiline-continuation.toml" --out "$T/multiline-continuation.json" >/dev/null
+python3 - "$T/multiline-continuation.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["created_by"] == "first second"
+PY
 cat > "$T/missing-artifact-hash.toml" <<'EOF'
 lock-version = '1.0'
 created-by = 'uv'
