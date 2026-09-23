@@ -43,8 +43,18 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["top_level_requires_python_state"] == "unknown", d
 assert all(x["requires_python_state"] == "unknown" for x in d["package_markers"]), d
+assert d["package_markers"][0]["marker_state"] == "true", d
+print("missing python_full_version unknown; omitted groups use default_groups")
+PY
+cat >"$TMP/empty-groups-context.json" <<'JSON'
+{"schema":"rh-pylock-evaluation-context/1","environment":{"python_version":"3.12","sys_platform":"linux"},"dependency_groups":[]}
+JSON
+"$ROOT/build/rh_cli" pylock-evaluate --audit "$TMP/audit.json" --context "$TMP/empty-groups-context.json" --out "$TMP/empty-groups.json" >/dev/null
+python3 - "$TMP/empty-groups.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
 assert d["package_markers"][0]["marker_state"] == "false", d
-print("missing python_full_version remains unknown")
+print("explicit empty dependency_groups overrides default_groups")
 PY
 python3 - "$TMP/audit.json" "$TMP/unconstrained-audit.json" <<'PY'
 import json, sys
