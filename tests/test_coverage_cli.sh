@@ -52,7 +52,21 @@ sed 's/"valid_start":null//' "$T/in.json" > "$T/missing-endpoint.json"
 "$ROOT/build/rh_cli" coverage --input "$T/missing-endpoint.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 sed 's/"schema":"rh-coverage-input\/1"/"schema":"rh-coverage-input\/2"/' "$T/in.json" > "$T/bad-schema.json"
 "$ROOT/build/rh_cli" coverage --input "$T/bad-schema.json" --out "$T/x" >/dev/null 2>&1; rc_schema=$?
+sed 's/,"collected_at":1700003700//' "$T/in.json" > "$T/missing-collected-at.json"
+"$ROOT/build/rh_cli" coverage --input "$T/missing-collected-at.json" --out "$T/x" >/dev/null 2>&1; rc_missing_collected=$?
+sed 's/"known_as_of":1700000100/"known_as_of":1700003701/' "$T/in.json" > "$T/future-known-at.json"
+"$ROOT/build/rh_cli" coverage --input "$T/future-known-at.json" --out "$T/x" >/dev/null 2>&1; rc_future_known=$?
 set -e
-[[ "$rc_state" -eq 4 && "$rc_missing" -eq 4 && "$rc_schema" -eq 4 ]] || fail "invalid coverage must exit 4 (got $rc_state/$rc_missing/$rc_schema)"
+[[ "$rc_state" -eq 4 && "$rc_missing" -eq 4 && "$rc_schema" -eq 4 && "$rc_missing_collected" -eq 4 && "$rc_future_known" -eq 4 ]] || fail "invalid coverage must exit 4 (got $rc_state/$rc_missing/$rc_schema/$rc_missing_collected/$rc_future_known)"
+
+printf '%s\n' '{"schema":"rh-coverage-input/1","source":"test","source_instance":"test/zero","collected_at":0,"capabilities":[{"capability":"events","state":"observed","reason":"captured at epoch zero","valid_start":0,"valid_end":null,"known_as_of":0}]}' > "$T/epoch-zero.json"
+"$ROOT/build/rh_cli" coverage --input "$T/epoch-zero.json" --out "$T/epoch-zero.out" >/dev/null || fail "epoch zero is a valid instant"
+python3 - "$T/epoch-zero.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"][0]["valid_start"] == 0, d
+assert d["capabilities"][0]["known_as_of"] == 0, d
+print("[coverage] epoch zero remains a valid instant")
+PY
 
 echo "test_coverage_cli OK"
