@@ -273,6 +273,30 @@ assert after["direct_count"] == 1, after
 print("[downstream] mapping known-time cutoff OK")
 PY
 
+echo "[downstream] accepted mappings remap dependency edges before traversal"
+cat > "$T/mapping-bridge.json" <<'JSON'
+{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"other","version":"1"},{"id":1,"name":"upstream","version":"1"},{"id":2,"name":"canonical","version":"1"},{"id":3,"name":"alias","version":"1"},{"id":4,"name":"focus","version":"1"}],"edges":[{"from":3,"to":4,"scope":"normal"},{"from":1,"to":2,"scope":"normal"}],"unresolved":[],"advisories":[]}
+JSON
+cat > "$T/mapping-bridge-assertion.json" <<'JSON'
+{"schema":"rh-mapping-input/1","revision":8,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"mirror","source":"operator","reviewed_at":100,"evidence":[]}]}
+JSON
+"$ROOT/build/rh_cli" downstream --graph "$T/mapping-bridge.json" --subject 4 --out "$T/map-bridge" --mapping "$T/mapping-bridge-assertion.json" --known-as-of 100 >/dev/null || fail "mapped bridge traversal"
+python3 - "$T/map-bridge/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["subject"] == 4, d
+assert {n["id"] for n in d["direct"]} == {2}, d["direct"]
+assert {n["id"] for n in d["transitive"]} == {1, 2}, d["transitive"]
+print("[downstream] graph traversal follows the canonical mapped bridge")
+PY
+"$ROOT/build/rh_cli" downstream --graph "$T/mapping-bridge.json" --subject 4 --out "$T/map-private" --mapping "$T/mapping-bridge-assertion.json" --known-as-of 100 --private 3 >/dev/null || fail "private mapped bridge traversal"
+python3 - "$T/map-private/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["direct_count"] == 0 and d["transitive_count"] == 0, d
+print("[downstream] private mapping members keep the canonical group private")
+PY
+
 echo "[downstream] cycle terminates and reports SCCs"
 "$ROOT/build/rh_cli" downstream --graph "$T/cycle.json" --subject 1 --out "$T/c" >/dev/null || fail "cycle run"
 python3 - "$T/c/downstream.json" <<'PY'
@@ -366,6 +390,9 @@ rc_platform=$?
 printf '%s' '{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"a","version":"1"}],"edges":[{"from":0,"to":0,"introduced":100,"removed":99}],"unresolved":[],"advisories":[]}' > "$T/bad-interval.json"
 "$ROOT/build/rh_cli" downstream --graph "$T/bad-interval.json" --subject 0 --out "$T/bad-interval" >/dev/null 2>&1
 rc_interval=$?
+printf '%s' '{"schema":"rh-mapping-input/1","revision":1,"assertions":[{"a":2,"b":99,"state":"accepted","relation":"mirror","source":"operator","reviewed_at":1,"evidence":[]}]}' > "$T/bad-mapping-endpoint.json"
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/bad-mapping-endpoint" --mapping "$T/bad-mapping-endpoint.json" >/dev/null 2>&1
+rc_mapping_endpoint=$?
 set -e
 [[ "$rc_subj" -eq 3 ]] || fail "missing subject must exit 3 (got $rc_subj)"
 [[ "$rc_bad" -eq 4 ]] || fail "malformed graph must exit 4 (got $rc_bad)"
@@ -378,5 +405,6 @@ set -e
 [[ "$rc_scope" -eq 2 ]] || fail "unknown scope filter must exit 2 (got $rc_scope)"
 [[ "$rc_platform" -eq 2 ]] || fail "invalid platform filter must exit 2 (got $rc_platform)"
 [[ "$rc_interval" -eq 4 ]] || fail "invalid edge validity interval must exit 4 (got $rc_interval)"
+[[ "$rc_mapping_endpoint" -eq 4 ]] || fail "out-of-graph accepted mapping endpoints must exit 4 (got $rc_mapping_endpoint)"
 
 echo "test_downstream_cli OK"

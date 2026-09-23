@@ -166,6 +166,10 @@ module DownstreamReport:
             node_count: i64 = name_idx.count.i64()
             if subject < 0 or subject >= node_count:
                 return -2
+            while i < asserts.count |i: usize = 0, asserts, node_count|:
+                assertion: Graph::RhAssertion = asserts[i]
+                return -1 if assertion.a < 0 or assertion.a >= node_count or assertion.b < 0 or assertion.b >= node_count
+                i <- i + 1
 
             # Edges.
             edges: mutable darray[Graph::RhGraphEdge] = []
@@ -199,12 +203,44 @@ module DownstreamReport:
                         edges.push(Graph::RhGraphEdge{from: frm, dst: dst, scope: scb, platform: edge_platform, introduced: introduced, removed: removed, first_seen: first_seen})
                 echild <- nodes[echild.usize()].next_sibling
 
+            # Apply reviewed identities before traversal. Every edge endpoint
+            # and query target uses the accepted representative; private members
+            # make the whole group private to avoid leaking their relationships.
+            roots: mutable darray[i64] = []
+            mapped_vis: mutable darray[u8] = []
+            while i < node_count |i: i64 = 0, node_count, roots, mapped_vis, vis, asserts|:
+                roots.push(Graph::rh_group_root(asserts, i))
+                mapped_vis.push(Graph::RH_VIS_PRIVATE)
+                i <- i + 1
+            while i < node_count |i: i64 = 0, node_count, roots, mapped_vis, vis|:
+                representative: i64 = roots[i.usize()]
+                if representative < 0 or representative >= node_count:
+                    return -1
+                if vis[i.usize()] == Graph::RH_VIS_PRIVATE:
+                    mapped_vis[representative.usize()] <- Graph::RH_VIS_PRIVATE
+                elif i == representative:
+                    mapped_vis[representative.usize()] <- Graph::RH_VIS_PUBLIC
+                i <- i + 1
+            mapped_edges: mutable darray[Graph::RhGraphEdge] = []
+            while i < edges.count |i: usize = 0, edges, roots, mapped_edges|:
+                edge: Graph::RhGraphEdge = edges[i]
+                return -1 if edge.from < 0 or edge.from >= node_count or edge.dst < 0 or edge.dst >= node_count
+                mapped_from: i64 = roots[edge.from.usize()]
+                mapped_dst: i64 = roots[edge.dst.usize()]
+                if mapped_from != mapped_dst:
+                    mapped_edges.push(Graph::RhGraphEdge{from: mapped_from, dst: mapped_dst, scope: edge.scope, platform: edge.platform, introduced: edge.introduced, removed: edge.removed, first_seen: edge.first_seen})
+                i <- i + 1
+            edges <- mapped_edges
+            vis <- mapped_vis
+            mapped_subject: i64 = roots[subject.usize()]
+            mapped_unavailable: i64 = roots[unavailable.usize()] if has_unavailable and unavailable >= 0 and unavailable < node_count else unavailable
+
             p: mutable Graph::RhProjection = Graph::rh_projection_make(1, scope_filter, platform_filter, valid_as_of, known_as_of, identity_revision, mapping_revision, true, max_nodes, max_depth)
             direct: mutable darray[i64] = []
-            dc: i64 = Graph::rh_direct_dependents(edges, vis, subject, &p, direct)
+            dc: i64 = Graph::rh_direct_dependents(edges, vis, mapped_subject, &p, direct)
             trans: mutable darray[i64] = []
             trunc: mutable i64 = 0
-            tc: i64 = Graph::rh_transitive_dependents(edges, vis, subject, &p, trans, &trunc)
+            tc: i64 = Graph::rh_transitive_dependents(edges, vis, mapped_subject, &p, trans, &trunc)
             scc: i64 = Graph::rh_scc_count(edges, vis, node_count, &p)
             cyclic_nodes: i64 = Graph::rh_cyclic_node_count(edges, vis, node_count, &p)
             visible_nodes: i64 =
@@ -217,7 +253,7 @@ module DownstreamReport:
                     i <- i + 1
             scen: mutable darray[i64] = []
             strunc: mutable i64 = 0
-            scount: i64 = Graph::rh_scenario_unavailable(edges, vis, subject, unavailable, &p, scen, &strunc) if has_unavailable else 0
+            scount: i64 = Graph::rh_scenario_unavailable(edges, vis, mapped_subject, mapped_unavailable, &p, scen, &strunc) if has_unavailable else 0
 
             # Mirror/family dedup: only ACCEPTED grouping assertions collapse nodes;
             # forks stay distinct. With no assertions this is an order-preserving
@@ -293,7 +329,7 @@ module DownstreamReport:
             Base::rh_push_text(out, "\",\"graph_source\":\"")
             Base::rh_push_cstr(out, graph_source)
             Base::rh_push_text(out, "\",\"subject\":")
-            Base::rh_push_decimal_i64(out, subject)
+            Base::rh_push_decimal_i64(out, mapped_subject)
             Base::rh_push_text(out, ",\"projection\":{\"edge_scope\":\"")
             if schema_version == 1:
                 Base::rh_push_text(out, "all")
@@ -389,7 +425,7 @@ module DownstreamReport:
                 Base::rh_push_text(out, "null")
             if has_unavailable:
                 Base::rh_push_text(out, ",\"scenario\":{\"unavailable\":")
-                Base::rh_push_decimal_i64(out, unavailable)
+                Base::rh_push_decimal_i64(out, mapped_unavailable)
                 Base::rh_push_text(out, ",\"affected\":[")
                 rh_ds_emit_list(out, scen2, nodes, texts, name_idx, ver_idx)
                 Base::rh_push_text(out, "],\"affected_count\":")

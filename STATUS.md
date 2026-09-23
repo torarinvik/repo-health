@@ -554,7 +554,12 @@ filters select `rh-downstream/2`. Its input edges preserve optional platform,
 introduction, removal, and first-seen times, and the output labels all four
 projection filters plus visible edge count. Temporal snapshot IDs are stable
 on replay and change when valid-time projection changes. R011/R012 are now
-implemented on the product path. No new metric keys are published.
+implemented on the product path. Accepted mappings now remap graph edge
+endpoints before traversal, so reverse walks pass through newly joined
+representatives; mapping endpoints outside the graph fail closed, and any
+private member makes its complete accepted group private. The bridge,
+time-cutoff, and private-group cases are covered in
+`tests/test_downstream_cli.sh`. No new metric keys are published.
 
 **M06 scope (in progress):** implemented — four-valued policy evaluator
 with an explicit lattice (deny > unknown > warn > allow) so unknown can
