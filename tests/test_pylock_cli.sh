@@ -328,7 +328,7 @@ assert coverage["unprojected_tables"] == 0, coverage
 print("[pylock] PEP 751 relationships and loss coverage OK")
 PY
 
-echo "[pylock] unsupported lock versions and string escapes fail closed"
+echo "[pylock] unsupported lock versions and escape handling"
 sed "s/lock-version = '1.0'/lock-version = '2.0'/" "$T/pylock.toml" > "$T/bad-version.toml"
 printf "lock-version = '1.0'\ncreated-by = \"bad\\\\escape\"\n[[packages]]\nname = 'x'\n" > "$T/bad-string.toml"
 for input in "$T/bad-version.toml" "$T/bad-string.toml"; do
@@ -338,6 +338,18 @@ for input in "$T/bad-version.toml" "$T/bad-string.toml"; do
   set -e
   [[ "$rc" -eq 4 ]] || fail "unsupported PEP 751 input must fail closed (got $rc)"
 done
+printf 'lock-version = "1.0"\ncreated-by = "tool\\\"name\\nnext"\n[[packages]]\nname = "x"\nversion = "1"\n' > "$T/escaped-string.toml"
+"$ROOT/build/rh_cli" pylock --input "$T/escaped-string.toml" --out "$T/escaped-string.json" >/dev/null
+python3 - "$T/escaped-string.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["created_by"] == 'tool"name\nnext'
+PY
+printf 'lock-version = "1.0"\ncreated-by = "bad\\u0041"\n' > "$T/unsupported-unicode-escape.toml"
+set +e
+"$ROOT/build/rh_cli" pylock --input "$T/unsupported-unicode-escape.toml" --out "$T/unsupported-unicode-escape.json" >/dev/null 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 4 ]] || fail "unsupported Unicode escape must fail closed (got $rc)"
 cat > "$T/missing-artifact-hash.toml" <<'EOF'
 lock-version = '1.0'
 created-by = 'uv'

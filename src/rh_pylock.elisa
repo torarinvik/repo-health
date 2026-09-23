@@ -593,24 +593,38 @@ module Pylock:
                 i <- i + 1
             limit
 
-        # Parse one single-line TOML basic/literal string. Escapes are rejected
-        # in this projection rather than decoded incorrectly.
+        # Parse one single-line TOML basic/literal string. Decode the standard
+        # one-byte escapes; Unicode escapes remain unsupported and fail closed.
         def rh_pylock_string(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, value_s: mutable i64&, value_e: mutable i64&, next_out: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if start >= end or (data[start] != 34 and data[start] != 39)
             quote: mutable u8 = data[start]
-            value_start: usize = start + 1
-            limit: mutable usize = end
-            close: usize =
-                while i < limit |i: usize = value_start, data, quote, limit| -> i:
-                    return false if data[i] == 10 or data[i] == 13
-                    return false if data[i] == 92
-                    break if data[i] == quote
-                    i <- i + 1
-            return false if close >= end
-            value_s[0] <- rh_pylock_copy(pool, data, value_start, close)
-            value_e[0] <- value_s[0] + (close - value_start).i64()
-            next_out[0] <- close + 1
-            true
+            cursor: mutable usize = start + 1
+            value_s[0] <- pool.count.i64()
+            while cursor < end |cursor, end, data, pool, quote|:
+                byte: u8 = data[cursor]
+                if byte == quote:
+                    value_e[0] <- pool.count.i64()
+                    next_out[0] <- cursor + 1
+                    return true
+                return false if byte == 10 or byte == 13
+                if byte == 92:
+                    return false if quote != 34 or cursor + 1 >= end
+                    cursor <- cursor + 1
+                    escaped: u8 = data[cursor]
+                    decoded: u8 =
+                        if escaped == 34: 34
+                        elif escaped == 92: 92
+                        elif escaped == 98: 8
+                        elif escaped == 116: 9
+                        elif escaped == 110: 10
+                        elif escaped == 102: 12
+                        elif escaped == 114: 13
+                        else: return false
+                    pool.push(decoded)
+                else:
+                    pool.push(byte)
+                cursor <- cursor + 1
+            false
 
         def rh_pylock_scalar_string(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, value_s: mutable i64&, value_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             next: mutable usize = 0
