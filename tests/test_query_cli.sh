@@ -81,6 +81,17 @@ assert up == {"direction": "upstream", "nodes": [3, 2], "truncated": True, "comp
 print("[query] graph direction + bounded truncation OK")
 PY
 
+cat > "$T/graph-up-fanout.json" <<'JSON'
+{"schema":"rh-query-input/1","kind":"upstream","ids":[1,2,3],"cursor":-1,"limit":10,"graph":{"direction":"upstream","subject":1,"nodes":[1,2,3],"edges":[{"from":1,"to":2},{"from":1,"to":3}],"max_nodes":1,"max_depth":8}}
+JSON
+"$ROOT/build/rh_cli" query --input "$T/graph-up-fanout.json" --out "$T/graph-up-fanout.out" >/dev/null || fail "graph upstream fanout budget"
+python3 - "$T/graph-up-fanout.out" <<'PY'
+import json, sys
+graph = json.load(open(sys.argv[1]))["graph"]
+assert graph == {"direction": "upstream", "nodes": [2], "truncated": True, "complete": False}, graph
+print("[query] upstream fanout respects node budget")
+PY
+
 echo "[query] determinism"
 "$ROOT/build/rh_cli" query --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "query output not deterministic"

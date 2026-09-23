@@ -122,6 +122,21 @@ module Graph:
                 i <- i + 1
             false
 
+        def rh_has_unseen_dependency(edges: darray[RhGraphEdge]&, vis: darray[u8]&, node: i64, subject: i64, p: RhProjection&, seen: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while e < edges.count |e: usize = 0, edges, vis, node, subject, p, seen|:
+                ed: RhGraphEdge = edges[e]
+                e <- e + 1
+                continue if ed.from != node or ed.dst == subject
+                continue if not rh_edge_visible(ed, p, vis)
+                return true if not rh_contains(seen, ed.dst)
+            false
+
+        def rh_pending_has_unseen_dependency(edges: darray[RhGraphEdge]&, vis: darray[u8]&, frontier: darray[i64]&, first: usize, subject: i64, p: RhProjection&, seen: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < frontier.count |i: usize = first, frontier, edges, vis, subject, p, seen|:
+                return true if rh_has_unseen_dependency(edges, vis, frontier[i], subject, p, seen)
+                i <- i + 1
+            false
+
         # Bounded transitive dependents over incoming edges. Repeated-scan BFS
         # with an explicit frontier/depth pair; budgets and depth limits set
         # truncated instead of silently stopping. Cycles terminate via `seen`.
@@ -174,22 +189,26 @@ module Graph:
             seen.push(subject)
             while fi < frontier.count |fi: usize = 0, frontier, depths, edges, vis, subject, p, out_nodes, seen, trunc_out|:
                 if out_nodes.count.i64() >= p.max_nodes:
-                    trunc_out[0] <- 1
+                    trunc_out[0] <- 1 if rh_pending_has_unseen_dependency(edges, vis, frontier, fi, subject, p, seen)
                     fi <- frontier.count
                     continue
                 cur: i64 = frontier[fi]
                 dep: i64 = depths[fi]
                 fi <- fi + 1
                 if dep >= p.max_depth:
-                    trunc_out[0] <- 1
+                    trunc_out[0] <- 1 if rh_has_unseen_dependency(edges, vis, cur, subject, p, seen)
                     continue
-                while e < edges.count |e: usize = 0, edges, vis, subject, p, out_nodes, seen, cur, dep, frontier, depths|:
+                while e < edges.count |e: usize = 0, edges, vis, subject, p, out_nodes, seen, cur, dep, frontier, depths, fi, trunc_out|:
                     ed: RhGraphEdge = edges[e]
                     e <- e + 1
                     continue if ed.from != cur
                     continue if ed.dst == subject
                     continue if not rh_edge_visible(ed, p, vis)
                     continue if rh_contains(seen, ed.dst)
+                    if out_nodes.count.i64() >= p.max_nodes:
+                        trunc_out[0] <- 1
+                        fi <- frontier.count
+                        break
                     seen.push(ed.dst)
                     out_nodes.push(ed.dst)
                     frontier.push(ed.dst)
