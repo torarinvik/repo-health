@@ -2,6 +2,7 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_sha256.elisa"
+include "./rh_store.elisa"
 
 module MaintenanceExposure:
     private:
@@ -57,7 +58,7 @@ module MaintenanceExposure:
     public:
         # Input binds one package graph to accepted, complete role-evidence
         # projections for selected nodes. Missing mappings remain unknown.
-        def rh_maintenance_exposure_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_maintenance_exposure_report(raw: darray[u8]&, evidence_root: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
             return -1 if raw.count.i64() > 8388608
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
@@ -120,6 +121,14 @@ module MaintenanceExposure:
                 evidence_s: mutable i64 = -1
                 evidence_e: mutable i64 = -1
                 return -1 if not Json::rh_json_str_span(nodes, evidence_ref, &evidence_s, &evidence_e) or not rh_exposure_hex(texts, evidence_s, evidence_e, 16)
+                evidence_name: mutable darray[u8] = []
+                while name_cursor < evidence_e |name_cursor: i64 = evidence_s, texts, evidence_name|:
+                    evidence_name.push(texts[name_cursor.usize()])
+                    name_cursor <- name_cursor + 1
+                evidence_name.push(0)
+                evidence_ptr: u8& = (&evidence_name[0]).cast[u8&] can Unsafe.PointerCast
+                evidence_ok: mutable i64 = 0
+                return -1 if Store::rh_store_blob_verify(evidence_root, evidence_ptr, &evidence_ok) != 0 or evidence_ok != 1
                 role_report: i64 = rh_exposure_member(nodes, texts, mapping, "role_evidence")
                 return -1 if role_report < 0 or nodes[role_report.usize()].kind != Json::RH_JSON_OBJ
                 role_schema: i64 = rh_exposure_member(nodes, texts, role_report, "schema")

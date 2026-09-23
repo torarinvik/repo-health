@@ -209,7 +209,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli postgres --input <rh-postgres-command/1> --out <file>  (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli drilldown --input <file> --out <file>")
     rh_cli_err("       rh_cli role-grain --input <file> --out <file>")
-    rh_cli_err("       rh_cli maintenance-exposure --input <rh-maintenance-exposure-input/1> --out <file>")
+    rh_cli_err("       rh_cli maintenance-exposure --input <rh-maintenance-exposure-input/1> --out <file> --evidence-store <store-root>")
     rh_cli_err("       rh_cli sign --key <keyfile> --subject <file> --sig <out>")
     rh_cli_err("       rh_cli verify --key <keyfile> --subject <file> --sig <file>")
     rh_cli_err("       rh_cli serve --root <report-dir> [--port N] [--max N]")
@@ -2850,8 +2850,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if rgi_idx < 0 or rgo_idx < 0
         return rh_do_role_grain(slots[rgi_idx], slots[rgo_idx])
     if Base::rh_streq(cmd, "maintenance-exposure"):
-        mei_idx, meo_idx =
-            while meq < argc |mei_idx: i64 = -1, meo_idx: i64 = -1, meq: i64 = 2, slots| -> mei_idx, meo_idx:
+        mei_idx, meo_idx, mee_idx =
+            while meq < argc |mei_idx: i64 = -1, meo_idx: i64 = -1, mee_idx: i64 = -1, meq: i64 = 2, slots| -> mei_idx, meo_idx, mee_idx:
                 exposure_arg: u8& = slots[meq].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(exposure_arg, "--input"):
                     if meq + 1 < argc:
@@ -2865,11 +2865,17 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         meo_idx <- meq
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(exposure_arg, "--evidence-store"):
+                    if meq + 1 < argc:
+                        meq <- meq + 1
+                        mee_idx <- meq
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 meq <- meq + 1
-        return rh_cli_usage(2) if mei_idx < 0 or meo_idx < 0
-        return rh_do_maintenance_exposure(slots[mei_idx], slots[meo_idx])
+        return rh_cli_usage(2) if mei_idx < 0 or meo_idx < 0 or mee_idx < 0
+        return rh_do_maintenance_exposure(slots[mei_idx], slots[meo_idx], slots[mee_idx])
     if Base::rh_streq(cmd, "sign") or Base::rh_streq(cmd, "verify"):
         key_idx, sub_idx, sig_idx =
             while m < argc |key_idx: i64 = -1, sub_idx: i64 = -1, sig_idx: i64 = -1, m: i64 = 2, slots| -> key_idx, sub_idx, sig_idx:
@@ -9220,8 +9226,8 @@ def rh_do_role_grain(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
     0
 
 # --- M05-08 accepted role-evidence overlap execution path. ---
-def rh_do_maintenance_exposure(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+def rh_do_maintenance_exposure(input_path: cstr, out_path: cstr, evidence_root: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path) or not Git::rh_arg_safe(evidence_root):
         rh_cli_err("rejected maintenance-exposure argument (allowlist)")
         return 3
     raw: mutable darray[u8] = []
@@ -9229,8 +9235,8 @@ def rh_do_maintenance_exposure(input_path: cstr, out_path: cstr) -> i32 can[Memo
         rh_cli_err("maintenance-exposure: cannot read --input")
         return 4
     body: mutable darray[u8] = []
-    if MaintenanceExposure::rh_maintenance_exposure_report(raw, body) != 0:
-        rh_cli_err("maintenance-exposure: malformed graph, accepted mapping, or role evidence (fail closed)")
+    if MaintenanceExposure::rh_maintenance_exposure_report(raw, evidence_root, body) != 0:
+        rh_cli_err("maintenance-exposure: malformed graph, accepted mapping, missing/corrupt evidence, or role evidence (fail closed)")
         return 4
     body.push(10)
     if not Base::rh_io_write(out_path, body):
