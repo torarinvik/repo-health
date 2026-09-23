@@ -823,6 +823,12 @@ path: `src/rh_release_feed_report.elisa` + `rh_cli release-feed --input
 and first-seen (known) time kept separate, a missing published time staying
 `null`, exact asset/digest counts, and `history_supported`/`identity_supported`
 both false (`tests/test_release_feed_cli.sh`).
+Each successful feed normalization also writes a digest-bound
+`rh-adapter-transformation-report/1` sidecar for exact input/output bytes and
+configuration. It reports release field preservation, metric derivation,
+unknown time fields, unsupported history/identity, and discarded locators;
+the configuration distinguishes captured input from URL acquisition without
+publishing the URL.
 An ecosystems lane begins with `src/rh_pep440.elisa`: Python/PEP 440
 version parsing and ordering, deliberately not SemVer — epoch, arbitrary
 release segments, a/b/rc pre-releases (with alpha/beta/c/pre aliases),

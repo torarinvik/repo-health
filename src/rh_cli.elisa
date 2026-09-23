@@ -82,6 +82,7 @@ include "./rh_archive.elisa"
 include "./rh_homebrew.elisa"
 include "./rh_arch.elisa"
 include "./rh_release_feed_report.elisa"
+include "./rh_release_feed_transformation.elisa"
 include "./rh_registry_meta_report.elisa"
 include "./rh_registry_meta_transformation.elisa"
 include "./rh_pep440_report.elisa"
@@ -8347,6 +8348,28 @@ def rh_do_release_feed(input_path: cstr, out_path: cstr, source_url: cstr, has_u
     opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
     if not Base::rh_io_write(opp, body):
         rh_cli_err("release-feed: cannot write --out")
+        return 4
+    produced: mutable darray[u8] = []
+    produced.extend(bytes_view(body))
+    configuration: mutable darray[u8] = []
+    Base::rh_push_text(configuration, "repo-health/release-feed/1:")
+    Base::rh_push_text(configuration, "url" if has_url else "captured-input")
+    configuration_sha: mutable darray[u8] = []
+    input_sha: mutable darray[u8] = []
+    output_sha: mutable darray[u8] = []
+    Sha256::rh_sha256(configuration, configuration_sha)
+    Sha256::rh_sha256(raw, input_sha)
+    Sha256::rh_sha256(produced, output_sha)
+    transformations: mutable darray[u8] = []
+    ReleaseFeedTransformation::rh_release_feed_transformation_report(configuration_sha, input_sha, output_sha, transformations)
+    transformations.push(10)
+    transformation_path: mutable darray[u8] = []
+    Base::rh_push_cstr(transformation_path, out_path)
+    Base::rh_push_text(transformation_path, ".transformations.json")
+    transformation_path.push(0)
+    transformation_ptr: cstr = (&transformation_path[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(transformation_ptr, transformations):
+        rh_cli_err("release-feed: cannot write transformation report")
         return 4
     rh_cli_out("release-feed: ok")
     0

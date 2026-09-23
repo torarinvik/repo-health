@@ -20,8 +20,8 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-release-feed-input/1","first_seen":1700000123,"releases":[{"tag":"v1.0.0","published_at":1700000000,"prerelease":false,"withdrawn":true,"supported_line":"1.x","support_end_at":1800000000,"support_end_issuer":"release-policy","release_notes_retrievable":true,"source_mapped":true,"assets":[{"name":"a.tgz","digest":"sha256:abc"},{"name":"b.tgz"}]},{"tag":"v1.1.0","prerelease":true,"supported_line":"1.x","release_notes_retrievable":false,"source_mapped":false}]}
 JSON
 "$ROOT/build/rh_cli" release-feed --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-release-feed-result/1", d
 r = d["releases"]
@@ -53,6 +53,13 @@ assert r[0] == {"tag": "v1.0.0", "published_at": 1700000000, "first_seen": 17000
 assert r[1]["published_at"] is None and r[1]["target"] is None and r[1]["prerelease"] is True and r[1]["withdrawn"] is None and r[1]["supported_line"] == "1.x" and r[1]["support_end_at"] is None and r[1]["support_end_issuer"] is None and r[1]["release_notes_retrievable"] is False and r[1]["source_mapped"] is False and r[1]["first_seen"] == 1700000123, r[1]
 assert d["source"] == {"history_supported": False, "identity_supported": False}, d["source"]
 assert "no history or author identity is derived" in d["note"], d["note"]
+tr = json.load(open(sys.argv[3]))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "release-feed", tr
+assert tr["output_schema"] == "rh-release-feed-result/1", tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/release-feed/1:captured-input").hexdigest(), tr
+assert {field["state"] for field in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 print("[release-feed] fields + validity/known time OK")
 PY
 
