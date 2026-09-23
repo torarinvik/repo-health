@@ -79,4 +79,11 @@ if "$ROOT/build/rh_cli" pylock-evaluate --audit "$TMP/audit.json" --context "$TM
   echo "undeclared dependency group unexpectedly accepted" >&2
   exit 1
 fi
+cat >"$TMP/duplicate-context.json" <<'JSON'
+{"schema":"rh-pylock-evaluation-context/1","environment":{"python_version":"3.12"},"environment":{"python_version":"3.11"}}
+JSON
+if "$ROOT/build/rh_cli" pylock-evaluate --audit "$TMP/audit.json" --context "$TMP/duplicate-context.json" --out "$TMP/bad.json" >/dev/null 2>&1; then
+  echo "duplicate evaluation context key unexpectedly accepted" >&2
+  exit 1
+fi
 echo "test_pylock_evaluate_cli OK"

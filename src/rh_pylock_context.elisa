@@ -16,6 +16,26 @@ module PylockContext:
         def rh_pylock_context_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_obj_get(nodes, texts, object, key)
 
+        def rh_pylock_context_root_valid(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ or nodes[root.usize()].child_count % 2 != 0
+            child: mutable i64 = nodes[root.usize()].first_child
+            pair_count: mutable i64 = 0
+            while child >= 0 |child, nodes, texts, root, pair_count|:
+                key: Json::RhJsonNode = nodes[child.usize()]
+                value_idx: i64 = key.next_sibling
+                return false if key.kind != Json::RH_JSON_STR or value_idx < 0
+                key_allowed: bool = Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "schema") or Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "environment") or Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "dependency_groups") or Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "extras") or Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "extra")
+                return false if not key_allowed
+                prior: mutable i64 = nodes[root.usize()].first_child
+                while prior >= 0 and prior != child |prior, child, nodes, texts, key|:
+                    prior_key: Json::RhJsonNode = nodes[prior.usize()]
+                    return false if Base::rh_bytes_equal_span(texts, key.text_start, key.text_end, texts, prior_key.text_start, prior_key.text_end)
+                    prior_value: i64 = prior_key.next_sibling
+                    prior <- nodes[prior_value.usize()].next_sibling if prior_value >= 0
+                child <- nodes[value_idx.usize()].next_sibling
+                pair_count <- pair_count + 1
+            pair_count == nodes[root.usize()].child_count / 2
+
         def rh_pylock_context_schema(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, expected: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             schema_idx: i64 = Json::rh_json_obj_get(nodes, texts, object, "schema")
             return false if schema_idx < 0 or nodes[schema_idx.usize()].kind != Json::RH_JSON_STR
@@ -80,7 +100,7 @@ module PylockContext:
             true
 
         def rh_pylock_context_build(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, audit_nodes: darray[Json::RhJsonNode]&, audit_texts: darray[u8]&, audit_root: i64, names: mutable darray[u8]&, values: mutable darray[u8]&, bindings: mutable darray[Marker::RhMarkerBinding]&, extras: mutable darray[Marker::RhMarkerSpan]&, groups: mutable darray[Marker::RhMarkerSpan]&, extra_s: mutable i64&, extra_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-            return false if not rh_pylock_context_schema(nodes, texts, root, "rh-pylock-evaluation-context/1")
+            return false if not rh_pylock_context_root_valid(nodes, texts, root) or not rh_pylock_context_schema(nodes, texts, root, "rh-pylock-evaluation-context/1")
             environment_idx: i64 = rh_pylock_context_member(nodes, texts, root, "environment")
             groups_idx: i64 = rh_pylock_context_member(nodes, texts, root, "dependency_groups")
             return false if environment_idx < 0 or nodes[environment_idx.usize()].kind != Json::RH_JSON_OBJ
