@@ -30,6 +30,7 @@ assert d["corrections"] == {"applied": 1, "retracted": 1, "invalidated_event_ids
 assert d["affiliations"][0] == {"actor": "alice", "organization": "old-org", "valid_from": 0, "valid_to": 2}, d
 assert d["affiliations"][1]["valid_to"] is None and d["affiliations"][2]["valid_from"] is None, d
 assert d["event_ledger"][0]["actor"] == "alice" and d["event_ledger"][0]["at"] == 1, d
+assert [(event["id"], event["actor"]) for event in d["current_event_ledger"]] == [("e1", "alice"), ("e2", "alice"), ("e4", "carol")], d
 assert "never rewrites an older event actor" in d["note"], d
 print("[role-grain] one-event grain + as-known/current correction fan-out OK")
 PY
