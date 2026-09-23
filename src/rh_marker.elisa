@@ -1,0 +1,355 @@
+# Bounded PEP 508 / PEP 751 environment-marker evaluator.
+# Unknown variables and unsupported syntax yield UNKNOWN; malformed syntax is
+# reported separately so callers cannot confuse unsupported with false.
+
+include "./rh_base.elisa"
+include "./rh_pep440.elisa"
+
+module Marker:
+    public:
+        struct RhMarkerSpan:
+            start: mutable i64
+            end: mutable i64
+
+        struct RhMarkerBinding:
+            name_s: mutable i64
+            name_e: mutable i64
+            value_s: mutable i64
+            value_e: mutable i64
+
+        struct RhMarkerContext:
+            names: darray[u8]
+            values: darray[u8]
+            bindings: darray[RhMarkerBinding]
+            extras: darray[RhMarkerSpan]
+            groups: darray[RhMarkerSpan]
+            extra_s: i64
+            extra_e: i64
+
+        struct RhMarkerEvaluation:
+            state: i64
+            valid: bool
+
+    private:
+        const RH_MARKER_FALSE: i64 = 0
+        const RH_MARKER_TRUE: i64 = 1
+        const RH_MARKER_UNKNOWN: i64 = -1
+
+        const RH_MARKER_VALUE: u8 = 0
+        const RH_MARKER_SCALAR: u8 = 1
+        const RH_MARKER_EXTRAS: u8 = 2
+        const RH_MARKER_GROUPS: u8 = 3
+        const RH_MARKER_MISSING: u8 = 4
+
+        const RH_MARKER_EQ: u8 = 1
+        const RH_MARKER_NE: u8 = 2
+        const RH_MARKER_LT: u8 = 3
+        const RH_MARKER_LE: u8 = 4
+        const RH_MARKER_GT: u8 = 5
+        const RH_MARKER_GE: u8 = 6
+        const RH_MARKER_COMPAT: u8 = 7
+        const RH_MARKER_ARBITRARY_EQ: u8 = 8
+        const RH_MARKER_IN: u8 = 9
+        const RH_MARKER_NOT_IN: u8 = 10
+        const RH_MARKER_INVALID: u8 = 5
+
+        struct RhMarkerOperand:
+            source: mutable u8
+            kind: mutable u8
+            start: mutable i64
+            end: mutable i64
+
+        def rh_marker_space(data: darray[u8]&, position: mutable i64&, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            while position[0] < end and (data[position[0].usize()] == 32 or data[position[0].usize()] == 9) |data, position, end|:
+                position[0] <- position[0] + 1
+
+        def rh_marker_name_char(byte: u8) -> bool:
+            return true if (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122)
+            return true if (byte >= 48 and byte <= 57) or byte == 95
+            false
+
+        def rh_marker_word(data: darray[u8]&, position: mutable i64&, end: i64, word: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_marker_space(data, position, end)
+            width: i64 = strlen(word).i64()
+            return false if position[0] + width > end
+            for offset in 0..<width |offset, data, position, word|:
+                return false if data[(position[0] + offset).usize()] != word[offset.usize()]
+            after: i64 = position[0] + width
+            return false if after < end and rh_marker_name_char(data[after.usize()])
+            return false if position[0] > 0 and after == position[0] + width and rh_marker_name_char(data[(position[0] - 1).usize()])
+            position[0] <- after
+            true
+
+        def rh_marker_operand(data: darray[u8]&, position: mutable i64&, end: i64, context: RhMarkerContext&) -> RhMarkerOperand can[Memory.Allocate, Abort.Panic]:
+            rh_marker_space(data, position, end)
+            return RhMarkerOperand{source: 0, kind: RH_MARKER_INVALID, start: -1, end: -1} if position[0] >= end
+            quote: u8 = data[position[0].usize()]
+            if quote == 34 or quote == 39:
+                start: i64 = position[0] + 1
+                cursor: mutable i64 = start
+                while cursor < end |cursor, data, quote|:
+                    return RhMarkerOperand{source: 0, kind: RH_MARKER_INVALID, start: -1, end: -1} if data[cursor.usize()] == 92
+                    break if data[cursor.usize()] == quote
+                    cursor <- cursor + 1
+                return RhMarkerOperand{source: 0, kind: RH_MARKER_INVALID, start: -1, end: -1} if cursor >= end
+                position[0] <- cursor + 1
+                return RhMarkerOperand{source: 0, kind: RH_MARKER_VALUE, start: start, end: cursor}
+            start: i64 = position[0]
+            return RhMarkerOperand{source: 0, kind: RH_MARKER_INVALID, start: -1, end: -1} if not rh_marker_name_char(data[start.usize()]) or (data[start.usize()] >= 48 and data[start.usize()] <= 57)
+            while position[0] < end and rh_marker_name_char(data[position[0].usize()]) |position, data|:
+                position[0] <- position[0] + 1
+            if Base::rh_bytes_equal_literal(data, start, position[0], "extras"):
+                return RhMarkerOperand{source: 0, kind: RH_MARKER_EXTRAS, start: start, end: position[0]}
+            if Base::rh_bytes_equal_literal(data, start, position[0], "dependency_groups"):
+                return RhMarkerOperand{source: 0, kind: RH_MARKER_GROUPS, start: start, end: position[0]}
+            if Base::rh_bytes_equal_literal(data, start, position[0], "extra"):
+                return RhMarkerOperand{source: 1, kind: RH_MARKER_MISSING, start: -1, end: -1} if context.extra_s < 0 or context.extra_e <= context.extra_s
+                return RhMarkerOperand{source: 1, kind: RH_MARKER_SCALAR, start: context.extra_s, end: context.extra_e}
+            for i in 0..<context.bindings.count |i, context, data, start, position|:
+                binding: RhMarkerBinding = context.bindings[i]
+                if Base::rh_bytes_equal_span(data, start, position[0], context.names, binding.name_s.usize(), binding.name_e.usize()):
+                    return RhMarkerOperand{source: 1, kind: RH_MARKER_SCALAR, start: binding.value_s, end: binding.value_e}
+            RhMarkerOperand{source: 1, kind: RH_MARKER_MISSING, start: -1, end: -1}
+
+        def rh_marker_operator(data: darray[u8]&, position: mutable i64&, end: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
+            rh_marker_space(data, position, end)
+            return 0 if position[0] >= end
+            start: i64 = position[0]
+            byte: u8 = data[start.usize()]
+            next: u8 = data[(start + 1).usize()] if start + 1 < end else 0
+            if byte == 61:
+                position[0] <- start + 1
+                return RH_MARKER_EQ if next != 61
+                position[0] <- start + 2
+                if position[0] < end and data[position[0].usize()] == 61:
+                    position[0] <- position[0] + 1
+                    return RH_MARKER_ARBITRARY_EQ
+                RH_MARKER_EQ
+            elif byte == 33 and next == 61:
+                position[0] <- start + 2
+                RH_MARKER_NE
+            elif byte == 60 or byte == 62:
+                position[0] <- start + 1
+                if next == 61:
+                    position[0] <- position[0] + 1
+                    return RH_MARKER_LE if byte == 60 else RH_MARKER_GE
+                return RH_MARKER_LT if byte == 60 else RH_MARKER_GT
+            elif byte == 126 and next == 61:
+                position[0] <- start + 2
+                RH_MARKER_COMPAT
+            else:
+                if rh_marker_word(data, position, end, "not"):
+                    rh_marker_space(data, position, end)
+                    return RH_MARKER_NOT_IN if rh_marker_word(data, position, end, "in") else 0
+                return RH_MARKER_IN if rh_marker_word(data, position, end, "in") else 0
+
+        def rh_marker_byte(data: darray[u8]&, operand: RhMarkerOperand, index: i64, values: darray[u8]&) -> u8:
+            return data[index.usize()] if operand.source == 0
+            values[index.usize()]
+
+        def rh_marker_equal(data: darray[u8]&, left: RhMarkerOperand, right: RhMarkerOperand, values: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if left.end - left.start != right.end - right.start
+            for offset in 0..<(left.end - left.start) |offset, data, left, right, values|:
+                return false if rh_marker_byte(data, left, left.start + offset, values) != rh_marker_byte(data, right, right.start + offset, values)
+            true
+
+        def rh_marker_text_compare(data: darray[u8]&, left: RhMarkerOperand, right: RhMarkerOperand, values: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            width: mutable i64 = left.end - left.start
+            width <- right.end - right.start if right.end - right.start < width
+            for offset in 0..<width |offset, data, left, right, values|:
+                a: u8 = rh_marker_byte(data, left, left.start + offset, values)
+                b: u8 = rh_marker_byte(data, right, right.start + offset, values)
+                return -1 if a < b
+                return 1 if a > b
+            return -1 if left.end - left.start < right.end - right.start
+            return 1 if left.end - left.start > right.end - right.start
+            0
+
+        def rh_marker_set_contains(data: darray[u8]&, value: RhMarkerOperand, set_kind: u8, context: RhMarkerContext&) -> bool can[Memory.Allocate, Abort.Panic]:
+            values: darray[RhMarkerSpan]& = context.extras if set_kind == RH_MARKER_EXTRAS else context.groups
+            for i in 0..<values.count |i, values, context, data, value|:
+                member: RhMarkerSpan = values[i]
+                candidate: RhMarkerOperand = RhMarkerOperand{source: 1, kind: RH_MARKER_VALUE, start: member.start, end: member.end}
+                return true if rh_marker_equal(data, value, candidate, context.values)
+            false
+
+        def rh_marker_contains(data: darray[u8]&, value: RhMarkerOperand, needle: RhMarkerOperand, context: RhMarkerContext&) -> bool can[Memory.Allocate, Abort.Panic]:
+            width: i64 = needle.end - needle.start
+            return true if width == 0
+            return false if value.end - value.start < width
+            for start in value.start ..< (value.end - width + 1) |start, value, needle, context, data|:
+                candidate: RhMarkerOperand = value
+                candidate.start <- start
+                candidate.end <- start + width
+                return true if rh_marker_equal(data, candidate, needle, context.values)
+            false
+
+        def rh_marker_compatible(data: darray[u8]&, left: RhMarkerOperand, right: RhMarkerOperand, context: RhMarkerContext&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            a: darray[u8]& = context.values if left.source == 1 else data
+            b: darray[u8]& = context.values if right.source == 1 else data
+            av: Pep440::RhPep440 = Pep440::rh_pep440_parse(a, left.start, left.end)
+            bv: Pep440::RhPep440 = Pep440::rh_pep440_parse(b, right.start, right.end)
+            return RH_MARKER_UNKNOWN if av.ok != 1 or bv.ok != 1 or bv.n < 2 or av.local >= 0 or bv.local >= 0
+            return RH_MARKER_FALSE if Pep440::rh_pep440_cmp(&av, &bv) < 0
+            prefix_count: i64 = bv.n - 1
+            while i < prefix_count |i: i64 = 0, av, bv|:
+                left_part: i64 = rh_marker_release_part(av, i)
+                right_part: i64 = rh_marker_release_part(bv, i)
+                return RH_MARKER_FALSE if left_part != right_part
+                i <- i + 1
+            RH_MARKER_TRUE
+
+        def rh_marker_release_part(version: Pep440::RhPep440&, part: i64) -> i64:
+            return version.r0 if part == 0
+            return version.r1 if part == 1
+            return version.r2 if part == 2
+            return version.r3 if part == 3
+            return version.r4 if part == 4
+            return version.r5 if part == 5
+            return version.r6 if part == 6
+            return version.r7 if part == 7
+            0
+
+        def rh_marker_compare(data: darray[u8]&, left: RhMarkerOperand, op: u8, right: RhMarkerOperand, context: RhMarkerContext&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return RH_MARKER_UNKNOWN if left.kind == RH_MARKER_MISSING or right.kind == RH_MARKER_MISSING
+            if op == RH_MARKER_IN or op == RH_MARKER_NOT_IN:
+                return RH_MARKER_UNKNOWN if left.kind == RH_MARKER_EXTRAS or left.kind == RH_MARKER_GROUPS
+                membership: mutable bool = false
+                if right.kind == RH_MARKER_EXTRAS or right.kind == RH_MARKER_GROUPS:
+                    membership <- rh_marker_set_contains(data, left, right.kind, context)
+                elif right.kind == RH_MARKER_SCALAR or right.kind == RH_MARKER_VALUE:
+                    membership <- rh_marker_contains(data, right, left, context)
+                else:
+                    return RH_MARKER_UNKNOWN
+                return RH_MARKER_TRUE if membership == (op == RH_MARKER_IN)
+                RH_MARKER_FALSE
+            return RH_MARKER_UNKNOWN if left.kind == RH_MARKER_EXTRAS or left.kind == RH_MARKER_GROUPS or right.kind == RH_MARKER_EXTRAS or right.kind == RH_MARKER_GROUPS
+            if op == RH_MARKER_COMPAT:
+                return rh_marker_compatible(data, left, right, context)
+            a: darray[u8]& = context.values if left.source == 1 else data
+            b: darray[u8]& = context.values if right.source == 1 else data
+            av: Pep440::RhPep440 = Pep440::rh_pep440_parse(a, left.start, left.end)
+            bv: Pep440::RhPep440 = Pep440::rh_pep440_parse(b, right.start, right.end)
+            return RH_MARKER_UNKNOWN if av.ok == 1 and bv.ok == 1 and (av.local >= 0 or bv.local >= 0) and op != RH_MARKER_ARBITRARY_EQ
+            order: i64 = Pep440::rh_pep440_cmp(&av, &bv) if av.ok == 1 and bv.ok == 1 else rh_marker_text_compare(data, left, right, context.values)
+            equal: bool = order == 0 if av.ok == 1 and bv.ok == 1 else rh_marker_equal(data, left, right, context.values)
+            return RH_MARKER_TRUE if op == RH_MARKER_EQ and equal
+            return RH_MARKER_FALSE if op == RH_MARKER_EQ
+            return RH_MARKER_TRUE if op == RH_MARKER_NE and not equal
+            return RH_MARKER_FALSE if op == RH_MARKER_NE
+            return RH_MARKER_TRUE if op == RH_MARKER_ARBITRARY_EQ and rh_marker_equal(data, left, right, context.values)
+            return RH_MARKER_FALSE if op == RH_MARKER_ARBITRARY_EQ
+            return RH_MARKER_TRUE if op == RH_MARKER_LT and order < 0
+            return RH_MARKER_TRUE if op == RH_MARKER_LE and order <= 0
+            return RH_MARKER_TRUE if op == RH_MARKER_GT and order > 0
+            return RH_MARKER_TRUE if op == RH_MARKER_GE and order >= 0
+            RH_MARKER_FALSE
+
+        const RH_MARKER_AND: u8 = 20
+        const RH_MARKER_OR: u8 = 21
+        const RH_MARKER_PAREN: u8 = 22
+
+        def rh_marker_apply(operator: u8, left: i64, right: i64) -> i64:
+            if operator == RH_MARKER_AND:
+                return RH_MARKER_FALSE if left == RH_MARKER_FALSE or right == RH_MARKER_FALSE
+                return RH_MARKER_TRUE if left == RH_MARKER_TRUE and right == RH_MARKER_TRUE
+                RH_MARKER_UNKNOWN
+            return RH_MARKER_TRUE if left == RH_MARKER_TRUE or right == RH_MARKER_TRUE
+            return RH_MARKER_FALSE if left == RH_MARKER_FALSE and right == RH_MARKER_FALSE
+            RH_MARKER_UNKNOWN
+
+        def rh_marker_reduce(values: mutable darray[i64]&, value_count: mutable i64&, operators: mutable darray[u8]&, operator_count: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if operator_count[0] <= 0 or value_count[0] < 2
+            operator: u8 = operators[(operator_count[0] - 1).usize()]
+            return false if operator != RH_MARKER_AND and operator != RH_MARKER_OR
+            left: i64 = values[(value_count[0] - 2).usize()]
+            right: i64 = values[(value_count[0] - 1).usize()]
+            value_count[0] <- value_count[0] - 1
+            values[(value_count[0] - 1).usize()] <- rh_marker_apply(operator, left, right)
+            operator_count[0] <- operator_count[0] - 1
+            true
+
+    public:
+        const RH_MARKER_RESULT_FALSE: i64 = 0
+        const RH_MARKER_RESULT_TRUE: i64 = 1
+        const RH_MARKER_RESULT_UNKNOWN: i64 = -1
+
+        # Evaluate one PEP 508 marker expression. A malformed expression sets
+        # valid_out=false; a well-formed expression with missing context yields
+        # UNKNOWN. Only marker comparison semantics are evaluated here: no
+        # package is installed and no dependency graph is synthesized.
+        def rh_marker_evaluate(data: darray[u8]&, start: i64, end: i64, context: RhMarkerContext&) -> RhMarkerEvaluation can[Memory.Allocate, Abort.Panic]:
+            return RhMarkerEvaluation{state: RH_MARKER_RESULT_UNKNOWN, valid: false} if start < 0 or end <= start or end > data.count.i64() or end - start > 65536
+            position: mutable i64 = start
+            values: mutable darray[i64] = []
+            operators: mutable darray[u8] = []
+            value_count: mutable i64 = 0
+            operator_count: mutable i64 = 0
+            expecting_value: mutable bool = true
+            valid: mutable bool = true
+            while position < end and valid |position, end, context, values, operators, value_count, operator_count, expecting_value, valid|:
+                rh_marker_space(data, &position, end)
+                break if position >= end
+                if expecting_value:
+                    if data[position.usize()] == 40:
+                        if operator_count >= 4096:
+                            valid <- false
+                        else:
+                            operators.push(RH_MARKER_PAREN)
+                            operator_count <- operator_count + 1
+                            position <- position + 1
+                    else:
+                        left: RhMarkerOperand = rh_marker_operand(data, &position, end, context)
+                        op: u8 = rh_marker_operator(data, &position, end)
+                        right: RhMarkerOperand = rh_marker_operand(data, &position, end, context)
+                        valid <- left.kind != RH_MARKER_INVALID and op != 0 and right.kind != RH_MARKER_INVALID
+                        if valid:
+                            if value_count >= 4096:
+                                valid <- false
+                            else:
+                                values.push(rh_marker_compare(data, left, op, right, context))
+                                value_count <- value_count + 1
+                                expecting_value <- false
+                else:
+                    saved_position: i64 = position
+                    is_and: bool = rh_marker_word(data, &position, end, "and")
+                    is_or: mutable bool = false
+                    if not is_and:
+                        is_or <- rh_marker_word(data, &position, end, "or")
+                    if is_and or is_or:
+                        operator: u8 = RH_MARKER_AND if is_and else RH_MARKER_OR
+                        precedence: i64 = 2 if is_and else 1
+                        while operator_count > 0 and operators[(operator_count - 1).usize()] != RH_MARKER_PAREN and valid |operator_count, operators, precedence, values, value_count, valid|:
+                            top: u8 = operators[(operator_count - 1).usize()]
+                            top_precedence: i64 = 2 if top == RH_MARKER_AND else 1
+                            break if top_precedence < precedence
+                            valid <- rh_marker_reduce(values, &value_count, operators, &operator_count)
+                        if valid:
+                            if operator_count >= 4096:
+                                valid <- false
+                            else:
+                                operators.push(operator)
+                                operator_count <- operator_count + 1
+                                expecting_value <- true
+                    else:
+                        position <- saved_position
+                        rh_marker_space(data, &position, end)
+                        if position < end and data[position.usize()] == 41:
+                            found_parenthesis: mutable bool = false
+                            while operator_count > 0 and valid |operator_count, operators, values, value_count, valid, found_parenthesis|:
+                                if operators[(operator_count - 1).usize()] == RH_MARKER_PAREN:
+                                    operator_count <- operator_count - 1
+                                    found_parenthesis <- true
+                                    break
+                                valid <- rh_marker_reduce(values, &value_count, operators, &operator_count)
+                            valid <- false if not found_parenthesis
+                            position <- position + 1 if valid
+                        else:
+                            valid <- false if position < end
+            rh_marker_space(data, &position, end)
+            valid <- false if expecting_value
+            while operator_count > 0 and valid |operator_count, operators, values, value_count, valid|:
+                valid <- rh_marker_reduce(values, &value_count, operators, &operator_count)
+            state: i64 = values[0] if value_count == 1 and valid and position == end else RH_MARKER_RESULT_UNKNOWN
+            valid <- false if value_count != 1 or position != end
+            RhMarkerEvaluation{state: state, valid: valid}

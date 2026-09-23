@@ -10,6 +10,7 @@ include "./rh_vcs_fossil.elisa"
 include "./rh_patch.elisa"
 include "./rh_release_feed.elisa"
 include "./rh_pep440.elisa"
+include "./rh_marker.elisa"
 
 def t8check(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     return if cond
@@ -416,6 +417,66 @@ def check_pep440_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Pa
         trial <- trial + 1
     return
 
+def marker_value(pool: mutable darray[u8]&, value: u8&) -> Marker::RhMarkerSpan can[Memory.Allocate, Abort.Panic]:
+    start: i64 = pool.count.i64()
+    Base::rh_push_text(pool, value)
+    Marker::RhMarkerSpan{start: start, end: pool.count.i64()}
+
+def check_pep508_markers(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    names: mutable darray[u8] = []
+    values: mutable darray[u8] = []
+    bindings: mutable darray[Marker::RhMarkerBinding] = []
+    extras: mutable darray[Marker::RhMarkerSpan] = []
+    groups: mutable darray[Marker::RhMarkerSpan] = []
+    python_name: i64 = names.count.i64()
+    Base::rh_push_text(names, "python_version")
+    python_name_end: i64 = names.count.i64()
+    python_value: Marker::RhMarkerSpan = marker_value(values, "3.12")
+    bindings.push(Marker::RhMarkerBinding{name_s: python_name, name_e: python_name_end, value_s: python_value.start, value_e: python_value.end})
+    platform_name: i64 = names.count.i64()
+    Base::rh_push_text(names, "sys_platform")
+    platform_name_end: i64 = names.count.i64()
+    platform_value: Marker::RhMarkerSpan = marker_value(values, "win32")
+    bindings.push(Marker::RhMarkerBinding{name_s: platform_name, name_e: platform_name_end, value_s: platform_value.start, value_e: platform_value.end})
+    extra_value: Marker::RhMarkerSpan = marker_value(values, "performance")
+    extras.push(extra_value)
+    group_value: Marker::RhMarkerSpan = marker_value(values, "lint")
+    groups.push(group_value)
+    context: Marker::RhMarkerContext = Marker::RhMarkerContext{names: names, values: values, bindings: bindings, extras: extras, groups: groups, extra_s: extra_value.start, extra_e: extra_value.end}
+    expression: mutable darray[u8] = []
+    Base::rh_push_text(expression, "python_version >= '3.10' and (sys_platform == 'win32' or sys_platform == 'linux')")
+    evaluation: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(expression, 0, expression.count.i64(), context)
+    t8check(evaluation.valid and evaluation.state == Marker::RH_MARKER_RESULT_TRUE, "marker-and-or-parentheses", fails)
+    compatible: mutable darray[u8] = []
+    Base::rh_push_text(compatible, "python_version ~= '3.10'")
+    evaluation2: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(compatible, 0, compatible.count.i64(), context)
+    t8check(evaluation2.valid and evaluation2.state == Marker::RH_MARKER_RESULT_TRUE, "marker-compatible-release", fails)
+    membership: mutable darray[u8] = []
+    Base::rh_push_text(membership, "'performance' in extras and 'lint' in dependency_groups")
+    evaluation3: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(membership, 0, membership.count.i64(), context)
+    t8check(evaluation3.valid and evaluation3.state == Marker::RH_MARKER_RESULT_TRUE, "marker-extra-and-group-membership", fails)
+    unknown: mutable darray[u8] = []
+    Base::rh_push_text(unknown, "platform_machine == 'x86_64'")
+    evaluation4: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(unknown, 0, unknown.count.i64(), context)
+    t8check(evaluation4.valid and evaluation4.state == Marker::RH_MARKER_RESULT_UNKNOWN, "marker-missing-context-is-unknown", fails)
+    malformed: mutable darray[u8] = []
+    Base::rh_push_text(malformed, "python_version >= '3.10' and (")
+    evaluation5: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(malformed, 0, malformed.count.i64(), context)
+    t8check(not evaluation5.valid, "marker-malformed-is-distinct", fails)
+    unknown_and_false: mutable darray[u8] = []
+    Base::rh_push_text(unknown_and_false, "platform_machine == 'x86_64' and sys_platform == 'linux'")
+    evaluation6: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(unknown_and_false, 0, unknown_and_false.count.i64(), context)
+    t8check(evaluation6.valid and evaluation6.state == Marker::RH_MARKER_RESULT_FALSE, "marker-unknown-and-false", fails)
+    unknown_or_true: mutable darray[u8] = []
+    Base::rh_push_text(unknown_or_true, "platform_machine == 'x86_64' or sys_platform == 'win32'")
+    evaluation7: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(unknown_or_true, 0, unknown_or_true.count.i64(), context)
+    t8check(evaluation7.valid and evaluation7.state == Marker::RH_MARKER_RESULT_TRUE, "marker-unknown-or-true", fails)
+    not_in: mutable darray[u8] = []
+    Base::rh_push_text(not_in, "'docs' not in extras")
+    evaluation8: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(not_in, 0, not_in.count.i64(), context)
+    t8check(evaluation8.valid and evaluation8.state == Marker::RH_MARKER_RESULT_TRUE, "marker-not-in-set", fails)
+    return
+
 def check_trailers(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     body: mutable darray[u8] = []
     Base::rh_push_text(body, "Add zero handling\n\nSigned-off-by: Dev One\nReviewed-by: Reviewer A <a@example.org>\nAcked-by: Reviewer B <b@example.org>\nFixes: deadbeef\nLink: https://example.invalid/1\n\nnot a trailer line\n")
@@ -693,6 +754,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_release_feed(&fails)
     check_pep440(&fails)
     check_pep440_fuzz(&fails)
+    check_pep508_markers(&fails)
     check_hg_reject(&fails)
     check_hg_bounds(&fails)
     check_hg_fuzz(&fails)
