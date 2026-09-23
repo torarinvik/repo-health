@@ -76,6 +76,28 @@ assert len(d["notices"]) == 2, d
 print("[correct] publication notice artifact OK")
 PY
 
+echo "[correct] correction notices become destination-scoped notify input"
+cat > "$T/notify-template.json" <<'JSON'
+{"schema":"rh-notify-input/3","cooldown_secs":300,"destinations":[{"id":10,"target":"subscriber","authorized":true,"correction_notices":true},{"id":11,"target":"subscriber","authorized":true}]}
+JSON
+"$ROOT/build/rh_cli" correct --corrections "$T/corr.json" --out "$T/notified" --notify-template "$T/notify-template.json" --notify-now 1700000500 >/dev/null || fail "correction notification input generation"
+python3 - "$T/notified/corrections-notify-input.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-notify-input/3", d
+assert [(e["rule_id"], e["subject_id"], e["destination_id"], e["now"]) for e in d["events"]] == [(1, 7, 10, 1700000500), (2, 7, 10, 1700000500)], d
+assert all(len(e["artifact_digest"]) == 32 for e in d["events"]), d
+print("[correct] generated notification events for opted-in destination only")
+PY
+"$ROOT/build/rh_cli" notify --input "$T/notified/corrections-notify-input.json" --out "$T/notified/notify-result.json" >/dev/null || fail "correction notification decisions"
+python3 - "$T/notified/notify-result.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert [x["decision"] for x in d["decisions"]] == ["new", "new"], d
+assert [x["destination_id"] for x in d["decisions"]] == [10, 10], d
+print("[correct] generated events pass through standard notification decision path")
+PY
+
 echo "[correct] a rejected-only document changes nothing"
 cat > "$T/reject.json" <<'JSON'
 {"schema":"rh-corrections/1","current_revision":5,"corrections":[{"kind":"identity","target_id":1,"state":"rejected","reviewed_by":"reviewer-b","reviewed_at":1700000100,"evidence_ref":"evidence-rejected"}],"derived":[{"subject_id":1,"revision_used":5,"superseded":false}]}

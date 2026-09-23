@@ -151,7 +151,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--snapshot-root <dir>] [--identity-revision <n>] [--mapping <file>] [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
     rh_cli_err("            [--max-nodes N] [--max-depth D] [--scope all|normal|dev|optional|peer] [--platform N] [--valid-as-of EPOCH] [--known-as-of EPOCH]")
     rh_cli_err("       rh_cli policy --policy <file> --input <file> --out <dir> [--state <file> | --state-store <dir>]")
-    rh_cli_err("       rh_cli correct --corrections <file> --out <dir> [--state <file> | --state-store <dir>] [--evidence-store <dir>]")
+    rh_cli_err("       rh_cli correct --corrections <file> --out <dir> [--state <file> | --state-store <dir>] [--evidence-store <dir>] [--notify-template <file> --notify-now <unix-seconds>]")
     rh_cli_err("       rh_cli store put --root <dir> --file <path> | store verify --root <dir> --name <hex>")
     rh_cli_err("       rh_cli store lease --root <dir> --job <name> --input <file> --out <file>")
     rh_cli_err("       rh_cli ops backup --root <dir> --manifest <path> --names <file>")
@@ -1371,8 +1371,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[p_idx], false, slots[pt_idx], true) if pt_idx >= 0
         return rh_do_policy_state(slots[p_idx], slots[i_idx], slots[po_idx], slots[p_idx], false, "", false)
     if Base::rh_streq(cmd, "correct"):
-        cr_idx, co_idx2, cs_idx, ct_idx, ce_idx =
-            while cw < argc |cr_idx: i64 = -1, co_idx2: i64 = -1, cs_idx: i64 = -1, ct_idx: i64 = -1, ce_idx: i64 = -1, cw: i64 = 2, slots| -> cr_idx, co_idx2, cs_idx, ct_idx, ce_idx:
+        cr_idx, co_idx2, cs_idx, ct_idx, ce_idx, cn_idx, cnow_idx =
+            while cw < argc |cr_idx: i64 = -1, co_idx2: i64 = -1, cs_idx: i64 = -1, ct_idx: i64 = -1, ce_idx: i64 = -1, cn_idx: i64 = -1, cnow_idx: i64 = -1, cw: i64 = 2, slots| -> cr_idx, co_idx2, cs_idx, ct_idx, ce_idx, cn_idx, cnow_idx:
                 a10: u8& = slots[cw].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(a10, "--corrections"):
                     if cw + 1 < argc:
@@ -1404,17 +1404,35 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         ce_idx <- cw
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(a10, "--notify-template"):
+                    if cw + 1 < argc:
+                        cw <- cw + 1
+                        cn_idx <- cw
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(a10, "--notify-now"):
+                    if cw + 1 < argc:
+                        cw <- cw + 1
+                        cnow_idx <- cw
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 cw <- cw + 1
         return rh_cli_usage(2) if cr_idx < 0 or co_idx2 < 0
         return rh_cli_usage(2) if cs_idx >= 0 and ct_idx >= 0
+        return rh_cli_usage(2) if (cn_idx >= 0) != (cnow_idx >= 0)
+        notify_now: mutable i64 = 0
+        if cnow_idx >= 0:
+            notify_now_ok: mutable i64 = 0
+            notify_now <- rh_parse_cstr_int(slots[cnow_idx], &notify_now_ok)
+            return rh_cli_usage(2) if notify_now_ok == 0 or notify_now < 0
         evidence_root: mutable cstr = ""
         if ce_idx >= 0:
             evidence_root <- slots[ce_idx]
-        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cs_idx], true, "", false, evidence_root, ce_idx >= 0) if cs_idx >= 0
-        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false, slots[ct_idx], true, evidence_root, ce_idx >= 0) if ct_idx >= 0
-        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false, "", false, evidence_root, ce_idx >= 0)
+        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cs_idx], true, "", false, evidence_root, ce_idx >= 0, slots[cn_idx], cn_idx >= 0, notify_now) if cs_idx >= 0
+        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false, slots[ct_idx], true, evidence_root, ce_idx >= 0, slots[cn_idx], cn_idx >= 0, notify_now) if ct_idx >= 0
+        return rh_do_correct_state(slots[cr_idx], slots[co_idx2], slots[cr_idx], false, "", false, evidence_root, ce_idx >= 0, slots[cn_idx], cn_idx >= 0, notify_now)
     if Base::rh_streq(cmd, "store"):
         return rh_cli_usage(2) if argc < 3
         sub11: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
@@ -6098,7 +6116,7 @@ def rh_correct_notice_document(result: darray[u8]&, out: mutable darray[u8]&) ->
     Base::rh_push_text(out, "}")
     0
 
-def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has_state: bool, state_root: cstr, has_state_root: bool, evidence_root: cstr, has_evidence_root: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has_state: bool, state_root: cstr, has_state_root: bool, evidence_root: cstr, has_evidence_root: bool, notify_template_path: cstr, has_notify_template: bool, notify_now: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(corrections_path) or not Git::rh_arg_safe(out):
         rh_cli_err("rejected correct argument (allowlist)")
         return 3
@@ -6113,6 +6131,9 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
         return 3
     if has_evidence_root and not Git::rh_arg_safe(evidence_root):
         rh_cli_err("rejected correct evidence-store argument (allowlist)")
+        return 3
+    if has_notify_template and not Git::rh_arg_safe(notify_template_path):
+        rh_cli_err("rejected correct notification template argument (allowlist)")
         return 3
     cp: mutable darray[u8] =
         cp: mutable darray[u8] = []
@@ -6186,6 +6207,22 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
     if not Base::rh_io_write(notice_ptr, notices):
         rh_cli_err("correct: cannot write corrections-notices.json")
         return 4
+    if has_notify_template:
+        template_raw: mutable darray[u8] = []
+        if Base::rh_io_read(notify_template_path, template_raw) < 0:
+            rh_cli_err("correct: cannot read --notify-template file")
+            return 4
+        notify_input: mutable darray[u8] = []
+        if NotifyReport::rh_notify_correction_input(notices, template_raw, notify_now, notify_input) != 0:
+            rh_cli_err("correct: invalid notification template or correction notices")
+            return 4
+        notify_input.push(10)
+        notify_path: mutable darray[u8] = []
+        return 3 if not rh_out_path(out, "corrections-notify-input.json", notify_path)
+        notify_ptr: cstr = (&notify_path[0]).cast[cstr] can Unsafe.PointerCast
+        if not Base::rh_io_write(notify_ptr, notify_input):
+            rh_cli_err("correct: cannot write corrections-notify-input.json")
+            return 4
     if has_state or has_state_root:
         merged: mutable darray[i64] = []
         while mi < prior_sup.count |mi: usize = 0, prior_sup, merged|:

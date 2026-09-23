@@ -604,6 +604,12 @@ suppress another. Input/result/state are versioned `/3`, `/3`, and `/2`;
 earlier formats are rejected because they cannot preserve configured,
 destination-isolated behavior. `tests/test_notify_cli.sh` covers these
 authorization and state-isolation rules plus fail-closed inputs.
+Accepted correction notices can also be converted into a standard notification
+input with `correct --notify-template ... --notify-now ...`. Only destinations
+that opt into correction notices receive generated events; their artifact keys
+use the SHA-256-derived 128-bit notice digest, and decisions still go through
+`rh_cli notify`. This bridge does not send external messages. The correction
+CLI regression verifies both destination filtering and notification decisions.
 The policy engine now has a real surface:
 `src/rh_policy_parse.elisa` parses a versioned `rh-policy/1` rule set and
 an `rh-policy-input/1` observation file, aligns inputs to rules by id

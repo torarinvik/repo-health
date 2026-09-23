@@ -12,6 +12,7 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_notify.elisa"
+include "./rh_sha256.elisa"
 
 module NotifyReport:
     private:
@@ -20,6 +21,7 @@ module NotifyReport:
             kind: mutable u8
             authorized: mutable bool
             subscribed: mutable bool
+            correction_notices: mutable bool
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_nr_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -59,8 +61,13 @@ module NotifyReport:
                 if subscribed_idx >= 0:
                     return -1 if nodes[subscribed_idx.usize()].kind != Json::RH_JSON_BOOL
                     subscribed <- Json::rh_json_is_true(nodes, raw, subscribed_idx)
+                correction_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "correction_notices")
+                correction_notices: mutable bool = false
+                if correction_idx >= 0:
+                    return -1 if nodes[correction_idx.usize()].kind != Json::RH_JSON_BOOL
+                    correction_notices <- Json::rh_json_is_true(nodes, raw, correction_idx)
                 authorized: bool = Json::rh_json_is_true(nodes, raw, authorized_idx)
-                out.push(RhDestination{id: id, kind: kind.u8(), authorized: authorized, subscribed: subscribed})
+                out.push(RhDestination{id: id, kind: kind.u8(), authorized: authorized, subscribed: subscribed, correction_notices: correction_notices})
                 child <- nodes[child.usize()].next_sibling
             0
 
@@ -252,7 +259,7 @@ module NotifyReport:
                 if rh_nr_eq(texts, ops, ope, "notify"):
                     return -1 if Json::rh_json_obj_get(nodes, texts, child, "target") >= 0 or Json::rh_json_obj_get(nodes, texts, child, "authorized") >= 0 or Json::rh_json_obj_get(nodes, texts, child, "subscribed") >= 0
                     okt: mutable i64 = 0
-                    destination: mutable RhDestination = RhDestination{id: destination_id, kind: Notify::RH_TARGET_SUBSCRIBER, authorized: false, subscribed: false}
+                    destination: mutable RhDestination = RhDestination{id: destination_id, kind: Notify::RH_TARGET_SUBSCRIBER, authorized: false, subscribed: false, correction_notices: false}
                     while di < destinations.count |di: usize = 0, destinations, destination_id, destination|:
                         configured: RhDestination = destinations[di]
                         if configured.id == destination_id:
@@ -346,6 +353,105 @@ module NotifyReport:
             Base::rh_push_decimal_i64(out, counts[5.usize()])
             Base::rh_push_text(out, "},\"note\":\"an upstream maintainer is refused unless explicitly subscribed; suppressed decisions are not recorded, so a cooldown cannot silence a first real alert; a changed artifact digest is a new key\"}")
             rh_notify_emit_state(states, state_out)
+            0
+
+        # Turn accepted correction notices into destination-scoped notify
+        # events. The template supplies the destination registry and cooldown;
+        # only destinations that explicitly opt into correction notices receive
+        # events. Each digest binds the exact serialized notice bytes.
+        def rh_notify_correction_input(notices_raw: darray[u8]&, template_raw: darray[u8]&, now: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if now < 0
+            template_nodes: mutable darray[Json::RhJsonNode] = []
+            template_texts: mutable darray[u8] = []
+            template_root: i64 = Json::rh_json_parse(template_raw, template_nodes, template_texts)
+            return -1 if template_root < 0 or template_nodes[template_root.usize()].kind != Json::RH_JSON_OBJ
+            template_schema_s: mutable i64 = 0
+            template_schema_e: mutable i64 = 0
+            return -1 if not rh_nr_str(template_nodes, template_texts, template_root, "schema", &template_schema_s, &template_schema_e)
+            return -1 if not rh_nr_eq(template_texts, template_schema_s, template_schema_e, "rh-notify-input/3")
+            destinations: mutable darray[RhDestination] = []
+            return -1 if rh_nr_destinations(template_nodes, template_raw, template_texts, template_root, destinations) != 0
+            events_idx: i64 = Json::rh_json_obj_get(template_nodes, template_texts, template_root, "events")
+            if events_idx >= 0:
+                return -1 if template_nodes[events_idx.usize()].kind != Json::RH_JSON_ARR or template_nodes[events_idx.usize()].child_count != 0
+            dest_idx: i64 = Json::rh_json_obj_get(template_nodes, template_texts, template_root, "destinations")
+            dest_node: Json::RhJsonNode = template_nodes[dest_idx.usize()]
+            return -1 if dest_node.text_start < 0 or dest_node.text_end <= dest_node.text_start
+            cooldown_fragment: mutable darray[u8] = []
+            cooldown_idx: i64 = Json::rh_json_obj_get(template_nodes, template_texts, template_root, "cooldown_secs")
+            if cooldown_idx >= 0:
+                cooldown_ok: mutable i64 = 0
+                cooldown: i64 = Json::rh_json_int(template_nodes, template_raw, cooldown_idx, &cooldown_ok)
+                return -1 if cooldown_ok == 0 or cooldown < 0
+                cooldown_node: Json::RhJsonNode = template_nodes[cooldown_idx.usize()]
+                return -1 if cooldown_node.text_start < 0 or cooldown_node.text_end <= cooldown_node.text_start
+                while ci < cooldown_node.text_end |ci: i64 = cooldown_node.text_start, cooldown_fragment, template_raw, cooldown_node|:
+                    cooldown_fragment.push(template_raw[ci.usize()])
+                    ci <- ci + 1
+
+            notice_nodes: mutable darray[Json::RhJsonNode] = []
+            notice_texts: mutable darray[u8] = []
+            notice_root: i64 = Json::rh_json_parse(notices_raw, notice_nodes, notice_texts)
+            return -1 if notice_root < 0 or notice_nodes[notice_root.usize()].kind != Json::RH_JSON_OBJ
+            notice_schema_s: mutable i64 = 0
+            notice_schema_e: mutable i64 = 0
+            return -1 if not rh_nr_str(notice_nodes, notice_texts, notice_root, "schema", &notice_schema_s, &notice_schema_e)
+            return -1 if not rh_nr_eq(notice_texts, notice_schema_s, notice_schema_e, "rh-correction-notices/1")
+            notice_idx: i64 = Json::rh_json_obj_get(notice_nodes, notice_texts, notice_root, "notices")
+            return -1 if notice_idx < 0 or notice_nodes[notice_idx.usize()].kind != Json::RH_JSON_ARR
+            notice_arr: Json::RhJsonNode = notice_nodes[notice_idx.usize()]
+
+            Base::rh_push_text(out, "{\"schema\":\"rh-notify-input/3\",\"destinations\":")
+            while di < dest_node.text_end |di: i64 = dest_node.text_start, template_raw, out, dest_node|:
+                out.push(template_raw[di.usize()])
+                di <- di + 1
+            Base::rh_push_text(out, ",\"cooldown_secs\":")
+            Base::rh_push_text(out, "0") if cooldown_fragment.count == 0
+            while ci2 < cooldown_fragment.count |ci2: usize = 0, cooldown_fragment, out|:
+                out.push(cooldown_fragment[ci2])
+                ci2 <- ci2 + 1
+            Base::rh_push_text(out, ",\"events\":[")
+            first: mutable bool = true
+            while notice_child >= 0 |notice_child: i64 = notice_arr.first_child, notice_nodes, notice_texts, notices_raw, destinations, now, out, first|:
+                return -1 if notice_nodes[notice_child.usize()].kind != Json::RH_JSON_OBJ
+                ok_revision: mutable i64 = 0
+                ok_subject: mutable i64 = 0
+                revision: i64 = rh_nr_int(notice_nodes, notices_raw, notice_texts, notice_child, "correction_revision", &ok_revision)
+                subject_id: i64 = rh_nr_int(notice_nodes, notices_raw, notice_texts, notice_child, "subject_id", &ok_subject)
+                return -1 if ok_revision == 0 or revision <= 0 or ok_subject == 0 or subject_id < 0
+                notice_node: Json::RhJsonNode = notice_nodes[notice_child.usize()]
+                return -1 if notice_node.text_start < 0 or notice_node.text_end <= notice_node.text_start
+                notice_bytes: mutable darray[u8] = []
+                while raw_idx < notice_node.text_end |raw_idx: i64 = notice_node.text_start, notice_bytes, notices_raw, notice_node|:
+                    notice_bytes.push(notices_raw[raw_idx.usize()])
+                    raw_idx <- raw_idx + 1
+                digest: mutable darray[u8] = []
+                Sha256::rh_sha256(notice_bytes, digest)
+                while di2 < destinations.count |di2: usize = 0, destinations, revision, subject_id, now, digest, out, first|:
+                    destination: RhDestination = destinations[di2]
+                    if destination.correction_notices:
+                        if not first:
+                            out.push(44)
+                        first <- false
+                        Base::rh_push_text(out, "{\"op\":\"notify\",\"rule_id\":")
+                        Base::rh_push_decimal_i64(out, revision)
+                        Base::rh_push_text(out, ",\"subject_id\":")
+                        Base::rh_push_decimal_i64(out, subject_id)
+                        Base::rh_push_text(out, ",\"destination_id\":")
+                        Base::rh_push_decimal_i64(out, destination.id)
+                        Base::rh_push_text(out, ",\"artifact_digest\":\"")
+                        # The notification key schema accepts 128-bit hex digests;
+                        # use the SHA-256 prefix while retaining the full digest
+                        # internally for the notice-to-event binding.
+                        while hash_idx < 32 |hash_idx: usize = 0, digest, out|:
+                            out.push(digest[hash_idx])
+                            hash_idx <- hash_idx + 1
+                        Base::rh_push_text(out, "\",\"now\":")
+                        Base::rh_push_decimal_i64(out, now)
+                        out.push(125)
+                    di2 <- di2 + 1
+                notice_child <- notice_nodes[notice_child.usize()].next_sibling
+            Base::rh_push_text(out, "]}")
             0
 
         # Convenience wrapper: process with empty initial state, discarding state.
