@@ -1,6 +1,6 @@
 # rh_notify_report.elisa — notification policy execution path (M06-08).
 #
-# Turns an `rh-notify-input/3` event stream into an `rh-notify-result/3`
+# Turns an `rh-notify-input/3` event stream into an `rh-notify-result/4`
 # report. The non-negotiable rule is enforced here too: configured subscriber,
 # maintainer-self, and operator destinations require explicit authorization;
 # an upstream maintainer also requires explicit subscription. Refusals are
@@ -228,7 +228,7 @@ module NotifyReport:
             # Emitted decision rows, collected as we go.
             ev_op: mutable darray[u8] = []
             ev_lbl: mutable darray[u8] = []
-            ev_deliv: mutable darray[i64] = []
+            ev_dispatchable: mutable darray[i64] = []
             ev_applied: mutable darray[i64] = []
             ev_destination: mutable darray[i64] = []
             counts: mutable darray[i64] = []
@@ -236,7 +236,7 @@ module NotifyReport:
                 counts.push(0)
                 c0 <- c0 + 1
             arr: Json::RhJsonNode = nodes[ev_idx.usize()]
-            while child >= 0 |child: i64 = arr.first_child, nodes, texts, raw, destinations, states, cooldown, ev_op, ev_lbl, ev_deliv, ev_applied, ev_destination, counts|:
+            while child >= 0 |child: i64 = arr.first_child, nodes, texts, raw, destinations, states, cooldown, ev_op, ev_lbl, ev_dispatchable, ev_applied, ev_destination, counts|:
                 return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
                 ops: mutable i64 = 0
                 ope: mutable i64 = 0
@@ -276,16 +276,16 @@ module NotifyReport:
                     ev_op.push(0)
                     ev_lbl.push(dec)
                     if dec == Notify::RH_NOTIFY_NEW:
-                        ev_deliv.push(1)
+                        ev_dispatchable.push(1)
                     else:
-                        ev_deliv.push(0)
+                        ev_dispatchable.push(0)
                     ev_applied.push(0)
                     ev_destination.push(destination_id)
                 elif rh_nr_eq(texts, ops, ope, "ack"):
                     applied: bool = Notify::rh_notify_acknowledge(states, &key)
                     ev_op.push(1)
                     ev_lbl.push(255)
-                    ev_deliv.push(0)
+                    ev_dispatchable.push(0)
                     if applied:
                         ev_applied.push(1)
                     else:
@@ -295,7 +295,7 @@ module NotifyReport:
                     applied2: bool = Notify::rh_notify_resolve(states, &key)
                     ev_op.push(2)
                     ev_lbl.push(255)
-                    ev_deliv.push(0)
+                    ev_dispatchable.push(0)
                     if applied2:
                         ev_applied.push(1)
                     else:
@@ -304,10 +304,10 @@ module NotifyReport:
                 else:
                     return -1
                 child <- nodes[child.usize()].next_sibling
-            Base::rh_push_text(out, "{\"schema\":\"rh-notify-result/3\",\"cooldown_secs\":")
+            Base::rh_push_text(out, "{\"schema\":\"rh-notify-result/4\",\"cooldown_secs\":")
             Base::rh_push_decimal_i64(out, cooldown)
             Base::rh_push_text(out, ",\"decisions\":[")
-            while i < ev_op.count.i64() |i: i64 = 0, ev_op, ev_lbl, ev_deliv, ev_applied, ev_destination, out|:
+            while i < ev_op.count.i64() |i: i64 = 0, ev_op, ev_lbl, ev_dispatchable, ev_applied, ev_destination, out|:
                 if i > 0:
                     out.push(44)
                 op: u8 = ev_op[i.usize()]
@@ -326,8 +326,8 @@ module NotifyReport:
                 if op == 0:
                     Base::rh_push_text(out, ",\"decision\":\"")
                     Base::rh_push_text(out, rh_nr_label(ev_lbl[i.usize()]))
-                    Base::rh_push_text(out, "\",\"delivered\":")
-                    if ev_deliv[i.usize()] == 1:
+                    Base::rh_push_text(out, "\",\"dispatchable\":")
+                    if ev_dispatchable[i.usize()] == 1:
                         Base::rh_push_text(out, "true")
                     else:
                         Base::rh_push_text(out, "false")

@@ -2,7 +2,7 @@
 # tests/test_notify_cli.sh — M06-08 notification execution path:
 # `rh_cli notify` applies authorization, dedup/cooldown, outage suppression,
 # and ack/resolve to an rh-notify-input/3 event stream, writing
-# rh-notify-result/3. The non-negotiable rule: an upstream maintainer is
+# rh-notify-result/4. The non-negotiable rule: an upstream maintainer is
 # refused unless explicitly subscribed, and a refusal records nothing (so it
 # cannot start a phantom cooldown).
 set -euo pipefail
@@ -34,7 +34,7 @@ JSON
 python3 - "$T/out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema"] == "rh-notify-result/3", d
+assert d["schema"] == "rh-notify-result/4", d
 seq = [(x["op"], x.get("decision") or x.get("applied")) for x in d["decisions"]]
 assert seq[0] == ("notify", "new")
 assert seq[1] == ("notify", "suppressed_unauthorized")
@@ -50,7 +50,7 @@ c = d["counts"]
 assert c == {"new": 3, "suppressed_unauthorized": 1, "suppressed_outage": 1,
              "suppressed_resolved": 1, "suppressed_acknowledged": 1,
              "suppressed_cooldown": 1}, c
-assert d["decisions"][0]["delivered"] is True and d["decisions"][1]["delivered"] is False, d
+assert d["decisions"][0]["dispatchable"] is True and d["decisions"][1]["dispatchable"] is False, d
 assert "refused unless explicitly subscribed" in d["note"], d["note"]
 print("[notify] policy scenario OK")
 PY
@@ -79,7 +79,7 @@ python3 - "$T/missing-authorization.out" "$T/missing-authorization.state" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["decisions"][0]["decision"] == "suppressed_unauthorized", d
-assert d["decisions"][0]["delivered"] is False, d
+assert d["decisions"][0]["dispatchable"] is False, d
 assert json.load(open(sys.argv[2]))["rows"] == [], "unauthorized subscriber must not start a phantom cooldown"
 print("[notify] missing subscriber authorization denied without recording state")
 PY
@@ -114,7 +114,7 @@ JSON
 python3 - "$T/sub.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["decisions"][0]["decision"] == "new" and d["decisions"][0]["delivered"] is True, d
+assert d["decisions"][0]["decision"] == "new" and d["decisions"][0]["dispatchable"] is True, d
 print("[notify] subscribed-upstream OK")
 PY
 
