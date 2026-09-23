@@ -45,6 +45,22 @@ assert d["top_level_requires_python_state"] == "unknown", d
 assert all(x["requires_python_state"] == "unknown" for x in d["package_markers"]), d
 print("missing python_full_version remains unknown")
 PY
+python3 - "$TMP/audit.json" "$TMP/unconstrained-audit.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d.pop("requires_python", None)
+for package in d["packages"]:
+    package.pop("requires_python", None)
+json.dump(d, open(sys.argv[2], "w"))
+PY
+"$ROOT/build/rh_cli" pylock-evaluate --audit "$TMP/unconstrained-audit.json" --context "$TMP/context.json" --out "$TMP/unconstrained.json" >/dev/null
+python3 - "$TMP/unconstrained.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["top_level_requires_python_state"] == "true", d
+assert all(x["requires_python_state"] == "true" for x in d["package_markers"]), d
+print("absent requires-python is unconstrained")
+PY
 cat >"$TMP/undeclared-context.json" <<'JSON'
 {"schema":"rh-pylock-evaluation-context/1","environment":{"python_version":"3.12","python_full_version":"3.12.1","sys_platform":"linux"},"dependency_groups":["typo"],"extras":[]}
 JSON
