@@ -16,21 +16,22 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-pep440-input/1","versions":["1.0.post1","1.0","1.0rc1","1.0b1","1.0a1","1.0a1.dev1","2.0","1!0.1","1.0.1","1.0+local","v1.0","1..2"]}
+{"schema":"rh-pep440-input/1","versions":["1.0.post1","1.0","1.0rc1","1.0b1","1.0a1","1.0a1.dev1","2.0","1!0.1","1.0.1","1.0+local","1.0+abc","1.0+abd","1.0+ABC","1.0+a","1.0+a.1","1.0+2","1.0+10","1.0+a_b","1.0+a.b","v1.0","1..2"]}
 JSON
 "$ROOT/build/rh_cli" pep440 --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
 python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
 import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema"] == "rh-pep440-result/1", d
+assert d["schema"] == "rh-pep440-result/2", d
 tr = json.load(open(sys.argv[3]))
 assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "python-pep440-version-order", tr
 assert tr["output_schema"] == d["schema"], tr
 assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
 assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
-assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/python-pep440/1").hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/python-pep440/2").hexdigest(), tr
 assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unsupported", "discarded"}, tr
-assert d["sorted"] == ["1.0a1.dev1", "1.0a1", "1.0b1", "1.0rc1", "1.0", "1.0+local",
+assert d["sorted"] == ["1.0a1.dev1", "1.0a1", "1.0b1", "1.0rc1", "1.0", "1.0+a", "1.0+a_b", "1.0+a.b",
+                       "1.0+a.1", "1.0+abc", "1.0+ABC", "1.0+abd", "1.0+local", "1.0+2", "1.0+10",
                        "1.0.post1", "1.0.1", "2.0", "1!0.1"], d["sorted"]
 by = {v["version"]: v for v in d["versions"]}
 # invalid versions are reported but never compared/sorted
@@ -42,6 +43,8 @@ assert by["1.0a1"]["pre_num"] == 1 and by["1.0a1"]["dev"] is None, by["1.0a1"]
 assert by["1.0"]["pre_num"] is None and by["1.0"]["post"] is None, by["1.0"]
 assert by["1.0.post1"]["post"] == 1, by["1.0.post1"]
 assert by["1.0+local"]["has_local"] is True, by["1.0+local"]
+assert by["1.0+local"]["local_segment_count"] == 1, by["1.0+local"]
+assert by["1.0+a_b"]["local_segment_count"] == 2, by["1.0+a_b"]
 # epoch dominates release
 assert by["1!0.1"]["epoch"] == 1 and by["2.0"]["epoch"] == 0, (by["1!0.1"], by["2.0"])
 assert "not SemVer" in d["note"], d["note"]

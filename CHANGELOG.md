@@ -19,6 +19,13 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- M08 PEP 440 local-version ordering now compares bounded normalized local
+  segments (case-folded text, equivalent separators, numeric ordering) instead
+  of treating all local labels as equal. The parser caps labels at eight
+  segments, eight text characters per segment, and numeric values through
+  1e12; `rh-pep440-result/2` reports each valid version's local segment count.
+  Contract and regression coverage include mixed numeric/text segments and
+  inputs outside each bound.
 - M03 Python lock evidence: `src/rh_pylock.elisa` and
   `rh_cli pylock --input <pylock.toml> --out <file>` emit
   `rh-pylock-audit/1` for bounded PEP 751 package-to-package auditing. The

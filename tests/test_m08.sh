@@ -58,7 +58,7 @@ grep -q "never invents commits" "$ROOT/src/rh_release_feed.elisa" || fail "no-hi
 
 echo "[m08] ecosystem: PEP 440 ordering, not SemVer, with declared subset"
 grep -q "SemVer rules must NOT be applied here" "$ROOT/src/rh_pep440.elisa" || fail "pep440 semver-independence note missing"
-grep -q "local versions are compared by presence only" "$ROOT/src/rh_pep440.elisa" || fail "pep440 local-version subset not declared"
+grep -q "at most eight segments, eight text characters per segment" "$ROOT/src/rh_pep440.elisa" || fail "pep440 local-version bounds not declared"
 
 echo "[m08] rights register records the mercurial source"
 python3 - "$ROOT/ops/source-review-register.json" <<'PY'

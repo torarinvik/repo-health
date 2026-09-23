@@ -838,13 +838,16 @@ version parsing and ordering, deliberately not SemVer — epoch, arbitrary
 release segments, a/b/rc pre-releases (with alpha/beta/c/pre aliases),
 post, dev and local are ordered per PEP 440 (e.g. `1.0.dev1 < 1.0a1 < 1.0
 < 1.0.post1 < 1.0.1`, and an epoch dominates). Declared subset: local
-versions are compared by presence only; invalid versions have `ok=0` and
-must not be compared. This is version semantics only — no PyPI manifest or
-requirements parser yet. It is now a real path: `src/rh_pep440_report.elisa`
-+ `rh_cli pep440 --input <file> --out <file>` emit `rh-pep440-result/1` with
-per-version details (epoch, release, a/b/rc/dev/post, local presence) and
-an ascending order over VALID versions only — invalid versions are reported
-`valid:false` and never compared or sorted (`tests/test_pep440_cli.sh`).
+versions use bounded normalized segment ordering: at most eight segments,
+eight text characters per segment, and numeric values through 1e12; inputs
+outside those bounds are invalid. Invalid versions have `ok=0` and must not
+be compared. It is now a real path: `src/rh_pep440_report.elisa` +
+`rh_cli pep440 --input <file> --out <file>` emit `rh-pep440-result/2` with
+per-version details (epoch, release, a/b/rc/dev/post, local presence and
+segment count) and an ascending order over VALID versions only — invalid
+versions are reported `valid:false` and never compared or sorted
+(`tests/test_pep440_cli.sh`). PyPI manifest and requirements parsing are
+covered separately by the M03 dependency lane.
 The PEP 440 path now also emits a shared digest-bound transformation report
 for exact source/output bytes and the pinned normalizer configuration.
 A second inventory format is pinned: `src/rh_spdx.elisa` parses SPDX 2.3

@@ -9,10 +9,9 @@ module Pep440:
         # dev releases, and local versions. SemVer rules must NOT be applied here.
         #
         # Declared subset: epoch, release, pre, post, dev are parsed and ordered
-        # per PEP 440; local versions are compared by presence only (public < any
-        # local; two local versions of the same public version compare equal here).
-        # Full local-segment ordering is not implemented. Invalid versions have
-        # ok=0 and must not be compared.
+        # per PEP 440. Local segments are normalized and compared with bounded
+        # limits: at most eight segments, eight text characters per segment, and
+        # numeric values through 1e12. Inputs outside those bounds are invalid.
 
 
         const RH_PEP_MAX_REL: i64 = 8
@@ -42,10 +41,27 @@ module Pep440:
             post: i64
             dev: i64
             local: i64
+            local_n: i64
+            l0: i64
+            l1: i64
+            l2: i64
+            l3: i64
+            l4: i64
+            l5: i64
+            l6: i64
+            l7: i64
+            lk0: i64
+            lk1: i64
+            lk2: i64
+            lk3: i64
+            lk4: i64
+            lk5: i64
+            lk6: i64
+            lk7: i64
 
         # (private to this file)
         def rh_pep_invalid() -> RhPep440:
-            RhPep440{ok: 0, epoch: 0, n: 0, r0: 0, r1: 0, r2: 0, r3: 0, r4: 0, r5: 0, r6: 0, r7: 0, pre_rank: RH_PEP_PRE_NONE, pre_num: 0, post: -1, dev: RH_PEP_DEV_ABSENT, local: -1}
+            RhPep440{ok: 0, epoch: 0, n: 0, r0: 0, r1: 0, r2: 0, r3: 0, r4: 0, r5: 0, r6: 0, r7: 0, pre_rank: RH_PEP_PRE_NONE, pre_num: 0, post: -1, dev: RH_PEP_DEV_ABSENT, local: -1, local_n: 0, l0: 0, l1: 0, l2: 0, l3: 0, l4: 0, l5: 0, l6: 0, l7: 0, lk0: 0, lk1: 0, lk2: 0, lk3: 0, lk4: 0, lk5: 0, lk6: 0, lk7: 0}
 
         # ASCII digit run at pos; returns value, sets out_pos, or -1 when no digit.
         # (private to this file)
@@ -113,6 +129,8 @@ module Pep440:
             post: mutable i64 = -1
             dev: mutable i64 = RH_PEP_DEV_ABSENT
             local: mutable i64 = -1
+            local_values: mutable darray[i64] = []
+            local_kinds: mutable darray[i64] = []
             # pre-release
             if p < e:
                 b: u8 = rh_pep_lower(data[p.usize()])
@@ -182,18 +200,53 @@ module Pep440:
                         pn <- q
                     dev <- num
                     p <- pn
-            # local: +... consumed (presence only)
+            # Local labels are case-folded and split on '.', '-' or '_'. Numeric
+            # segments sort above text segments; text segments use normalized
+            # lexical order. Fixed-width base-37 packing preserves lexical order.
             if p < e:
                 if data[p.usize()] == 43:
                     return rh_pep_invalid() if p + 1 >= e
                     local <- 0
-                    p <- e
+                    p <- p + 1
+                    while p < e |p, e, data, local_values, local_kinds|:
+                        segment_start: i64 = p
+                        segment_end: mutable i64 = p
+                        while segment_end < e and data[segment_end.usize()] != 46 and data[segment_end.usize()] != 45 and data[segment_end.usize()] != 95 |segment_end, e, data|:
+                            byte: u8 = rh_pep_lower(data[segment_end.usize()])
+                            return rh_pep_invalid() if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 122))
+                            segment_end <- segment_end + 1
+                        return rh_pep_invalid() if segment_end == segment_start or local_values.count.i64() >= 8
+                        numeric: mutable bool = true
+                        for index in segment_start..<segment_end |index, data, numeric|:
+                            byte: u8 = rh_pep_lower(data[index.usize()])
+                            numeric <- false if byte < 48 or byte > 57
+                        if numeric:
+                            after: mutable i64 = segment_start
+                            value: i64 = rh_pep_digits(data, segment_start, segment_end, &after)
+                            return rh_pep_invalid() if value < 0 or after != segment_end
+                            local_values.push(value)
+                            local_kinds.push(1)
+                        else:
+                            return rh_pep_invalid() if segment_end - segment_start > 8
+                            encoded: mutable i64 = 0
+                            weight: mutable i64 = 94931877133
+                            for index in segment_start..<segment_end |index, data, encoded, weight|:
+                                byte: u8 = rh_pep_lower(data[index.usize()])
+                                symbol: i64 = (byte.i64() - 47) if byte >= 48 and byte <= 57 else (byte.i64() - 86)
+                                encoded <- encoded + symbol * weight
+                                weight <- weight / 37
+                            local_values.push(encoded)
+                            local_kinds.push(0)
+                        p <- segment_end
+                        if p < e:
+                            p <- p + 1
+                            return rh_pep_invalid() if p >= e
             if p != e:
                 return rh_pep_invalid()
             # dev-only versions (no pre, no post) sort below any pre-release.
             if pre_rank == RH_PEP_PRE_NONE and post == -1 and dev != RH_PEP_DEV_ABSENT:
                 pre_rank <- RH_PEP_PRE_DEV_ONLY
-            RhPep440{ok: 1, epoch: epoch, n: n, r0: rh_pep_seg(rel, 0), r1: rh_pep_seg(rel, 1), r2: rh_pep_seg(rel, 2), r3: rh_pep_seg(rel, 3), r4: rh_pep_seg(rel, 4), r5: rh_pep_seg(rel, 5), r6: rh_pep_seg(rel, 6), r7: rh_pep_seg(rel, 7), pre_rank: pre_rank, pre_num: pre_num, post: post, dev: dev, local: local}
+            RhPep440{ok: 1, epoch: epoch, n: n, r0: rh_pep_seg(rel, 0), r1: rh_pep_seg(rel, 1), r2: rh_pep_seg(rel, 2), r3: rh_pep_seg(rel, 3), r4: rh_pep_seg(rel, 4), r5: rh_pep_seg(rel, 5), r6: rh_pep_seg(rel, 6), r7: rh_pep_seg(rel, 7), pre_rank: pre_rank, pre_num: pre_num, post: post, dev: dev, local: local, local_n: local_values.count.i64(), l0: rh_pep_seg(local_values, 0), l1: rh_pep_seg(local_values, 1), l2: rh_pep_seg(local_values, 2), l3: rh_pep_seg(local_values, 3), l4: rh_pep_seg(local_values, 4), l5: rh_pep_seg(local_values, 5), l6: rh_pep_seg(local_values, 6), l7: rh_pep_seg(local_values, 7), lk0: rh_pep_seg(local_kinds, 0), lk1: rh_pep_seg(local_kinds, 1), lk2: rh_pep_seg(local_kinds, 2), lk3: rh_pep_seg(local_kinds, 3), lk4: rh_pep_seg(local_kinds, 4), lk5: rh_pep_seg(local_kinds, 5), lk6: rh_pep_seg(local_kinds, 6), lk7: rh_pep_seg(local_kinds, 7)}
 
         # (private to this file)
         def rh_pep_seg(rel: darray[i64]&, i: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -217,6 +270,18 @@ module Pep440:
             return rh_pep_sign(a.post - b.post) if a.post != b.post
             return rh_pep_sign(a.dev - b.dev) if a.dev != b.dev
             return rh_pep_sign(a.local - b.local) if a.local != b.local
+            if a.local >= 0:
+                max_local: mutable i64 = a.local_n if a.local_n > b.local_n else b.local_n
+                while local_index < max_local |local_index: i64 = 0, a, b, max_local|:
+                    return -1 if local_index >= a.local_n
+                    return 1 if local_index >= b.local_n
+                    left_kind: i64 = rh_pep_local_kind(a, local_index)
+                    right_kind: i64 = rh_pep_local_kind(b, local_index)
+                    return rh_pep_sign(left_kind - right_kind) if left_kind != right_kind
+                    left_value: i64 = rh_pep_local_field(a, local_index)
+                    right_value: i64 = rh_pep_local_field(b, local_index)
+                    return rh_pep_sign(left_value - right_value) if left_value != right_value
+                    local_index <- local_index + 1
             0
 
         # (private to this file)
@@ -235,4 +300,26 @@ module Pep440:
             return v.r5 if i == 5
             return v.r6 if i == 6
             return v.r7 if i == 7
+            0
+
+        def rh_pep_local_field(v: RhPep440&, i: i64) -> i64:
+            return v.l0 if i == 0
+            return v.l1 if i == 1
+            return v.l2 if i == 2
+            return v.l3 if i == 3
+            return v.l4 if i == 4
+            return v.l5 if i == 5
+            return v.l6 if i == 6
+            return v.l7 if i == 7
+            0
+
+        def rh_pep_local_kind(v: RhPep440&, i: i64) -> i64:
+            return v.lk0 if i == 0
+            return v.lk1 if i == 1
+            return v.lk2 if i == 2
+            return v.lk3 if i == 3
+            return v.lk4 if i == 4
+            return v.lk5 if i == 5
+            return v.lk6 if i == 6
+            return v.lk7 if i == 7
             0
