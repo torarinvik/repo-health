@@ -68,6 +68,7 @@ PY
 
 printf '{"schema":"rh-adoption-input/1","cutoff":1000,"adoptions":[]}' > "$T/empty.json"
 "$ROOT/build/rh_cli" adoption --input "$T/empty.json" --out "$T/empty.out" >/dev/null || fail "empty adoption population"
+"$ROOT/build/rh_cli" adoption --input "$T/empty.json" --store-root "$T/empty-store" --out "$T/empty-store.out" >/dev/null || fail "empty store-backed adoption population"
 python3 - "$T/empty.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -118,6 +119,42 @@ assert m["adoption.snapshot_coverage_gap_count"]["value"] == 2, m
 assert m["adoption.snapshot_coverage_uncovered_seconds"]["value"] == 200, m
 print("[adoption] release-to-first-qualifying-snapshot lag and censoring OK")
 PY
+mkdir -p "$T/store/sources/repo-a/coverage"
+cat > "$T/store/sources/repo-a/coverage/resolution.interval" <<'EOF'
+100 900 observed
+900 1000 partial
+1000 2000 observed
+EOF
+cat > "$T/store-backed.json" <<'JSON'
+{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"coverage_source":"repo-a","coverage_capability":"resolution"}]}
+JSON
+"$ROOT/build/rh_cli" adoption --input "$T/store-backed.json" --store-root "$T/store" --out "$T/store-backed.out" >/dev/null || fail "store-backed adoption coverage"
+python3 - "$T/store-backed.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+a = d["adoptions"][0]
+assert a["snapshot_coverage"] == {"status": "reconstructed", "interval_count": 3, "gap_count": 1, "uncovered_seconds": 100}, a
+assert a["upgrade_lag"]["status"] == "unknown", a
+print("[adoption] temporal store intervals reconstruct adoption coverage")
+PY
+mkdir -p "$T/empty-store"
+"$ROOT/build/rh_cli" adoption --input "$T/store-backed.json" --store-root "$T/empty-store" --out "$T/store-missing.out" >/dev/null || fail "missing temporal store history remains unknown"
+python3 - "$T/store-missing.out" <<'PY'
+import json, sys
+a = json.load(open(sys.argv[1]))["adoptions"][0]
+assert a["snapshot_coverage"] == {"status": "reconstructed", "interval_count": 0, "gap_count": 1, "uncovered_seconds": 1900}, a
+assert a["upgrade_lag"]["status"] == "unknown", a
+print("[adoption] missing stored history remains uncovered")
+PY
+cat > "$T/store/sources/repo-a/coverage/resolution.interval" <<'EOF'
+100 1000 observed
+900 2000 observed
+EOF
+if "$ROOT/build/rh_cli" adoption --input "$T/store-backed.json" --store-root "$T/store" --out "$T/store-overlap.out" >/dev/null 2>&1; then fail "overlapping persisted intervals were accepted"; fi
+cat > "$T/store/sources/repo-a/coverage/resolution.interval" <<'EOF'
+100 2000 maybe
+EOF
+if "$ROOT/build/rh_cli" adoption --input "$T/store-backed.json" --store-root "$T/store" --out "$T/store-bad-status.out" >/dev/null 2>&1; then fail "unknown persisted coverage state was accepted"; fi
 cat > "$T/invalid-lag.json" <<'JSON'
 {"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":1000,"target_version_ord":2000000,"first_qualifying_version_ord":2000000,"first_qualifying_snapshot_at":999}]}
 JSON

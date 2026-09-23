@@ -23,11 +23,137 @@ module Adoption:
             gap_count: i64
             uncovered_seconds: i64
 
+        const RH_ADOPTION_MAX_STORE_RUNS: i64 = 4096
+
         def rh_adoption_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_obj_get(nodes, texts, obj, key)
 
         def rh_adoption_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, lit)
+
+        def rh_adoption_store_segment(texts: darray[u8]&, start: i64, finish: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or finish <= start or finish - start > 128
+            while i < finish - start |i: i64 = 0, texts, start, finish|:
+                c: u8 = texts[(start + i).usize()]
+                safe: bool = (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 45 or c == 46 or c == 95
+                return false if not safe
+                i <- i + 1
+            return false if finish - start == 1 and texts[start.usize()] == 46
+            return false if finish - start == 2 and texts[start.usize()] == 46 and texts[(start + 1).usize()] == 46
+            true
+
+        def rh_adoption_store_status_known(raw: darray[u8]&, start: i64, finish: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(raw, start, finish, "observed") or Base::rh_bytes_equal_literal(raw, start, finish, "not_observed") or Base::rh_bytes_equal_literal(raw, start, finish, "unavailable") or Base::rh_bytes_equal_literal(raw, start, finish, "unauthorized") or Base::rh_bytes_equal_literal(raw, start, finish, "partial") or Base::rh_bytes_equal_literal(raw, start, finish, "stale") or Base::rh_bytes_equal_literal(raw, start, finish, "not_applicable") or Base::rh_bytes_equal_literal(raw, start, finish, "error") or Base::rh_bytes_equal_literal(raw, start, finish, "conflicted") or Base::rh_bytes_equal_literal(raw, start, finish, "suppressed") or Base::rh_bytes_equal_literal(raw, start, finish, "unsupported")
+
+        def rh_adoption_store_runs(root_path: cstr, source: darray[u8]&, source_s: i64, source_e: i64, capability_s: i64, capability_e: i64, runs_out: mutable darray[u8]&) -> bool can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            path: mutable darray[u8] = []
+            Base::rh_push_cstr(path, root_path)
+            Base::rh_push_text(path, "/sources/")
+            while i < source_e - source_s |i: i64 = 0, source, source_s, source_e, path|:
+                path.push(source[(source_s + i).usize()])
+                i <- i + 1
+            Base::rh_push_text(path, "/coverage/")
+            while i < capability_e - capability_s |i: i64 = 0, source, capability_s, capability_e, path|:
+                path.push(source[(capability_s + i).usize()])
+                i <- i + 1
+            Base::rh_push_text(path, ".interval")
+            path.push(0)
+            path_ptr: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+            size: i64 = Base::rh_file_size(path_ptr)
+            runs_out.push(91)
+            if size < 0:
+                runs_out.push(93)
+                return true
+            raw: mutable darray[u8] = []
+            return false if Base::rh_io_read(path_ptr, raw) != size
+            cursor: mutable usize = 0
+            previous_end: mutable i64 = -1
+            count: mutable i64 = 0
+            while cursor < raw.count |cursor, raw, previous_end, count, runs_out|:
+                return false if count >= RH_ADOPTION_MAX_STORE_RUNS
+                line_end: mutable usize = cursor
+                while line_end < raw.count and raw[line_end] != 10 |line_end, raw|:
+                    line_end <- line_end + 1
+                return false if line_end == cursor or line_end == raw.count
+                first_end: mutable usize = cursor
+                while first_end < line_end and raw[first_end] != 32 |first_end, raw|:
+                    first_end <- first_end + 1
+                second_end: mutable usize = first_end + 1
+                while second_end < line_end and raw[second_end] != 32 |second_end, raw|:
+                    second_end <- second_end + 1
+                return false if first_end == cursor or second_end == first_end + 1 or second_end >= line_end
+                status_start: usize = second_end + 1
+                return false if status_start >= line_end
+                status_cursor: mutable usize = status_start
+                status_has_space: mutable bool = false
+                while status_cursor < line_end |status_cursor, line_end, raw, status_has_space|:
+                    status_has_space <- true if raw[status_cursor] == 32
+                    status_cursor <- status_cursor + 1
+                return false if status_has_space or not Adoption::rh_adoption_store_status_known(raw, status_start.i64(), line_end.i64())
+                start_ok: mutable i64 = 0
+                finish_ok: mutable i64 = 0
+                start: i64 = Base::rh_parse_i64(raw, cursor, first_end, &start_ok)
+                finish: i64 = Base::rh_parse_i64(raw, first_end + 1, second_end, &finish_ok)
+                return false if start_ok == 0 or finish_ok == 0 or start < 0 or finish <= start or (previous_end >= 0 and start < previous_end)
+                if count > 0:
+                    runs_out.push(44)
+                Base::rh_push_text(runs_out, "{\"from\":")
+                Base::rh_push_decimal_i64(runs_out, start)
+                Base::rh_push_text(runs_out, ",\"through\":")
+                Base::rh_push_decimal_i64(runs_out, finish)
+                Base::rh_push_text(runs_out, ",\"complete\":")
+                is_observed: bool = Base::rh_bytes_equal_literal(raw, status_start.i64(), line_end.i64(), "observed")
+                Base::rh_push_text(runs_out, "true" if is_observed else "false")
+                runs_out.push(125)
+                previous_end <- finish
+                count <- count + 1
+                cursor <- line_end + 1
+            runs_out.push(93)
+            true
+
+        def rh_adoption_augment_store(raw: darray[u8]&, root_path: cstr, augmented: mutable darray[u8]&) -> bool can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            adoptions_idx: i64 = Adoption::rh_adoption_get(nodes, texts, root, "adoptions")
+            return false if adoptions_idx < 0 or nodes[adoptions_idx.usize()].kind != Json::RH_JSON_ARR
+            cursor: mutable usize = 0
+            while child >= 0 |child: i64 = nodes[adoptions_idx.usize()].first_child, nodes, raw, texts, augmented, cursor, root_path|:
+                return false if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                source_idx: i64 = Adoption::rh_adoption_get(nodes, texts, child, "coverage_source")
+                capability_idx: i64 = Adoption::rh_adoption_get(nodes, texts, child, "coverage_capability")
+                if source_idx < 0 and capability_idx < 0:
+                    child <- nodes[child.usize()].next_sibling
+                    continue
+                return false if source_idx < 0 or capability_idx < 0
+                source_null: bool = nodes[source_idx.usize()].kind == Json::RH_JSON_NULL
+                capability_null: bool = nodes[capability_idx.usize()].kind == Json::RH_JSON_NULL
+                return false if source_null or capability_null or nodes[source_idx.usize()].kind != Json::RH_JSON_STR or nodes[capability_idx.usize()].kind != Json::RH_JSON_STR
+                source_node: Json::RhJsonNode = nodes[source_idx.usize()]
+                capability_node: Json::RhJsonNode = nodes[capability_idx.usize()]
+                return false if not Adoption::rh_adoption_store_segment(texts, source_node.text_start, source_node.text_end) or not Adoption::rh_adoption_store_segment(texts, capability_node.text_start, capability_node.text_end)
+                coverage_idx: i64 = Adoption::rh_adoption_get(nodes, texts, child, "snapshot_coverage")
+                history_idx: i64 = Adoption::rh_adoption_get(nodes, texts, child, "snapshot_runs")
+                return false if coverage_idx >= 0 and nodes[coverage_idx.usize()].kind != Json::RH_JSON_NULL
+                return false if history_idx >= 0 and nodes[history_idx.usize()].kind != Json::RH_JSON_NULL
+                runs: mutable darray[u8] = []
+                return false if not Adoption::rh_adoption_store_runs(root_path, texts, source_node.text_start, source_node.text_end, capability_node.text_start, capability_node.text_end, runs)
+                entry: Json::RhJsonNode = nodes[child.usize()]
+                return false if entry.text_start < cursor.i64() or entry.text_end <= entry.text_start or raw[(entry.text_end - 1).usize()] != 125
+                while i < entry.text_end - 1 - cursor.i64() |i: usize = 0, raw, augmented, cursor, entry|:
+                    augmented.push(raw[cursor + i])
+                    i <- i + 1
+                augmented.push(44) if entry.child_count > 0
+                Base::rh_push_text(augmented, "\"snapshot_runs\":")
+                augmented.extend(bytes_view(runs))
+                augmented.push(125)
+                cursor <- entry.text_end.usize()
+                child <- nodes[child.usize()].next_sibling
+            while i < raw.count |i: usize = cursor, raw, augmented|:
+                augmented.push(raw[i])
+                i <- i + 1
+            true
 
         def rh_adoption_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             idx: i64 = Adoption::rh_adoption_get(nodes, texts, obj, key)
@@ -360,3 +486,8 @@ module Adoption:
             Adoption::rh_adoption_ratio_metric(out, supported_line_adoptions, supported_line_assessments)
             Base::rh_push_text(out, "],\"note\":\"first_seen is a collector observation; confirmed introduction/removal remain separate assertions; elapsed duration is seconds and right-censored at last_seen or cutoff; missing follow-up is right-censored and an observed upgrade is not proof of migration\"}")
             0
+
+        def rh_adoption_report_from_store(raw: darray[u8]&, root_path: cstr, out: mutable darray[u8]&) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            augmented: mutable darray[u8] = []
+            return -1 if not Adoption::rh_adoption_augment_store(raw, root_path, augmented)
+            Adoption::rh_adoption_report(augmented, out)
