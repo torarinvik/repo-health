@@ -344,6 +344,18 @@ python3 - "$T/escaped-string.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1]))["created_by"] == 'tool"name\nnext'
 PY
+cat > "$T/escaped-quote-comment.toml" <<'EOF'
+lock-version = '1.0'
+created-by = "tool\" # retained"
+[[packages]]
+name = 'x'
+version = '1'
+EOF
+"$ROOT/build/rh_cli" pylock --input "$T/escaped-quote-comment.toml" --out "$T/escaped-quote-comment.json" >/dev/null
+python3 - "$T/escaped-quote-comment.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["created_by"] == 'tool" # retained'
+PY
 printf 'lock-version = "1.0"\ncreated-by = "\\u00e9\\U0001F680"\n[[packages]]\nname = "x"\nversion = "1"\n' > "$T/unicode-escape.toml"
 "$ROOT/build/rh_cli" pylock --input "$T/unicode-escape.toml" --out "$T/unicode-escape.json" >/dev/null
 python3 - "$T/unicode-escape.json" <<'PY'
