@@ -5,10 +5,10 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 bash "$ROOT/tools/build.sh" >/dev/null
 cat >"$TMP/audit.json" <<'JSON'
-{"schema":"rh-pylock-audit/1","requires_python":">=3.11,<4","extras":["speedups"],"dependency_groups":["dev","test"],"environments":["sys_platform == 'linux' or sys_platform == 'win32'"],"packages":[{"name":"yes","version":"1.0","marker":"python_version >= '3.10'","requires_python":">=3.10,<4"},{"name":"no","version":"2.0","marker":"sys_platform == 'win32'","requires_python":">=3.13"},{"name":"unknown","version":null,"marker":"platform_release == 'future'","requires_python":"==3.12.*"}]}
+{"schema":"rh-pylock-audit/1","requires_python":">=3.11,<4","extras":["speedups"],"dependency_groups":["dev","test"],"default_groups":["default"],"environments":["sys_platform == 'linux' or sys_platform == 'win32'"],"packages":[{"name":"yes","version":"1.0","marker":"'default' in dependency_groups and python_version >= '3.10'","requires_python":">=3.10,<4"},{"name":"no","version":"2.0","marker":"sys_platform == 'win32'","requires_python":">=3.13"},{"name":"unknown","version":null,"marker":"platform_release == 'future'","requires_python":"==3.12.*"}]}
 JSON
 cat >"$TMP/context.json" <<'JSON'
-{"schema":"rh-pylock-evaluation-context/1","environment":{"python_version":"3.12","python_full_version":"3.12.1","sys_platform":"linux"},"dependency_groups":["dev"],"extras":[]}
+{"schema":"rh-pylock-evaluation-context/1","environment":{"python_version":"3.12","python_full_version":"3.12.1","sys_platform":"linux"},"dependency_groups":["default"],"extras":[]}
 JSON
 "$ROOT/build/rh_cli" pylock-evaluate --audit "$TMP/audit.json" --context "$TMP/context.json" --out "$TMP/out.json" >/dev/null
 python3 - "$TMP/out.json" <<'PY'
