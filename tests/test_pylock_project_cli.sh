@@ -30,6 +30,7 @@ assert sidecar["output_schema"] == "rh-pylock-project-membership/1", sidecar
 assert sidecar["source_input_sha256"] == hashlib.sha256((root / "fixtures/packages/pylock-project-membership-project.toml").read_bytes()).hexdigest(), sidecar
 assert sidecar["source_audit_sha256"] == hashlib.sha256((root / "fixtures/packages/pylock-project-membership-audit.json").read_bytes()).hexdigest(), sidecar
 assert sidecar["normalized_output_sha256"] == hashlib.sha256(result_path.read_bytes()).hexdigest(), sidecar
+assert sidecar["source_context_sha256"] is None, sidecar
 assert result["installation_graph"] is False and result["markers_evaluated"] is False, result
 assert next(row for row in result["packages"] if row["name"] == "pytest")["optional_group"] == "test-suite", result
 requests = next(row for row in result["packages"] if row["name"] == "requests")
@@ -98,5 +99,53 @@ assert rows["eps"]["state"] == "represented" and rows["eps"]["specifier_candidat
 assert rows["zeta"]["state"] == "represented" and rows["zeta"]["specifier_candidate_count"] == 1, rows
 assert rows["prelib"]["state"] == "not_evaluated", rows
 assert rows["localib"]["state"] == "not_evaluated", rows
+PY
+cat > "$T/marker-project.toml" <<'MARKER_PROJECT'
+[project]
+name = "marker-fixture"
+version = "1.0"
+dependencies = [
+  'alpha==1.0; sys_platform == "linux"',
+  'beta==2.0; sys_platform == "win32"',
+  'gamma==3.0; unavailable_marker == "yes"',
+]
+[project.optional-dependencies]
+test = ['pytest==7.0; extra == "test"']
+MARKER_PROJECT
+cat > "$T/marker-audit.json" <<'MARKER_AUDIT'
+{"schema":"rh-pylock-audit/1","dependency_semantics":"informational_only","environments":[],"extras":[],"dependency_groups":[],"default_groups":[],"packages":[{"id":0,"name":"alpha","version":"1.0"},{"id":1,"name":"beta","version":"2.0"},{"id":2,"name":"gamma","version":"3.0"},{"id":3,"name":"pytest","version":"7.0"}]}
+MARKER_AUDIT
+cat > "$T/marker-context.json" <<'MARKER_CONTEXT'
+{"schema":"rh-pylock-evaluation-context/1","environment":{"sys_platform":"linux"},"extra":"test"}
+MARKER_CONTEXT
+"$ROOT/build/rh_cli" pylock-project --project "$T/marker-project.toml" --audit "$T/marker-audit.json" --context "$T/marker-context.json" --out "$T/marker-result.json" >/dev/null || fail "context-aware marker evaluation"
+python3 - "$T/marker-result.json" "$T/marker-context.json" <<'PY'
+import hashlib, json, pathlib, sys
+result_path, context_path = map(pathlib.Path, sys.argv[1:])
+result = json.loads(result_path.read_bytes())
+rows = {row["name"]: row for row in result["packages"]}
+sidecar = json.loads(pathlib.Path(str(result_path) + ".transformations.json").read_bytes())
+context_sha = hashlib.sha256(context_path.read_bytes()).hexdigest()
+assert result["markers_evaluated"] is True and result["context_sha256"] == context_sha, result
+assert rows["alpha"]["marker_state"] == "true" and rows["alpha"]["state"] == "represented", rows
+assert rows["beta"]["marker_state"] == "false" and rows["beta"]["state"] == "represented", rows
+assert rows["gamma"]["marker_state"] == "unknown", rows
+assert rows["pytest"]["marker_state"] == "true" and rows["pytest"]["scope"] == "optional", rows
+assert sidecar["source_context_sha256"] == context_sha, sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(result_path.read_bytes()).hexdigest(), sidecar
+PY
+sed 's/rh-pylock-evaluation-context\/1/unsupported-context\/1/' "$T/marker-context.json" > "$T/invalid-marker-context.json"
+set +e
+"$ROOT/build/rh_cli" pylock-project --project "$T/marker-project.toml" --audit "$T/marker-audit.json" --context "$T/invalid-marker-context.json" --out "$T/invalid-marker-result.json" >/dev/null 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 4 ]] || fail "unsupported marker context schema must fail closed (got $rc)"
+"$ROOT/build/rh_cli" pylock-project --project "$T/marker-project.toml" --audit "$T/marker-audit.json" --out "$T/marker-no-context.json" >/dev/null || fail "context-free marker membership"
+python3 - "$T/marker-no-context.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1]))
+rows = {row["name"]: row for row in result["packages"]}
+assert result["markers_evaluated"] is False and result["context_sha256"] is None, result
+assert rows["alpha"]["marker_state"] == "not_evaluated", rows
 PY
 echo "test_pylock_project_cli OK"

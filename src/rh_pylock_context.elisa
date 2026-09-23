@@ -197,6 +197,27 @@ module PylockContext:
                 out.push(34)
 
     public:
+        # Build the validated marker context once for callers that need to evaluate
+        # expressions outside the lock report, such as PEP 621 project declarations.
+        def rh_pylock_context_prepare(audit: darray[u8]&, context_bytes: darray[u8]&, names: mutable darray[u8]&, values: mutable darray[u8]&, bindings: mutable darray[Marker::RhMarkerBinding]&, extras: mutable darray[Marker::RhMarkerSpan]&, groups: mutable darray[Marker::RhMarkerSpan]&, extra_s: mutable i64&, extra_e: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if audit.count.i64() <= 0 or audit.count.i64() > RH_PYLOCK_CONTEXT_MAX_AUDIT
+            return -1 if context_bytes.count.i64() <= 0 or context_bytes.count.i64() > RH_PYLOCK_CONTEXT_MAX_CONTEXT
+            audit_nodes: mutable darray[Json::RhJsonNode] = []
+            audit_texts: mutable darray[u8] = []
+            audit_root: i64 = Json::rh_json_parse(audit, audit_nodes, audit_texts)
+            return -1 if audit_root < 0 or audit_nodes[audit_root.usize()].kind != Json::RH_JSON_OBJ or not rh_pylock_context_schema(audit_nodes, audit_texts, audit_root, "rh-pylock-audit/1")
+            context_nodes: mutable darray[Json::RhJsonNode] = []
+            context_texts: mutable darray[u8] = []
+            context_root: i64 = Json::rh_json_parse(context_bytes, context_nodes, context_texts)
+            return -1 if context_root < 0
+            return -1 if not rh_pylock_context_build(context_nodes, context_texts, context_root, audit_nodes, audit_texts, audit_root, names, values, bindings, extras, groups, extra_s, extra_e)
+            declared_extras: i64 = rh_pylock_context_member(audit_nodes, audit_texts, audit_root, "extras")
+            declared_groups: i64 = rh_pylock_context_member(audit_nodes, audit_texts, audit_root, "dependency_groups")
+            default_groups: i64 = rh_pylock_context_member(audit_nodes, audit_texts, audit_root, "default_groups")
+            return -1 if not rh_pylock_context_selection_declared(audit_nodes, audit_texts, values, declared_extras, -1, extras)
+            return -1 if not rh_pylock_context_selection_declared(audit_nodes, audit_texts, values, declared_groups, default_groups, groups)
+            0
+
         # Evaluate only marker conditions represented in one PEP 751 audit.
         # Missing variables remain unknown; no install graph is inferred.
         def rh_pylock_marker_evaluation(audit: darray[u8]&, context_bytes: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:

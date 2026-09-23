@@ -138,6 +138,37 @@ module PylockProject:
             Sha256::rh_sha256(declaration, digest)
             digest
 
+        def rh_pylock_project_marker_span(data: darray[u8]&, start: i64, end: i64, marker_start: mutable i64&, marker_end: mutable i64&) -> void:
+            quote: mutable u8 = 0
+            escaped: mutable bool = false
+            cursor: mutable i64 = start
+            while cursor < end |cursor, end, data, quote, escaped, marker_start, marker_end|:
+                byte: u8 = data[cursor.usize()]
+                if escaped:
+                    escaped <- false
+                elif quote != 0 and byte == 92:
+                    escaped <- true
+                elif quote != 0 and byte == quote:
+                    quote <- 0
+                elif quote == 0 and (byte == 34 or byte == 39):
+                    quote <- byte
+                elif quote == 0 and byte == 59:
+                    marker_start[0] <- cursor + 1
+                    marker_end[0] <- end
+                    while marker_start[0] < marker_end[0] and (data[marker_start[0].usize()] == 32 or data[marker_start[0].usize()] == 9) |marker_start, marker_end, data|:
+                        marker_start[0] <- marker_start[0] + 1
+                    while marker_end[0] > marker_start[0] and (data[(marker_end[0] - 1).usize()] == 32 or data[(marker_end[0] - 1).usize()] == 9) |marker_start, marker_end, data|:
+                        marker_end[0] <- marker_end[0] - 1
+                    return
+                cursor <- cursor + 1
+            return
+
+        def rh_pylock_project_marker_state_name(state: i64) -> u8&:
+            return "not_evaluated" if state == -2
+            return "true" if state == 1
+            return "false" if state == 0
+            "unknown"
+
         def rh_pylock_project_object_unique(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if obj < 0 or nodes[obj.usize()].kind != Json::RH_JSON_OBJ
             while key >= 0 |key: i64 = nodes[obj.usize()].first_child, nodes, texts|:
@@ -200,7 +231,7 @@ module PylockProject:
     public:
         # This reports membership only. It does not build an installer graph,
         # evaluate markers, or claim that a ranged requirement is satisfied.
-        def rh_pylock_project_compare(project: darray[u8]&, audit: darray[u8]&, project_sha: darray[u8]&, audit_sha: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_pylock_project_compare(project: darray[u8]&, audit: darray[u8]&, project_sha: darray[u8]&, audit_sha: darray[u8]&, context_sha: darray[u8]&, marker_context: Marker::RhMarkerContext&, has_context: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if project.count.i64() <= 0 or project.count.i64() > RH_PYLOCK_PROJECT_MAX_BYTES
             return -1 if audit.count.i64() <= 0 or audit.count.i64() > RH_PYLOCK_PROJECT_MAX_BYTES
             nodes: mutable darray[Json::RhJsonNode] = []
@@ -228,10 +259,27 @@ module PylockProject:
             out.extend(bytes_view(project_sha))
             Base::rh_push_text(out, "\",\"audit_sha256\":\"")
             out.extend(bytes_view(audit_sha))
-            Base::rh_push_text(out, "\",\"dependency_semantics\":\"declared_manifest_vs_lock_membership\",\"installation_graph\":false,\"markers_evaluated\":false,\"packages\":[")
+            Base::rh_push_text(out, "\",\"context_sha256\":")
+            if has_context:
+                out.push(34)
+                out.extend(bytes_view(context_sha))
+                out.push(34)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"dependency_semantics\":\"declared_manifest_vs_lock_membership\",\"installation_graph\":false,\"markers_evaluated\":")
+            Base::rh_push_text(out, "true" if has_context else "false")
+            Base::rh_push_text(out, ",\"packages\":[")
             while index < requirements.count.i64() |index: i64 = 0, requirements, project_pool, lock_packages, texts, nodes, out, represented, version_missing, ambiguous, no_candidate, not_evaluated, specifier_matches|:
                 requirement: Package::RhRequire = requirements[index.usize()]
                 return -1 if requirement.name_s < 0 or requirement.declared_s < 0
+                marker_s: mutable i64 = -1
+                marker_e: mutable i64 = -1
+                rh_pylock_project_marker_span(project_pool, requirement.declared_s, requirement.declared_e, &marker_s, &marker_e)
+                marker_state: mutable i64 = 1 if marker_s < 0 else -2
+                if marker_s >= 0 and marker_e > marker_s and has_context:
+                    marker_evaluation: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(project_pool, marker_s, marker_e, marker_context)
+                    return -1 if not marker_evaluation.valid
+                    marker_state <- marker_evaluation.state
                 if index > 0:
                     out.push(44)
                 name_candidates: mutable i64 = 0
@@ -289,6 +337,9 @@ module PylockProject:
                     out.push(34)
                     Base::rh_json_escape(out, project_pool, requirement.scope_name_s.usize(), requirement.scope_name_e.usize())
                     out.push(34)
+                Base::rh_push_text(out, ",\"marker_state\":\"")
+                Base::rh_push_text(out, rh_pylock_project_marker_state_name(marker_state))
+                out.push(34)
                 declaration_sha: darray[u8] = rh_pylock_project_declaration_sha(project_pool, requirement.declared_s, requirement.declared_e)
                 Base::rh_push_text(out, ",\"declaration_sha256\":\"")
                 out.extend(bytes_view(declaration_sha))
