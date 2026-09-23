@@ -125,8 +125,17 @@ printf '{"schema":"rh-policy/1","rules":[{"id":1,"op":"=="},{"id":1,"op":"!="}]}
 "$ROOT/build/rh_cli" policy --policy "$T/bad_duplicate_rule.json" --input "$T/deny.json" --out "$T/x6" >/dev/null 2>&1; rc6=$?
 printf '{"schema":"rh-policy-input/1","subject_id":7,"now":1000,"inputs":[{"rule_id":1,"status":"observed"},{"rule_id":1,"status":"partial"}]}' > "$T/bad_duplicate_input.json"
 "$ROOT/build/rh_cli" policy --policy "$T/policy.json" --input "$T/bad_duplicate_input.json" --out "$T/x7" >/dev/null 2>&1; rc7=$?
+printf '{"schema":"rh-policy-input/1","subject_id":7,"now":1000,"inputs":[{"rule_id":99,"status":"observed"}]}' > "$T/bad_unknown_rule.json"
+"$ROOT/build/rh_cli" policy --policy "$T/policy.json" --input "$T/bad_unknown_rule.json" --out "$T/x8" >/dev/null 2>&1; rc8=$?
+python3 - "$T/bad_duplicate_exception.json" "$digest" <<'PY'
+import json, sys
+exc = {"rule_id": 1, "subject_id": 7, "digest": sys.argv[2], "expires_at": 2000}
+open(sys.argv[1], "w").write(json.dumps({"schema": "rh-policy/1", "rules": [{"id": 1, "op": ">="}],
+    "exceptions": [{**exc, "state": "approved"}, {**exc, "state": "revoked"}]}))
+PY
+"$ROOT/build/rh_cli" policy --policy "$T/bad_duplicate_exception.json" --input "$T/deny.json" --out "$T/x9" >/dev/null 2>&1; rc9=$?
 set -e
-for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7"; do
+for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7" "$rc8" "$rc9"; do
   [[ "$rc" -eq 4 ]] || fail "malformed policy/input must exit 4 (got $rc)"
 done
 
