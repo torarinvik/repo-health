@@ -110,6 +110,10 @@ printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[1,1]}' > "$T/duplic
 "$ROOT/build/rh_cli" query --input "$T/duplicateids.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate=$?
 printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[-1,1]}' > "$T/negativeids.json"
 "$ROOT/build/rh_cli" query --input "$T/negativeids.json" --out "$T/x" >/dev/null 2>&1; rc_negative=$?
+printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[1],"cursor":-2}' > "$T/badcursor.json"
+"$ROOT/build/rh_cli" query --input "$T/badcursor.json" --out "$T/x" >/dev/null 2>&1; rc_cursor=$?
+printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[1],"limit":-1}' > "$T/badlimit.json"
+"$ROOT/build/rh_cli" query --input "$T/badlimit.json" --out "$T/x" >/dev/null 2>&1; rc_limit=$?
 printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[],"scan_states":["vibes"]}' > "$T/badstate.json"
 "$ROOT/build/rh_cli" query --input "$T/badstate.json" --out "$T/x" >/dev/null 2>&1; rc_state=$?
 printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[],"job":{"ops":[{"op":"finish","token":1,"phase":"goodbye"}]}}' > "$T/badphase.json"
@@ -118,7 +122,7 @@ printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[],"graph":{"subject
 "$ROOT/build/rh_cli" query --input "$T/badgraph.json" --out "$T/x" >/dev/null 2>&1; rc_graph=$?
 "$ROOT/build/rh_cli" query --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_kind" "$rc_ids" "$rc_unsorted" "$rc_duplicate" "$rc_negative" "$rc_state" "$rc_phase" "$rc_graph" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_kind" "$rc_ids" "$rc_unsorted" "$rc_duplicate" "$rc_negative" "$rc_cursor" "$rc_limit" "$rc_state" "$rc_phase" "$rc_graph" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed query input must exit 4 (got $rc)"
 done
 
