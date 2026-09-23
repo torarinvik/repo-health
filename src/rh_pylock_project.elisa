@@ -2,6 +2,7 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_package.elisa"
+include "./rh_pep440.elisa"
 include "./rh_sha256.elisa"
 
 module PylockProject:
@@ -9,6 +10,66 @@ module PylockProject:
         const RH_PYLOCK_PROJECT_MAX_BYTES: i64 = 8388608
         const RH_PYLOCK_PROJECT_MAX_PACKAGES: i64 = 10000
         const RH_PYLOCK_PROJECT_MAX_REQUIREMENTS: i64 = 10000
+
+        def rh_pylock_project_stable_version(data: darray[u8]&, start: i64, end: i64) -> bool:
+            return false if start < 0 or end <= start
+            digits: mutable i64 = 0
+            for index in start..<end |index, data, digits|:
+                byte: u8 = data[index.usize()]
+                return false if not ((byte >= 48 and byte <= 57) or byte == 46 or byte == 33)
+                digits <- digits + 1 if byte >= 48 and byte <= 57
+            digits > 0
+
+        def rh_pylock_project_specifier_match(requirement: darray[u8]&, start: i64, end: i64, version: darray[u8]&, version_start: i64, version_end: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if start < 0 or end <= start or version_start < 0 or version_end <= version_start
+            clauses: mutable i64 = 0
+            clause_start: mutable i64 = start
+            cursor: mutable i64 = start
+            while cursor <= end |cursor, end, clause_start, requirement, version, version_start, version_end, clauses|:
+                if cursor == end or requirement[cursor.usize()] == 44:
+                    clause_end: mutable i64 = cursor
+                    while clause_start < clause_end and (requirement[clause_start.usize()] == 32 or requirement[clause_start.usize()] == 9) |clause_start, clause_end, requirement|:
+                        clause_start <- clause_start + 1
+                    while clause_end > clause_start and (requirement[(clause_end - 1).usize()] == 32 or requirement[(clause_end - 1).usize()] == 9) |clause_start, clause_end, requirement|:
+                        clause_end <- clause_end - 1
+                    return -1 if clause_start >= clause_end
+                    operator_end: i64 =
+                        while operator_end < clause_end and (requirement[operator_end.usize()] == 60 or requirement[operator_end.usize()] == 62 or requirement[operator_end.usize()] == 61 or requirement[operator_end.usize()] == 33) |operator_end: i64 = clause_start, clause_end, requirement| -> operator_end:
+                            operator_end <- operator_end + 1
+                    return -1 if operator_end == clause_start or operator_end - clause_start > 2
+                    value_start: mutable i64 = operator_end
+                    while value_start < clause_end and (requirement[value_start.usize()] == 32 or requirement[value_start.usize()] == 9) |value_start, clause_end, requirement|:
+                        value_start <- value_start + 1
+                    return -1 if value_start >= clause_end
+                    return -1 if not rh_pylock_project_stable_version(version, version_start, version_end) or not rh_pylock_project_stable_version(requirement, value_start, clause_end)
+                    candidate: Pep440::RhPep440 = Pep440::rh_pep440_parse(version, version_start, version_end)
+                    bound: Pep440::RhPep440 = Pep440::rh_pep440_parse(requirement, value_start, clause_end)
+                    return -1 if candidate.ok != 1 or bound.ok != 1
+                    order: i64 = Pep440::rh_pep440_cmp(candidate, bound)
+                    operator_width: i64 = operator_end - clause_start
+                    first: u8 = requirement[clause_start.usize()]
+                    second: u8 = requirement[(clause_start + 1).usize()] if operator_width == 2 else 0
+                    accepted: bool =
+                        if first == 61 and operator_width == 2:
+                            order == 0
+                        elif first == 33 and operator_width == 2:
+                            order != 0
+                        elif first == 62 and second == 61:
+                            order >= 0
+                        elif first == 60 and second == 61:
+                            order <= 0
+                        elif first == 62 and operator_width == 1:
+                            order > 0
+                        elif first == 60 and operator_width == 1:
+                            order < 0
+                        else:
+                            return -1
+                    return 0 if not accepted
+                    clauses <- clauses + 1
+                    return -1 if clauses > 64
+                    clause_start <- cursor + 1
+                cursor <- cursor + 1
+            1
 
         struct RhPylockProjectPackage:
             name_s: mutable i64
@@ -137,25 +198,32 @@ module PylockProject:
             ambiguous: mutable i64 = 0
             no_candidate: mutable i64 = 0
             not_evaluated: mutable i64 = 0
+            specifier_matches: mutable i64 = 0
             Base::rh_push_text(out, "{\"schema\":\"rh-pylock-project-membership/1\",\"project_sha256\":\"")
             out.extend(bytes_view(project_sha))
             Base::rh_push_text(out, "\",\"audit_sha256\":\"")
             out.extend(bytes_view(audit_sha))
             Base::rh_push_text(out, "\",\"dependency_semantics\":\"declared_manifest_vs_lock_membership\",\"installation_graph\":false,\"markers_evaluated\":false,\"packages\":[")
-            while index < requirements.count.i64() |index: i64 = 0, requirements, project_pool, lock_packages, texts, nodes, out, represented, version_missing, ambiguous, no_candidate, not_evaluated|:
+            while index < requirements.count.i64() |index: i64 = 0, requirements, project_pool, lock_packages, texts, nodes, out, represented, version_missing, ambiguous, no_candidate, not_evaluated, specifier_matches|:
                 requirement: Package::RhRequire = requirements[index.usize()]
                 return -1 if requirement.name_s < 0 or requirement.declared_s < 0
                 if index > 0:
                     out.push(44)
                 name_candidates: mutable i64 = 0
                 version_candidates: mutable i64 = 0
-                while candidate < lock_packages.count.i64() |candidate: i64 = 0, requirement, project_pool, lock_packages, texts, name_candidates, version_candidates|:
+                specifier_candidates: mutable i64 = 0
+                unsupported_specifier: mutable bool = false
+                while candidate < lock_packages.count.i64() |candidate: i64 = 0, requirement, project_pool, lock_packages, texts, name_candidates, version_candidates, specifier_candidates, unsupported_specifier|:
                     package: RhPylockProjectPackage = lock_packages[candidate.usize()]
                     if rh_pylock_project_name_eq(project_pool, requirement.name_s, requirement.name_e, texts, package.name_s, package.name_e):
                         name_candidates <- name_candidates + 1
                         if requirement.ver_s >= 0 and package.version_s >= 0:
                             same_version: bool = rh_pylock_project_span_eq(project_pool, requirement.ver_s, requirement.ver_e, texts, package.version_s, package.version_e)
                             version_candidates <- version_candidates + 1 if same_version
+                        elif requirement.req_s >= 0 and package.version_s >= 0:
+                            matches: i64 = rh_pylock_project_specifier_match(project_pool, requirement.req_s, requirement.req_e, texts, package.version_s, package.version_e)
+                            unsupported_specifier <- true if matches < 0
+                            specifier_candidates <- specifier_candidates + 1 if matches == 1
                     candidate <- candidate + 1
                 state: mutable u8 = 4
                 if name_candidates == 0:
@@ -165,6 +233,12 @@ module PylockProject:
                         state <- 2
                     elif version_candidates == 1:
                         state <- 0
+                    else:
+                        state <- 1
+                elif requirement.req_s >= 0 and not unsupported_specifier:
+                    if specifier_candidates > 0:
+                        state <- 0
+                        specifier_matches <- specifier_matches + 1
                     else:
                         state <- 1
                 if state == 0:
@@ -204,6 +278,8 @@ module PylockProject:
                 Base::rh_push_decimal_i64(out, name_candidates)
                 Base::rh_push_text(out, ",\"version_text_candidate_count\":")
                 Base::rh_push_decimal_i64(out, version_candidates)
+                Base::rh_push_text(out, ",\"specifier_candidate_count\":")
+                Base::rh_push_decimal_i64(out, specifier_candidates)
                 Base::rh_push_text(out, ",\"state\":\"")
                 Base::rh_push_text(out, rh_pylock_project_state_name(state))
                 Base::rh_push_text(out, "\"}")
@@ -220,5 +296,7 @@ module PylockProject:
             Base::rh_push_decimal_i64(out, no_candidate)
             Base::rh_push_text(out, ",\"not_evaluated_count\":")
             Base::rh_push_decimal_i64(out, not_evaluated)
+            Base::rh_push_text(out, ",\"specifier_match_count\":")
+            Base::rh_push_decimal_i64(out, specifier_matches)
             Base::rh_push_text(out, "}}")
             0

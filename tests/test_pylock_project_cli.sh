@@ -32,6 +32,9 @@ assert sidecar["source_audit_sha256"] == hashlib.sha256((root / "fixtures/packag
 assert sidecar["normalized_output_sha256"] == hashlib.sha256(result_path.read_bytes()).hexdigest(), sidecar
 assert result["installation_graph"] is False and result["markers_evaluated"] is False, result
 assert next(row for row in result["packages"] if row["name"] == "pytest")["optional_group"] == "test-suite", result
+requests = next(row for row in result["packages"] if row["name"] == "requests")
+assert requests["state"] == "represented" and requests["specifier_candidate_count"] == 1, requests
+assert result["coverage"]["specifier_match_count"] == 1, result
 assert any(row["state"] == "discarded" for row in sidecar["fields"]), sidecar
 assert all(row["state"] in {"preserved", "transformed", "inferred", "discarded", "unsupported", "unknown"} for row in sidecar["fields"]), sidecar
 PY
@@ -74,4 +77,24 @@ for malformed in \
   [[ "$rc" -eq 4 ]] || fail "duplicate audit keys must fail closed (got $rc)"
 done
 
+cat > "$T/specifier-project.toml" <<'SPECIFIER_PROJECT'
+[project]
+name = "specifier-fixture"
+version = "1.0"
+dependencies = ["alpha>=2,<3", "beta!=1.0", "gamma~=1.4", "delta<2", "prelib>=1.0", "localib>=1.0"]
+SPECIFIER_PROJECT
+cat > "$T/specifier-audit.json" <<'SPECIFIER_AUDIT'
+{"schema":"rh-pylock-audit/1","dependency_semantics":"informational_only","packages":[{"id":0,"name":"alpha","version":"2.1"},{"id":1,"name":"beta","version":"1.0"},{"id":2,"name":"beta","version":"1.1"},{"id":3,"name":"gamma","version":"1.4"},{"id":4,"name":"delta","version":"2.0"},{"id":5,"name":"prelib","version":"1.1rc1"},{"id":6,"name":"localib","version":"1.0+abc"}]}
+SPECIFIER_AUDIT
+"$ROOT/build/rh_cli" pylock-project --project "$T/specifier-project.toml" --audit "$T/specifier-audit.json" --out "$T/specifier-result.json" >/dev/null || fail "bounded specifier evaluation"
+python3 - "$T/specifier-result.json" <<'PY'
+import json, sys
+rows = {row["name"]: row for row in json.load(open(sys.argv[1]))["packages"]}
+assert rows["alpha"]["state"] == "represented" and rows["alpha"]["specifier_candidate_count"] == 1, rows
+assert rows["beta"]["state"] == "represented" and rows["beta"]["specifier_candidate_count"] == 1, rows
+assert rows["gamma"]["state"] == "not_evaluated", rows
+assert rows["delta"]["state"] == "version_not_present", rows
+assert rows["prelib"]["state"] == "not_evaluated", rows
+assert rows["localib"]["state"] == "not_evaluated", rows
+PY
 echo "test_pylock_project_cli OK"
