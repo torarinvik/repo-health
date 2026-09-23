@@ -24,6 +24,7 @@ include "./rh_continuity.elisa"
 include "./rh_continuity_scan.elisa"
 include "./rh_package.elisa"
 include "./rh_pylock.elisa"
+include "./rh_pylock_context.elisa"
 include "./rh_pylock_transformation.elisa"
 include "./rh_pylock_observation.elisa"
 include "./rh_pylock_observation_transformation.elisa"
@@ -158,6 +159,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
     rh_cli_err("       rh_cli pylock --input <pylock.toml> --out <file>")
+    rh_cli_err("       rh_cli pylock-evaluate --audit <rh-pylock-audit/1> --context <rh-pylock-evaluation-context/1> --out <file>")
     rh_cli_err("       rh_cli pylock-observe --audit <rh-pylock-audit/1> --artifact <id> --file <local-artifact> --out <file>")
     rh_cli_err("       rh_cli artifact-observe --graph <package-graph> --artifact <id> --file <local-artifact> --out <file>")
     rh_cli_err("       rh_cli osv-query --input <rh-osv-query-input/1|2> --out <dir> [--continue-pagination]")
@@ -873,6 +875,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 option_index <- option_index + 1
         return rh_cli_usage(2) if pylock_input < 0 or pylock_output < 0
         return rh_do_pylock(slots[pylock_input], slots[pylock_output])
+    if Base::rh_streq(cmd, "pylock-evaluate"):
+        audit_idx, context_idx, out_idx =
+            while option_index < argc |audit_idx: i64 = -1, context_idx: i64 = -1, out_idx: i64 = -1, option_index: i64 = 2, slots| -> audit_idx, context_idx, out_idx:
+                option: u8& = slots[option_index].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(option, "--audit"):
+                    return rh_cli_usage(2) if audit_idx >= 0 or option_index + 1 >= argc
+                    option_index <- option_index + 1
+                    audit_idx <- option_index
+                elif Base::rh_streq(option, "--context"):
+                    return rh_cli_usage(2) if context_idx >= 0 or option_index + 1 >= argc
+                    option_index <- option_index + 1
+                    context_idx <- option_index
+                elif Base::rh_streq(option, "--out"):
+                    return rh_cli_usage(2) if out_idx >= 0 or option_index + 1 >= argc
+                    option_index <- option_index + 1
+                    out_idx <- option_index
+                else:
+                    return rh_cli_usage(2)
+                option_index <- option_index + 1
+        return rh_cli_usage(2) if audit_idx < 0 or context_idx < 0 or out_idx < 0
+        return rh_do_pylock_evaluation(slots[audit_idx], slots[context_idx], slots[out_idx])
     if Base::rh_streq(cmd, "pylock-observe"):
         audit_idx, artifact_idx, file_idx, out_idx, artifact_id =
             while poq < argc |audit_idx: i64 = -1, artifact_idx: i64 = -1, file_idx: i64 = -1, out_idx: i64 = -1, artifact_id: i64 = -1, poq: i64 = 2, slots| -> audit_idx, artifact_idx, file_idx, out_idx, artifact_id:
@@ -3087,6 +3110,27 @@ def rh_do_pylock(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, A
         rh_cli_err("pylock: cannot write transformation report")
         return 4
     rh_cli_out("pylock: PEP 751 audit emitted")
+    0
+
+def rh_do_pylock_evaluation(audit_path: cstr, context_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    return 3 if not rh_path_arg_ok(audit_path) or not rh_path_arg_ok(context_path) or not rh_path_arg_ok(out_path)
+    audit_size: i64 = Base::rh_file_size(audit_path)
+    context_size: i64 = Base::rh_file_size(context_path)
+    return 4 if audit_size <= 0 or audit_size > 8388608
+    return 4 if context_size <= 0 or context_size > 1048576
+    audit: mutable darray[u8] = []
+    context_bytes: mutable darray[u8] = []
+    return 4 if Base::rh_io_read(audit_path, audit) < 0 or audit.count.i64() != audit_size
+    return 4 if Base::rh_io_read(context_path, context_bytes) < 0 or context_bytes.count.i64() != context_size
+    result: mutable darray[u8] = []
+    if PylockContext::rh_pylock_marker_evaluation(audit, context_bytes, result) != 0:
+        rh_cli_err("pylock-evaluate: malformed audit, context, or marker expression")
+        return 4
+    result.push(10)
+    if not Base::rh_io_write(out_path, result):
+        rh_cli_err("pylock-evaluate: cannot write --out")
+        return 4
+    rh_cli_out("pylock-evaluate: marker coverage emitted")
     0
 
 def rh_do_pylock_observation(audit_path: cstr, artifact_id: i64, artifact_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:

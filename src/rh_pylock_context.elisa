@@ -1,0 +1,215 @@
+# Explicit PEP 751 marker-context evaluation. This produces coverage evidence,
+# never an install graph or a global claim about packages outside the lock file.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+include "./rh_marker.elisa"
+
+module PylockContext:
+    private:
+        const RH_PYLOCK_CONTEXT_MAX_AUDIT: i64 = 8388608
+        const RH_PYLOCK_CONTEXT_MAX_CONTEXT: i64 = 1048576
+        const RH_PYLOCK_CONTEXT_MAX_PACKAGES: i64 = 10000
+        const RH_PYLOCK_CONTEXT_MAX_SET_VALUES: i64 = 1024
+
+        def rh_pylock_context_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            Json::rh_json_obj_get(nodes, texts, object, key)
+
+        def rh_pylock_context_schema(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, expected: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            schema_idx: i64 = Json::rh_json_obj_get(nodes, texts, object, "schema")
+            return false if schema_idx < 0 or nodes[schema_idx.usize()].kind != Json::RH_JSON_STR
+            schema: Json::RhJsonNode = nodes[schema_idx.usize()]
+            Base::rh_bytes_equal_literal(texts, schema.text_start, schema.text_end, expected)
+
+        def rh_pylock_context_allowed_key(texts: darray[u8]&, key: Json::RhJsonNode) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "python_version")
+            return true if Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "python_full_version")
+            return true if Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "os_name")
+            return true if Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "sys_platform")
+            return true if Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "platform_release")
+            return true if Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "platform_system")
+            return true if Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "platform_version")
+            return true if Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "platform_machine")
+            return true if Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "platform_python_implementation")
+            return true if Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "implementation_name")
+            Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, "implementation_version")
+
+        def rh_pylock_context_copy(out: mutable darray[u8]&, input: darray[u8]&, start: i64, end: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if start < 0 or end < start or end > input.count.i64()
+            first: i64 = out.count.i64()
+            while i < end |i: i64 = start, out, input|:
+                out.push(input[i.usize()])
+                i <- i + 1
+            first
+
+        def rh_pylock_context_add_set(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, array_idx: i64, values: mutable darray[u8]&, spans: mutable darray[Marker::RhMarkerSpan]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if array_idx < 0 or nodes[array_idx.usize()].kind != Json::RH_JSON_ARR
+            array: Json::RhJsonNode = nodes[array_idx.usize()]
+            return false if array.child_count > RH_PYLOCK_CONTEXT_MAX_SET_VALUES
+            child: mutable i64 = array.first_child
+            while child >= 0 |child, nodes, texts, values, spans|:
+                item: Json::RhJsonNode = nodes[child.usize()]
+                return false if item.kind != Json::RH_JSON_STR
+                for prior in 0..<spans.count |prior, spans, values, texts, item|:
+                    existing: Marker::RhMarkerSpan = spans[prior]
+                    return false if Base::rh_bytes_equal_span(texts, item.text_start, item.text_end, values, existing.start.usize(), existing.end.usize())
+                start: i64 = rh_pylock_context_copy(values, texts, item.text_start, item.text_end)
+                return false if start < 0
+                spans.push(Marker::RhMarkerSpan{start: start, end: start + item.text_end - item.text_start})
+                child <- item.next_sibling
+            spans.count.i64() == array.child_count
+
+        def rh_pylock_context_build(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, names: mutable darray[u8]&, values: mutable darray[u8]&, bindings: mutable darray[Marker::RhMarkerBinding]&, extras: mutable darray[Marker::RhMarkerSpan]&, groups: mutable darray[Marker::RhMarkerSpan]&, extra_s: mutable i64&, extra_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not rh_pylock_context_schema(nodes, texts, root, "rh-pylock-evaluation-context/1")
+            environment_idx: i64 = rh_pylock_context_member(nodes, texts, root, "environment")
+            groups_idx: i64 = rh_pylock_context_member(nodes, texts, root, "dependency_groups")
+            return false if environment_idx < 0 or nodes[environment_idx.usize()].kind != Json::RH_JSON_OBJ or groups_idx < 0
+            environment: Json::RhJsonNode = nodes[environment_idx.usize()]
+            return false if environment.child_count > 32
+            child: mutable i64 = environment.first_child
+            while child >= 0 |child, nodes, texts, names, values, bindings|:
+                key: Json::RhJsonNode = nodes[child.usize()]
+                value_idx: i64 = key.next_sibling
+                return false if value_idx < 0 or not rh_pylock_context_allowed_key(texts, key)
+                value: Json::RhJsonNode = nodes[value_idx.usize()]
+                return false if value.kind != Json::RH_JSON_STR
+                for prior in 0..<bindings.count |prior, bindings, names, texts, key|:
+                    binding: Marker::RhMarkerBinding = bindings[prior]
+                    return false if Base::rh_bytes_equal_span(texts, key.text_start, key.text_end, names, binding.name_s.usize(), binding.name_e.usize())
+                name_s: i64 = rh_pylock_context_copy(names, texts, key.text_start, key.text_end)
+                value_s: i64 = rh_pylock_context_copy(values, texts, value.text_start, value.text_end)
+                return false if name_s < 0 or value_s < 0
+                bindings.push(Marker::RhMarkerBinding{name_s: name_s, name_e: name_s + key.text_end - key.text_start, value_s: value_s, value_e: value_s + value.text_end - value.text_start})
+                child <- nodes[value_idx.usize()].next_sibling
+            return false if bindings.count.i64() != environment.child_count / 2
+            return false if not rh_pylock_context_add_set(nodes, texts, groups_idx, values, groups)
+            extras_idx: i64 = rh_pylock_context_member(nodes, texts, root, "extras")
+            return false if extras_idx >= 0 and not rh_pylock_context_add_set(nodes, texts, extras_idx, values, extras)
+            extra_idx: i64 = rh_pylock_context_member(nodes, texts, root, "extra")
+            if extra_idx >= 0:
+                extra: Json::RhJsonNode = nodes[extra_idx.usize()]
+                return false if extra.kind != Json::RH_JSON_STR
+                extra_s[0] <- rh_pylock_context_copy(values, texts, extra.text_start, extra.text_end)
+                return false if extra_s[0] < 0
+                extra_e[0] <- extra_s[0] + extra.text_end - extra.text_start
+            true
+
+        def rh_pylock_context_state_name(state: i64) -> u8&:
+            return "true" if state == Marker::RH_MARKER_RESULT_TRUE
+            return "false" if state == Marker::RH_MARKER_RESULT_FALSE
+            "unknown"
+
+        def rh_pylock_context_emit_string(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            if start < 0:
+                Base::rh_push_text(out, "null")
+            else:
+                out.push(34)
+                Base::rh_json_escape(out, texts, start.usize(), end.usize())
+                out.push(34)
+
+    public:
+        # Evaluate only marker conditions represented in one PEP 751 audit.
+        # Missing variables remain unknown; no install graph is inferred.
+        def rh_pylock_marker_evaluation(audit: darray[u8]&, context_bytes: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if audit.count.i64() <= 0 or audit.count.i64() > RH_PYLOCK_CONTEXT_MAX_AUDIT
+            return -1 if context_bytes.count.i64() <= 0 or context_bytes.count.i64() > RH_PYLOCK_CONTEXT_MAX_CONTEXT
+            audit_nodes: mutable darray[Json::RhJsonNode] = []
+            audit_texts: mutable darray[u8] = []
+            audit_root: i64 = Json::rh_json_parse(audit, audit_nodes, audit_texts)
+            return -1 if audit_root < 0 or not rh_pylock_context_schema(audit_nodes, audit_texts, audit_root, "rh-pylock-audit/1")
+            context_nodes: mutable darray[Json::RhJsonNode] = []
+            context_texts: mutable darray[u8] = []
+            context_root: i64 = Json::rh_json_parse(context_bytes, context_nodes, context_texts)
+            return -1 if context_root < 0 or audit_nodes[audit_root.usize()].kind != Json::RH_JSON_OBJ
+            names: mutable darray[u8] = []
+            values: mutable darray[u8] = []
+            bindings: mutable darray[Marker::RhMarkerBinding] = []
+            extras: mutable darray[Marker::RhMarkerSpan] = []
+            groups: mutable darray[Marker::RhMarkerSpan] = []
+            extra_s: mutable i64 = -1
+            extra_e: mutable i64 = -1
+            return -1 if not rh_pylock_context_build(context_nodes, context_texts, context_root, names, values, bindings, extras, groups, &extra_s, &extra_e)
+            marker_context: mutable Marker::RhMarkerContext = Marker::RhMarkerContext{names: names, values: values, bindings: bindings, extras: extras, groups: groups, extra_s: extra_s, extra_e: extra_e}
+            audit_hash: mutable darray[u8] = []
+            context_hash: mutable darray[u8] = []
+            Sha256::rh_sha256(audit, audit_hash)
+            Sha256::rh_sha256(context_bytes, context_hash)
+            environments_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, audit_root, "environments")
+            packages_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, audit_root, "packages")
+            return -1 if environments_idx < 0 or packages_idx < 0 or audit_nodes[environments_idx.usize()].kind != Json::RH_JSON_ARR or audit_nodes[packages_idx.usize()].kind != Json::RH_JSON_ARR
+            environments: Json::RhJsonNode = audit_nodes[environments_idx.usize()]
+            packages: Json::RhJsonNode = audit_nodes[packages_idx.usize()]
+            return -1 if packages.child_count > RH_PYLOCK_CONTEXT_MAX_PACKAGES
+            environment_state: mutable i64 = Marker::RH_MARKER_RESULT_TRUE if environments.child_count == 0 else Marker::RH_MARKER_RESULT_FALSE
+            env_child: mutable i64 = environments.first_child
+            while env_child >= 0 |env_child, audit_nodes, audit_texts, marker_context, environment_state|:
+                expression: Json::RhJsonNode = audit_nodes[env_child.usize()]
+                return -1 if expression.kind != Json::RH_JSON_STR
+                evaluated: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(audit_texts, expression.text_start, expression.text_end, marker_context)
+                return -1 if not evaluated.valid
+                if evaluated.state == Marker::RH_MARKER_RESULT_TRUE:
+                    environment_state <- Marker::RH_MARKER_RESULT_TRUE
+                elif evaluated.state == Marker::RH_MARKER_RESULT_UNKNOWN and environment_state != Marker::RH_MARKER_RESULT_TRUE:
+                    environment_state <- Marker::RH_MARKER_RESULT_UNKNOWN
+                env_child <- expression.next_sibling
+            Base::rh_push_text(out, "{\"schema\":\"rh-pylock-marker-evaluation/1\",\"audit_sha256\":\"")
+            out.extend(bytes_view(audit_hash))
+            Base::rh_push_text(out, "\",\"context_sha256\":\"")
+            out.extend(bytes_view(context_hash))
+            Base::rh_push_text(out, "\",\"environment_state\":\"")
+            Base::rh_push_text(out, rh_pylock_context_state_name(environment_state))
+            Base::rh_push_text(out, "\",\"dependency_semantics\":\"informational_only\",\"installation_graph\":false,\"package_markers\":[")
+            first: mutable bool = true
+            package_child: mutable i64 = packages.first_child
+            package_id: mutable i64 = 0
+            while package_child >= 0 |package_child, audit_nodes, audit_texts, marker_context, out, first, package_id|:
+                package: Json::RhJsonNode = audit_nodes[package_child.usize()]
+                return -1 if package.kind != Json::RH_JSON_OBJ
+                marker_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, package_child, "marker")
+                name_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, package_child, "name")
+                version_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, package_child, "version")
+                return -1 if name_idx < 0 or version_idx < 0
+                name: Json::RhJsonNode = audit_nodes[name_idx.usize()]
+                version: Json::RhJsonNode = audit_nodes[version_idx.usize()]
+                return -1 if name.kind != Json::RH_JSON_STR or (version.kind != Json::RH_JSON_NULL and version.kind != Json::RH_JSON_STR)
+                marker_state: mutable i64 = Marker::RH_MARKER_RESULT_TRUE
+                if marker_idx >= 0 and audit_nodes[marker_idx.usize()].kind != Json::RH_JSON_NULL:
+                    marker: Json::RhJsonNode = audit_nodes[marker_idx.usize()]
+                    return -1 if marker.kind != Json::RH_JSON_STR
+                    evaluated: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(audit_texts, marker.text_start, marker.text_end, marker_context)
+                    return -1 if not evaluated.valid
+                    marker_state <- evaluated.state
+                if not first:
+                    out.push(44)
+                first <- false
+                Base::rh_push_text(out, "{\"id\":")
+                Base::rh_push_decimal_i64(out, package_id)
+                Base::rh_push_text(out, ",\"name\":")
+                rh_pylock_context_emit_string(out, audit_texts, name.text_start, name.text_end)
+                Base::rh_push_text(out, ",\"version\":")
+                if version.kind == Json::RH_JSON_NULL:
+                    Base::rh_push_text(out, "null")
+                else:
+                    rh_pylock_context_emit_string(out, audit_texts, version.text_start, version.text_end)
+                Base::rh_push_text(out, ",\"marker_state\":\"")
+                Base::rh_push_text(out, rh_pylock_context_state_name(marker_state))
+                Base::rh_push_text(out, "\"}")
+                package_child <- package.next_sibling
+                package_id <- package_id + 1
+            Base::rh_push_text(out, "],\"coverage\":{\"package_count\":")
+            Base::rh_push_decimal_i64(out, packages.child_count)
+            Base::rh_push_text(out, ",\"marker_unknown_count\":")
+            packages_for_count: mutable Json::RhJsonNode = packages
+            unknown_count: i64 =
+                while i < packages_for_count.child_count |count: i64 = 0, i: i64 = 0, audit_nodes, audit_texts, marker_context, packages_for_count| -> count:
+                    package_id_idx: i64 = Json::rh_json_arr_get(audit_nodes, packages_idx, i)
+                    marker_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, package_id_idx, "marker")
+                    if marker_idx >= 0 and audit_nodes[marker_idx.usize()].kind == Json::RH_JSON_STR:
+                        marker: Json::RhJsonNode = audit_nodes[marker_idx.usize()]
+                        evaluated: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(audit_texts, marker.text_start, marker.text_end, marker_context)
+                        count <- count + 1 if evaluated.state == Marker::RH_MARKER_RESULT_UNKNOWN
+                    i <- i + 1
+            Base::rh_push_decimal_i64(out, unknown_count)
+            Base::rh_push_text(out, "}}")
+            0
