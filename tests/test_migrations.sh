@@ -24,6 +24,7 @@ functions = set(re.findall(r"CREATE FUNCTION\s+([a-z_][a-z0-9_]*)", clean, re.I)
 required_tables = {
     "source_instance", "capability_observation", "credential_reference",
     "collection_run", "collection_page", "collection_cursor", "job", "job_attempt",
+    "graph_query_job",
     "staged_source_record",
     "staged_normalization",
     "entity", "project", "repository", "repository_location", "repository_snapshot",
@@ -42,7 +43,7 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_enqueue_collection_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events"} <= functions
+assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_publish_graph_query_result", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events"} <= functions
 assert clean.lstrip().startswith("BEGIN;") and clean.rstrip().endswith("COMMIT;")
 assert "FOR UPDATE SKIP LOCKED" in clean
 assert "fencing_token" in clean and "lease_expires_at" in clean
@@ -80,6 +81,11 @@ assert "outcome = 'lease_expired'" in clean and "error_kind = 'lease_expired'" i
 assert "a.fencing_token < j.fencing_token" in clean
 assert "p_job_id IS NULL OR j.id = p_job_id" in clean
 assert "p_job_id IS NULL OR j.kind = 'collection'" in clean
+assert "graph query request is malformed or exceeds the bounded payload limit" in clean
+assert "graph query result is malformed or exceeds the bounded payload limit" in clean
+assert "kind <> 'graph_query' OR p_state <> 'succeeded'" in clean
+assert "v_job.fencing_token IS DISTINCT FROM p_fencing_token" in clean
+assert "result_fencing_token = p_fencing_token" in clean
 assert "collection job state and run status are inconsistent" in clean
 assert "collection job attempt was not found for the current fencing token" in clean
 assert "UPDATE job" in clean and "fencing_token = p_fencing_token" in clean

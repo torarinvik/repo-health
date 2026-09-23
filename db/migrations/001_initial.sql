@@ -195,6 +195,18 @@ CREATE TABLE job_attempt (
     UNIQUE (job_id, fencing_token)
 );
 
+-- Graph queries are durable jobs with a bounded, immutable request and one
+-- result published by the current fenced attempt.
+CREATE TABLE graph_query_job (
+    job_id uuid PRIMARY KEY REFERENCES job(id),
+    request jsonb NOT NULL CHECK (jsonb_typeof(request) = 'object'),
+    result jsonb CHECK (result IS NULL OR jsonb_typeof(result) = 'object'),
+    result_fencing_token bigint CHECK (result_fencing_token IS NULL OR result_fencing_token > 0),
+    completed_at timestamptz,
+    CHECK ((result IS NULL AND result_fencing_token IS NULL AND completed_at IS NULL)
+        OR (result IS NOT NULL AND result_fencing_token IS NOT NULL AND completed_at IS NOT NULL))
+);
+
 CREATE TABLE entity (
     id uuid PRIMARY KEY,
     entity_kind text NOT NULL,
@@ -999,6 +1011,7 @@ BEGIN
     SET state = p_state, lease_expires_at = NULL, finished_at = p_now
     WHERE id = p_job_id
       AND kind <> 'collection'
+      AND (kind <> 'graph_query' OR p_state <> 'succeeded')
       AND state = 'running'
       AND fencing_token = p_fencing_token
       AND lease_expires_at > p_now;
@@ -1010,6 +1023,112 @@ BEGIN
     UPDATE job_attempt
     SET finished_at = p_now, outcome = p_outcome, error_kind = p_error_kind
     WHERE job_id = p_job_id AND fencing_token = p_fencing_token;
+    RETURN true;
+END;
+$$;
+
+-- Enqueue an immutable, bounded query request. Reusing a job ID is idempotent
+-- only when scheduling metadata, visibility, and the complete request match.
+CREATE FUNCTION rh_enqueue_graph_query_job(
+    p_job_id uuid,
+    p_visibility_scope rh_visibility_scope,
+    p_request jsonb,
+    p_priority integer,
+    p_next_attempt_at timestamptz,
+    p_created_at timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_existing job%ROWTYPE;
+BEGIN
+    IF p_request IS NULL OR jsonb_typeof(p_request) IS DISTINCT FROM 'object'
+       OR p_request->>'schema' IS DISTINCT FROM 'rh-query-input/1'
+       OR jsonb_typeof(p_request->'ids') IS DISTINCT FROM 'array'
+       OR pg_column_size(p_request) > 1048576 THEN
+        RAISE EXCEPTION 'graph query request is malformed or exceeds the bounded payload limit';
+    END IF;
+    IF p_created_at > p_next_attempt_at THEN
+        RAISE EXCEPTION 'graph query job cannot be scheduled before its creation time';
+    END IF;
+
+    SELECT * INTO v_existing FROM job WHERE id = p_job_id FOR UPDATE;
+    IF FOUND THEN
+        IF v_existing.source_instance_id IS NOT NULL
+           OR v_existing.kind IS DISTINCT FROM 'graph_query'
+           OR v_existing.visibility_scope IS DISTINCT FROM p_visibility_scope
+           OR v_existing.priority IS DISTINCT FROM p_priority
+           OR v_existing.next_attempt_at IS DISTINCT FROM p_next_attempt_at
+           OR v_existing.created_at IS DISTINCT FROM p_created_at
+           OR NOT EXISTS (
+               SELECT 1 FROM graph_query_job AS g
+               WHERE g.job_id = p_job_id AND g.request = p_request
+           ) THEN
+            RAISE EXCEPTION 'graph query job identity is already registered with different immutable metadata';
+        END IF;
+        RETURN false;
+    END IF;
+
+    INSERT INTO job (
+        id, source_instance_id, kind, visibility_scope, state, priority,
+        next_attempt_at, created_at, input_manifest
+    ) VALUES (
+        p_job_id, NULL, 'graph_query', p_visibility_scope, 'queued', p_priority,
+        p_next_attempt_at, p_created_at,
+        jsonb_build_object('schema', 'rh-graph-query-job/1', 'job_id', p_job_id::text)
+    );
+    INSERT INTO graph_query_job (job_id, request) VALUES (p_job_id, p_request);
+    RETURN true;
+END;
+$$;
+
+-- Publish the bounded result and close the job/attempt atomically. A stale or
+-- expired worker cannot overwrite a result after the job has been reclaimed.
+CREATE FUNCTION rh_publish_graph_query_result(
+    p_job_id uuid,
+    p_fencing_token bigint,
+    p_now timestamptz,
+    p_result jsonb
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_job job%ROWTYPE;
+BEGIN
+    IF p_result IS NULL OR jsonb_typeof(p_result) IS DISTINCT FROM 'object'
+       OR p_result->>'schema' IS DISTINCT FROM 'rh-query-result/1'
+       OR pg_column_size(p_result) > 1048576 THEN
+        RAISE EXCEPTION 'graph query result is malformed or exceeds the bounded payload limit';
+    END IF;
+
+    SELECT * INTO v_job FROM job WHERE id = p_job_id FOR UPDATE;
+    IF NOT FOUND OR v_job.kind IS DISTINCT FROM 'graph_query'
+       OR v_job.state IS DISTINCT FROM 'running'
+       OR v_job.fencing_token IS DISTINCT FROM p_fencing_token
+       OR v_job.lease_expires_at <= p_now THEN
+        RETURN false;
+    END IF;
+
+    UPDATE graph_query_job
+    SET result = p_result,
+        result_fencing_token = p_fencing_token,
+        completed_at = p_now
+    WHERE job_id = p_job_id AND result IS NULL;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    UPDATE job SET state = 'succeeded', lease_expires_at = NULL, finished_at = p_now
+    WHERE id = p_job_id AND state = 'running' AND fencing_token = p_fencing_token;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'graph query job changed while publishing its result';
+    END IF;
+
+    UPDATE job_attempt SET finished_at = p_now, outcome = 'succeeded'
+    WHERE job_id = p_job_id AND fencing_token = p_fencing_token AND finished_at IS NULL;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'graph query job attempt was not found for the current fencing token';
+    END IF;
     RETURN true;
 END;
 $$;
