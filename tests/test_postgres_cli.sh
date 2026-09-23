@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/test_postgres_cli.sh — RH_DATABASE_URL-backed PostgreSQL command path.
-# Contracts: rh-postgres-command/1 -> rh-postgres-result/1.
+# Contracts: rh-postgres-command/1 -> rh-postgres-result/1; retry_graph_query_job uses rh-job-next/1.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="/tmp/rh-postgres-cli"

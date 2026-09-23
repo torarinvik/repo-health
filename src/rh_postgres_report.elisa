@@ -6,6 +6,7 @@ include "./rh_postgres.elisa"
 include "./rh_sha256.elisa"
 include "./rh_store.elisa"
 include "./rh_query_report.elisa"
+include "./rh_job.elisa"
 
 module PostgresReport:
     private:
@@ -810,6 +811,50 @@ module PostgresReport:
                 Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"publish_graph_query_result\",\"status\":\"")
                 Base::rh_push_text(out, "published" if published == 1 else "fenced")
                 Base::rh_push_text(out, "\"}")
+                return 0
+
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "retry_graph_query_job"):
+                job_s: mutable i64 = 0
+                job_e: mutable i64 = 0
+                now_s: mutable i64 = 0
+                now_e: mutable i64 = 0
+                kind_s: mutable i64 = 0
+                kind_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "job_id", &job_s, &job_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, job_s, job_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "now", &now_s, &now_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "failure_kind", &kind_s, &kind_e, false)
+                kind: i64 = Job::rh_job_classify(texts, kind_s, kind_e)
+                return -1 if kind < 0 or kind == 6
+                attempt: mutable i64 = 0
+                epoch: mutable i64 = 0
+                max_attempts: mutable i64 = 0
+                backoff_cap: mutable i64 = 3600
+                token: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "fencing_token", 1, 9223372036854775807, &token)
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "attempt", 1, 2147483647, &attempt)
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "now_epoch", 0, 9223372036854775807, &epoch)
+                max_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "max_attempts")
+                if max_idx >= 0:
+                    return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "max_attempts", 0, 2147483647, &max_attempts)
+                cap_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "backoff_cap_secs")
+                if cap_idx >= 0:
+                    return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "backoff_cap_secs", 0, 2147483647, &backoff_cap)
+                decision: Job::RhJobNext = Job::rh_job_on_failure(kind, attempt, epoch, max_attempts, backoff_cap)
+                job_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, job_s, job_e)
+                now: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, now_s, now_e)
+                failure_kind: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, kind_s, kind_e)
+                job_ptr: cstr = (&job_id[0]).cast[cstr] can Unsafe.PointerCast
+                now_ptr: cstr = (&now[0]).cast[cstr] can Unsafe.PointerCast
+                kind_ptr: cstr = (&failure_kind[0]).cast[cstr] can Unsafe.PointerCast
+                applied: i64 = Postgres::rh_pg_retry_graph_query_job(conninfo, job_ptr, token, attempt, kind_ptr, decision.phase, decision.wake_at, now_ptr)
+                return -1 if applied < 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"retry_graph_query_job\",\"status\":\"")
+                Base::rh_push_text(out, "applied" if applied == 1 else "fenced")
+                Base::rh_push_text(out, "\",\"next_phase\":\"")
+                Base::rh_push_text(out, Job::rh_job_phase_label(decision.phase))
+                Base::rh_push_text(out, "\",\"wake_epoch\":")
+                Base::rh_push_decimal_i64(out, decision.wake_at)
+                Base::rh_push_text(out, "}")
                 return 0
 
             commit_events: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "page_commit_events")

@@ -1244,6 +1244,58 @@ BEGIN
 END;
 $$;
 
+-- Apply the existing Elisa Job retry decision atomically with attempt history.
+-- attempt_count and token are checked against durable state before any update.
+CREATE FUNCTION rh_retry_graph_query_job(
+    p_job_id uuid,
+    p_fencing_token bigint,
+    p_attempt integer,
+    p_failure_kind text,
+    p_phase integer,
+    p_wake_at timestamptz,
+    p_now timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_job job%ROWTYPE;
+    v_target_state text;
+    v_outcome text;
+BEGIN
+    IF p_failure_kind IS NULL OR p_failure_kind NOT IN ('transient', 'rate_limit', 'auth', 'unsupported', 'malformed', 'budget')
+       OR p_phase NOT IN (4, 6, 7) THEN
+        RAISE EXCEPTION 'invalid graph query retry decision';
+    END IF;
+    SELECT * INTO v_job FROM job WHERE id = p_job_id FOR UPDATE;
+    IF NOT FOUND OR v_job.kind IS DISTINCT FROM 'graph_query'
+       OR v_job.state IS DISTINCT FROM 'running'
+       OR v_job.fencing_token IS DISTINCT FROM p_fencing_token
+       OR v_job.attempt_count IS DISTINCT FROM p_attempt
+       OR v_job.lease_expires_at <= p_now THEN
+        RETURN false;
+    END IF;
+    IF (p_failure_kind IN ('auth', 'unsupported') AND p_phase <> 4)
+       OR (p_failure_kind = 'malformed' AND p_phase <> 7)
+       OR (p_failure_kind IN ('transient', 'rate_limit', 'budget') AND p_phase NOT IN (6, 7))
+       OR (p_phase = 6 AND p_wake_at < p_now)
+       OR (p_phase <> 6 AND p_wake_at IS DISTINCT FROM 'epoch'::timestamptz) THEN
+        RAISE EXCEPTION 'retry decision does not match failure classification';
+    END IF;
+    v_target_state := CASE p_phase WHEN 6 THEN 'queued' WHEN 4 THEN 'failed' ELSE 'dead_letter' END;
+    v_outcome := CASE p_phase WHEN 6 THEN 'retry' WHEN 4 THEN 'failed' ELSE 'dead_letter' END;
+    UPDATE job_attempt
+    SET finished_at = p_now, outcome = v_outcome, error_kind = p_failure_kind
+    WHERE job_id = p_job_id AND fencing_token = p_fencing_token
+      AND attempt_number = p_attempt AND finished_at IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'graph query attempt was not found for the current fencing token'; END IF;
+    UPDATE job SET state = v_target_state, next_attempt_at = CASE WHEN p_phase = 6 THEN p_wake_at ELSE next_attempt_at END,
+        worker_id = NULL, lease_expires_at = NULL, finished_at = CASE WHEN p_phase = 6 THEN NULL ELSE p_now END
+    WHERE id = p_job_id AND state = 'running' AND fencing_token = p_fencing_token;
+    IF NOT FOUND THEN RAISE EXCEPTION 'graph query job changed while applying retry decision'; END IF;
+    RETURN true;
+END;
+$$;
+
 -- Collection runs and their owning jobs finish together. This keeps a run from
 -- appearing terminal while its lease is still active, or after that lease has
 -- expired and may belong to a later worker.
