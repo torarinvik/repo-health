@@ -13,7 +13,12 @@ JSON
 "$ROOT/build/rh_cli" pylock-evaluate --audit "$TMP/audit.json" --context "$TMP/context.json" --out "$TMP/out.json" >/dev/null
 python3 - "$TMP/out.json" <<'PY'
 import json, sys
+import hashlib
 d = json.load(open(sys.argv[1]))
+audit_path = sys.argv[1].replace("out.json", "audit.json")
+context_path = sys.argv[1].replace("out.json", "context.json")
+out_bytes = open(sys.argv[1], "rb").read()
+sidecar = json.load(open(sys.argv[1] + ".transformations.json"))
 assert d["schema"] == "rh-pylock-marker-evaluation/1", d
 assert d["environment_state"] == "true", d
 assert d["top_level_requires_python_state"] == "true", d
@@ -22,6 +27,11 @@ assert [x["marker_state"] for x in d["package_markers"]] == ["true", "false", "u
 assert [x["requires_python_state"] for x in d["package_markers"]] == ["true", "false", "unknown"], d
 assert d["coverage"] == {"package_count": 3, "marker_unknown_count": 1}, d
 assert len(d["audit_sha256"]) == len(d["context_sha256"]) == 64, d
+assert sidecar["source_input_sha256"] == hashlib.sha256(open(audit_path, "rb").read()).hexdigest(), sidecar
+assert sidecar["source_context_sha256"] == hashlib.sha256(open(context_path, "rb").read()).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(out_bytes).hexdigest(), sidecar
+assert sidecar["output_schema"] == d["schema"] and sidecar["configuration_sha256"] != "0" * 64, sidecar
+assert any(x["state"] == "unsupported" and x["target"] == "installation_graph" for x in sidecar["fields"]), sidecar
 print("pylock evaluate output OK")
 PY
 cat >"$TMP/no-version-context.json" <<'JSON'
