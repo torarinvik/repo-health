@@ -20,13 +20,19 @@ cp "$ROOT/fixtures/connectors/forge-events-result.json" "$T/expected.json"
 
 echo "[forge-events] valid capture reproduces the checked-in result"
 "$ROOT/build/rh_cli" forge events --input "$T/input.json" --out "$T/out.json" >/dev/null || fail "valid capture"
-python3 - "$T/out.json" "$T/expected.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/expected.json" "$T/input.json" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, sys
 got = json.load(open(sys.argv[1]))
 expected = json.load(open(sys.argv[2]))
 assert got == expected, (got, expected)
 assert all(e["native_id"].startswith("github:") for e in got["events"])
 assert all("title" not in e and "body" not in e for e in got["events"])
+tr = json.load(open(sys.argv[4]))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "forge-workflow-events", tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[3], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/forge-workflow-events/1").hexdigest(), tr
+assert {field["state"] for field in tr["fields"]} >= {"preserved", "transformed", "discarded", "unknown", "unsupported"}, tr
 print("[forge-events] result and provider-native boundary OK")
 PY
 

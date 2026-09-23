@@ -140,7 +140,11 @@ IDs (`github:<id>`/`gitlab:<id>`), emits explicit `observed` or `unsupported`
 capability states, and reports attempted, normalized, duplicate-replacement,
 unique, and rejected counts per capability. It retains no titles or bodies.
 The input envelope is versioned in `schemas/forge-events-input.schema.json`
-and registered with the public contract checks. This captured-input normalizer
+and registered with the public contract checks. Each successful captured
+normalization also writes a deterministic `.transformations.json` sidecar
+(`rh-adapter-transformation-report/1`) binding exact input bytes, normalized
+output bytes, and normalizer configuration by SHA-256, with field-level
+preserved/transformed/discarded/unknown/unsupported states. This captured-input normalizer
 does not perform live acquisition; the separate GitHub fetch path handles
 bounded authentication and pagination, while role inference remains separate.
 
