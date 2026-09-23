@@ -100,6 +100,51 @@ module PylockContext:
             return "false" if state == Marker::RH_MARKER_RESULT_FALSE
             "unknown"
 
+        def rh_pylock_requires_python(data: darray[u8]&, start: i64, end: i64, context: Marker::RhMarkerContext&) -> Marker::RhMarkerEvaluation can[Memory.Allocate, Abort.Panic]:
+            return Marker::RhMarkerEvaluation{state: Marker::RH_MARKER_RESULT_UNKNOWN, valid: true} if start < 0 or end <= start
+            state: mutable i64 = Marker::RH_MARKER_RESULT_TRUE
+            clause_start: mutable i64 = start
+            cursor: mutable i64 = start
+            while cursor <= end |cursor, end, clause_start, data, context, state|:
+                if cursor == end or data[cursor.usize()] == 44:
+                    clause_end: mutable i64 = cursor
+                    while clause_start < clause_end and (data[clause_start.usize()] == 32 or data[clause_start.usize()] == 9) |clause_start, clause_end, data|:
+                        clause_start <- clause_start + 1
+                    while clause_end > clause_start and (data[(clause_end - 1).usize()] == 32 or data[(clause_end - 1).usize()] == 9) |clause_start, clause_end, data|:
+                        clause_end <- clause_end - 1
+                    return Marker::RhMarkerEvaluation{state: Marker::RH_MARKER_RESULT_UNKNOWN, valid: false} if clause_start >= clause_end
+                    op_end: mutable i64 = clause_start
+                    while op_end < clause_end and data[op_end.usize()] != 48 and data[op_end.usize()] != 49 and data[op_end.usize()] != 50 and data[op_end.usize()] != 51 and data[op_end.usize()] != 52 and data[op_end.usize()] != 53 and data[op_end.usize()] != 54 and data[op_end.usize()] != 55 and data[op_end.usize()] != 56 and data[op_end.usize()] != 57 |op_end, clause_end, data|:
+                        op_end <- op_end + 1
+                    return Marker::RhMarkerEvaluation{state: Marker::RH_MARKER_RESULT_UNKNOWN, valid: false} if op_end == clause_start or op_end == clause_end
+                    version_start: mutable i64 = op_end
+                    while version_start < clause_end and (data[version_start.usize()] == 32 or data[version_start.usize()] == 9) |version_start, clause_end, data|:
+                        version_start <- version_start + 1
+                    return Marker::RhMarkerEvaluation{state: Marker::RH_MARKER_RESULT_UNKNOWN, valid: false} if version_start >= clause_end
+                    for i in version_start..<clause_end |i, data|:
+                        return Marker::RhMarkerEvaluation{state: Marker::RH_MARKER_RESULT_UNKNOWN, valid: false} if data[i.usize()] == 39 or data[i.usize()] == 34 or data[i.usize()] == 92
+                    wildcard: mutable bool = false
+                    for i in version_start..<clause_end |i, data, wildcard|:
+                        wildcard <- true if data[i.usize()] == 42
+                    if wildcard:
+                        state <- Marker::RH_MARKER_RESULT_UNKNOWN
+                    else:
+                        expression: mutable darray[u8] = []
+                        Base::rh_push_text(expression, "python_full_version ")
+                        for i in clause_start..<op_end |i, data, expression|:
+                            expression.push(data[i.usize()])
+                        Base::rh_push_text(expression, " '")
+                        for i in version_start..<clause_end |i, data, expression|:
+                            expression.push(data[i.usize()])
+                        expression.push(39)
+                        evaluated: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(expression, 0, expression.count.i64(), context)
+                        return Marker::RhMarkerEvaluation{state: Marker::RH_MARKER_RESULT_UNKNOWN, valid: false} if not evaluated.valid
+                        state <- Marker::RH_MARKER_RESULT_FALSE if evaluated.state == Marker::RH_MARKER_RESULT_FALSE
+                        state <- Marker::RH_MARKER_RESULT_UNKNOWN if evaluated.state == Marker::RH_MARKER_RESULT_UNKNOWN and state != Marker::RH_MARKER_RESULT_FALSE
+                    clause_start <- cursor + 1
+                cursor <- cursor + 1
+            Marker::RhMarkerEvaluation{state: state, valid: true}
+
         def rh_pylock_context_emit_string(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
             if start < 0:
                 Base::rh_push_text(out, "null")
@@ -167,6 +212,7 @@ module PylockContext:
                 package: Json::RhJsonNode = audit_nodes[package_child.usize()]
                 return -1 if package.kind != Json::RH_JSON_OBJ
                 marker_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, package_child, "marker")
+                requires_python_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, package_child, "requires_python")
                 name_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, package_child, "name")
                 version_idx: i64 = rh_pylock_context_member(audit_nodes, audit_texts, package_child, "version")
                 return -1 if name_idx < 0 or version_idx < 0
@@ -180,6 +226,12 @@ module PylockContext:
                     evaluated: Marker::RhMarkerEvaluation = Marker::rh_marker_evaluate(audit_texts, marker.text_start, marker.text_end, marker_context)
                     return -1 if not evaluated.valid
                     marker_state <- evaluated.state
+                requires_python_state: mutable i64 = Marker::RH_MARKER_RESULT_UNKNOWN
+                if requires_python_idx >= 0 and audit_nodes[requires_python_idx.usize()].kind == Json::RH_JSON_STR:
+                    specifier: Json::RhJsonNode = audit_nodes[requires_python_idx.usize()]
+                    evaluated: Marker::RhMarkerEvaluation = rh_pylock_requires_python(audit_texts, specifier.text_start, specifier.text_end, marker_context)
+                    return -1 if not evaluated.valid
+                    requires_python_state <- evaluated.state
                 if not first:
                     out.push(44)
                 first <- false
@@ -194,6 +246,8 @@ module PylockContext:
                     rh_pylock_context_emit_string(out, audit_texts, version.text_start, version.text_end)
                 Base::rh_push_text(out, ",\"marker_state\":\"")
                 Base::rh_push_text(out, rh_pylock_context_state_name(marker_state))
+                Base::rh_push_text(out, "\",\"requires_python_state\":\"")
+                Base::rh_push_text(out, rh_pylock_context_state_name(requires_python_state))
                 Base::rh_push_text(out, "\"}")
                 package_child <- package.next_sibling
                 package_id <- package_id + 1
