@@ -38,6 +38,8 @@ run_ok enqueue_graph committed enqueue-graph-query-job
 run_ok enqueue_graph duplicate enqueue-graph-query-job
 run_ok claim_graph committed claim-graph-query-job
 run_ok claim_graph duplicate claim-graph-query-job
+run_ok publish_graph committed publish-graph-query-result
+run_ok publish_graph duplicate publish-graph-query-result
 python3 - "$T/enqueue-graph-query-job-committed.json" "$T/enqueue-graph-query-job-duplicate.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"enqueue_graph_query_job","status":"enqueued"}
@@ -47,6 +49,11 @@ python3 - "$T/claim-graph-query-job-committed.json" "$ROOT/fixtures/postgres/cla
 import json, sys
 assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))
 assert json.load(open(sys.argv[3])) == {"schema":"rh-postgres-result/1","operation":"claim_graph_query_job","status":"empty"}
+PY
+python3 - "$T/publish-graph-query-result-committed.json" "$T/publish-graph-query-result-duplicate.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"publish_graph_query_result","status":"published"}
+assert json.load(open(sys.argv[2])) == {"schema":"rh-postgres-result/1","operation":"publish_graph_query_result","status":"fenced"}
 PY
 python3 - "$T/enqueue-graph-query-job-command.json" "$T/enqueue-graph-query-job-invalid.json" <<'PY'
 import json, sys

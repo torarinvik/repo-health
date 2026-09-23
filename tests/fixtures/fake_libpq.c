@@ -130,6 +130,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     static const char *claim_graph_values[4] = {
         "graph-worker-1", "2026-01-01T00:01:00Z", "60", "00000000-0000-0000-0000-000000000099"
     };
+    static const char *publish_graph_values[4] = {
+        "00000000-0000-0000-0000-000000000099", "1", "2026-01-01T00:01:30Z",
+        "{\"schema\":\"rh-query-result/1\",\"kind\":\"downstream\",\"graph\":{\"direction\":\"downstream\",\"nodes\":[2],\"truncated\":false,\"complete\":true}}"
+    };
     static const char *begin_run_values[13] = {
         "00000000-0000-0000-0000-000000000001", "github", "https://api.github.com",
         "public", "1", "2026-01-01T00:00:00Z", "00000000-0000-0000-0000-000000000003",
@@ -224,6 +228,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = claim_graph_values;
         expected_count = 4;
         prefix = "SELECT public.rh_claim_graph_query_job(";
+    } else if (operation != NULL && strcmp(operation, "publish_graph") == 0) {
+        expected = publish_graph_values;
+        expected_count = 4;
+        prefix = "SELECT public.rh_publish_graph_query_result(";
     } else if (operation != NULL && strcmp(operation, "page_events") == 0) {
         expected = page_events_values;
         expected_count = 14;

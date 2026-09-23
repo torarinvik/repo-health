@@ -156,8 +156,22 @@ BEGIN
   IF rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value - 1, '2026-01-01T00:00:10Z', result_value) THEN
     RAISE EXCEPTION 'stale graph result publication was accepted';
   END IF;
+  BEGIN
+    PERFORM rh_publish_graph_query_result(
+      '00000000-0000-0000-0000-000000000099', token_value, '2026-01-01T00:00:10Z',
+      jsonb_set(result_value, '{kind}', '"upstream"'::jsonb)
+    );
+    RAISE EXCEPTION 'mismatched graph result kind was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('graph query result kind does not match its immutable request' IN SQLERRM) = 0 THEN
+      RAISE;
+    END IF;
+  END;
   IF NOT rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value, '2026-01-01T00:00:10Z', result_value) THEN
     RAISE EXCEPTION 'current graph result publication was refused';
+  END IF;
+  IF rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value, '2026-01-01T00:00:11Z', result_value) THEN
+    RAISE EXCEPTION 'completed graph result was published twice';
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM graph_query_job

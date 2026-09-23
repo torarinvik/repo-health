@@ -1153,9 +1153,12 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_job job%ROWTYPE;
+    v_request_kind text;
 BEGIN
     IF p_result IS NULL OR jsonb_typeof(p_result) IS DISTINCT FROM 'object'
        OR p_result->>'schema' IS DISTINCT FROM 'rh-query-result/1'
+       OR (p_result->>'kind' IS DISTINCT FROM 'upstream' AND p_result->>'kind' IS DISTINCT FROM 'downstream')
+       OR jsonb_typeof(p_result->'graph') IS DISTINCT FROM 'object'
        OR pg_column_size(p_result) > 1048576 THEN
         RAISE EXCEPTION 'graph query result is malformed or exceeds the bounded payload limit';
     END IF;
@@ -1166,6 +1169,12 @@ BEGIN
        OR v_job.fencing_token IS DISTINCT FROM p_fencing_token
        OR v_job.lease_expires_at <= p_now THEN
         RETURN false;
+    END IF;
+
+    SELECT request->>'kind' INTO v_request_kind
+    FROM graph_query_job WHERE job_id = p_job_id;
+    IF v_request_kind IS DISTINCT FROM p_result->>'kind' THEN
+        RAISE EXCEPTION 'graph query result kind does not match its immutable request';
     END IF;
 
     UPDATE graph_query_job

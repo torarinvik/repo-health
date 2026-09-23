@@ -83,6 +83,7 @@ assert "p_job_id IS NULL OR j.id = p_job_id" in clean
 assert "p_job_kind IS NULL OR j.kind = p_job_kind" in clean
 assert "graph query request is malformed or exceeds the bounded payload limit" in clean
 assert "graph query result is malformed or exceeds the bounded payload limit" in clean
+assert "graph query result kind does not match its immutable request" in clean
 assert "kind <> 'graph_query' OR p_state <> 'succeeded'" in clean
 assert "v_job.fencing_token IS DISTINCT FROM p_fencing_token" in clean
 assert "result_fencing_token = p_fencing_token" in clean
