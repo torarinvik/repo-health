@@ -863,6 +863,20 @@ the default gate stays offline. `src/test_http.elisa` covers the
 parse/route/status matrix including traversal, unknown paths, wrong methods,
 query JSON success/failure, NUL, and CRLF response heads.
 
+The PostgreSQL query-job path is also wired through `rh_cli postgres`:
+bounded graph requests are enqueued idempotently, claimed with their immutable
+request and fencing token, polled by visibility scope, and completed only by
+publishing a request-kind-matched result under the current lease. The
+`retry_graph_query_job` command reuses `rh-job-next/1`; its SQL transition
+checks job kind, live fencing token, durable attempt number, configured
+attempt limit, and phase/failure-kind compatibility before it closes the
+attempt and requeues, fails, or dead-letters atomically. Fake-libpq tests
+verify exact bound retry parameters and backoff output. The opt-in migration
+rehearsal covers requeue, replay refusal, attempt history, and exhausted
+dead-letter behavior; it has not run in this environment because the Docker
+daemon is unavailable. This database path supplements the HTTP query API;
+it does not claim a deployed PostgreSQL service.
+
 **M06-03 accessible renderer:** `tools/render-project.sh` turns a produced
 report directory into a single static HTML page whose every value is a
 semantic table row — no chart, no color-only encoding, no image — so the
