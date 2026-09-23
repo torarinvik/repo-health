@@ -207,7 +207,79 @@ module Postgres:
             _ = rh_pg_dlclose(library)
             outcome
 
+        # Parameter-bound read counterpart for fixed, read-only repository
+        # queries. Callers own the statement; caller data is never SQL text.
+        def rh_pg_text_params(conninfo: cstr, statement: cstr, params: darray[cstr]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if out.count != 0 or params.count == 0 or params.count > 64 or Base::rh_cstr_len_c(conninfo) == 0 or Base::rh_cstr_len_c(conninfo) > 4096
+            api: RhPgApi = Postgres::rh_pg_load_api()
+            return -1 if api.library == null
+            library: void& = api.library
+            connectdb_params: fn(void&, void&, i32) -> void&? = api.connectdb_params.cast[fn(void&, void&, i32) -> void&?] can Unsafe.PointerCast
+            exec_params: fn(void&, cstr, i32, void&?, void&, void&?, void&?, i32) -> void&? = api.exec_params.cast[fn(void&, cstr, i32, void&?, void&, void&?, void&?, i32) -> void&?] can Unsafe.PointerCast
+            status: fn(void&) -> i32 = api.status.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            result_status: fn(void&) -> i32 = api.result_status.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            tuples: fn(void&) -> i32 = api.tuples.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            fields: fn(void&) -> i32 = api.fields.cast[fn(void&) -> i32] can Unsafe.PointerCast
+            is_null: fn(void&, i32, i32) -> i32 = api.is_null.cast[fn(void&, i32, i32) -> i32] can Unsafe.PointerCast
+            value: fn(void&, i32, i32) -> cstr = api.value.cast[fn(void&, i32, i32) -> cstr] can Unsafe.PointerCast
+            length: fn(void&, i32, i32) -> i32 = api.length.cast[fn(void&, i32, i32) -> i32] can Unsafe.PointerCast
+            clear: fn(void&) -> void = api.clear.cast[fn(void&) -> void] can Unsafe.PointerCast
+            finish: fn(void&) -> void = api.finish.cast[fn(void&) -> void] can Unsafe.PointerCast
+            keywords: mutable darray[cstr?] = []
+            values: mutable darray[cstr?] = []
+            keywords.push("dbname")
+            values.push(conninfo)
+            keywords.push("connect_timeout")
+            values.push("5")
+            keywords.push(null)
+            values.push(null)
+            keyword_ptr: void& = (&keywords[0]).cast[void&] can Unsafe.PointerCast
+            value_ptr: void& = (&values[0]).cast[void&] can Unsafe.PointerCast
+            connection: void&? = connectdb_params(keyword_ptr, value_ptr, 1)
+            if connection == null:
+                _ = rh_pg_dlclose(library)
+                return -1
+            conn: void& = connection
+            outcome: i64 =
+                if status(conn) != 0:
+                    -1
+                else:
+                    parameter_values: void& = (&params[0]).cast[void&] can Unsafe.PointerCast
+                    result_pointer: void&? = exec_params(conn, statement, params.count.i32(), null, parameter_values, null, null, 0)
+                    if result_pointer == null:
+                        -1
+                    else:
+                        result: void& = result_pointer
+                        copied: i64 =
+                            if result_status(result) != RH_PG_TUPLES_OK or tuples(result) != 1 or fields(result) != 1 or is_null(result, 0, 0) != 0:
+                                -1
+                            else:
+                                text_length: i32 = length(result, 0, 0)
+                                if text_length <= 0 or text_length > 4194304:
+                                    -1
+                                else:
+                                    text_value: cstr = value(result, 0, 0)
+                                    while i < text_length.i64() |i: i64 = 0, text_length, text_value, out|:
+                                        out.push(text_value[i.usize()].u8())
+                                        i <- i + 1
+                                    text_length.i64()
+                        clear(result)
+                        copied
+            finish(conn)
+            _ = rh_pg_dlclose(library)
+            outcome
+
     public:
+        # Return bounded run-window coverage for one source and capability.
+        # Missing request bounds are omitted because they cannot establish a
+        # measurable interval; non-successful runs remain explicit gaps.
+        def rh_pg_adoption_history(conninfo: cstr, source_id: cstr, capability: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if Base::rh_cstr_len_c(source_id) != 36 or Base::rh_cstr_len_c(capability) == 0 or Base::rh_cstr_len_c(capability) > 128
+            params: mutable darray[cstr] = []
+            params.push(source_id)
+            params.push(capability)
+            Postgres::rh_pg_text_params(conninfo, "SELECT json_build_object('runs', COALESCE(json_agg(json_build_object('from', extract(epoch FROM requested_start)::bigint, 'through', extract(epoch FROM requested_end)::bigint, 'complete', (status = 'succeeded' AND completeness IN ('complete', 'empty'))) ORDER BY requested_start, started_at, id), '[]'::json), 'truncated', count(*) > 4096)::text FROM (SELECT id, requested_start, requested_end, started_at, status, completeness FROM public.collection_run WHERE source_instance_id = $1::uuid AND capability = $2::text AND requested_start IS NOT NULL AND requested_end IS NOT NULL ORDER BY requested_start, started_at, id LIMIT 4097) AS bounded_runs", params, out)
+
         # Create or verify the immutable source configuration and its running
         # collection run in one database transaction. Returns 1 when started,
         # 0 for an exact retry, or -1 on a transport or metadata conflict.
