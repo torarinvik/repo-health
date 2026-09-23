@@ -845,6 +845,8 @@ requirements parser yet. It is now a real path: `src/rh_pep440_report.elisa`
 per-version details (epoch, release, a/b/rc/dev/post, local presence) and
 an ascending order over VALID versions only — invalid versions are reported
 `valid:false` and never compared or sorted (`tests/test_pep440_cli.sh`).
+The PEP 440 path now also emits a shared digest-bound transformation report
+for exact source/output bytes and the pinned normalizer configuration.
 A second inventory format is pinned: `src/rh_spdx.elisa` parses SPDX 2.3
 JSON (declared supported version; anything else is `unsupported`), extracts
 package identity and SHA-256 checksums, and **counts top-level keys it does
