@@ -199,6 +199,38 @@ BEGIN
 END $$;
 
 DO $$
+DECLARE
+  c jsonb;
+  first_token bigint;
+  second_token bigint;
+BEGIN
+  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000098', 'public', '{"schema":"rh-query-input/1","kind":"upstream","ids":[1],"cursor":-1,"limit":10}'::jsonb, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
+    RAISE EXCEPTION 'retry graph job was not enqueued';
+  END IF;
+  c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:01Z', 60, '00000000-0000-0000-0000-000000000098');
+  first_token := (c->>'fencing_token')::bigint;
+  IF NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 'transient', 6, '2026-01-01T00:00:03Z', '2026-01-01T00:00:01Z') THEN
+    RAISE EXCEPTION 'current transient failure was not requeued';
+  END IF;
+  IF rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 'transient', 6, '2026-01-01T00:00:03Z', '2026-01-01T00:00:01Z') THEN
+    RAISE EXCEPTION 'closed attempt retry was accepted twice';
+  END IF;
+  IF (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000098') <> 'queued'
+     OR (SELECT outcome FROM job_attempt WHERE job_id = '00000000-0000-0000-0000-000000000098' AND attempt_number = 1) <> 'retry' THEN
+    RAISE EXCEPTION 'retry transition did not preserve queued state and attempt outcome';
+  END IF;
+  c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:04Z', 60, '00000000-0000-0000-0000-000000000098');
+  second_token := (c->>'fencing_token')::bigint;
+  IF second_token <= first_token OR NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', second_token, 2, 'transient', 7, 'epoch', '2026-01-01T00:00:05Z') THEN
+    RAISE EXCEPTION 'exhausted retry was not dead-lettered';
+  END IF;
+  IF (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000098') <> 'dead_letter'
+     OR (SELECT count(*) FROM job_attempt WHERE job_id = '00000000-0000-0000-0000-000000000098' AND finished_at IS NOT NULL) <> 2 THEN
+    RAISE EXCEPTION 'dead-letter transition did not close both attempts';
+  END IF;
+END $$;
+
+DO $$
 BEGIN
   IF NOT rh_register_evidence_object('00000000-0000-0000-0000-000000000006', 'public', repeat('a', 64), 18, 'application/json', 'fnv1a64:aaaaaaaaaaaaaaaa', 'standard', 'captured', '2026-01-01T00:00:00Z') THEN
     RAISE EXCEPTION 'new evidence object was not registered';
