@@ -33,10 +33,16 @@ The body is not interpreted.
 %setup -q
 SPEC
 "$ROOT/build/rh_cli" rpm-spec --input "$T/demo.spec" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/demo.spec" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-rpm-spec-result/1" and d["format"] == "rpm-spec", d
+tr = json.load(open(sys.argv[3]))
+assert tr["adapter"] == "rpm-spec-preamble" and tr["output_schema"] == d["schema"], tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/rpm-spec-preamble/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 assert d["name"] == "demo" and d["version"] == "1.2.3" and d["release"] == "4%{?dist}", d
 assert d["sources"] == ["https://example.invalid/demo-%{version}.tar.gz"], d
 assert d["patches"] == ["fix.patch"], d

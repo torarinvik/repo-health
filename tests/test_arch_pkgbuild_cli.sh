@@ -35,10 +35,16 @@ prepare() {
 EOF
 
 "$ROOT/build/rh_cli" arch-pkgbuild --input "$T/PKGBUILD" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/PKGBUILD" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-arch-pkgbuild-result/1" and d["format"] == "arch-pkgbuild", d
+tr = json.load(open(sys.argv[3]))
+assert tr["adapter"] == "arch-pkgbuild" and tr["output_schema"] == d["schema"], tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/arch-pkgbuild/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 assert d["name"] == "demo" and d["pkgver"] == "1.2.3" and d["pkgrel"] == "4", d
 assert d["licenses"] == ["MIT"] and d["architectures"] == ["x86_64", "aarch64"], d
 assert d["sources"][0] == "https://example.invalid/demo-${pkgver}.tar.gz", d

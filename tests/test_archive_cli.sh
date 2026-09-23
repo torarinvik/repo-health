@@ -18,10 +18,16 @@ cat > "$T/in.json" <<'JSON'
 JSON
 
 "$ROOT/build/rh_cli" archive --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-archive-result/1", d
+tr = json.load(open(sys.argv[3]))
+assert tr["adapter"] == "source-archive-metadata" and tr["output_schema"] == d["schema"], tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/source-archive-metadata/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 assert d["counts"] == {"archives": 2, "digest_known": 1, "published_known": 1}, d
 assert d["archives"][0]["identifier"] == "v1.2.3" and d["archives"][0]["digest"].startswith("sha256:"), d
 assert d["archives"][1]["published_at"] is None and d["archives"][1]["size"] is None, d

@@ -40,10 +40,17 @@ Provides: parser-tools
 EOF
 
 "$ROOT/build/rh_cli" distribution --input "$T/control" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/control" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-distribution-result/1" and d["format"] == "debian-control", d
+tr = json.load(open(sys.argv[3]))
+assert tr["adapter"] == "debian-control" and tr["output_schema"] == d["schema"], tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/debian-control/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
+print("[distribution] rh-adapter-transformation-report/1 verified")
 assert len(d["source_stanzas"]) == 1 and len(d["binary_packages"]) == 2, d
 s = d["source_stanzas"][0]
 assert s["name"] == "example-parser" and s["version"] == "1.2.3-4", s

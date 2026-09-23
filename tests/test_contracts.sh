@@ -34,7 +34,7 @@ for c in d["contracts"]:
     p = os.path.join(root, t["path"])
     assert os.path.isfile(p), ("missing test file", c["id"], t["path"])
     assert t["token"] in open(p, encoding="utf-8", errors="replace").read(), ("test token absent", c["id"], t)
-for want in ("dep-graph", "canonical-repo", "bundle-manifest", "report",
+for want in ("dep-graph", "canonical-repo", "adapter-transformation-report", "bundle-manifest", "report",
              "continuity-report", "metric-registry", "source-review-register",
              "release-packet", "release-signature", "continuity-metrics",
              "deps-metrics", "downstream-report", "downstream-temporal-report", "policy-result",

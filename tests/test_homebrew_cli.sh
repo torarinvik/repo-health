@@ -15,11 +15,17 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-homebrew-formula/1","name":"wget","homepage":"https://www.gnu.org/software/wget/","revision":2,"stable":{"version":"1.25.0","url":"https://ftp.gnu.org/gnu/wget/wget-1.25.0.tar.gz","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","dependencies":["libidn2"],"build_dependencies":["pkg-config"],"optional_dependencies":["gnutls"],"test_dependencies":["perl"]}}
 JSON
 "$ROOT/build/rh_cli" homebrew --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, sys
 raw = open(sys.argv[1]).read()
 d = json.loads(raw)
 assert d["schema"] == "rh-homebrew-result/1", d
+tr = json.load(open(sys.argv[3]))
+assert tr["adapter"] == "homebrew-formula" and tr["output_schema"] == d["schema"], tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/homebrew-formula/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 assert d["name"] == "wget" and d["stable_version"] == "1.25.0" and d["revision"] == 2, d
 assert d["counts"] == {"dependencies": 4, "runtime": 1, "build": 1, "optional": 1, "test": 1}, d
 assert d["stable_digest"].startswith("sha256:"), d

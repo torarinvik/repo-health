@@ -829,6 +829,10 @@ configuration. It reports release field preservation, metric derivation,
 unknown time fields, unsupported history/identity, and discarded locators;
 the configuration distinguishes captured input from URL acquisition without
 publishing the URL.
+The Debian control, RPM preamble, archive metadata, Homebrew formula, and Arch
+PKGBUILD paths now use the shared `src/rh_adapter_transformation.elisa`
+module. Their CLI tests bind each sidecar to exact source and output bytes
+and verify all supported field-state categories.
 An ecosystems lane begins with `src/rh_pep440.elisa`: Python/PEP 440
 version parsing and ordering, deliberately not SemVer — epoch, arbitrary
 release segments, a/b/rc pre-releases (with alpha/beta/c/pre aliases),

@@ -830,6 +830,9 @@ transformation sidecar that records field preservation, normalization, loss,
 and unsupported identity/history semantics alongside exact input/output
 digests. Captured versus URL-fed release inputs are distinguished in the
 configuration digest without exposing the source URL in the sidecar.
+The Debian control, RPM preamble, source archive, Homebrew formula, and Arch
+PKGBUILD adapters share the `rh_adapter_transformation` envelope and record
+their supported field mappings with the same digest bindings.
 
 Registry enrichment now has one provider-shaped adapter at the boundary:
 `src/rh_registry_pypi.elisa` accepts bounded PyPI project JSON, normalizes its
