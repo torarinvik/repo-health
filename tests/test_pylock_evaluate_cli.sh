@@ -35,7 +35,7 @@ assert any(x["state"] == "unsupported" and x["target"] == "installation_graph" f
 print("pylock evaluate output OK")
 PY
 cat >"$TMP/no-version-context.json" <<'JSON'
-{"schema":"rh-pylock-evaluation-context/1","environment":{"sys_platform":"linux"},"dependency_groups":[],"extras":[]}
+{"schema":"rh-pylock-evaluation-context/1","environment":{"python_version":"3.12","sys_platform":"linux"}}
 JSON
 "$ROOT/build/rh_cli" pylock-evaluate --audit "$TMP/audit.json" --context "$TMP/no-version-context.json" --out "$TMP/no-version.json" >/dev/null
 python3 - "$TMP/no-version.json" <<'PY'
@@ -43,6 +43,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["top_level_requires_python_state"] == "unknown", d
 assert all(x["requires_python_state"] == "unknown" for x in d["package_markers"]), d
+assert d["package_markers"][0]["marker_state"] == "false", d
 print("missing python_full_version remains unknown")
 PY
 python3 - "$TMP/audit.json" "$TMP/unconstrained-audit.json" <<'PY'
