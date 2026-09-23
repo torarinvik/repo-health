@@ -409,6 +409,21 @@ python3 - "$T/multiline-continuation.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1]))["created_by"] == "first second"
 PY
+for quote_count in 3 4 5; do
+  close="$(printf '%*s' "$quote_count" '' | tr ' ' '"')"
+  printf 'lock-version = "1.0"\ncreated-by = """quoted%s\n[[packages]]\nname = "x"\nversion = "1"\n' "$close" > "$T/multiline-quotes.toml"
+  "$ROOT/build/rh_cli" pylock --input "$T/multiline-quotes.toml" --out "$T/multiline-quotes.json" >/dev/null
+  python3 - "$T/multiline-quotes.json" "$quote_count" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["created_by"] == "quoted" + '"' * (int(sys.argv[2]) - 3)
+PY
+done
+printf 'lock-version = "1.0"\ncreated-by = """quoted""""""\n[[packages]]\nname = "x"\nversion = "1"\n' > "$T/too-many-multiline-quotes.toml"
+set +e
+"$ROOT/build/rh_cli" pylock --input "$T/too-many-multiline-quotes.toml" --out "$T/too-many-multiline-quotes.json" >/dev/null 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 4 ]] || fail "ambiguous multiline quote run must fail closed (got $rc)"
 cat > "$T/missing-artifact-hash.toml" <<'EOF'
 lock-version = '1.0'
 created-by = 'uv'
