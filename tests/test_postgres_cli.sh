@@ -40,6 +40,8 @@ run_ok claim_graph committed claim-graph-query-job
 run_ok claim_graph duplicate claim-graph-query-job
 run_ok publish_graph committed publish-graph-query-result
 run_ok publish_graph duplicate publish-graph-query-result
+run_ok retry_graph committed retry-graph-query-job
+run_ok retry_graph duplicate retry-graph-query-job
 run_ok poll_graph committed get-graph-query-job
 run_ok poll_graph duplicate get-graph-query-job
 run_ok poll_graph empty get-graph-query-job
@@ -57,6 +59,11 @@ python3 - "$T/publish-graph-query-result-committed.json" "$T/publish-graph-query
 import json, sys
 assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"publish_graph_query_result","status":"published"}
 assert json.load(open(sys.argv[2])) == {"schema":"rh-postgres-result/1","operation":"publish_graph_query_result","status":"fenced"}
+PY
+python3 - "$T/retry-graph-query-job-committed.json" "$T/retry-graph-query-job-duplicate.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"retry_graph_query_job","status":"applied","next_phase":"retry_wait","wake_epoch":1767225602}
+assert json.load(open(sys.argv[2])) == {"schema":"rh-postgres-result/1","operation":"retry_graph_query_job","status":"fenced","next_phase":"retry_wait","wake_epoch":1767225602}
 PY
 python3 - "$T/get-graph-query-job-committed.json" "$ROOT/fixtures/postgres/get-graph-query-job-result.json" "$T/get-graph-query-job-duplicate.json" "$ROOT/fixtures/postgres/get-graph-query-job-running-result.json" "$T/get-graph-query-job-empty.json" "$ROOT/fixtures/postgres/get-graph-query-job-not-found-result.json" <<'PY'
 import json, sys
