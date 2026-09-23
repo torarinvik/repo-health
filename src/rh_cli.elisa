@@ -24,6 +24,8 @@ include "./rh_continuity.elisa"
 include "./rh_continuity_scan.elisa"
 include "./rh_package.elisa"
 include "./rh_pylock.elisa"
+include "./rh_pylock_project.elisa"
+include "./rh_pylock_project_transformation.elisa"
 include "./rh_pylock_context.elisa"
 include "./rh_pylock_transformation.elisa"
 include "./rh_pylock_observation.elisa"
@@ -160,6 +162,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli succession --input <file> --out <file>")
     rh_cli_err("       rh_cli deps --repo <local-dir> --out <dir> [--osv <file> | --osv-url <https-or-file-url>]")
     rh_cli_err("       rh_cli pylock --input <pylock.toml> --out <file>")
+    rh_cli_err("       rh_cli pylock-project --project <pyproject.toml> --audit <rh-pylock-audit/1> --out <file>")
     rh_cli_err("       rh_cli pylock-evaluate --audit <rh-pylock-audit/1> --context <rh-pylock-evaluation-context/1> --out <file>")
     rh_cli_err("       rh_cli pylock-observe --audit <rh-pylock-audit/1> --artifact <id> --file <local-artifact> --out <file>")
     rh_cli_err("       rh_cli artifact-observe --graph <package-graph> --artifact <id> --file <local-artifact> --out <file>")
@@ -897,6 +900,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 option_index <- option_index + 1
         return rh_cli_usage(2) if audit_idx < 0 or context_idx < 0 or out_idx < 0
         return rh_do_pylock_evaluation(slots[audit_idx], slots[context_idx], slots[out_idx])
+    if Base::rh_streq(cmd, "pylock-project"):
+        project_idx, audit_idx, out_idx =
+            while option_index < argc |project_idx: i64 = -1, audit_idx: i64 = -1, out_idx: i64 = -1, option_index: i64 = 2, slots| -> project_idx, audit_idx, out_idx:
+                option: u8& = slots[option_index].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(option, "--project"):
+                    return rh_cli_usage(2) if project_idx >= 0 or option_index + 1 >= argc
+                    option_index <- option_index + 1
+                    project_idx <- option_index
+                elif Base::rh_streq(option, "--audit"):
+                    return rh_cli_usage(2) if audit_idx >= 0 or option_index + 1 >= argc
+                    option_index <- option_index + 1
+                    audit_idx <- option_index
+                elif Base::rh_streq(option, "--out"):
+                    return rh_cli_usage(2) if out_idx >= 0 or option_index + 1 >= argc
+                    option_index <- option_index + 1
+                    out_idx <- option_index
+                else:
+                    return rh_cli_usage(2)
+                option_index <- option_index + 1
+        return rh_cli_usage(2) if project_idx < 0 or audit_idx < 0 or out_idx < 0
+        return rh_do_pylock_project(slots[project_idx], slots[audit_idx], slots[out_idx])
     if Base::rh_streq(cmd, "pylock-observe"):
         audit_idx, artifact_idx, file_idx, out_idx, artifact_id =
             while poq < argc |audit_idx: i64 = -1, artifact_idx: i64 = -1, file_idx: i64 = -1, out_idx: i64 = -1, artifact_id: i64 = -1, poq: i64 = 2, slots| -> audit_idx, artifact_idx, file_idx, out_idx, artifact_id:
@@ -3111,6 +3135,48 @@ def rh_do_pylock(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, A
         rh_cli_err("pylock: cannot write transformation report")
         return 4
     rh_cli_out("pylock: PEP 751 audit emitted")
+    0
+
+def rh_do_pylock_project(project_path: cstr, audit_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    return 3 if not rh_path_arg_ok(project_path) or not rh_path_arg_ok(audit_path) or not rh_path_arg_ok(out_path)
+    project_size: i64 = Base::rh_file_size(project_path)
+    audit_size: i64 = Base::rh_file_size(audit_path)
+    return 4 if project_size <= 0 or project_size > 8388608 or audit_size <= 0 or audit_size > 8388608
+    project: mutable darray[u8] = []
+    audit: mutable darray[u8] = []
+    return 4 if Base::rh_io_read(project_path, project) < 0 or project.count.i64() != project_size
+    return 4 if Base::rh_io_read(audit_path, audit) < 0 or audit.count.i64() != audit_size
+    project_sha: mutable darray[u8] = []
+    audit_sha: mutable darray[u8] = []
+    Sha256::rh_sha256(project, project_sha)
+    Sha256::rh_sha256(audit, audit_sha)
+    result: mutable darray[u8] = []
+    if PylockProject::rh_pylock_project_compare(project, audit, project_sha, audit_sha, result) != 0:
+        rh_cli_err("pylock-project: malformed pyproject or PEP 751 audit; bounded comparison failed closed")
+        return 4
+    result.push(10)
+    output_ptr: cstr = out_path
+    if not Base::rh_io_write(output_ptr, result):
+        rh_cli_err("pylock-project: cannot write --out")
+        return 4
+    configuration: mutable darray[u8] = []
+    Base::rh_push_text(configuration, "repo-health/pep621-pylock-membership/1")
+    configuration_sha: mutable darray[u8] = []
+    output_sha: mutable darray[u8] = []
+    Sha256::rh_sha256(configuration, configuration_sha)
+    Sha256::rh_sha256(result, output_sha)
+    transformations: mutable darray[u8] = []
+    PylockProjectTransformation::rh_pylock_project_transformation_report(configuration_sha, project_sha, audit_sha, output_sha, transformations)
+    transformations.push(10)
+    transformation_path: mutable darray[u8] = []
+    Base::rh_push_cstr(transformation_path, out_path)
+    Base::rh_push_text(transformation_path, ".transformations.json")
+    transformation_path.push(0)
+    transformation_ptr: cstr = (&transformation_path[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(transformation_ptr, transformations):
+        rh_cli_err("pylock-project: cannot write transformation report")
+        return 4
+    rh_cli_out("pylock-project: manifest membership comparison emitted")
     0
 
 def rh_do_pylock_evaluation(audit_path: cstr, context_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:

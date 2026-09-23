@@ -1,0 +1,217 @@
+# Compare PEP 621 declarations with PEP 751 package membership.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_package.elisa"
+include "./rh_sha256.elisa"
+
+module PylockProject:
+    private:
+        const RH_PYLOCK_PROJECT_MAX_BYTES: i64 = 8388608
+        const RH_PYLOCK_PROJECT_MAX_PACKAGES: i64 = 10000
+        const RH_PYLOCK_PROJECT_MAX_REQUIREMENTS: i64 = 10000
+
+        struct RhPylockProjectPackage:
+            name_s: mutable i64
+            name_e: mutable i64
+            version_s: mutable i64
+            version_e: mutable i64
+
+        def rh_pylock_project_name_eq(a_data: darray[u8]&, a_s: i64, a_e: i64, b_data: darray[u8]&, b_s: i64, b_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if a_s < 0 or b_s < 0 or a_e <= a_s or b_e <= b_s
+            while a < a_e or b < b_e |a: i64 = a_s, b: i64 = b_s, a_data, b_data|:
+                return false if a >= a_e or b >= b_e
+                a_punctuation: bool = a_data[a.usize()] == 45 or a_data[a.usize()] == 95 or a_data[a.usize()] == 46
+                b_punctuation: bool = b_data[b.usize()] == 45 or b_data[b.usize()] == 95 or b_data[b.usize()] == 46
+                a_char: u8 = 45 if a_punctuation else a_data[a.usize()] + 32 if a_data[a.usize()] >= 65 and a_data[a.usize()] <= 90 else a_data[a.usize()]
+                b_char: u8 = 45 if b_punctuation else b_data[b.usize()] + 32 if b_data[b.usize()] >= 65 and b_data[b.usize()] <= 90 else b_data[b.usize()]
+                return false if a_char != b_char
+                if a_punctuation:
+                    while a < a_e and (a_data[a.usize()] == 45 or a_data[a.usize()] == 95 or a_data[a.usize()] == 46) |a, a_e, a_data|:
+                        a <- a + 1
+                else:
+                    a <- a + 1
+                if b_punctuation:
+                    while b < b_e and (b_data[b.usize()] == 45 or b_data[b.usize()] == 95 or b_data[b.usize()] == 46) |b, b_e, b_data|:
+                        b <- b + 1
+                else:
+                    b <- b + 1
+            true
+
+        def rh_pylock_project_span_eq(a_data: darray[u8]&, a_s: i64, a_e: i64, b_data: darray[u8]&, b_s: i64, b_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if a_s < 0 or b_s < 0 or a_e - a_s != b_e - b_s
+            while offset < a_e - a_s |offset: i64 = 0, a_data, b_data, a_s, b_s, a_e|:
+                return false if a_data[(a_s + offset).usize()] != b_data[(b_s + offset).usize()]
+                offset <- offset + 1
+            true
+
+        def rh_pylock_project_declaration_sha(data: darray[u8]&, start: i64, end: i64) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
+            declaration: mutable darray[u8] = []
+            for byte in start.usize()..<end.usize() |byte, data, declaration|:
+                declaration.push(data[byte])
+            digest: mutable darray[u8] = []
+            Sha256::rh_sha256(declaration, digest)
+            digest
+
+        def rh_pylock_project_object_unique(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if obj < 0 or nodes[obj.usize()].kind != Json::RH_JSON_OBJ
+            while key >= 0 |key: i64 = nodes[obj.usize()].first_child, nodes, texts|:
+                key_node: Json::RhJsonNode = nodes[key.usize()]
+                return false if key_node.kind != Json::RH_JSON_STR or key_node.next_sibling < 0
+                next_key: i64 = nodes[key_node.next_sibling.usize()].next_sibling
+                while prior >= 0 and prior != key |prior: i64 = nodes[obj.usize()].first_child, key, key_node, nodes, texts|:
+                    prior_node: Json::RhJsonNode = nodes[prior.usize()]
+                    return false if prior_node.kind != Json::RH_JSON_STR or prior_node.next_sibling < 0
+                    return false if rh_pylock_project_span_eq(texts, key_node.text_start, key_node.text_end, texts, prior_node.text_start, prior_node.text_end)
+                    prior <- nodes[prior_node.next_sibling.usize()].next_sibling
+                key <- next_key
+            true
+
+        def rh_pylock_project_packages(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, packages: mutable darray[RhPylockProjectPackage]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not rh_pylock_project_object_unique(nodes, texts, root)
+            schema_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
+            schema_s: mutable i64 = -1
+            schema_e: mutable i64 = -1
+            return false if not Json::rh_json_str_span(nodes, schema_idx, &schema_s, &schema_e) or not Base::rh_bytes_equal_literal(texts, schema_s, schema_e, "rh-pylock-audit/1")
+            semantics_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "dependency_semantics")
+            semantics_s: mutable i64 = -1
+            semantics_e: mutable i64 = -1
+            return false if not Json::rh_json_str_span(nodes, semantics_idx, &semantics_s, &semantics_e) or not Base::rh_bytes_equal_literal(texts, semantics_s, semantics_e, "informational_only")
+            packages_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "packages")
+            return false if packages_idx < 0 or nodes[packages_idx.usize()].kind != Json::RH_JSON_ARR
+            package_array: Json::RhJsonNode = nodes[packages_idx.usize()]
+            return false if package_array.child_count > RH_PYLOCK_PROJECT_MAX_PACKAGES
+            while child >= 0 |child: i64 = package_array.first_child, nodes, texts, packages|:
+                package_node: Json::RhJsonNode = nodes[child.usize()]
+                return false if package_node.kind != Json::RH_JSON_OBJ or not rh_pylock_project_object_unique(nodes, texts, child)
+                name_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "name")
+                name_s: mutable i64 = -1
+                name_e: mutable i64 = -1
+                return false if not Json::rh_json_str_span(nodes, name_idx, &name_s, &name_e) or name_e <= name_s
+                version_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "version")
+                return false if version_idx < 0
+                version: Json::RhJsonNode = nodes[version_idx.usize()]
+                return false if version.kind != Json::RH_JSON_NULL and version.kind != Json::RH_JSON_STR
+                version_s: mutable i64 = -1
+                version_e: mutable i64 = -1
+                return false if version.kind == Json::RH_JSON_STR and not Json::rh_json_str_span(nodes, version_idx, &version_s, &version_e)
+                return false if version.kind == Json::RH_JSON_STR and version_e <= version_s
+                packages.push(RhPylockProjectPackage{name_s: name_s, name_e: name_e, version_s: version_s, version_e: version_e})
+                child <- package_node.next_sibling
+            packages.count.i64() == package_array.child_count
+
+        def rh_pylock_project_scope(scope: u8) -> u8&:
+            return "runtime" if scope == Package::RH_SCOPE_NORMAL
+            return "optional" if scope == Package::RH_SCOPE_OPTIONAL
+            "other"
+
+        def rh_pylock_project_state_name(state: u8) -> u8&:
+            return "represented" if state == 0
+            return "version_not_present" if state == 1
+            return "ambiguous" if state == 2
+            return "no_name_candidate" if state == 3
+            "not_evaluated"
+
+    public:
+        # This reports membership only. It does not build an installer graph,
+        # evaluate markers, or claim that a ranged requirement is satisfied.
+        def rh_pylock_project_compare(project: darray[u8]&, audit: darray[u8]&, project_sha: darray[u8]&, audit_sha: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if project.count.i64() <= 0 or project.count.i64() > RH_PYLOCK_PROJECT_MAX_BYTES
+            return -1 if audit.count.i64() <= 0 or audit.count.i64() > RH_PYLOCK_PROJECT_MAX_BYTES
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(audit, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            lock_packages: mutable darray[RhPylockProjectPackage] = []
+            return -1 if not rh_pylock_project_packages(nodes, texts, root, lock_packages)
+            requirements: mutable darray[Package::RhRequire] = []
+            project_packages: mutable darray[Package::RhPkgNode] = []
+            project_pool: mutable darray[u8] = []
+            edges: mutable darray[Package::RhDepEdge] = []
+            unresolved: mutable darray[Package::RhUnresolved] = []
+            unknown: mutable i64 = 0
+            return -1 if Package::rh_pypi_parse_pep621(project, project_packages, project_pool, requirements, edges, unresolved, &unknown) != 0 or unknown != 0
+            return -1 if requirements.count.i64() > RH_PYLOCK_PROJECT_MAX_REQUIREMENTS
+            return -1 if requirements.count.i64() * lock_packages.count.i64() > 10000000
+            represented: mutable i64 = 0
+            version_missing: mutable i64 = 0
+            ambiguous: mutable i64 = 0
+            no_candidate: mutable i64 = 0
+            not_evaluated: mutable i64 = 0
+            Base::rh_push_text(out, "{\"schema\":\"rh-pylock-project-membership/1\",\"project_sha256\":\"")
+            out.extend(bytes_view(project_sha))
+            Base::rh_push_text(out, "\",\"audit_sha256\":\"")
+            out.extend(bytes_view(audit_sha))
+            Base::rh_push_text(out, "\",\"dependency_semantics\":\"declared_manifest_vs_lock_membership\",\"installation_graph\":false,\"markers_evaluated\":false,\"packages\":[")
+            while index < requirements.count.i64() |index: i64 = 0, requirements, project_pool, lock_packages, texts, nodes, out, represented, version_missing, ambiguous, no_candidate, not_evaluated|:
+                requirement: Package::RhRequire = requirements[index.usize()]
+                return -1 if requirement.name_s < 0 or requirement.declared_s < 0
+                if index > 0:
+                    out.push(44)
+                name_candidates: mutable i64 = 0
+                version_candidates: mutable i64 = 0
+                while candidate < lock_packages.count.i64() |candidate: i64 = 0, requirement, project_pool, lock_packages, texts, name_candidates, version_candidates|:
+                    package: RhPylockProjectPackage = lock_packages[candidate.usize()]
+                    if rh_pylock_project_name_eq(project_pool, requirement.name_s, requirement.name_e, texts, package.name_s, package.name_e):
+                        name_candidates <- name_candidates + 1
+                        if requirement.ver_s >= 0 and package.version_s >= 0:
+                            same_version: bool = rh_pylock_project_span_eq(project_pool, requirement.ver_s, requirement.ver_e, texts, package.version_s, package.version_e)
+                            version_candidates <- version_candidates + 1 if same_version
+                    candidate <- candidate + 1
+                state: mutable u8 = 4
+                if name_candidates == 0:
+                    state <- 3
+                elif requirement.ver_s >= 0:
+                    if version_candidates > 1:
+                        state <- 2
+                    elif version_candidates == 1:
+                        state <- 0
+                    else:
+                        state <- 1
+                if state == 0:
+                    represented <- represented + 1
+                elif state == 1:
+                    version_missing <- version_missing + 1
+                elif state == 2:
+                    ambiguous <- ambiguous + 1
+                elif state == 3:
+                    no_candidate <- no_candidate + 1
+                else:
+                    not_evaluated <- not_evaluated + 1
+                Base::rh_push_text(out, "{\"index\":")
+                Base::rh_push_decimal_i64(out, index)
+                Base::rh_push_text(out, ",\"name\":\"")
+                Base::rh_json_escape(out, project_pool, requirement.name_s.usize(), requirement.name_e.usize())
+                Base::rh_push_text(out, "\",\"scope\":\"")
+                Base::rh_push_text(out, rh_pylock_project_scope(requirement.depctx))
+                declaration_sha: darray[u8] = rh_pylock_project_declaration_sha(project_pool, requirement.declared_s, requirement.declared_e)
+                Base::rh_push_text(out, "\",\"declaration_sha256\":\"")
+                out.extend(bytes_view(declaration_sha))
+                Base::rh_push_text(out, "\",\"pinned_version\":")
+                if requirement.ver_s < 0:
+                    Base::rh_push_text(out, "null")
+                else:
+                    out.push(34)
+                    Base::rh_json_escape(out, project_pool, requirement.ver_s.usize(), requirement.ver_e.usize())
+                    out.push(34)
+                Base::rh_push_text(out, ",\"name_candidate_count\":")
+                Base::rh_push_decimal_i64(out, name_candidates)
+                Base::rh_push_text(out, ",\"version_text_candidate_count\":")
+                Base::rh_push_decimal_i64(out, version_candidates)
+                Base::rh_push_text(out, ",\"state\":\"")
+                Base::rh_push_text(out, rh_pylock_project_state_name(state))
+                Base::rh_push_text(out, "\"}")
+                index <- index + 1
+            Base::rh_push_text(out, "],\"coverage\":{\"requirement_count\":")
+            Base::rh_push_decimal_i64(out, requirements.count.i64())
+            Base::rh_push_text(out, ",\"represented_count\":")
+            Base::rh_push_decimal_i64(out, represented)
+            Base::rh_push_text(out, ",\"version_not_present_count\":")
+            Base::rh_push_decimal_i64(out, version_missing)
+            Base::rh_push_text(out, ",\"ambiguous_count\":")
+            Base::rh_push_decimal_i64(out, ambiguous)
+            Base::rh_push_text(out, ",\"no_name_candidate_count\":")
+            Base::rh_push_decimal_i64(out, no_candidate)
+            Base::rh_push_text(out, ",\"not_evaluated_count\":")
+            Base::rh_push_decimal_i64(out, not_evaluated)
+            Base::rh_push_text(out, "}}")
+            0
