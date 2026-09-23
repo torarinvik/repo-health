@@ -594,23 +594,40 @@ module Pylock:
             limit
 
         # Parse one single-line TOML basic/literal string and decode TOML
-        # escapes to UTF-8; multiline strings remain unsupported and fail closed.
+        # escapes to UTF-8; multiline strings are handled by the same bounded
+        # scanner and keep their normalized line breaks.
         def rh_pylock_string(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, value_s: mutable i64&, value_e: mutable i64&, next_out: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if start >= end or (data[start] != 34 and data[start] != 39)
             quote: mutable u8 = data[start]
-            cursor: mutable usize = start + 1
+            multiline: bool = start + 2 < end and data[start + 1] == quote and data[start + 2] == quote
+            cursor: mutable usize = start + 1 if not multiline else start + 3
+            if multiline and cursor < end and data[cursor] == 13:
+                cursor <- cursor + 1
+                cursor <- cursor + 1 if cursor < end and data[cursor] == 10
+            elif multiline and cursor < end and data[cursor] == 10:
+                cursor <- cursor + 1
             value_s[0] <- pool.count.i64()
             while cursor < end |cursor, end, data, pool, quote|:
                 byte: u8 = data[cursor]
-                if byte == quote:
+                if multiline and byte == quote and cursor + 2 < end and data[cursor + 1] == quote and data[cursor + 2] == quote:
+                    value_e[0] <- pool.count.i64()
+                    next_out[0] <- cursor + 3
+                    return true
+                if byte == quote and not multiline:
                     value_e[0] <- pool.count.i64()
                     next_out[0] <- cursor + 1
                     return true
-                return false if byte == 10 or byte == 13
-                if byte == 92:
-                    return false if quote != 34 or cursor + 1 >= end
+                if multiline and (byte == 10 or byte == 13):
+                    pool.push(10)
+                    cursor <- cursor + 1
+                    cursor <- cursor + 1 if byte == 13 and cursor < end and data[cursor] == 10
+                    continue
+                return false if not multiline and (byte == 10 or byte == 13)
+                if byte == 92 and quote == 34:
+                    return false if cursor + 1 >= end
                     cursor <- cursor + 1
                     escaped: u8 = data[cursor]
+                    return false if multiline and (escaped == 10 or escaped == 13)
                     if escaped == 117 or escaped == 85:
                         digit_count: i64 = 4 if escaped == 117 else 8
                         codepoint: mutable i64 = 0
@@ -651,6 +668,21 @@ module Pylock:
                     pool.push(byte)
                 cursor <- cursor + 1
             false
+
+        # Find the closing delimiter before the line parser advances. Escaped
+        # quotes in a basic multiline string cannot terminate the value.
+        def rh_pylock_multiline_close(data: darray[u8]&, start: usize) -> i64:
+            quote: u8 = data[start]
+            basic: bool = quote == 34
+            cursor: mutable usize = start + 3
+            while cursor + 2 < data.count |cursor, data, quote, basic|:
+                if basic and data[cursor] == 92:
+                    cursor <- cursor + 2
+                    continue
+                if data[cursor] == quote and data[cursor + 1] == quote and data[cursor + 2] == quote:
+                    return cursor.i64()
+                cursor <- cursor + 1
+            -1
 
         def rh_pylock_scalar_string(data: mutable darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, value_s: mutable i64&, value_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             next: mutable usize = 0
@@ -1119,6 +1151,12 @@ module Pylock:
                             value_e: usize = rh_pylock_comment_end(data, value_s, trimmed_end)
                             value_end: mutable usize = value_e
                             rh_pylock_trim(data, &value_s, &value_end)
+                            if value_end >= value_s + 3 and (data[value_s] == 34 or data[value_s] == 39) and data[value_s + 1] == data[value_s] and data[value_s + 2] == data[value_s]:
+                                close: i64 = rh_pylock_multiline_close(data, value_s)
+                                return -1 if close < 0
+                                value_end <- close.usize() + 3
+                                line_end <- while line_cursor < data.count and data[line_cursor] != 10 |line_cursor: usize = value_end, data| -> line_cursor:
+                                    line_cursor <- line_cursor + 1
                             if section == 0 and Base::rh_bytes_equal_literal(data, key_s.i64(), key_e.i64(), "lock-version"):
                                 return -1 if lock_version_ok
                                 lock_s: mutable i64 = -1

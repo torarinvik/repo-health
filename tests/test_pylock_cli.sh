@@ -356,6 +356,34 @@ set +e
 rc=$?
 set -e
 [[ "$rc" -eq 4 ]] || fail "invalid Unicode scalar escape must fail closed (got $rc)"
+cat > "$T/multiline-string.toml" <<'EOF'
+lock-version = '1.0'
+created-by = """
+tool # name
+second line"""
+[[packages]]
+name = 'x'
+version = '1'
+EOF
+"$ROOT/build/rh_cli" pylock --input "$T/multiline-string.toml" --out "$T/multiline-string.json" >/dev/null
+python3 - "$T/multiline-string.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["created_by"] == "tool # name\nsecond line"
+PY
+cat > "$T/multiline-literal.toml" <<'EOF'
+lock-version = '1.0'
+created-by = '''
+tool\literal
+second line'''
+[[packages]]
+name = 'x'
+version = '1'
+EOF
+"$ROOT/build/rh_cli" pylock --input "$T/multiline-literal.toml" --out "$T/multiline-literal.json" >/dev/null
+python3 - "$T/multiline-literal.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["created_by"] == "tool\\literal\nsecond line"
+PY
 cat > "$T/missing-artifact-hash.toml" <<'EOF'
 lock-version = '1.0'
 created-by = 'uv'
