@@ -24,6 +24,10 @@ static const char *evidence_references_truncated_json =
     "{\"storage_keys\":[\"fnv1a64:f5e19178d3ff184e\"],\"invalid_count\":0,\"truncated\":true,\"count\":1}";
 static const char *evidence_references_unsorted_json =
     "{\"storage_keys\":[\"fnv1a64:f5e19178d3ff184e\",\"fnv1a64:0000000000000000\"],\"invalid_count\":0,\"truncated\":false,\"count\":2}";
+static const char *graph_query_claimed_json =
+    "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_graph_query_job\",\"status\":\"claimed\",\"job_id\":\"00000000-0000-0000-0000-000000000099\",\"fencing_token\":1,\"lease_expires_at\":\"2026-01-01T00:02:00+00:00\",\"request\":{\"schema\":\"rh-query-input/1\",\"kind\":\"downstream\",\"ids\":[1],\"graph\":{\"direction\":\"downstream\",\"subject\":1,\"nodes\":[1,2],\"edges\":[{\"from\":2,\"to\":1}],\"max_nodes\":20,\"max_depth\":5}}}";
+static const char *graph_query_empty_json =
+    "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_graph_query_job\",\"status\":\"empty\"}";
 static const char *adoption_history_json =
     "[{\"from\":100,\"through\":900,\"complete\":true},{\"from\":900,\"through\":1000,\"complete\":false},{\"from\":1000,\"through\":2000,\"complete\":true}]";
 
@@ -123,6 +127,9 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "{\"schema\":\"rh-query-input/1\",\"kind\":\"downstream\",\"ids\":[1],\"graph\":{\"direction\":\"downstream\",\"subject\":1,\"nodes\":[1,2],\"edges\":[{\"from\":2,\"to\":1}],\"max_nodes\":20,\"max_depth\":5}}",
         "3", "2026-01-01T00:01:00Z", "2026-01-01T00:00:00Z"
     };
+    static const char *claim_graph_values[4] = {
+        "graph-worker-1", "2026-01-01T00:01:00Z", "60", "00000000-0000-0000-0000-000000000099"
+    };
     static const char *begin_run_values[13] = {
         "00000000-0000-0000-0000-000000000001", "github", "https://api.github.com",
         "public", "1", "2026-01-01T00:00:00Z", "00000000-0000-0000-0000-000000000003",
@@ -213,6 +220,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = enqueue_graph_values;
         expected_count = 6;
         prefix = "SELECT public.rh_enqueue_graph_query_job(";
+    } else if (operation != NULL && strcmp(operation, "claim_graph") == 0) {
+        expected = claim_graph_values;
+        expected_count = 4;
+        prefix = "SELECT public.rh_claim_graph_query_job(";
     } else if (operation != NULL && strcmp(operation, "page_events") == 0) {
         expected = page_events_values;
         expected_count = 14;
@@ -291,6 +302,13 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.columns = 3;
         result.rows = mode != NULL && strcmp(mode, "duplicate") == 0 ? 0 : 1;
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+        return &result;
+    }
+    if (operation != NULL && strcmp(operation, "claim_graph") == 0) {
+        result.columns = 1;
+        result.rows = 1;
+        result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+        result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? graph_query_empty_json : graph_query_claimed_json;
         return &result;
     }
     result.columns = 1;

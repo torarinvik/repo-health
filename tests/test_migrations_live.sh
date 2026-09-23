@@ -131,7 +131,8 @@ END $$;
 
 DO $$
 DECLARE
-  c record;
+  c jsonb;
+  token_value bigint;
   request_value jsonb := '{"schema":"rh-query-input/1","kind":"downstream","ids":[1,2],"cursor":-1,"limit":10}'::jsonb;
   result_value jsonb := '{"schema":"rh-query-result/1","kind":"downstream","graph":{"direction":"downstream","nodes":[2],"truncated":false,"complete":true}}'::jsonb;
 BEGIN
@@ -141,25 +142,33 @@ BEGIN
   IF rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000099', 'public', request_value, 3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
     RAISE EXCEPTION 'exact graph query job replay was not absorbed';
   END IF;
-  SELECT * INTO c FROM rh_claim_next_job('graph-worker', '2026-01-01T00:00:01Z', 60, '00000000-0000-0000-0000-000000000099', 'graph_query');
-  IF c.job_id <> '00000000-0000-0000-0000-000000000099'::uuid OR c.fencing_token <> 1 THEN
-    RAISE EXCEPTION 'graph query job was not claimed with a fence';
+  c := rh_claim_graph_query_job('graph-worker', '2026-01-01T00:00:01Z', 60, '00000000-0000-0000-0000-000000000099');
+  token_value := (c->>'fencing_token')::bigint;
+  IF c->>'status' <> 'claimed' OR c->>'job_id' <> '00000000-0000-0000-0000-000000000099' OR token_value <> 1 OR c->'request' <> request_value THEN
+    RAISE EXCEPTION 'graph claim omitted its lease or immutable request: %', c;
   END IF;
-  IF rh_finish_job(c.job_id, c.fencing_token, 'succeeded', '2026-01-01T00:00:10Z') THEN
+  IF rh_read_graph_query_request('00000000-0000-0000-0000-000000000099', token_value, '2026-01-01T00:00:02Z') IS DISTINCT FROM request_value THEN
+    RAISE EXCEPTION 'current graph claim could not read its request';
+  END IF;
+  IF rh_finish_job('00000000-0000-0000-0000-000000000099', token_value, 'succeeded', '2026-01-01T00:00:10Z') THEN
     RAISE EXCEPTION 'generic finish bypassed graph result publication';
   END IF;
-  IF rh_publish_graph_query_result(c.job_id, c.fencing_token - 1, '2026-01-01T00:00:10Z', result_value) THEN
+  IF rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value - 1, '2026-01-01T00:00:10Z', result_value) THEN
     RAISE EXCEPTION 'stale graph result publication was accepted';
   END IF;
-  IF NOT rh_publish_graph_query_result(c.job_id, c.fencing_token, '2026-01-01T00:00:10Z', result_value) THEN
+  IF NOT rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value, '2026-01-01T00:00:10Z', result_value) THEN
     RAISE EXCEPTION 'current graph result publication was refused';
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM graph_query_job
-    WHERE job_id = c.job_id AND request = request_value AND result = result_value
-      AND result_fencing_token = c.fencing_token AND completed_at = '2026-01-01T00:00:10Z'
-  ) OR (SELECT state FROM job WHERE id = c.job_id) <> 'succeeded' THEN
+    WHERE job_id = '00000000-0000-0000-0000-000000000099' AND request = request_value AND result = result_value
+      AND result_fencing_token = token_value AND completed_at = '2026-01-01T00:00:10Z'
+  ) OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000099') <> 'succeeded' THEN
     RAISE EXCEPTION 'graph result and terminal job state were not committed together';
+  END IF;
+  c := rh_claim_graph_query_job('graph-worker', '2026-01-01T00:00:20Z', 60, NULL);
+  IF c->>'status' <> 'empty' THEN
+    RAISE EXCEPTION 'completed graph query was claimable again';
   END IF;
 END $$;
 

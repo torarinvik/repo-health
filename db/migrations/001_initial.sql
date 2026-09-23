@@ -973,6 +973,64 @@ AS $$
     JOIN recorded AS r ON r.job_id = c.id;
 $$;
 
+-- Claim one graph job and return its immutable input with the lease. The
+-- request remains readable only through this fenced claim response.
+CREATE FUNCTION rh_claim_graph_query_job(
+    p_worker_id text,
+    p_now timestamptz,
+    p_lease_seconds integer,
+    p_job_id uuid DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_claim record;
+    v_request jsonb;
+BEGIN
+    SELECT * INTO v_claim
+    FROM rh_claim_next_job(p_worker_id, p_now, p_lease_seconds, p_job_id, 'graph_query');
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'schema', 'rh-postgres-result/1',
+            'operation', 'claim_graph_query_job',
+            'status', 'empty'
+        );
+    END IF;
+
+    SELECT request INTO v_request FROM graph_query_job WHERE job_id = v_claim.job_id;
+    IF NOT FOUND OR v_request IS NULL THEN
+        RAISE EXCEPTION 'claimed graph query job has no immutable request';
+    END IF;
+    RETURN jsonb_build_object(
+        'schema', 'rh-postgres-result/1',
+        'operation', 'claim_graph_query_job',
+        'status', 'claimed',
+        'job_id', v_claim.job_id::text,
+        'fencing_token', v_claim.fencing_token,
+        'lease_expires_at', v_claim.lease_expires_at,
+        'request', v_request
+    );
+END;
+$$;
+
+-- A graph result can be published only by the live token returned above.
+CREATE FUNCTION rh_read_graph_query_request(
+    p_job_id uuid,
+    p_fencing_token bigint,
+    p_now timestamptz
+) RETURNS jsonb
+LANGUAGE sql
+AS $$
+    SELECT g.request
+    FROM graph_query_job AS g
+    JOIN job AS j ON j.id = g.job_id
+    WHERE g.job_id = p_job_id
+      AND j.kind = 'graph_query'
+      AND j.state = 'running'
+      AND j.fencing_token = p_fencing_token
+      AND j.lease_expires_at > p_now
+$$;
+
 CREATE FUNCTION rh_heartbeat_job(
     p_job_id uuid,
     p_fencing_token bigint,

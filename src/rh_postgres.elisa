@@ -630,3 +630,18 @@ module Postgres:
         def rh_pg_claim_collection_job(conninfo: cstr, job_id: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, job_id_out: mutable darray[u8]&, fencing_token_out: mutable i64&, lease_expires_at_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if Base::rh_cstr_len_c(job_id) == 0 or Base::rh_cstr_len_c(job_id) > 64
             Postgres::rh_pg_claim_job(conninfo, worker_id, now, lease_seconds, job_id, "collection", job_id_out, fencing_token_out, lease_expires_at_out)
+
+        # Claim only graph-query work and return its immutable request in the
+        # same database function result as the lease token.
+        def rh_pg_claim_graph_query_job(conninfo: cstr, worker_id: cstr, now: cstr, lease_seconds: i64, job_id: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if Base::rh_cstr_len_c(worker_id) == 0 or Base::rh_cstr_len_c(worker_id) > 256
+            return -1 if lease_seconds <= 0 or lease_seconds > 86400
+            return -1 if Base::rh_cstr_len_c(job_id) > 64
+            lease_text: mutable darray[u8] = Postgres::rh_pg_decimal(lease_seconds)
+            lease_ptr: cstr = (&lease_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(worker_id)
+            params.push(now)
+            params.push(lease_ptr)
+            params.push(job_id)
+            Postgres::rh_pg_text_params(conninfo, "SELECT public.rh_claim_graph_query_job($1::text, $2::timestamptz, $3::integer, NULLIF($4, '')::uuid)::text", params, out)

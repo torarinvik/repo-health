@@ -673,6 +673,66 @@ module PostgresReport:
                 Base::rh_push_text(out, "\"}")
                 return 0
 
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "claim_graph_query_job"):
+                worker_s: mutable i64 = 0
+                worker_e: mutable i64 = 0
+                now_s: mutable i64 = 0
+                now_e: mutable i64 = 0
+                job_s: mutable i64 = 0
+                job_e: mutable i64 = 0
+                token: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "worker_id", &worker_s, &worker_e, false) or worker_e - worker_s > 256
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "now", &now_s, &now_e, false)
+                lease_seconds: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "lease_seconds", 1, 86400, &lease_seconds)
+                requested_job: mutable darray[u8] = []
+                requested_job_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "job_id")
+                if requested_job_idx >= 0:
+                    return -1 if not Json::rh_json_str_span(nodes, requested_job_idx, &job_s, &job_e) or not PostgresReport::rh_pg_report_uuid_valid(texts, job_s, job_e)
+                    requested_job <- PostgresReport::rh_pg_report_text(texts, job_s, job_e)
+                worker: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, worker_s, worker_e)
+                now: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, now_s, now_e)
+                worker_ptr: cstr = (&worker[0]).cast[cstr] can Unsafe.PointerCast
+                now_ptr: cstr = (&now[0]).cast[cstr] can Unsafe.PointerCast
+                requested_job_ptr: cstr = (&requested_job[0]).cast[cstr] can Unsafe.PointerCast if requested_job.count > 0 else ""
+                claim_result: mutable darray[u8] = []
+                result_bytes: i64 = Postgres::rh_pg_claim_graph_query_job(conninfo, worker_ptr, now_ptr, lease_seconds, requested_job_ptr, claim_result)
+                return -1 if result_bytes <= 0 or result_bytes > 1048576
+                claim_nodes: mutable darray[Json::RhJsonNode] = []
+                claim_texts: mutable darray[u8] = []
+                claim_root: i64 = Json::rh_json_parse(claim_result, claim_nodes, claim_texts)
+                return -1 if claim_root < 0 or claim_nodes[claim_root.usize()].kind != Json::RH_JSON_OBJ
+                result_schema_s: mutable i64 = 0
+                result_schema_e: mutable i64 = 0
+                result_operation_s: mutable i64 = 0
+                result_operation_e: mutable i64 = 0
+                result_status_s: mutable i64 = 0
+                result_status_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(claim_nodes, claim_texts, claim_root, "schema", &result_schema_s, &result_schema_e, false) or not PostgresReport::rh_pg_report_eq(claim_texts, result_schema_s, result_schema_e, "rh-postgres-result/1")
+                return -1 if not PostgresReport::rh_pg_report_span(claim_nodes, claim_texts, claim_root, "operation", &result_operation_s, &result_operation_e, false) or not PostgresReport::rh_pg_report_eq(claim_texts, result_operation_s, result_operation_e, "claim_graph_query_job")
+                return -1 if not PostgresReport::rh_pg_report_span(claim_nodes, claim_texts, claim_root, "status", &result_status_s, &result_status_e, false)
+                if PostgresReport::rh_pg_report_eq(claim_texts, result_status_s, result_status_e, "claimed"):
+                    return -1 if not PostgresReport::rh_pg_report_span(claim_nodes, claim_texts, claim_root, "job_id", &job_s, &job_e, false) or not PostgresReport::rh_pg_report_uuid_valid(claim_texts, job_s, job_e)
+                    return -1 if not PostgresReport::rh_pg_report_int(claim_nodes, claim_result, claim_texts, claim_root, "fencing_token", 1, 9223372036854775807, &token)
+                    request_validation_out: mutable darray[u8] = []
+                    request_idx: i64 = Json::rh_json_obj_get(claim_nodes, claim_texts, claim_root, "request")
+                    return -1 if request_idx < 0 or claim_nodes[request_idx.usize()].kind != Json::RH_JSON_OBJ
+                    request_node: Json::RhJsonNode = claim_nodes[request_idx.usize()]
+                    request_start: i64 = request_node.text_start
+                    request_end: i64 = request_node.text_end
+                    return -1 if request_start < 0 or request_end <= request_start or request_end - request_start > 1048576
+                    request_validation: mutable darray[u8] = []
+                    while i < request_end |i: i64 = request_start, request_validation, claim_result|:
+                        request_validation.push(claim_result[i.usize()])
+                        i <- i + 1
+                    return -1 if QueryReport::rh_query_report(request_validation, request_validation_out) != 0
+                elif not PostgresReport::rh_pg_report_eq(claim_texts, result_status_s, result_status_e, "empty"):
+                    return -1
+                while i < claim_result.count |i: usize = 0, claim_result, out|:
+                    out.push(claim_result[i])
+                    i <- i + 1
+                return 0
+
             commit_events: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "page_commit_events")
             if commit_events or PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "page_commit"):
                 run_s: mutable i64 = 0
