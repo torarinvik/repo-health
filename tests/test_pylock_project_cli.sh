@@ -31,6 +31,7 @@ assert sidecar["source_input_sha256"] == hashlib.sha256((root / "fixtures/packag
 assert sidecar["source_audit_sha256"] == hashlib.sha256((root / "fixtures/packages/pylock-project-membership-audit.json").read_bytes()).hexdigest(), sidecar
 assert sidecar["normalized_output_sha256"] == hashlib.sha256(result_path.read_bytes()).hexdigest(), sidecar
 assert result["installation_graph"] is False and result["markers_evaluated"] is False, result
+assert next(row for row in result["packages"] if row["name"] == "pytest")["optional_group"] == "test-suite", result
 assert any(row["state"] == "discarded" for row in sidecar["fields"]), sidecar
 assert all(row["state"] in {"preserved", "transformed", "inferred", "discarded", "unsupported", "unknown"} for row in sidecar["fields"]), sidecar
 PY
@@ -44,6 +45,21 @@ set +e
 rc=$?
 set -e
 [[ "$rc" -eq 4 ]] || fail "wrong audit schema must fail closed (got $rc)"
+
+cat > "$T/invalid-project.toml" <<'EOF'
+[project]
+dependencies = []
+[project.optional-dependencies]
+test.suite = ["pytest==7.0"]
+EOF
+set +e
+"$ROOT/build/rh_cli" pylock-project \
+  --project "$T/invalid-project.toml" \
+  --audit "$ROOT/fixtures/packages/pylock-project-membership-audit.json" \
+  --out "$T/invalid-project-result.json" >/dev/null 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 4 ]] || fail "unsupported bare dotted optional key must fail closed (got $rc)"
 
 for malformed in \
   '{"schema":"rh-pylock-audit/1","schema":"rh-pylock-audit/1","dependency_semantics":"informational_only","packages":[]}' \
