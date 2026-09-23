@@ -7,6 +7,7 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_downstream.elisa"
+include "./rh_postgres.elisa"
 
 module Adoption:
     private:
@@ -111,7 +112,7 @@ module Adoption:
             runs_out.push(93)
             true
 
-        def rh_adoption_augment_store(raw: darray[u8]&, root_path: cstr, augmented: mutable darray[u8]&) -> bool can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+        def rh_adoption_augment_store(raw: darray[u8]&, root_path: cstr, conninfo: cstr, use_postgres: bool, augmented: mutable darray[u8]&) -> bool can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -138,7 +139,23 @@ module Adoption:
                 return false if coverage_idx >= 0 and nodes[coverage_idx.usize()].kind != Json::RH_JSON_NULL
                 return false if history_idx >= 0 and nodes[history_idx.usize()].kind != Json::RH_JSON_NULL
                 runs: mutable darray[u8] = []
-                return false if not Adoption::rh_adoption_store_runs(root_path, texts, source_node.text_start, source_node.text_end, capability_node.text_start, capability_node.text_end, runs)
+                if use_postgres:
+                    source_id: mutable darray[u8] = []
+                    capability: mutable darray[u8] = []
+                    while i < source_node.text_end - source_node.text_start |i: i64 = 0, texts, source_node, source_id|:
+                        source_id.push(texts[(source_node.text_start + i).usize()])
+                        i <- i + 1
+                    source_id.push(0)
+                    while i < capability_node.text_end - capability_node.text_start |i: i64 = 0, texts, capability_node, capability|:
+                        capability.push(texts[(capability_node.text_start + i).usize()])
+                        i <- i + 1
+                    capability.push(0)
+                    source_ptr: cstr = (&source_id[0]).cast[cstr] can Unsafe.PointerCast
+                    capability_ptr: cstr = (&capability[0]).cast[cstr] can Unsafe.PointerCast
+                    history_status: i64 = Postgres::rh_pg_adoption_history(conninfo, source_ptr, capability_ptr, runs)
+                    return false if history_status <= 0
+                else:
+                    return false if not Adoption::rh_adoption_store_runs(root_path, texts, source_node.text_start, source_node.text_end, capability_node.text_start, capability_node.text_end, runs)
                 entry: Json::RhJsonNode = nodes[child.usize()]
                 return false if entry.text_start < cursor.i64() or entry.text_end <= entry.text_start or raw[(entry.text_end - 1).usize()] != 125
                 while i < entry.text_end - 1 - cursor.i64() |i: usize = 0, raw, augmented, cursor, entry|:
@@ -487,7 +504,7 @@ module Adoption:
             Base::rh_push_text(out, "],\"note\":\"first_seen is a collector observation; confirmed introduction/removal remain separate assertions; elapsed duration is seconds and right-censored at last_seen or cutoff; missing follow-up is right-censored and an observed upgrade is not proof of migration\"}")
             0
 
-        def rh_adoption_report_from_store(raw: darray[u8]&, root_path: cstr, out: mutable darray[u8]&) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+        def rh_adoption_report_from_store(raw: darray[u8]&, root_path: cstr, conninfo: cstr, use_postgres: bool, out: mutable darray[u8]&) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
             augmented: mutable darray[u8] = []
-            return -1 if not Adoption::rh_adoption_augment_store(raw, root_path, augmented)
+            return -1 if not Adoption::rh_adoption_augment_store(raw, root_path, conninfo, use_postgres, augmented)
             Adoption::rh_adoption_report(augmented, out)

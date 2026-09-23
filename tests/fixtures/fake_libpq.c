@@ -24,6 +24,8 @@ static const char *evidence_references_truncated_json =
     "{\"storage_keys\":[\"fnv1a64:f5e19178d3ff184e\"],\"invalid_count\":0,\"truncated\":true,\"count\":1}";
 static const char *evidence_references_unsorted_json =
     "{\"storage_keys\":[\"fnv1a64:f5e19178d3ff184e\",\"fnv1a64:0000000000000000\"],\"invalid_count\":0,\"truncated\":false,\"count\":2}";
+static const char *adoption_history_json =
+    "[{\"from\":100,\"through\":900,\"complete\":true},{\"from\":900,\"through\":1000,\"complete\":false},{\"from\":1000,\"through\":2000,\"complete\":true}]";
 
 void *PQconnectdbParams(const char *const *keywords, const char *const *values, int expand_dbname) {
     const char *marker = getenv("RH_FAKE_PG_CONNECT_MARK");
@@ -169,7 +171,12 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     const char *prefix = "SELECT public.rh_commit_collection_page(";
     int expected_count = 11;
     int claim_query = 0;
-    if (operation != NULL && strcmp(operation, "begin_run") == 0) {
+    if (operation != NULL && strcmp(operation, "adoption_history") == 0) {
+        static const char *history_values[2] = { "00000000-0000-0000-0000-000000000001", "issues" };
+        expected = history_values;
+        expected_count = 2;
+        prefix = "SELECT COALESCE(json_agg(";
+    } else if (operation != NULL && strcmp(operation, "begin_run") == 0) {
         expected = begin_run_values;
         expected_count = 13;
         prefix = "SELECT public.rh_begin_collection_run(";
@@ -257,12 +264,16 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     }
     if (handle != &connection || query == NULL || strncmp(query, prefix, strlen(prefix)) != 0 ||
         count != expected_count || types != NULL || values == NULL || lengths != NULL || formats != NULL || result_format != 0) {
+        if (operation != NULL && strcmp(operation, "adoption_history") == 0)
+            fprintf(stderr, "fake libpq adoption call mismatch: query=%s count=%d expected=%d prefix=%s\n", query == NULL ? "(null)" : query, count, expected_count, prefix);
         if (operation != NULL && strcmp(operation, "ingest") == 0)
             fprintf(stderr, "fake libpq ingest call mismatch: query=%s count=%d expected=%d prefix=%s\n", query == NULL ? "(null)" : query, count, expected_count, prefix);
         return NULL;
     }
     for (int i = 0; i < count; ++i)
         if (values[i] == NULL || strcmp(values[i], expected[i]) != 0) {
+            if (operation != NULL && strcmp(operation, "adoption_history") == 0)
+                fprintf(stderr, "fake libpq adoption parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
             if (operation != NULL && strcmp(operation, "ingest") == 0)
                 fprintf(stderr, "fake libpq ingest parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
             return NULL;
@@ -277,6 +288,8 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     result.rows = 1;
     if (mode != NULL && strcmp(mode, "duplicate") == 0)
         result.value = "f";
+    else if (operation != NULL && strcmp(operation, "adoption_history") == 0)
+        result.value = adoption_history_json;
     else
         result.value = "t";
     if (mode != NULL && strcmp(mode, "failure") == 0)

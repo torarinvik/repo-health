@@ -197,7 +197,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli snapshot --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli aggregate --input <file> --out <file>")
     rh_cli_err("       rh_cli index --input <rh-dep-graph/1> --out <file>")
-    rh_cli_err("       rh_cli adoption --input <file> --out <file> [--store-root <dir>]")
+    rh_cli_err("       rh_cli adoption --input <file> --out <file> [--store-root <dir> | --postgres] (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli lineage --input <file> --out <file>")
     rh_cli_err("       rh_cli population --input <file> --out <file>")
     rh_cli_err("       rh_cli ingest --root <dir> --input <file> --out <file>")
@@ -2670,8 +2670,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if xi_idx < 0 or xo_idx < 0
         return rh_do_index(slots[xi_idx], slots[xo_idx])
     if Base::rh_streq(cmd, "adoption"):
-        ai2_idx, ao2_idx, ars_idx =
-            while abq < argc |ai2_idx: i64 = -1, ao2_idx: i64 = -1, ars_idx: i64 = -1, abq: i64 = 2, slots| -> ai2_idx, ao2_idx, ars_idx:
+        ai2_idx, ao2_idx, ars_idx, apg =
+            while abq < argc |ai2_idx: i64 = -1, ao2_idx: i64 = -1, ars_idx: i64 = -1, apg: i64 = 0, abq: i64 = 2, slots| -> ai2_idx, ao2_idx, ars_idx, apg:
                 a35: u8& = slots[abq].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(a35, "--input"):
                     if abq + 1 < argc:
@@ -2691,13 +2691,22 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         ars_idx <- abq
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(a35, "--postgres"):
+                    apg <- 1
                 else:
                     return rh_cli_usage(2)
                 abq <- abq + 1
-        return rh_cli_usage(2) if ai2_idx < 0 or ao2_idx < 0
+        return rh_cli_usage(2) if ai2_idx < 0 or ao2_idx < 0 or (ars_idx >= 0 and apg == 1)
         store_root: mutable cstr = ""
         store_root <- slots[ars_idx] if ars_idx >= 0
-        return rh_do_adoption(slots[ai2_idx], slots[ao2_idx], store_root, ars_idx >= 0)
+        conninfo: mutable cstr = ""
+        if apg == 1:
+            database_url: u8&? = getenv("RH_DATABASE_URL")
+            if database_url == null:
+                rh_cli_err("adoption: RH_DATABASE_URL is required for --postgres")
+                return 4
+            conninfo <- database_url.cast[cstr] can Unsafe.PointerCast
+        return rh_do_adoption(slots[ai2_idx], slots[ao2_idx], store_root, ars_idx >= 0, apg == 1, conninfo)
     if Base::rh_streq(cmd, "lineage"):
         li_idx, lo_idx =
             while llq < argc |li_idx: i64 = -1, lo_idx: i64 = -1, llq: i64 = 2, slots| -> li_idx, lo_idx:
@@ -8881,7 +8890,7 @@ def rh_do_index(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Ab
 # --- M05 staged adoption execution path. ---
 # Publishes observation/confirmation states and right-censored durations while
 # keeping migration hypotheses out of the canonical evidence result.
-def rh_do_adoption(input_path: cstr, out_path: cstr, store_root: cstr, has_store: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_adoption(input_path: cstr, out_path: cstr, store_root: cstr, has_store: bool, has_postgres: bool, conninfo: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path) or (has_store and not Git::rh_arg_safe(store_root)):
         rh_cli_err("rejected adoption argument (allowlist)")
         return 3
@@ -8896,7 +8905,7 @@ def rh_do_adoption(input_path: cstr, out_path: cstr, store_root: cstr, has_store
         rh_cli_err("adoption: cannot read --input")
         return 4
     body: mutable darray[u8] = []
-    report_status: i64 = Adoption::rh_adoption_report_from_store(raw, store_root, body) if has_store else Adoption::rh_adoption_report(raw, body)
+    report_status: i64 = Adoption::rh_adoption_report_from_store(raw, store_root, conninfo, has_postgres, body) if has_store or has_postgres else Adoption::rh_adoption_report(raw, body)
     if report_status != 0:
         rh_cli_err("adoption: unsupported or malformed adoption envelope (fail closed)")
         return 4

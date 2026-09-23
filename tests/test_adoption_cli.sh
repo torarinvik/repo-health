@@ -193,4 +193,24 @@ printf '{"schema":"rh-adoption-input/1","cutoff":1,"adoptions":[{"first_seen":nu
 set -e
 [[ "$rc_order" -eq 4 && "$rc_cutoff" -eq 4 && "$rc_last" -eq 4 && "$rc_version" -eq 4 && "$rc_missing" -eq 4 ]] || fail "invalid adoption must exit 4 (got $rc_order/$rc_cutoff/$rc_last/$rc_version/$rc_missing)"
 
+command -v cc >/dev/null 2>&1 || fail "C compiler unavailable for fake PostgreSQL"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  cc -dynamiclib -o "$T/libpq.dylib" "$ROOT/tests/fixtures/fake_libpq.c" || fail "compile fake libpq"
+  LIBPQ="$T/libpq.dylib"
+else
+  cc -shared -fPIC -o "$T/libpq.so" "$ROOT/tests/fixtures/fake_libpq.c" || fail "compile fake libpq"
+  LIBPQ="$T/libpq.so"
+fi
+cat > "$T/postgres-backed.json" <<'JSON'
+{"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"coverage_source":"00000000-0000-0000-0000-000000000001","coverage_capability":"issues"}]}
+JSON
+RH_DATABASE_URL="host=fake dbname=repo_health" RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=adoption_history RH_FAKE_PG_EXPECT=committed "$ROOT/build/rh_cli" adoption --input "$T/postgres-backed.json" --postgres --out "$T/postgres-backed.out" >/dev/null || fail "PostgreSQL-backed adoption coverage"
+python3 - "$T/postgres-backed.out" <<'PY'
+import json, sys
+a = json.load(open(sys.argv[1]))["adoptions"][0]
+assert a["snapshot_coverage"] == {"status": "reconstructed", "interval_count": 3, "gap_count": 1, "uncovered_seconds": 100}, a
+assert a["upgrade_lag"]["status"] == "unknown", a
+print("[adoption] PostgreSQL run history reconstructs bounded coverage")
+PY
+
 echo "test_adoption_cli OK"

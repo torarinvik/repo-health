@@ -28,5 +28,12 @@ for operation in begin_run page page_events page_staged staged_normalization evi
     fi
   done
 done
+for mode in committed failure connect_failure; do
+  if [[ "$mode" == "connect_failure" ]]; then
+    RH_FAKE_PG_OPERATION=adoption_history RH_FAKE_PG_CONNECT_FAIL=1 RH_FAKE_PG_EXPECT="$mode" RH_LIBPQ_PATH="$LIBPQ" "$ROOT/build/test_postgres" || fail "adoption_history $mode result"
+  else
+    RH_FAKE_PG_OPERATION=adoption_history RH_FAKE_PG_EXPECT="$mode" RH_LIBPQ_PATH="$LIBPQ" "$ROOT/build/test_postgres" || fail "adoption_history $mode result"
+  fi
+done
 RH_FAKE_PG_OPERATION=page RH_FAKE_PG_EXPECT=missing RH_LIBPQ_PATH="$T/no-libpq-here.dylib" "$ROOT/build/test_postgres" || fail "missing libpq result"
 echo "[pg-adapter] bound page and lease operations, claim outputs, fencing outcomes, and failure paths OK"
