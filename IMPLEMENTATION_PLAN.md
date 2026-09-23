@@ -705,7 +705,7 @@ unknown states. The continuity tables are covered by renderer and live
 loopback regression fixtures; no value is inferred when either artifact is
 absent.
 
-**M06-04: Policy parser and evaluator.** Implement validated declarative rules, typed comparisons, required input freshness, minimum sample sizes, four-valued results, and explicit precedence. Rule and observation IDs must be unique within their respective inputs; every observation must name a configured rule; exception keys must be unique so approval/revocation cannot depend on row order. Invalid or ambiguous identities fail closed. `tests/test_policy_cli.sh` covers these cases alongside the existing truth-table and malformed-input cases.
+**M06-04: Policy parser and evaluator.** Implement validated declarative rules, typed comparisons, required input freshness, minimum sample sizes, four-valued results, and explicit precedence. Rule and observation IDs must be unique within their respective inputs; every observation must name a configured rule; exception keys must be unique so approval/revocation cannot depend on row order. Observed values require an explicit positive denominator; negative ages, sample sizes, freshness windows, and timestamps fail closed. A missing age cannot satisfy a freshness-gated rule. `tests/test_policy_cli.sh` covers these cases alongside the existing truth-table and malformed-input cases.
 
 **M06-05: Agent integration.** Provide a small tool contract for checking exact dependencies or inventories and explaining findings. Do not allow repository prose to override policy rules.
 

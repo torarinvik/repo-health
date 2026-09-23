@@ -74,6 +74,15 @@ cat > "$T/prose.json" <<'JSON'
 JSON
 "$ROOT/build/rh_cli" policy --policy "$T/policy.json" --input "$T/prose.json" --out "$T/o5" | grep -q "decision=deny" || fail "prose changed the decision"
 
+echo "[policy] missing freshness age cannot satisfy a freshness gate"
+cat > "$T/fresh-policy.json" <<'JSON'
+{"schema":"rh-policy/1","rules":[{"id":1,"op":"==","threshold":{"num":1,"den":1},"freshness_secs":60}]}
+JSON
+cat > "$T/fresh-input.json" <<'JSON'
+{"schema":"rh-policy-input/1","subject_id":7,"now":1000,"inputs":[{"rule_id":1,"status":"observed","num":1,"den":1,"sample":1}]}
+JSON
+"$ROOT/build/rh_cli" policy --policy "$T/fresh-policy.json" --input "$T/fresh-input.json" --out "$T/fresh-out" | grep -q "decision=unknown" || fail "missing age must not appear fresh"
+
 echo "[policy] exceptions are digest-bound, approved, and must be unexpired"
 digest="$(python3 -c "import json;print(json.load(open('$T/o1/policy-result.json'))['binding']['policy_digest'])")"
 python3 - "$T/pexc.json" "$digest" <<'PY'
@@ -134,8 +143,12 @@ open(sys.argv[1], "w").write(json.dumps({"schema": "rh-policy/1", "rules": [{"id
     "exceptions": [{**exc, "state": "approved"}, {**exc, "state": "revoked"}]}))
 PY
 "$ROOT/build/rh_cli" policy --policy "$T/bad_duplicate_exception.json" --input "$T/deny.json" --out "$T/x9" >/dev/null 2>&1; rc9=$?
+printf '{"schema":"rh-policy/1","rules":[{"id":1,"op":"==","freshness_secs":-1}]}' > "$T/bad_negative_freshness.json"
+"$ROOT/build/rh_cli" policy --policy "$T/bad_negative_freshness.json" --input "$T/deny.json" --out "$T/x10" >/dev/null 2>&1; rc10=$?
+printf '{"schema":"rh-policy-input/1","subject_id":7,"now":1000,"inputs":[{"rule_id":1,"status":"observed","num":1,"sample":1}]}' > "$T/bad_missing_denominator.json"
+"$ROOT/build/rh_cli" policy --policy "$T/policy.json" --input "$T/bad_missing_denominator.json" --out "$T/x11" >/dev/null 2>&1; rc11=$?
 set -e
-for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7" "$rc8" "$rc9"; do
+for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7" "$rc8" "$rc9" "$rc10" "$rc11"; do
   [[ "$rc" -eq 4 ]] || fail "malformed policy/input must exit 4 (got $rc)"
 done
 
