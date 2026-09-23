@@ -574,11 +574,12 @@ echo "[pylock] local artifact hashes bind to audit and file bytes"
   --file "$ROOT/fixtures/packages/pylock-observation-artifact.whl" \
   --out "$T/observation-match.json" >/dev/null
 cmp "$ROOT/fixtures/packages/pylock-artifact-observation-result.json" "$T/observation-match.json" || fail "artifact observation drifted from golden"
-python3 - "$T/observation-match.json" "$ROOT/fixtures/packages/pylock-observation-audit.json" "$ROOT/fixtures/packages/pylock-observation-artifact.whl" <<'PY'
+python3 - "$T/observation-match.json" "$ROOT/fixtures/packages/pylock-observation-audit.json" "$ROOT/fixtures/packages/pylock-observation-artifact.whl" "$T/observation-match.json.transformations.json" <<'PY'
 import hashlib, json, sys
 report = json.load(open(sys.argv[1]))
 audit_bytes = open(sys.argv[2], "rb").read()
 artifact = open(sys.argv[3], "rb").read()
+transformation = json.load(open(sys.argv[4]))
 assert report["schema"] == "rh-pylock-artifact-observation-result/1", report
 assert report["audit_sha256"] == hashlib.sha256(audit_bytes).hexdigest(), report
 assert report["source_input_sha256"] == json.loads(audit_bytes)["input_sha256"], report
@@ -592,6 +593,14 @@ assert all(h["state"] == "match" and h["observed"] == h["expected"] for h in rep
 serialized = json.dumps(report)
 for locator in ["https://files.example.invalid/attrs-25.1.0.whl", "../wheelhouse/attrs-cp312.whl"]:
     assert locator not in serialized, report
+assert transformation["schema"] == "rh-adapter-transformation-report/1", transformation
+assert transformation["adapter"] == "pep751-local-artifact-observation", transformation
+assert transformation["source_input_sha256"] == hashlib.sha256(audit_bytes).hexdigest(), transformation
+assert transformation["source_artifact_sha256"] == hashlib.sha256(artifact).hexdigest(), transformation
+assert transformation["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), transformation
+assert transformation["configuration_sha256"] == hashlib.sha256(b"repo-health/pep751-local-artifact-observation/1").hexdigest(), transformation
+assert {field["state"] for field in transformation["fields"]} == {"preserved", "transformed", "discarded", "unsupported"}, transformation
+assert "observation-match.json" not in json.dumps(transformation), transformation
 print("[pylock] SHA-256/384/512 match and evidence binding OK")
 PY
 
