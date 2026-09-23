@@ -17,9 +17,11 @@ cp "$ROOT/fixtures/packages/scorecard-findings.json" "$T/in.json"
 
 echo "[findings] preserve assessment and typed findings"
 "$ROOT/build/rh_cli" findings --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "findings run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
+source = open(sys.argv[2], "rb").read()
+transformation = json.load(open(sys.argv[3]))
 assert d["schema"] == "rh-findings-result/1", d
 assert d["assessment"] == {"id": "scorecard:repo@abc123:1700000000", "tool": "OpenSSF Scorecard", "tool_version": "5.0.0", "subject_revision": "abc123", "assessed_at": 1700000000}, d["assessment"]
 assert d["delivery_paths"] == ["api", "artifact"], d
@@ -27,6 +29,12 @@ assert d["summary"] == {"total": 2, "pass": 1, "fail": 0, "unknown": 1, "omitted
 assert d["findings"][0] == {"check": "Pinned-Dependencies", "probe": "manifest-lock-match", "probe_version": "2", "outcome": "pass", "polarity": "positive", "locations": ["package-lock.json:1"], "remediation": "keep lockfile synchronized"}, d["findings"][0]
 assert d["findings"][1]["outcome"] == "unknown" and d["findings"][1]["remediation"] is None, d["findings"][1]
 assert "delivery paths do not refresh age" in d["note"], d["note"]
+assert transformation["schema"] == "rh-adapter-transformation-report/1", transformation
+assert transformation["adapter"] == "scorecard-findings", transformation
+assert transformation["source_input_sha256"] == hashlib.sha256(source).hexdigest(), transformation
+assert transformation["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), transformation
+assert transformation["configuration_sha256"] == hashlib.sha256(b"repo-health/scorecard-findings/1").hexdigest(), transformation
+assert {field["state"] for field in transformation["fields"]} == {"preserved", "transformed", "discarded", "unsupported"}, transformation
 print("[findings] origin + typed outcomes OK")
 PY
 
