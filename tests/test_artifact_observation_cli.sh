@@ -31,6 +31,21 @@ assert result == {
     "archive_size_bytes": len(archive),
 }, result
 PY
+python3 - "$T/match.json.transformations.json" "$T/match.json" "$ROOT/fixtures/packages/artifact-observation-graph.json" "$ROOT/fixtures/packages/artifact-observation.archive" <<'PY'
+import hashlib, json, pathlib, sys
+sidecar, result_path, graph_path, artifact_path = map(pathlib.Path, sys.argv[1:])
+d = json.loads(sidecar.read_bytes())
+assert d["schema"] == "rh-adapter-transformation-report/1", d
+assert d["adapter"] == "local-artifact-byte-observation", d
+assert d["source_input_sha256"] == hashlib.sha256(graph_path.read_bytes()).hexdigest(), d
+assert d["source_artifact_sha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest(), d
+assert d["output_schema"] == "rh-artifact-observation-result/1", d
+assert d["configuration_sha256"] == hashlib.sha256(b"repo-health/local-artifact-byte-observation/1").hexdigest(), d
+assert d["normalized_output_sha256"] == hashlib.sha256(result_path.read_bytes()).hexdigest(), d
+assert [f["state"] for f in d["fields"]] == ["preserved", "preserved", "transformed", "transformed", "discarded", "unsupported"], d
+assert str(pathlib.Path.cwd()) not in sidecar.read_text(), d
+print("[artifact-observe] exact graph/artifact/output lineage and field transformations OK")
+PY
 
 echo "[artifact-observe] changed bytes remain distinct under the same package label"
 cp "$ROOT/fixtures/packages/artifact-observation.archive" "$T/changed.archive"
