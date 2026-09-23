@@ -90,7 +90,7 @@ import json, sys
 rules = [{"id":1,"op":">=","threshold":{"num":1,"den":2},"min_sample":10,"on_violation":"deny","requires_complete":True},
          {"id":2,"op":">","threshold":{"num":0,"den":1},"on_violation":"warn"}]
 out = {"schema":"rh-policy/1","rules":rules,
-       "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":2000,"state":"approved"}]}
+       "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":2000,"state":"approved","approved_by":"maintainer-17","reason":"temporary signed-off compatibility window"}]}
 open(sys.argv[1],"w").write(json.dumps(out))
 PY
 "$ROOT/build/rh_cli" policy --policy "$T/pexc.json" --input "$T/deny.json" --out "$T/o6" >/dev/null || fail "exception run"
@@ -110,7 +110,7 @@ import json, sys
 rules = [{"id":1,"op":">=","threshold":{"num":1,"den":2},"min_sample":10,"on_violation":"deny","requires_complete":True},
          {"id":2,"op":">","threshold":{"num":0,"den":1},"on_violation":"warn"}]
 open(sys.argv[1],"w").write(json.dumps({"schema":"rh-policy/1","rules":rules,
-  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":500,"state":"approved"}]}))
+  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":500,"state":"approved","approved_by":"maintainer-17","reason":"temporary signed-off compatibility window"}]}))
 PY
 "$ROOT/build/rh_cli" policy --policy "$T/pexp.json" --input "$T/deny.json" --out "$T/o7" | grep -q "decision=deny" || fail "expired exception must not authorize"
 cat > "$T/rev.json" <<'JSON'
@@ -144,7 +144,8 @@ printf '{"schema":"rh-policy-input/1","subject_id":7,"now":1000,"inputs":[{"rule
 "$ROOT/build/rh_cli" policy --policy "$T/policy.json" --input "$T/bad_unknown_rule.json" --out "$T/x8" >/dev/null 2>&1; rc8=$?
 python3 - "$T/bad_duplicate_exception.json" "$digest" <<'PY'
 import json, sys
-exc = {"rule_id": 1, "subject_id": 7, "digest": sys.argv[2], "expires_at": 2000}
+exc = {"rule_id": 1, "subject_id": 7, "digest": sys.argv[2], "expires_at": 2000,
+       "approved_by": "maintainer-17", "reason": "temporary compatibility test"}
 open(sys.argv[1], "w").write(json.dumps({"schema": "rh-policy/1", "rules": [{"id": 1, "op": ">="}],
     "exceptions": [{**exc, "state": "approved"}, {**exc, "state": "revoked"}]}))
 PY
@@ -172,10 +173,17 @@ PY
 python3 - "$T/st_allow.json" "$pdig" <<'PY'
 import json, sys
 open(sys.argv[1],"w").write(json.dumps({"schema":"rh-policy-state/1",
-  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":2000,"state":"approved"}]}))
+  "exceptions":[{"rule_id":1,"subject_id":7,"digest":sys.argv[2],"context_digest":"0000000000000002","expires_at":2000,"state":"approved","approved_by":"maintainer-17","reason":"temporary \"compatibility\" window"}]}))
 PY
 # run 1 with --state -> allow; state must be written back byte-stable
 "$ROOT/build/rh_cli" policy --policy "$T/st_base.json" --input "$T/deny.json" --out "$T/s1" --state "$T/st_allow.json" | grep -q "decision=allow" || fail "durable approved state must allow"
+python3 - "$T/st_allow.json" <<'PY'
+import json, sys
+row = json.load(open(sys.argv[1]))["exceptions"][0]
+assert row["approved_by"] == "maintainer-17", row
+assert row["reason"] == 'temporary "compatibility" window', row
+print("[policy] approver and rationale survive state persistence")
+PY
 cp "$T/st_allow.json" "$T/st_allow.snap"
 # run 2 (now=1000 still) -> still allow, proving persistence independent of inline policy
 "$ROOT/build/rh_cli" policy --policy "$T/st_base.json" --input "$T/deny.json" --out "$T/s2" --state "$T/st_allow.json" | grep -q "decision=allow" || fail "durable state must survive a second run"
