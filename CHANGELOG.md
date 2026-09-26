@@ -8,6 +8,11 @@ on the real execution path.
 ## [Unreleased]
 
 ### Fixed
+- The M07 monitor now classifies source freshness against its configured
+  interval as `fresh`, `stale`, or `unknown`, and rejects future success times
+  and negative queue/cursor ages instead of silently treating them as zero.
+  Latest-success aggregation is independent of event order, while project
+  activity remains separate from service freshness.
 - The M07-08 evidence deletion primitive now validates content-key syntax,
   serializes unlink with store writers, fails closed on filesystem errors, and
   syncs the evidence directory. Repeated deletion remains idempotent only when

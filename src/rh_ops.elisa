@@ -139,6 +139,7 @@ module Ops:
         # ---------------------------------------------------------------------------
 
         struct RhMon:
+            has_success: mutable bool
             observed: mutable i64
             unknown: mutable i64
             stale_partial: mutable i64
@@ -152,7 +153,7 @@ module Ops:
             expected_interval: mutable i64
 
         def rh_mon_new(expected_interval: i64) -> RhMon:
-            RhMon{observed: 0, unknown: 0, stale_partial: 0, errors: 0, parser_rejects: 0, object_failures: 0, truncations: 0, queue_age_max: 0, cursor_lag_max: 0, last_success_epoch: 0, expected_interval: expected_interval}
+            RhMon{has_success: false, observed: 0, unknown: 0, stale_partial: 0, errors: 0, parser_rejects: 0, object_failures: 0, truncations: 0, queue_age_max: 0, cursor_lag_max: 0, last_success_epoch: 0, expected_interval: expected_interval}
 
         def rh_mon_observed(m: mutable RhMon&) -> void:
             m.observed <- m.observed + 1
@@ -176,7 +177,9 @@ module Ops:
             m.truncations <- m.truncations + 1
 
         def rh_mon_success(m: mutable RhMon&, now: i64) -> void:
-            m.last_success_epoch <- now
+            if not m.has_success or now > m.last_success_epoch:
+                m.last_success_epoch <- now
+                m.has_success <- true
 
         # Observed ratio in basis points. -1 means "no denominator" and callers
         # MUST surface unknown rather than 0 (S006).
@@ -186,9 +189,14 @@ module Ops:
             (m.observed * 10000) / total
 
         def rh_mon_freshness_age(m: mutable RhMon&, now: i64) -> i64:
-            return -1 if m.last_success_epoch <= 0
-            return 0 if now < m.last_success_epoch
+            return -1 if not m.has_success or now < m.last_success_epoch
             now - m.last_success_epoch
+
+        # -1 unknown (no success or no configured interval), 0 fresh, 1 stale.
+        def rh_mon_freshness_state(m: mutable RhMon&, now: i64) -> i64:
+            age: i64 = rh_mon_freshness_age(m, now)
+            return -1 if age < 0 or m.expected_interval <= 0
+            1 if age > m.expected_interval else 0
 
         # Deterministic exposition text; field order is stable so diffs are
         # meaningful. Two series namespaces: rh_service_* and rh_project_*.
@@ -204,6 +212,9 @@ module Ops:
             out.push(10)
             Base::rh_push_text(out, "rh_service_freshness_age_seconds ")
             Base::rh_push_decimal_i64(out, rh_mon_freshness_age(m, now))
+            out.push(10)
+            Base::rh_push_text(out, "rh_service_freshness_state ")
+            Base::rh_push_decimal_i64(out, rh_mon_freshness_state(m, now))
             out.push(10)
             Base::rh_push_text(out, "rh_service_errors_total ")
             Base::rh_push_decimal_i64(out, m.errors)

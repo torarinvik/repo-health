@@ -30,6 +30,16 @@ module OpsReport:
             return default_v if ok == 0
             v
 
+        def rh_or_checked_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, required: bool, value_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
+            if idx < 0:
+                return false if required
+                value_out[0] <- 0
+                return true
+            valid: mutable i64 = 0
+            value_out[0] <- Json::rh_json_int(nodes, raw, idx, &valid)
+            valid == 1
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_or_load_policy(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64) -> Ops::RhHostPolicy can[Memory.Allocate, Abort.Panic]:
             Ops::RhHostPolicy{capacity: rh_or_int(nodes, raw, texts, root, "capacity", 1), refill_per_second: rh_or_int(nodes, raw, texts, root, "refill_per_second", 0), base_backoff_seconds: rh_or_int(nodes, raw, texts, root, "base_backoff_seconds", 0), max_backoff_seconds: rh_or_int(nodes, raw, texts, root, "max_backoff_seconds", 0)}
@@ -45,8 +55,10 @@ module OpsReport:
             sc: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
             return -1 if sc < 0 or not Json::rh_json_str_span(nodes, sc, &sspan, &espan)
             return -1 if not rh_or_eq(texts, sspan, espan, "rh-monitor-input/1")
-            now: i64 = rh_or_int(nodes, raw, texts, root, "now", 0)
-            interval: i64 = rh_or_int(nodes, raw, texts, root, "expected_interval", 0)
+            now: mutable i64 = 0
+            interval: mutable i64 = 0
+            return -1 if not rh_or_checked_int(nodes, raw, texts, root, "now", true, &now) or now < 0
+            return -1 if not rh_or_checked_int(nodes, raw, texts, root, "expected_interval", false, &interval) or interval < 0
             ev_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "events")
             return -1 if ev_idx < 0 or nodes[ev_idx.usize()].kind != Json::RH_JSON_ARR
             m: mutable Ops::RhMon = Ops::rh_mon_new(interval)
@@ -71,13 +83,17 @@ module OpsReport:
                 elif rh_or_eq(texts, ks, ke, "truncation"):
                     Ops::rh_mon_truncation(m)
                 elif rh_or_eq(texts, ks, ke, "success"):
-                    Ops::rh_mon_success(m, rh_or_int(nodes, raw, texts, child, "now", 0))
+                    success_at: mutable i64 = 0
+                    return -1 if not rh_or_checked_int(nodes, raw, texts, child, "now", true, &success_at) or success_at < 0 or success_at > now
+                    Ops::rh_mon_success(m, success_at)
                 elif rh_or_eq(texts, ks, ke, "queue_age"):
-                    v: i64 = rh_or_int(nodes, raw, texts, child, "value", 0)
+                    v: mutable i64 = 0
+                    return -1 if not rh_or_checked_int(nodes, raw, texts, child, "value", true, &v) or v < 0
                     if v > m.queue_age_max:
                         m.queue_age_max <- v
                 elif rh_or_eq(texts, ks, ke, "cursor_lag"):
-                    v2: i64 = rh_or_int(nodes, raw, texts, child, "value", 0)
+                    v2: mutable i64 = 0
+                    return -1 if not rh_or_checked_int(nodes, raw, texts, child, "value", true, &v2) or v2 < 0
                     if v2 > m.cursor_lag_max:
                         m.cursor_lag_max <- v2
                 else:
@@ -85,6 +101,7 @@ module OpsReport:
                 child <- nodes[child.usize()].next_sibling
             rate: i64 = Ops::rh_mon_observed_rate_bp(m)
             fresh: i64 = Ops::rh_mon_freshness_age(m, now)
+            freshness_state: i64 = Ops::rh_mon_freshness_state(m, now)
             Base::rh_push_text(out, "{\"schema\":\"rh-monitor-result/1\",\"expected_interval\":")
             Base::rh_push_decimal_i64(out, interval)
             Base::rh_push_text(out, ",\"now\":")
@@ -100,6 +117,9 @@ module OpsReport:
                 Base::rh_push_text(out, "null")
             else:
                 Base::rh_push_decimal_i64(out, fresh)
+            Base::rh_push_text(out, ",\"freshness_state\":\"")
+            Base::rh_push_text(out, "unknown" if freshness_state < 0 else ("stale" if freshness_state == 1 else "fresh"))
+            Base::rh_push_text(out, "\"")
             Base::rh_push_text(out, ",\"errors\":")
             Base::rh_push_decimal_i64(out, m.errors)
             Base::rh_push_text(out, ",\"parser_rejects\":")
@@ -136,7 +156,7 @@ module OpsReport:
                     e <- expo.count
                 else:
                     e <- stop.usize() + 1
-            Base::rh_push_text(out, "],\"note\":\"service and project series are separate; a source outage moves service counters, not project activity/unknown; observed_rate_bp null means no denominator (unknown, not 0)\"}")
+            Base::rh_push_text(out, "],\"note\":\"freshness is stale only when age exceeds a positive expected_interval; missing success or interval is unknown; service and project series are separate; observed_rate_bp null means no denominator (unknown, not 0)\"}")
             0
 
         def rh_quota_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:

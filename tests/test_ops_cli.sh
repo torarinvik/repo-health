@@ -24,10 +24,10 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-monitor-result/1", d
 assert d["service"] == {"queue_age_max": 30, "cursor_lag_max": 90, "last_success_epoch": 1150,
-                        "freshness_age": 50, "errors": 1, "parser_rejects": 1, "object_failures": 1}, d["service"]
+                        "freshness_age": 50, "freshness_state": "fresh", "errors": 1, "parser_rejects": 1, "object_failures": 1}, d["service"]
 assert d["project"] == {"observed": 2, "unknown": 1, "observed_rate_bp": 6666,
                         "stale_partial": 1, "truncations": 1}, d["project"]
-assert len(d["exposition"]) == 12, d["exposition"]
+assert len(d["exposition"]) == 13, d["exposition"]
 assert d["exposition"][0].startswith("rh_service_"), d["exposition"]
 assert any(x.startswith("rh_project_observed_rate_bp") for x in d["exposition"]), d["exposition"]
 assert "separate" in d["note"], d["note"]
@@ -42,7 +42,20 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["project"]["observed_rate_bp"] is None, d["project"]
 assert d["service"]["freshness_age"] is None, d["service"]
+assert d["service"]["freshness_state"] == "unknown", d["service"]
 print("[ops] unknown-not-zero OK")
+PY
+
+echo "[ops] source freshness crosses the configured interval without changing project health"
+printf '%s\n' '{"schema":"rh-monitor-input/1","expected_interval":60,"now":1061,"events":[{"kind":"success","now":1000},{"kind":"observed"}]}' > "$T/stale.json"
+"$ROOT/build/rh_cli" ops monitor --input "$T/stale.json" --out "$T/stale.out" >/dev/null || fail "stale monitor"
+python3 - "$T/stale.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["service"]["freshness_age"] == 61 and d["service"]["freshness_state"] == "stale", d["service"]
+assert d["project"]["observed"] == 1 and d["project"]["unknown"] == 0, d["project"]
+assert "rh_service_freshness_state 1" in d["exposition"], d["exposition"]
+print("[ops] stale service and independent project health OK")
 PY
 
 cat > "$T/quota.json" <<'JSON'
@@ -88,13 +101,17 @@ printf '{"schema":"rh-monitor-input/2","events":[]}' > "$T/badms.json"
 "$ROOT/build/rh_cli" ops monitor --input "$T/badms.json" --out "$T/x" >/dev/null 2>&1; rc_ms=$?
 printf '{"schema":"rh-monitor-input/1","events":[{"kind":"vibes"}]}' > "$T/badmk.json"
 "$ROOT/build/rh_cli" ops monitor --input "$T/badmk.json" --out "$T/x" >/dev/null 2>&1; rc_mk=$?
+printf '{"schema":"rh-monitor-input/1","now":10,"events":[{"kind":"queue_age","value":-1}]}' > "$T/badnegative.json"
+"$ROOT/build/rh_cli" ops monitor --input "$T/badnegative.json" --out "$T/x" >/dev/null 2>&1; rc_negative=$?
+printf '{"schema":"rh-monitor-input/1","now":10,"events":[{"kind":"success","now":11}]}' > "$T/badfuture.json"
+"$ROOT/build/rh_cli" ops monitor --input "$T/badfuture.json" --out "$T/x" >/dev/null 2>&1; rc_future=$?
 printf '{"schema":"rh-quota-input/1","ops":[{"op":"teleport"}]}' > "$T/badqo.json"
 "$ROOT/build/rh_cli" ops quota --input "$T/badqo.json" --out "$T/x" >/dev/null 2>&1; rc_qo=$?
 printf '{"schema":"rh-quota-input/1","ops":42}' > "$T/badqa.json"
 "$ROOT/build/rh_cli" ops quota --input "$T/badqa.json" --out "$T/x" >/dev/null 2>&1; rc_qa=$?
 "$ROOT/build/rh_cli" ops monitor --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_miss=$?
 set -e
-for rc in "$rc_ms" "$rc_mk" "$rc_qo" "$rc_qa" "$rc_miss"; do
+for rc in "$rc_ms" "$rc_mk" "$rc_negative" "$rc_future" "$rc_qo" "$rc_qa" "$rc_miss"; do
   [[ "$rc" -eq 4 ]] || fail "malformed ops input must exit 4 (got $rc)"
 done
 

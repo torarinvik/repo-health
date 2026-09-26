@@ -775,7 +775,7 @@ Validate that the useful product can be operated without endangering its users, 
 
 **M07-10: Backups and restore.** Back up the database and evidence store with a manifest linking them. Restore to a clean environment and replay a sample of published reports.
 
-**M07-11: Monitoring.** Instrument queue age, source freshness, error rates, parser rejection rates, cursor lag, evidence-object failures, policy unknown rates, and graph truncation rates. Separate service health from project health.
+**M07-11: Monitoring.** Instrument queue age, source freshness, error rates, parser rejection rates, cursor lag, evidence-object failures, policy unknown rates, and graph truncation rates. Separate service health from project health. The `rh_cli ops monitor` path now classifies source freshness as `fresh`, `stale`, or `unknown`: a positive expected interval becomes stale only when age exceeds that interval; missing success or interval is unknown. Future success timestamps and negative queue/cursor values fail closed, and repeated success observations are order-independent. JSON and exposition output retain service/project separation. Instrumentation remains caller-fed rather than wired to deployed queue, database, and project metric stores.
 
 **M07-12: Source-respect controls.** Apply per-host quotas, retry backoff, cancellation, contact identity, crawl exclusions where applicable, and a stop mechanism for a source operator's request. The bounded HTTP transport identifies the project and its public issue/contact route in the User-Agent; it does not claim an individual operator contact. The current acquisition paths are fixed-route API lookups, not a recursive crawler, so robots/exclusion-list handling remains a prerequisite if crawling is added.
 
