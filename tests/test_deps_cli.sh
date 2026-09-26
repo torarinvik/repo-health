@@ -649,6 +649,16 @@ set -e
 [[ "$rc_bad_sum_base64" -eq 4 ]] || fail "non-canonical go.sum SHA-256 Base64 must exit 4 (got $rc_bad_sum_base64)"
 [[ ! -f "$T/bad-go-base64-out/deps-go-graph.json" ]] || fail "partial graph written on non-canonical go.sum digest"
 
+echo "[deps] go.mod without a module coordinate fails closed"
+mkdir -p "$T/bad-go-module"
+printf 'go 1.22\nrequire example.com/dep v1.2.3\n' > "$T/bad-go-module/go.mod"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/bad-go-module" --out "$T/bad-go-module-out" >/dev/null 2>&1
+rc_bad_go_module=$?
+set -e
+[[ "$rc_bad_go_module" -eq 4 ]] || fail "go.mod without module directive must exit 4 (got $rc_bad_go_module)"
+[[ ! -f "$T/bad-go-module-out/deps-go-graph.json" ]] || fail "missing Go module identity produced a graph"
+
 echo "[deps] Cargo lock resolution distinguishes registry and exact version"
 mkdir -p "$T/cargo-source-collision"
 cp "$ROOT/fixtures/packages/cargo-source-collision.lock" "$T/cargo-source-collision/Cargo.lock"

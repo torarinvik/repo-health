@@ -8,6 +8,11 @@ on the real execution path.
 ## [Unreleased]
 
 ### Fixed
+- The Go module parser now requires a nonempty `module` path before creating
+  its root node. It no longer substitutes the synthetic label `root`, which
+  could merge unrelated or malformed module manifests into an invented graph
+  identity. Parser and CLI regressions verify rejection without a partial root
+  or graph.
 - M04 continuity reducers now reject misaligned actor/month/kind/time arrays
   before indexing and reject actor-month matrix dimensions that overflow the
   signed index range. Presence lookups guard multiplication before computing
