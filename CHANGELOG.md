@@ -13,7 +13,7 @@ on the real execution path.
   signed index range. Presence lookups guard multiplication before computing
   row-major offsets, and return-gap inputs reject negative instants or day
   thresholds that cannot be represented in seconds. Regression oracles cover
-  mismatched columns and dimension/index overflow.
+  mismatched columns, dimension/index overflow, and nonempty output buffers.
 - The evidence-store concurrency harness now uses a per-process temporary root
   and removes it on exit, so overlapping local suite runs cannot delete or
   contaminate one another's lock file and race fixtures.
