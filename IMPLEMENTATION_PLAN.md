@@ -759,7 +759,7 @@ Validate that the useful product can be operated without endangering its users, 
 
 **M07-04: Publication integrity.** Sign released software and optionally report manifests under a documented key policy. Protect signing keys separately from collection workers. Verification is evidence integrity, not a claim that measurements are infallible.
 
-**M07-05: Dependency review.** Inventory repo-health's own dependencies, build-time tools, and native components. Document update procedures and isolate unavoidable native parsing surfaces.
+**M07-05: Dependency review.** Inventory repo-health's own dependencies, build-time tools, and native components. Document update procedures and isolate unavoidable native parsing surfaces. `docs/DEPENDENCIES.md` now inventories the compiler, shell/Python harness, VCS tools, cURL transport, libc, zlib, optional libpq, and PostgreSQL 16 rehearsals; it records the update/revalidation procedure and the Elisa-owned ZIP parsing boundary. The full suite and opt-in native/live gates still need to be run when the corresponding boundary changes.
 
 ### 12.3 Privacy and rights work packages
 

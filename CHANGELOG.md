@@ -39,6 +39,9 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- M07 dependency inventory and update procedure in `docs/DEPENDENCIES.md`:
+  compiler/build/test tools, live transport clients, native libraries, and
+  optional PostgreSQL components are mapped to their boundaries and checks.
 - Captured provider permission imports now emit a digest-bound transformation
   sidecar mapping source identity, normalized role tiers, authorization and
   completeness, unsupported permission semantics, and discarded fields.
