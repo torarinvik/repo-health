@@ -32,6 +32,19 @@ assert d == {
 }, d
 print("[roles-provider] GitHub mapping + unknown role OK")
 PY
+python3 - "fixtures/roles/github-provider-input.json" "$T/github.json" "$T/github.json.transformations.json" <<'PY'
+import hashlib, json, sys
+raw = open(sys.argv[1], "rb").read()
+normalized = open(sys.argv[2], "rb").read()
+report = json.load(open(sys.argv[3]))
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "provider-role-permissions", report
+assert report["output_schema"] == "rh-roles-input/1", report
+assert report["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), report
+assert {field["state"] for field in report["fields"]} == {"preserved", "transformed", "unsupported", "discarded"}, report
+print("[roles-provider] transformation sidecar binds exact captured and normalized bytes")
+PY
 
 echo "[roles-provider] GitLab mapping"
 "$ROOT/build/rh_cli" roles-import --input fixtures/roles/gitlab-provider-input.json --out "$T/gitlab.json" >/dev/null || fail "GitLab import"

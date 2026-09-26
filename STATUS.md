@@ -1172,7 +1172,11 @@ metric classes (`tests/test_lineage_cli.sh`). The staged forge adapter now
 also emits automatic provider/capability field transformations, explicit
 absence states, parser/output schema IDs, and a digest over the exact mapping
 bytes; equivalent automatic mapping reports across the remaining adapters are
-still open (`tests/test_staged_forge_cli.sh`). RP-03 has a filesystem-backed
+still open (`tests/test_staged_forge_cli.sh`). Captured provider permission
+imports now also emit `rh-adapter-transformation-report/1`, binding the exact
+input and normalized role bytes while recording role-tier transformations,
+authorization/completeness preservation, unsupported permission semantics,
+and discarded provider fields (`tests/test_roles_provider_cli.sh`). RP-03 has a filesystem-backed
 `rh-ingest-input/1` -> `rh-ingest-result/1` conformance replay that writes
 events before cursors and distinguishes duplicate, empty, failed, partial, and
 stale-lease outcomes (`tests/test_ingest_conformance_cli.sh`). RP-04 has a

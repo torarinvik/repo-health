@@ -19,6 +19,10 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- Captured provider permission imports now emit a digest-bound transformation
+  sidecar mapping source identity, normalized role tiers, authorization and
+  completeness, unsupported permission semantics, and discarded fields.
+  `tests/test_roles_provider_cli.sh` verifies the exact input/output bindings.
 - M08 PEP 440 local-version ordering now compares bounded normalized local
   segments (case-folded text, equivalent separators, numeric ordering) instead
   of treating all local labels as equal. The parser caps labels at eight
