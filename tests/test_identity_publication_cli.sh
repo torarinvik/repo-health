@@ -109,6 +109,8 @@ printf '%s' '{"schema":"rh-identity-publication-input/1","project_id":"x","publi
 "$ROOT/build/rh_cli" identity-publish --input "$T/bad-link.json" --out "$T/bad-link.out" >/dev/null 2>&1; rc_link=$?
 printf '%s' '{"schema":"rh-identity-publication-input/1","project_id":"x","publication_scope":"public","actor_count":2,"links":[{"a":0,"b":1,"state":"accepted"}]}' > "$T/bad-link-revision.json"
 "$ROOT/build/rh_cli" identity-publish --input "$T/bad-link-revision.json" --out "$T/bad-link-revision.out" >/dev/null 2>&1; rc_link_revision=$?
+printf '%s' '{"schema":"rh-identity-publication-input/1","project_id":"x","publication_scope":"public","actor_count":2,"links":[{"a":0,"b":1,"state":"revoked","revision_added":0}]}' > "$T/bad-link-revoked-revision.json"
+"$ROOT/build/rh_cli" identity-publish --input "$T/bad-link-revoked-revision.json" --out "$T/bad-link-revoked-revision.out" >/dev/null 2>&1; rc_link_revoked_revision=$?
 printf '%s' '{"schema":"rh-identity-publication-input/1","project_id":"x","publication_scope":"public","actor_count":1,"links":[],"correction_requests":[{"id":"same","state":"open"},{"id":"same","state":"accepted"}]}' > "$T/bad-duplicate.json"
 "$ROOT/build/rh_cli" identity-publish --input "$T/bad-duplicate.json" --out "$T/bad-duplicate.out" >/dev/null 2>&1; rc_duplicate=$?
 printf '%s' '{"schema":"rh-identity-publication-input/1","project_id":"x","publication_scope":"public","actor_count":1,"links":[],"actor_kinds":["human"],"actor_kind_observed_at":[-1]}' > "$T/bad-kind-time.json"
@@ -138,10 +140,10 @@ PY
 "$ROOT/build/rh_cli" identity-publish --input "$T/history-empty-interval.json" --out "$T/history-empty-interval.out" >/dev/null 2>&1; rc_history_empty_interval=$?
 "$ROOT/build/rh_cli" identity-publish --input "$T/history-missing-until.json" --out "$T/history-missing-until.out" >/dev/null 2>&1; rc_history_missing_until=$?
 set -e
-for rc in "$rc_schema" "$rc_scope" "$rc_link" "$rc_link_revision" "$rc_duplicate" "$rc_kind_time" "$rc_kind_time_count" "$rc_kind_ref_count" "$rc_kind_ref" "$rc_kind_ref_without_kind" "$rc_history_no_as_of" "$rc_history_unsorted" "$rc_history_empty_interval" "$rc_history_missing_until"; do
+for rc in "$rc_schema" "$rc_scope" "$rc_link" "$rc_link_revision" "$rc_link_revoked_revision" "$rc_duplicate" "$rc_kind_time" "$rc_kind_time_count" "$rc_kind_ref_count" "$rc_kind_ref" "$rc_kind_ref_without_kind" "$rc_history_no_as_of" "$rc_history_unsorted" "$rc_history_empty_interval" "$rc_history_missing_until"; do
     [[ "$rc" -eq 4 ]] || fail "malformed publication must exit 4 (got $rc)"
 done
-for path in "$T/bad-schema.out" "$T/bad-scope.out" "$T/bad-link.out" "$T/bad-link-revision.out" "$T/bad-duplicate.out" "$T/bad-kind-time.out" "$T/bad-kind-time-count.out" "$T/bad-kind-ref-count.out" "$T/bad-kind-ref.out" "$T/kind-ref-without-kind.out" "$T/history-no-as-of.out" "$T/history-unsorted.out" "$T/history-empty-interval.out" "$T/history-missing-until.out"; do
+for path in "$T/bad-schema.out" "$T/bad-scope.out" "$T/bad-link.out" "$T/bad-link-revision.out" "$T/bad-link-revoked-revision.out" "$T/bad-duplicate.out" "$T/bad-kind-time.out" "$T/bad-kind-time-count.out" "$T/bad-kind-ref-count.out" "$T/bad-kind-ref.out" "$T/kind-ref-without-kind.out" "$T/history-no-as-of.out" "$T/history-unsorted.out" "$T/history-empty-interval.out" "$T/history-missing-until.out"; do
     [[ ! -e "$path" ]] || fail "failed publication wrote partial output: $path"
 done
 
