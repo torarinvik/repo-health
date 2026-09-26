@@ -16,7 +16,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/mon.json" <<'JSON'
-{"schema":"rh-monitor-input/1","expected_interval":60,"now":1200,"events":[{"kind":"observed"},{"kind":"observed"},{"kind":"unknown"},{"kind":"stale_partial"},{"kind":"error"},{"kind":"parser_reject"},{"kind":"object_failure"},{"kind":"truncation"},{"kind":"success","now":1150},{"kind":"queue_age","value":30},{"kind":"cursor_lag","value":90}]}
+{"schema":"rh-monitor-input/1","expected_interval":60,"now":1200,"events":[{"kind":"observed"},{"kind":"observed"},{"kind":"unknown"},{"kind":"stale_partial"},{"kind":"error"},{"kind":"parser_reject"},{"kind":"object_failure"},{"kind":"truncation"},{"kind":"policy_evaluated"},{"kind":"policy_unknown"},{"kind":"success","now":1150},{"kind":"queue_age","value":30},{"kind":"cursor_lag","value":90}]}
 JSON
 "$ROOT/build/rh_cli" ops monitor --input "$T/mon.json" --out "$T/mon.out" >/dev/null || fail "monitor run"
 python3 - "$T/mon.out" <<'PY'
@@ -26,10 +26,12 @@ assert d["schema"] == "rh-monitor-result/1", d
 assert d["service"] == {"queue_age_max": 30, "cursor_lag_max": 90, "last_success_epoch": 1150,
                         "freshness_age": 50, "freshness_state": "fresh", "errors": 1, "parser_rejects": 1, "object_failures": 1}, d["service"]
 assert d["project"] == {"observed": 2, "unknown": 1, "observed_rate_bp": 6666,
-                        "stale_partial": 1, "truncations": 1}, d["project"]
-assert len(d["exposition"]) == 13, d["exposition"]
+                        "stale_partial": 1, "truncations": 1, "policy_evaluated": 2,
+                        "policy_unknown": 1, "policy_unknown_rate_bp": 5000}, d["project"]
+assert len(d["exposition"]) == 16, d["exposition"]
 assert d["exposition"][0].startswith("rh_service_"), d["exposition"]
 assert any(x.startswith("rh_project_observed_rate_bp") for x in d["exposition"]), d["exposition"]
+assert "rh_project_policy_unknown_rate_bp 5000" in d["exposition"], d["exposition"]
 assert "separate" in d["note"], d["note"]
 print("[ops] monitor series OK")
 PY
@@ -41,6 +43,7 @@ python3 - "$T/empty.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["project"]["observed_rate_bp"] is None, d["project"]
+assert d["project"]["policy_unknown_rate_bp"] is None, d["project"]
 assert d["service"]["freshness_age"] is None, d["service"]
 assert d["service"]["freshness_state"] == "unknown", d["service"]
 print("[ops] unknown-not-zero OK")

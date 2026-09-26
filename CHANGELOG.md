@@ -8,6 +8,10 @@ on the real execution path.
 ## [Unreleased]
 
 ### Fixed
+- The M07 monitor now accepts explicit policy-evaluation and policy-unknown
+  observations and reports the unknown share with a real denominator; absent
+  policy observations yield `null`. This remains independent of service
+  freshness and general project-activity counters.
 - The M07 monitor now classifies source freshness against its configured
   interval as `fresh`, `stale`, or `unknown`, and rejects future success times
   and negative queue/cursor ages instead of silently treating them as zero.
