@@ -325,7 +325,14 @@ while (($#)); do
 done
 [[ -n "$body_out" && -n "$url" ]]
 if [[ "$config_stdin" == "1" ]]; then cat > "$RH_CURL_CONFIG_LOG"; fi
-if [[ "$url" == *"/pulls/7/reviews?"* && -n "${RH_CURL_REPO_REVIEW_7_PAGE1:-}" ]]; then
+if [[ "$url" == *"/api/v4/projects/"* && "$url" == *"/issues?state=all&"* ]]; then
+  body="$RH_CURL_GITLAB_ISSUES"
+  [[ "$url" != *'page=2' || -z "${RH_CURL_GITLAB_ISSUES_PAGE2:-}" ]] || body="$RH_CURL_GITLAB_ISSUES_PAGE2"
+elif [[ "$url" == *"/api/v4/projects/"* && "$url" == *"/merge_requests?"* ]]; then
+  body="$RH_CURL_GITLAB_MERGE_REQUESTS"
+elif [[ "$url" == *"/api/v4/projects/"* && "$url" == *"/releases?per_page=100&"* ]]; then
+  body="$RH_CURL_GITLAB_RELEASES"
+elif [[ "$url" == *"/pulls/7/reviews?"* && -n "${RH_CURL_REPO_REVIEW_7_PAGE1:-}" ]]; then
   body="$RH_CURL_REPO_REVIEW_7_PAGE1"
   [[ "$url" != *'page=2' ]] || body="$RH_CURL_REPO_REVIEW_7_PAGE2"
 elif [[ "$url" == *"/pulls/8/reviews?"* && -n "${RH_CURL_REPO_REVIEW_8_PAGE1:-}" ]]; then
@@ -350,9 +357,69 @@ else
   [[ "$url" != *'page=2' ]] || body="$RH_CURL_PAGE2"
 fi
 cp "$body" "$body_out"
-printf '%s' 200
+printf '%s' "${RH_CURL_HTTP_STATUS:-200}"
 SH
 chmod +x "$T/bin/python3" "$T/bin/curl"
+
+printf '%s\n' '[{"iid":12,"state":"opened","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-15T22:13:20Z","closed_at":null,"web_url":"https://gitlab.com/group/subgroup/project/-/issues/12"}]' > "$T/gitlab-live-issues.json"
+printf '%s\n' '[{"iid":8,"state":"merged","created_at":"2023-11-13T22:13:20Z","updated_at":"2023-11-16T22:13:20Z","closed_at":"2023-11-17T22:13:20Z","web_url":"https://gitlab.com/group/subgroup/project/-/merge_requests/8"}]' > "$T/gitlab-live-merge-requests.json"
+printf '%s\n' '[{"id":10,"created_at":"2023-11-14T22:13:20Z","released_at":"2023-11-15T22:13:20Z","tag_name":"v2.0.0"}]' > "$T/gitlab-live-releases.json"
+python3 - "$T/gitlab-live-full-issues.json" <<'PY'
+import json, sys
+json.dump([{"iid":i,"state":"opened","created_at":"2023-11-14T22:13:20Z","web_url":f"https://gitlab.com/group/subgroup/project/-/issues/{i}"} for i in range(1,101)], open(sys.argv[1], "w"), separators=(",", ":"))
+PY
+
+echo "[forge-events] bounded live GitLab collection keeps scoped evidence and auth out of argv"
+rm -f "$T/gitlab-live.out" "$T/gitlab-live.out.gitlab-events-"* "$T/gitlab-live-curl.args" "$T/gitlab-live-curl.config"
+PATH="$T/bin:$PATH" RH_GITLAB_TOKEN="glpat_events_fixture" RH_CURL_GITLAB_ISSUES="$T/gitlab-live-issues.json" \
+  RH_CURL_GITLAB_MERGE_REQUESTS="$T/gitlab-live-merge-requests.json" RH_CURL_GITLAB_RELEASES="$T/gitlab-live-releases.json" \
+  RH_CURL_LOG="$T/gitlab-live-curl.args" RH_CURL_CONFIG_LOG="$T/gitlab-live-curl.config" \
+  "$ROOT/build/rh_cli" forge events --gitlab-project group/subgroup/project --max-pages 2 --out "$T/gitlab-live.out" >/dev/null || fail "live GitLab collection"
+python3 - "$T/gitlab-live.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["provider"] == "gitlab" and d["scope"] == {"project_path":"group/subgroup/project"}, d
+assert d["authorization"]["state"] == "authorized", d
+assert [event["native_id"] for event in d["events"]] == ["gitlab:12", "gitlab:8", "gitlab:10"], d
+assert d["events"][1]["status"] == "merged" and d["events"][1]["closed_at"] == 1700259200, d["events"][1]
+assert d["events"][2]["created_at"] == 1700086400 and d["events"][2]["tag"] == "v2.0.0", d["events"][2]
+assert d["pagination"]["issues"] == {"next":None,"complete":True}, d["pagination"]
+for capability in ("issues", "merge-requests", "releases"):
+    for suffix in ("json", "status", "err", "url"):
+        assert (t / f"gitlab-live.out.gitlab-events-{capability}-page-1.{suffix}").exists()
+print("[forge-events] GitLab scope, fields, pagination, and local response evidence OK")
+PY
+grep -Fxq 'header = "PRIVATE-TOKEN: glpat_events_fixture"' "$T/gitlab-live-curl.config" || fail "GitLab events token header absent"
+! grep -Fq 'glpat_events_fixture' "$T/gitlab-live-curl.args" || fail "GitLab events token leaked into curl arguments"
+grep -Fq 'https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/issues?state=all&per_page=100&page=1' "$T/gitlab-live-curl.args" || fail "GitLab issue route was not encoded/fixed"
+set +e
+PATH="$T/bin:$PATH" RH_CURL_LOG="$T/gitlab-invalid-project.args" \
+  "$ROOT/build/rh_cli" forge events --gitlab-project 'group/../project' --out "$T/gitlab-invalid-project.out" >/dev/null 2>&1
+gitlab_invalid_project_rc=$?
+set -e
+[[ "$gitlab_invalid_project_rc" -eq 4 && ! -e "$T/gitlab-invalid-project.args" && ! -e "$T/gitlab-invalid-project.out" ]] || fail "invalid GitLab project path reached transport"
+PATH="$T/bin:$PATH" RH_CURL_GITLAB_ISSUES="$T/gitlab-live-full-issues.json" RH_CURL_GITLAB_MERGE_REQUESTS="$T/gitlab-live-merge-requests.json" \
+  RH_CURL_GITLAB_RELEASES="$T/gitlab-live-releases.json" RH_CURL_LOG="$T/gitlab-partial-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --gitlab-project group/subgroup/project --max-pages 1 --out "$T/gitlab-partial.out" >/dev/null || fail "bounded GitLab page cap"
+python3 - "$T/gitlab-partial.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["issues"]["count"] == 100, d["capabilities"]
+assert d["pagination"]["issues"] == {"next":"page=2","complete":False}, d["pagination"]
+print("[forge-events] GitLab page cap exposes a resumable numeric cursor")
+PY
+[[ "$(grep -c 'issues?state=all' "$T/gitlab-partial-curl.args")" -eq 1 ]] || fail "GitLab page cap fetched an unrequested page"
+: > "$T/gitlab-http-error.args"
+set +e
+PATH="$T/bin:$PATH" RH_CURL_HTTP_STATUS=403 RH_CURL_GITLAB_ISSUES="$T/gitlab-live-issues.json" \
+  RH_CURL_GITLAB_MERGE_REQUESTS="$T/gitlab-live-merge-requests.json" RH_CURL_GITLAB_RELEASES="$T/gitlab-live-releases.json" \
+  RH_CURL_LOG="$T/gitlab-http-error.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --gitlab-project group/subgroup/project --out "$T/gitlab-http-error.out" >/dev/null 2>&1
+gitlab_http_error_rc=$?
+set -e
+[[ "$gitlab_http_error_rc" -eq 4 && ! -e "$T/gitlab-http-error.out" ]] || fail "GitLab HTTP 403 produced a normalized result"
+[[ "$(cat "$T/gitlab-http-error.out.gitlab-events-issues-page-1.status")" == "403" ]] || fail "GitLab HTTP failure evidence was not retained"
 
 rm -f "$T/live.out" "$T/live.out.github-"* "$T/live-curl.args" "$T/live-curl.config"
 PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_fixture_token" RH_CURL_ISSUES_PAGE1="$T/live-issues-full-page.json" RH_CURL_PULLS_PAGE1="$T/live-full-page.json" RH_CURL_RELEASES_PAGE1="$T/live-releases-full-page.json" RH_CURL_PAGE2="$T/live-empty.json" \

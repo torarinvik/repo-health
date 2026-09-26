@@ -43,6 +43,11 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- Bounded live GitLab issue, merge-request, and release acquisition through
+  `forge events --gitlab-project`, with encoded project-path routes, optional
+  host-scoped token auth, per-page evidence, a 3 MiB capture cap, and numeric
+  pagination cursors. GitLab `released_at` is retained as the release event
+  time. CLI fixtures cover scopes, token handling, failure evidence, and caps.
 - M07 dependency inventory and update procedure in `docs/DEPENDENCIES.md`:
   compiler/build/test tools, live transport clients, native libraries, and
   optional PostgreSQL components are mapped to their boundaries and checks.
