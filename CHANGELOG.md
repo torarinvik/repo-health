@@ -8,6 +8,15 @@ on the real execution path.
 ## [Unreleased]
 
 ### Fixed
+- M04 continuity reducers now reject misaligned actor/month/kind/time arrays
+  before indexing and reject actor-month matrix dimensions that overflow the
+  signed index range. Presence lookups guard multiplication before computing
+  row-major offsets, and return-gap inputs reject negative instants or day
+  thresholds that cannot be represented in seconds. Regression oracles cover
+  mismatched columns and dimension/index overflow.
+- The evidence-store concurrency harness now uses a per-process temporary root
+  and removes it on exit, so overlapping local suite runs cannot delete or
+  contaminate one another's lock file and race fixtures.
 - M12 release packet (`tools/release-packet.sh`): the `limitations` block
   had drifted behind the implementation. It now says what the tree can
   actually back up — native VCS parsers span Mercurial, Subversion and

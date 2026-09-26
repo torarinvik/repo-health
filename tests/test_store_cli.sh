@@ -6,7 +6,8 @@
 # and missing objects are counted separately from corrupt ones.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-T="/tmp/rh-store"
+T="/tmp/rh-store-$PPID-$$"
+trap 'rm -rf "$T"' EXIT
 
 fail() { echo "[store] FAIL: $1" >&2; exit 1; }
 
