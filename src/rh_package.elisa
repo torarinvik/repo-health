@@ -3517,7 +3517,10 @@ module Package:
             while i < e and data[i.usize()] != 32 and data[i.usize()] != 9 |i: i64 = s| -> i:
                 i <- i + 1
 
-        # Parse `module <path>`; returns the path span via ms/me or -1.
+        # Parse `module <path>`; returns the path span via ms/me or -1. The
+        # surrounding quotes of Go interpreted/raw strings are syntax, not part
+        # of the module coordinate. Escaped interpreted strings fail closed;
+        # this bounded parser does not guess at Go's full string decoder.
         def rh_go_module_path(mod: darray[u8]&, ms: mutable i64&, me: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             while true |pos: i64 = 0, mod, ms, me|:
                 break if pos >= mod.count.i64()
@@ -3534,11 +3537,27 @@ module Package:
                             while rest < ce and (mod[rest.usize()] == 32 or mod[rest.usize()] == 9) |rest: i64 = k, ce| -> rest:
                                 rest <- rest + 1
                         if rest < ce:
+                            if mod[rest.usize()] == 34 or mod[rest.usize()] == 96:
+                                quote: u8 = mod[rest.usize()]
+                                return -1 if ce - rest < 2 or mod[(ce - 1).usize()] != quote
+                                return -1 if quote == 34 and rh_go_contains(mod, rest + 1, ce - 1, 92)
+                                ms[0] <- rest + 1
+                                me[0] <- ce - 1
+                                return 0 if me[0] > ms[0]
+                                return -1
                             ms[0] <- rest
                             me[0] <- ce
                             return 0
                 pos <- le + 1
             -1
+
+        # Search a byte span; used to keep unsupported Go string escapes from
+        # becoming a subtly different module identity.
+        def rh_go_contains(data: darray[u8]&, s: i64, e: i64, needle: u8) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < e |i: i64 = s, data, needle|:
+                return true if data[i.usize()] == needle
+                i <- i + 1
+            false
 
         # Insert a require entry: exact supported version -> node + root edge;
         # otherwise an unresolved entry preserving the original text.

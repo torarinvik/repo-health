@@ -8,6 +8,10 @@ on the real execution path.
 ## [Unreleased]
 
 ### Fixed
+- Go module root paths now exclude the surrounding quotes in interpreted and raw
+  string forms, preserving the actual module coordinate. Escaped interpreted
+  paths fail closed until their Go string escapes can be decoded exactly;
+  package tests cover both quoted forms.
 - The Go module parser now requires a nonempty `module` path before creating
   its root node. It no longer substitutes the synthetic label `root`, which
   could merge unrelated or malformed module manifests into an invented graph
