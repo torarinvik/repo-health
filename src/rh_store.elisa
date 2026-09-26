@@ -35,6 +35,14 @@ module Store:
             const RH_STORE_OPEN_NOFOLLOW: i32 = 0
             const RH_STORE_OPEN_EXCLUSIVE: i32 = 0
 
+        def rh_store_errno_is_missing() -> bool can[]:
+            static if ELISA_TARGET_OS_MACOS:
+                return __error()[0] == 2
+            static elif ELISA_TARGET_OS_LINUX:
+                return __errno_location()[0] == 2
+            static else:
+                return false
+
     public:
         # Hold one advisory lock shared by every local process using this root.
         # The file remains in the root so a shared filesystem carries the lock.
@@ -461,16 +469,27 @@ module Store:
         # name. Removing a raw payload does NOT rewrite any derived result; it makes
         # the affected report not replayable, which callers must record.
         def rh_store_delete_blob(evidence_dir: cstr, hexname: u8&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-            return -1 if Base::rh_cstr_len_c(hexname) == 0
-            path: mutable darray[u8] =
-                path: mutable darray[u8] = []
-                Base::rh_push_cstr(path, evidence_dir)
-                path.push(47)
-                Base::rh_push_text(path, hexname)
-                path.push(0)
-                path
+            name_length: usize = Base::rh_cstr_len_c(hexname).usize()
+            return -1 if Base::rh_cstr_len_c(evidence_dir) == 0 or name_length != 16
+            while index < name_length |index: usize = 0, hexname|:
+                digit: u8 = hexname[index]
+                return -1 if not ((digit >= 48 and digit <= 57) or (digit >= 97 and digit <= 102))
+                index <- index + 1
+            guard_fd: mutable i32 = -1
+            return -1 if Store::rh_store_guard_acquire(evidence_dir, &guard_fd) != 0
+            path: mutable darray[u8] = []
+            Base::rh_push_cstr(path, evidence_dir)
+            path.push(47)
+            Base::rh_push_cstr(path, hexname.cast[cstr] can Unsafe.PointerCast)
+            path.push(0)
             pp: u8& = (&path[0]).cast[u8&] can Unsafe.PointerCast
-            _ = unlink(pp)
+            removed: i32 = unlink(pp)
+            absent_is_success: bool = removed != 0 and Store::rh_store_errno_is_missing()
+            directory_fd: i32 = open(evidence_dir, 0, 0)
+            synced: i32 = -1 if directory_fd < 0 else fsync(directory_fd)
+            closed: i32 = -1 if directory_fd < 0 else close(directory_fd)
+            released: i64 = Store::rh_store_guard_release(guard_fd)
+            return -1 if (removed != 0 and not absent_is_success) or synced != 0 or closed != 0 or released != 0
             0
 
         # Index lookup: 1 present, 0 absent, -1 unreadable.

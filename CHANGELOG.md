@@ -8,6 +8,11 @@ on the real execution path.
 ## [Unreleased]
 
 ### Fixed
+- The M07-08 evidence deletion primitive now validates content-key syntax,
+  serializes unlink with store writers, fails closed on filesystem errors, and
+  syncs the evidence directory. Repeated deletion remains idempotent only when
+  the blob is already absent; the replayability drill also rejects traversal
+  names.
 - The forge-event adapter now accepts and retains GitLab `project_path` scope,
   alongside its GitLab-native issue and merge-request identifiers. This keeps
   project-local IIDs attached to their source project; the GitLab fixture and
