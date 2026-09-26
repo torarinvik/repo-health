@@ -68,9 +68,11 @@ Trigger: `rh_store_blob_verify` fails, a manifest digest check fails, or
    write new evidence. Never substitute live bytes into a pinned report.
 4. Mark affected reports `not_replayable` for the corrupted inputs, and
    keep the label until clean inputs are restored.
-5. Note for reviewers: the current digest is FNV-1a. It detects
+5. Note for reviewers: the evidence object name uses FNV-1a. It detects
    accidental corruption; it is **not** a cryptographic signature and is
-   not evidence of safety. Release signing is still pending (M07-04).
+   not evidence of safety. Release packets can be signed with HMAC-SHA256
+   (`rh_cli sign|verify`, M07-04), but that shared-key signature establishes
+   integrity and key possession only; it does not establish code safety.
 6. Record: object digest, manifest, backup used, restored/unavailable
    count, replayability change.
 
