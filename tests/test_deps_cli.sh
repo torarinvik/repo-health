@@ -908,6 +908,16 @@ print("[deps] npm resolved source locators remain distinct and private")
 PY
 
 echo "[deps] unsupported declared lockfile revisions fail closed"
+mkdir -p "$T/unsupported-poetry"
+cp "$ROOT/fixtures/packages/cargo-diamond.lock" "$T/unsupported-poetry/Cargo.lock"
+printf '# Poetry format is not yet admitted\n' > "$T/unsupported-poetry/poetry.lock"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/unsupported-poetry" --out "$T/unsupported-poetry-out" >/dev/null 2>&1
+rc_unsupported_poetry=$?
+set -e
+[[ "$rc_unsupported_poetry" -eq 4 ]] || fail "unadmitted Poetry lock must fail closed (got $rc_unsupported_poetry)"
+[[ ! -f "$T/unsupported-poetry-out/deps-cargo-graph.json" ]] || fail "partial graph written when Poetry lock is unadmitted"
+
 mkdir -p "$T/bad-cargo-revision"
 cat > "$T/bad-cargo-revision/Cargo.lock" <<'EOF'
 version = 5
