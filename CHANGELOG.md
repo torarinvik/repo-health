@@ -8,6 +8,10 @@ on the real execution path.
 ## [Unreleased]
 
 ### Fixed
+- The forge-event adapter now accepts and retains GitLab `project_path` scope,
+  alongside its GitLab-native issue and merge-request identifiers. This keeps
+  project-local IIDs attached to their source project; the GitLab fixture and
+  CLI test verify the normalized scope.
 - Go module root paths now exclude the surrounding quotes in interpreted and raw
   string forms, preserving the actual module coordinate. Escaped interpreted
   paths fail closed until their Go string escapes can be decoded exactly;

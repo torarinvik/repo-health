@@ -71,6 +71,7 @@ python3 - "$T/gitlab.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["provider"] == "gitlab" and d["authorization"]["state"] == "not_requested", d
+assert d["scope"] == {"project_path":"group/subgroup/project"}, d
 assert [e["native_id"] for e in d["events"]] == ["gitlab:12", "gitlab:8", "gitlab:56", "gitlab:10"], d
 assert d["events"][-1]["created_at"] == 1699900100 and d["events"][-1]["status"] == "published", d
 assert d["events"][-1]["tag"] == "v2.0.0" and d["events"][-1]["url"].startswith("https://gitlab.com/"), d
