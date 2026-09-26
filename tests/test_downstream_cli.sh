@@ -106,10 +106,18 @@ PY
 )
 [[ "$identity_sid_a" == "$identity_sid_b" ]] || fail "identical identity revision must replay the same snapshot"
 [[ "$identity_sid_a" != "$identity_sid_c" ]] || fail "a changed identity revision must create a new snapshot"
+"$ROOT/build/rh_cli" ops delete --root "$T/identity-snapshots" --name "$identity_sid_a" >/dev/null || fail "invalidate snapshot from superseded identity revision"
+[[ ! -e "$T/identity-snapshots/$identity_sid_a" ]] || fail "superseded identity snapshot remained available"
+"$ROOT/build/rh_cli" store verify --root "$T/identity-snapshots" --name "$identity_sid_c" >/dev/null || fail "corrected identity snapshot should remain available"
+set +e
+"$ROOT/build/rh_cli" store verify --root "$T/identity-snapshots" --name "$identity_sid_a" >/dev/null 2>&1
+old_snapshot_rc=$?
+set -e
+[[ "$old_snapshot_rc" -eq 5 ]] || fail "superseded identity snapshot must verify as missing"
 if "$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/identity-revision-invalid" --identity-revision -1 >/dev/null 2>&1; then
   fail "negative identity revision must be rejected"
 fi
-echo "[downstream] identity revision snapshot identity OK"
+echo "[downstream] identity revision creates a new snapshot and invalidates the superseded cache entry"
 
 # Cycle: 1->2, 2->1 (plus an isolated node 0).
 cat > "$T/cycle.json" <<'JSON'

@@ -46,7 +46,12 @@ suspected.
    rewritten (`src/rh_identity.elisa`).
 2. Recompute cluster-sensitive results and publish them under the new
    identity revision. Results computed under the old revision are
-   superseded, not silently edited (`src/rh_correction.elisa`).
+   superseded, not silently edited (`src/rh_correction.elisa`). For every
+   superseded public projection snapshot, invalidate its content-addressed
+   cache entry with `rh_cli ops delete --root <snapshot-root> --name <snapshot-id>`;
+   the corrected run writes a new snapshot bound to the new identity revision.
+   The downstream CLI test verifies the old snapshot is missing while the new
+   revision's snapshot remains available.
 3. Freeze person-sensitive publication for the affected subject until a
    human re-reviews it; never publish a trust or reputation score.
 4. Add a regression fixture reproducing the bad merge and a test proving

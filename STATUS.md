@@ -728,9 +728,12 @@ guarded store primitive, rejects malformed/path-shaped keys, treats an
 already-absent object as success, and reports that replayability must be
 reevaluated. The M07 execution-path drill (`rh_store_delete_blob` +
 `rh_replay_label`) confirms a report whose referenced inputs are gone is
-labelled **not replayable** rather than silently recomputed. Full identity-link
-revocation, cache invalidation, and authorized report regeneration across
-deployed backends remain open.
+labelled **not replayable** rather than silently recomputed. A downstream
+identity-revision test now deletes the superseded public snapshot and verifies
+the replacement snapshot remains available (`tests/test_downstream_cli.sh`).
+Identity-link revocation is covered in the identity layer; its full correction
+workflow and cache invalidation/regeneration across other derived and deployed
+backends remain open.
 Adversarial
 transport policy hardened (`src/rh_git.elisa`: loopback/private/link-local/
 CGNAT/benchmark/multicast/unspecified v4, IPv6 brackets/ULA/link-local,
