@@ -6,17 +6,19 @@
 # safety invariants without pretending that a static check is a database run.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-SQL="$ROOT/db/migrations/001_initial.sql"
+MIGRATIONS="$ROOT/db/migrations"
 
 fail() { echo "[migrations] FAIL: $1" >&2; exit 1; }
-[[ -f "$SQL" ]] || fail "initial migration is missing"
+[[ -f "$MIGRATIONS/001_initial.sql" && -f "$MIGRATIONS/002_current_state_reconciliation.sql" ]] || fail "expected migration is missing"
 
-python3 - "$SQL" <<'PY'
+python3 - "$MIGRATIONS" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-sql = Path(sys.argv[1]).read_text(encoding="utf-8")
+migrations = sorted(Path(sys.argv[1]).glob("*.sql"))
+assert migrations and migrations[0].name == "001_initial.sql", migrations
+sql = "\n".join(path.read_text(encoding="utf-8") for path in migrations)
 clean = re.sub(r"--[^\n]*", "", sql)
 tables = set(re.findall(r"CREATE TABLE\s+([a-z_][a-z0-9_]*)", clean, re.I))
 functions = set(re.findall(r"CREATE FUNCTION\s+([a-z_][a-z0-9_]*)", clean, re.I))
@@ -27,6 +29,8 @@ required_tables = {
     "graph_query_job",
     "staged_source_record",
     "staged_normalization",
+    "source_object_state",
+    "source_state_reconciliation",
     "entity", "project", "repository", "repository_location", "repository_snapshot",
     "revision", "revision_membership", "ref_observation", "account",
     "actor_cluster_revision", "identity_assertion", "role_assertion",
@@ -43,8 +47,12 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_claim_graph_query_job", "rh_read_graph_query_request", "rh_get_graph_query_job", "rh_publish_graph_query_result", "rh_retry_graph_query_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events"} <= functions
-assert clean.lstrip().startswith("BEGIN;") and clean.rstrip().endswith("COMMIT;")
+assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_claim_graph_query_job", "rh_read_graph_query_request", "rh_get_graph_query_job", "rh_publish_graph_query_result", "rh_retry_graph_query_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events", "rh_reconcile_source_objects"} <= functions
+assert all(
+    re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).lstrip().startswith("BEGIN;") and
+    re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).rstrip().endswith("COMMIT;")
+    for path in migrations
+), "every migration must be transactional"
 assert "FOR UPDATE SKIP LOCKED" in clean
 assert "fencing_token" in clean and "lease_expires_at" in clean
 assert "ON CONFLICT (collection_run_id, page_number) DO NOTHING" in clean
@@ -90,6 +98,11 @@ assert "result_fencing_token = p_fencing_token" in clean
 assert "collection job state and run status are inconsistent" in clean
 assert "collection job attempt was not found for the current fencing token" in clean
 assert "UPDATE job" in clean and "fencing_token = p_fencing_token" in clean
+assert "current-state acquisition disagrees with terminal collection run" in clean
+assert "current-state reconciliation is older than committed state" in clean
+assert "current-state replay differs from its committed reconciliation" in clean
+assert "successful empty acquisition must use the empty state" in clean
+assert "absence_inferred" in clean
 
 for ref in re.findall(r"\bREFERENCES\s+([a-z_][a-z0-9_]*)", clean, re.I):
     assert ref in tables, f"foreign key target is undeclared: {ref}"

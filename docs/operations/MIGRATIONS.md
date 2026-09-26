@@ -8,6 +8,15 @@ defines typed PostgreSQL tables, visibility scope, source-scoped identity,
 evidence references, indexes, and fenced job/cursor methods. The migration is
 not applied by the local CLI, so the SQL file is a target contract and not
 evidence of a deployed database.
+The additive
+[`db/migrations/002_current_state_reconciliation.sql`](../../db/migrations/002_current_state_reconciliation.sql)
+adds durable per-source/capability/scope current-state observations. Its
+`rh_reconcile_source_objects` transaction marks unseen IDs absent only for a
+successful complete/empty collection run; incomplete, failed, or unsupported
+acquisition leaves unseen IDs unconfirmed. It rejects cross-scope runs,
+out-of-order snapshots, duplicate or oversized IDs, and acquisition states
+that disagree with the terminal run. The CLI adapter is still pending; the
+opt-in migration rehearsal covers exact-scope absence and partial-run behavior.
 
 Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa),
 with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).
@@ -73,7 +82,7 @@ The CLI command contract and failure gates are covered by
 | Profile manifest | `rh-profile/3` | `build/profile-manifest.json` |
 | Release packet | `rh-release-packet/1` | `build/release-packet.json` |
 | Source register | `rh-source-review/1` | `ops/source-review-register.json` |
-| PostgreSQL target schema | migration `001` | `db/migrations/001_initial.sql` |
+| PostgreSQL target schema | migrations `001`–`002` | `db/migrations/*.sql` |
 
 ## Rules
 

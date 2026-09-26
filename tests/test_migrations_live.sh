@@ -39,6 +39,8 @@ docker exec "$CONTAINER" pg_isready -U postgres -d repo_health >/dev/null 2>&1 |
 
 docker cp "$ROOT/db/migrations/001_initial.sql" "$CONTAINER:/tmp/001_initial.sql" || fail "copy migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/001_initial.sql >/dev/null || fail "apply migration"
+docker cp "$ROOT/db/migrations/002_current_state_reconciliation.sql" "$CONTAINER:/tmp/002_current_state_reconciliation.sql" || fail "copy current-state migration"
+docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/002_current_state_reconciliation.sql >/dev/null || fail "apply current-state migration"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
 DO $$
@@ -855,6 +857,84 @@ BEGIN
 END $$;
 SQL
 echo "[migrations-live] canonical staged normalization validates source lineage and exact replay"
+
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
+INSERT INTO collection_run (
+  id, source_instance_id, capability, connector_name, connector_version,
+  started_at, finished_at, status, completeness
+) VALUES
+  ('00000000-0000-0000-0000-000000000050', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-05T00:00:00Z', '2026-01-05T00:00:10Z', 'partial', 'partial'),
+  ('00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-06T00:00:00Z', '2026-01-06T00:00:10Z', 'succeeded', 'complete'),
+  ('00000000-0000-0000-0000-000000000053', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-07T00:00:00Z', '2026-01-07T00:00:10Z', 'succeeded', 'complete'),
+  ('00000000-0000-0000-0000-000000000054', '00000000-0000-0000-0000-000000000001', 'issues', 'github', '1.0.0', '2026-01-08T00:00:00Z', '2026-01-08T00:00:10Z', 'failed', 'unknown');
+DO $$
+DECLARE result jsonb;
+BEGIN
+  result := rh_reconcile_source_objects(
+    '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000003',
+    'issues', 'project-17', 'complete', ARRAY['old-a', 'shared'], '2026-01-04T00:00:00Z'
+  );
+  IF result->>'status' <> 'applied' OR result->>'absence_inferred' <> 'true' OR
+     (SELECT state FROM source_object_state WHERE scope_key = 'project-17' AND native_id = 'old-a') <> 'present' THEN
+    RAISE EXCEPTION 'complete current-state snapshot was not committed';
+  END IF;
+  result := rh_reconcile_source_objects(
+    '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000003',
+    'issues', 'project-17', 'complete', ARRAY['shared', 'old-a'], '2026-01-04T00:00:00Z'
+  );
+  IF result->>'status' <> 'duplicate' THEN
+    RAISE EXCEPTION 'exact current-state replay was not absorbed';
+  END IF;
+  BEGIN
+    PERFORM rh_reconcile_source_objects(
+      '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000003',
+      'issues', 'project-17', 'complete', ARRAY['different'], '2026-01-04T00:00:00Z'
+    );
+    RAISE EXCEPTION 'changed current-state replay was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('replay differs from its committed reconciliation' IN SQLERRM) = 0 THEN RAISE; END IF;
+  END;
+  result := rh_reconcile_source_objects(
+    '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000050',
+    'issues', 'project-17', 'partial', ARRAY['shared', 'new-b'], '2026-01-05T00:00:10Z'
+  );
+  IF result->>'absence_inferred' <> 'false' OR
+     (SELECT state FROM source_object_state WHERE scope_key = 'project-17' AND native_id = 'old-a') <> 'unconfirmed' OR
+     (SELECT state FROM source_object_state WHERE scope_key = 'project-17' AND native_id = 'shared') <> 'present' THEN
+    RAISE EXCEPTION 'partial snapshot inferred absence or lost an observed ID';
+  END IF;
+  PERFORM rh_reconcile_source_objects(
+    '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000051',
+    'issues', 'project-18', 'complete', ARRAY['old-a'], '2026-01-06T00:00:10Z'
+  );
+  PERFORM rh_reconcile_source_objects(
+    '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000053',
+    'issues', 'project-17', 'complete', ARRAY['shared'], '2026-01-06T00:00:10Z'
+  );
+  IF (SELECT state FROM source_object_state WHERE scope_key = 'project-17' AND native_id = 'old-a') <> 'absent' OR
+     (SELECT state FROM source_object_state WHERE scope_key = 'project-17' AND native_id = 'new-b') <> 'absent' OR
+     (SELECT state FROM source_object_state WHERE scope_key = 'project-18' AND native_id = 'old-a') <> 'present' THEN
+    RAISE EXCEPTION 'complete snapshot absence escaped its exact scope';
+  END IF;
+  PERFORM rh_reconcile_source_objects(
+    '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000054',
+    'issues', 'project-17', 'failed', ARRAY[]::text[], '2026-01-08T00:00:10Z'
+  );
+  IF EXISTS (SELECT 1 FROM source_object_state WHERE scope_key = 'project-17' AND state = 'absent') THEN
+    RAISE EXCEPTION 'failed acquisition retained absence inference';
+  END IF;
+  BEGIN
+    PERFORM rh_reconcile_source_objects(
+      '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000050',
+      'issues', 'project-17', 'complete', ARRAY['shared'], '2026-01-08T00:00:00Z'
+    );
+    RAISE EXCEPTION 'partial run was accepted as complete';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('disagrees with terminal collection run' IN SQLERRM) = 0 THEN RAISE; END IF;
+  END;
+END $$;
+SQL
+echo "[migrations-live] durable current-state projection scopes absence to successful complete snapshots"
 
 echo "[migrations-live] source/run, staged normalization, enqueue/claim/finish, lease-reclaim audit, stale/expired fencing, rollback, and crash-recovery boundaries OK"
 echo "test_migrations_live OK"

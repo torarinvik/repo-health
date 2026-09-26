@@ -57,6 +57,13 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- Additive PostgreSQL migration `002_current_state_reconciliation.sql` adds
+  scope-keyed source-object states and an atomic reconciliation function.
+  Only matching terminal complete/empty runs can mark unseen IDs absent;
+  incomplete runs preserve unseen IDs as unconfirmed. Exact run replay is
+  idempotent, changed replay and out-of-order snapshots fail closed. The static
+  migration gate passes; Docker is unavailable here, so the opt-in live
+  PostgreSQL rehearsal remains unverified, and the CLI adapter is still open.
 - Bounded live GitLab issue, merge-request, and release acquisition through
   `forge events --gitlab-project`, with encoded project-path routes, optional
   host-scoped token auth, per-page evidence, a 3 MiB capture cap, and numeric
