@@ -1,7 +1,7 @@
 # rh_ops_report.elisa — M07 ops monitoring + source-respect execution path
 # (M07-11, M07-12).
 #
-# `rh-monitor-input/1` -> `rh-monitor-result/1`: service health and project
+# `rh-monitor-input/1` -> `rh-monitor-result/2`: service health and project
 # health are SEPARATE series, and a rate with no denominator is `null`
 # (unknown), never 0. `rh-quota-input/1` -> `rh-quota-result/1`: a per-host
 # token bucket with exponential backoff, operator stop, and cancel refund.
@@ -95,25 +95,33 @@ module OpsReport:
                     return -1 if not rh_or_checked_int(nodes, raw, texts, child, "value", true, &v) or v < 0
                     if v > m.queue_age_max:
                         m.queue_age_max <- v
+                    m.has_queue_age <- true
                 elif rh_or_eq(texts, ks, ke, "cursor_lag"):
                     v2: mutable i64 = 0
                     return -1 if not rh_or_checked_int(nodes, raw, texts, child, "value", true, &v2) or v2 < 0
                     if v2 > m.cursor_lag_max:
                         m.cursor_lag_max <- v2
+                    m.has_cursor_lag <- true
                 else:
                     return -1
                 child <- nodes[child.usize()].next_sibling
             rate: i64 = Ops::rh_mon_observed_rate_bp(m)
             fresh: i64 = Ops::rh_mon_freshness_age(m, now)
             freshness_state: i64 = Ops::rh_mon_freshness_state(m, now)
-            Base::rh_push_text(out, "{\"schema\":\"rh-monitor-result/1\",\"expected_interval\":")
+            Base::rh_push_text(out, "{\"schema\":\"rh-monitor-result/2\",\"expected_interval\":")
             Base::rh_push_decimal_i64(out, interval)
             Base::rh_push_text(out, ",\"now\":")
             Base::rh_push_decimal_i64(out, now)
             Base::rh_push_text(out, ",\"service\":{\"queue_age_max\":")
-            Base::rh_push_decimal_i64(out, m.queue_age_max)
+            if m.has_queue_age:
+                Base::rh_push_decimal_i64(out, m.queue_age_max)
+            else:
+                Base::rh_push_text(out, "null")
             Base::rh_push_text(out, ",\"cursor_lag_max\":")
-            Base::rh_push_decimal_i64(out, m.cursor_lag_max)
+            if m.has_cursor_lag:
+                Base::rh_push_decimal_i64(out, m.cursor_lag_max)
+            else:
+                Base::rh_push_text(out, "null")
             Base::rh_push_text(out, ",\"last_success_epoch\":")
             Base::rh_push_decimal_i64(out, m.last_success_epoch)
             Base::rh_push_text(out, ",\"freshness_age\":")
@@ -170,7 +178,7 @@ module OpsReport:
                     e <- expo.count
                 else:
                     e <- stop.usize() + 1
-            Base::rh_push_text(out, "],\"note\":\"freshness is stale only when age exceeds a positive expected_interval; missing success or interval is unknown; service and project series are separate; rates with no denominator are null (unknown, not 0)\"}")
+            Base::rh_push_text(out, "],\"note\":\"freshness is stale only when age exceeds a positive expected_interval; missing success or interval is unknown; service and project series are separate; queue age and cursor lag are null without samples; rates with no denominator are null (unknown, not 0)\"}")
             0
 
         def rh_quota_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:

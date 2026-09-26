@@ -22,7 +22,7 @@ JSON
 python3 - "$T/mon.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema"] == "rh-monitor-result/1", d
+assert d["schema"] == "rh-monitor-result/2", d
 assert d["service"] == {"queue_age_max": 30, "cursor_lag_max": 90, "last_success_epoch": 1150,
                         "freshness_age": 50, "freshness_state": "fresh", "errors": 1, "parser_rejects": 1, "object_failures": 1}, d["service"]
 assert d["project"] == {"observed": 2, "unknown": 1, "observed_rate_bp": 6666,
@@ -46,7 +46,21 @@ assert d["project"]["observed_rate_bp"] is None, d["project"]
 assert d["project"]["policy_unknown_rate_bp"] is None, d["project"]
 assert d["service"]["freshness_age"] is None, d["service"]
 assert d["service"]["freshness_state"] == "unknown", d["service"]
+assert d["service"]["queue_age_max"] is None and d["service"]["cursor_lag_max"] is None, d["service"]
+assert "rh_service_queue_age_seconds_max -1" in d["exposition"], d["exposition"]
+assert "rh_service_cursor_lag_seconds_max -1" in d["exposition"], d["exposition"]
 print("[ops] unknown-not-zero OK")
+PY
+
+echo "[ops] explicit zero age/lag is distinct from missing samples"
+printf '%s\n' '{"schema":"rh-monitor-input/1","now":10,"events":[{"kind":"queue_age","value":0},{"kind":"cursor_lag","value":0}]}' > "$T/zero-service.json"
+"$ROOT/build/rh_cli" ops monitor --input "$T/zero-service.json" --out "$T/zero-service.out" >/dev/null || fail "zero service samples"
+python3 - "$T/zero-service.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["service"]["queue_age_max"] == 0 and d["service"]["cursor_lag_max"] == 0, d["service"]
+assert "rh_service_queue_age_seconds_max 0" in d["exposition"], d["exposition"]
+print("[ops] sampled-zero distinction OK")
 PY
 
 echo "[ops] source freshness crosses the configured interval without changing project health"

@@ -745,8 +745,10 @@ restore drill where corruption is detected and corrupt objects are
 now a product path (`rh_cli ops backup|verify|restore`, `tests/test_store_cli.sh`,
 with missing and corrupt counted separately). Monitoring and source-respect
 are also product paths: `rh_cli ops monitor --input <file> --out <file>`
-emits `rh-monitor-result/1` with service and project series **separate** and
-a rate with no denominator as `null` (unknown, not 0); `rh_cli ops quota
+emits `rh-monitor-result/2` with service and project series **separate** and
+a rate with no denominator as `null` (unknown, not 0). Queue-age and cursor-lag
+maxima are `null` when no corresponding sample was supplied (`-1` in
+exposition); sampled zero remains zero. `rh_cli ops quota
 --input <file> --out <file>` emits `rh-quota-result/1` running a per-host
 token bucket with exponential capped backoff, operator stop, and cancel
 refund (`tests/test_ops_cli.sh`). M07-04 release
