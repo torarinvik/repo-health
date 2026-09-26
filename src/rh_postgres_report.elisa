@@ -495,6 +495,73 @@ module PostgresReport:
                 Base::rh_push_text(out, "\"}")
                 return 0
 
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "reconcile_source_objects"):
+                source_s: mutable i64 = 0
+                source_e: mutable i64 = 0
+                run_s: mutable i64 = 0
+                run_e: mutable i64 = 0
+                capability_s: mutable i64 = 0
+                capability_e: mutable i64 = 0
+                scope_s: mutable i64 = 0
+                scope_e: mutable i64 = 0
+                acquisition_s: mutable i64 = 0
+                acquisition_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "source_instance_id", &source_s, &source_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, source_s, source_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "collection_run_id", &run_s, &run_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, run_s, run_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "capability", &capability_s, &capability_e, false) or capability_e - capability_s > 128
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "scope", &scope_s, &scope_e, false) or scope_e - scope_s > 512
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "acquisition", &acquisition_s, &acquisition_e, false)
+                complete_acquisition: bool = PostgresReport::rh_pg_report_eq(texts, acquisition_s, acquisition_e, "complete")
+                empty_acquisition: bool = PostgresReport::rh_pg_report_eq(texts, acquisition_s, acquisition_e, "empty")
+                partial_acquisition: bool = PostgresReport::rh_pg_report_eq(texts, acquisition_s, acquisition_e, "partial")
+                failed_acquisition: bool = PostgresReport::rh_pg_report_eq(texts, acquisition_s, acquisition_e, "failed")
+                unsupported_acquisition: bool = PostgresReport::rh_pg_report_eq(texts, acquisition_s, acquisition_e, "unsupported")
+                return -1 if not complete_acquisition and not empty_acquisition and not partial_acquisition and not failed_acquisition and not unsupported_acquisition
+                captured_at: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "captured_at", 0, 253402300799, &captured_at)
+                observed_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "observed")
+                return -1 if observed_idx < 0 or nodes[observed_idx.usize()].kind != Json::RH_JSON_ARR or nodes[observed_idx.usize()].child_count > 100000
+                observed_node: Json::RhJsonNode = nodes[observed_idx.usize()]
+                return -1 if observed_node.text_start < 0 or observed_node.text_end <= observed_node.text_start or observed_node.text_end - observed_node.text_start > 1048576
+                observed_count: mutable i64 = 0
+                observed_bytes: mutable i64 = 0
+                while observed_child >= 0 |observed_child: i64 = observed_node.first_child, nodes, texts, observed_count, observed_bytes|:
+                    return -1 if nodes[observed_child.usize()].kind != Json::RH_JSON_STR
+                    id_s: mutable i64 = 0
+                    id_e: mutable i64 = 0
+                    return -1 if not Json::rh_json_str_span(nodes, observed_child, &id_s, &id_e) or id_e <= id_s or id_e - id_s > 512
+                    while id_offset < id_e - id_s |id_offset: i64 = 0, texts, id_s, id_e|:
+                        return -1 if texts[(id_s + id_offset).usize()] == 0
+                        id_offset <- id_offset + 1
+                    observed_bytes <- observed_bytes + id_e - id_s
+                    return -1 if observed_bytes > 4194304
+                    observed_count <- observed_count + 1
+                    observed_child <- nodes[observed_child.usize()].next_sibling
+                return -1 if (empty_acquisition or failed_acquisition or unsupported_acquisition) and observed_count != 0
+                return -1 if complete_acquisition and observed_count == 0
+                observed_json: mutable darray[u8] = []
+                while observed_offset < observed_node.text_end |observed_offset: i64 = observed_node.text_start, observed_node, raw, observed_json|:
+                    observed_json.push(raw[observed_offset.usize()])
+                    observed_offset <- observed_offset + 1
+                observed_json.push(0)
+                source_bytes: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, source_s, source_e)
+                run_bytes: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, run_s, run_e)
+                capability_bytes: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, capability_s, capability_e)
+                scope_bytes: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, scope_s, scope_e)
+                acquisition_bytes: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, acquisition_s, acquisition_e)
+                source_ptr: cstr = (&source_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                run_ptr: cstr = (&run_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                capability_ptr: cstr = (&capability_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                scope_ptr: cstr = (&scope_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                acquisition_ptr: cstr = (&acquisition_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                observed_ptr: cstr = (&observed_json[0]).cast[cstr] can Unsafe.PointerCast
+                reconciliation: mutable darray[u8] = []
+                return -1 if Postgres::rh_pg_reconcile_source_objects(conninfo, source_ptr, run_ptr, capability_ptr, scope_ptr, acquisition_ptr, observed_ptr, captured_at, reconciliation) <= 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"reconcile_source_objects\",\"status\":\"recorded\",\"reconciliation\":")
+                out.extend(bytes_view(reconciliation))
+                out.push(125)
+                return 0
+
             if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "evidence_references"):
                 references: mutable darray[u8] = []
                 return -1 if Postgres::rh_pg_evidence_references(conninfo, references) <= 0

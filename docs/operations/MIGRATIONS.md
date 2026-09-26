@@ -15,8 +15,12 @@ adds durable per-source/capability/scope current-state observations. Its
 successful complete/empty collection run; incomplete, failed, or unsupported
 acquisition leaves unseen IDs unconfirmed. It rejects cross-scope runs,
 out-of-order snapshots, duplicate or oversized IDs, and acquisition states
-that disagree with the terminal run. The CLI adapter is still pending; the
-opt-in migration rehearsal covers exact-scope absence and partial-run behavior.
+that disagree with the terminal run. `rh_cli postgres` exposes this through
+the `reconcile_source_objects` operation in `rh-postgres-command/1`; input
+identifiers and scope are preflighted before connecting and all SQL values use
+bound parameters. Fake-libpq tests cover preflight, applied results, and exact
+replay. The opt-in migration rehearsal covers exact-scope absence and
+partial/failed-run behavior; it still needs an executed PostgreSQL environment.
 
 Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa),
 with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).

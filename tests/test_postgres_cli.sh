@@ -45,6 +45,32 @@ run_ok retry_graph duplicate retry-graph-query-job
 run_ok poll_graph committed get-graph-query-job
 run_ok poll_graph duplicate get-graph-query-job
 run_ok poll_graph empty get-graph-query-job
+run_ok current_state applied reconcile-source-objects
+run_ok current_state duplicate reconcile-source-objects
+python3 - "$T/reconcile-source-objects-applied.json" "$T/reconcile-source-objects-duplicate.json" "$ROOT/fixtures/postgres/reconcile-source-objects-projection.json" <<'PY'
+import json, sys
+applied, duplicate, fixture = [json.load(open(path)) for path in sys.argv[1:]]
+assert applied["schema"] == "rh-postgres-result/1" and applied["operation"] == "reconcile_source_objects", applied
+assert applied["reconciliation"] == fixture, applied
+assert applied["reconciliation"]["schema"] == "rh-postgres-current-state-result/1", applied
+assert duplicate["reconciliation"]["status"] == "duplicate", duplicate
+assert duplicate["reconciliation"]["absence_inferred"] is False, duplicate
+print("[postgres-cli] current-state reconciliation is scope-bound and replay-aware")
+PY
+
+python3 - "$ROOT/fixtures/postgres/reconcile-source-objects-command.json" "$T/current-state-invalid.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["observed"] = [1]
+json.dump(d, open(sys.argv[2], "w"))
+PY
+set +e
+RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+  RH_FAKE_PG_OPERATION=current_state RH_FAKE_PG_EXPECT=applied RH_FAKE_PG_CONNECT_MARK="$T/current-state-invalid.connected" \
+  "$ROOT/build/rh_cli" postgres --input "$T/current-state-invalid.json" --out "$T/current-state-invalid.out" >/dev/null 2>&1
+current_state_invalid_rc=$?
+set -e
+[[ "$current_state_invalid_rc" -eq 4 && ! -e "$T/current-state-invalid.connected" && ! -e "$T/current-state-invalid.out" ]] || fail "malformed current-state request reached PostgreSQL or wrote output"
 python3 - "$T/enqueue-graph-query-job-committed.json" "$T/enqueue-graph-query-job-duplicate.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"enqueue_graph_query_job","status":"enqueued"}

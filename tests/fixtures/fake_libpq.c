@@ -36,6 +36,10 @@ static const char *graph_query_poll_not_found_json =
     "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"get_graph_query_job\",\"status\":\"not_found\"}";
 static const char *adoption_history_json =
     "[{\"from\":100,\"through\":900,\"complete\":true},{\"from\":900,\"through\":1000,\"complete\":false},{\"from\":1000,\"through\":2000,\"complete\":true}]";
+static const char *current_state_applied_json =
+    "{\"schema\":\"rh-postgres-current-state-result/1\",\"status\":\"applied\",\"source_instance_id\":\"00000000-0000-0000-0000-000000000001\",\"collection_run_id\":\"00000000-0000-0000-0000-000000000040\",\"capability\":\"issues\",\"scope\":\"project-17\",\"acquisition\":\"partial\",\"observed_upserts\":2,\"unseen_state_changes\":3,\"absence_inferred\":false}";
+static const char *current_state_duplicate_json =
+    "{\"schema\":\"rh-postgres-current-state-result/1\",\"status\":\"duplicate\",\"source_instance_id\":\"00000000-0000-0000-0000-000000000001\",\"collection_run_id\":\"00000000-0000-0000-0000-000000000040\",\"capability\":\"issues\",\"scope\":\"project-17\",\"acquisition\":\"partial\",\"observed_upserts\":0,\"unseen_state_changes\":0,\"absence_inferred\":false}";
 
 void *PQconnectdbParams(const char *const *keywords, const char *const *values, int expand_dbname) {
     const char *marker = getenv("RH_FAKE_PG_CONNECT_MARK");
@@ -91,6 +95,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "28fd63073eaf26a97de86ab4dc6027e69f33217858102da590ba4c1095308d26",
         "rh-forge-events/1", "1700000000",
         "[{\"kind\":\"issues\",\"native_id\":\"github:101\",\"status\":\"closed\",\"created_at\":1690000000,\"updated_at\":1695000000,\"closed_at\":null,\"staged_origin\":{\"page_number\":1,\"record_ordinal\":0,\"evidence_id\":\"00000000-0000-0000-0000-000000000008\"}}]"
+    };
+    static const char *current_state_values[7] = {
+        "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000040",
+        "issues", "project-17", "partial", "[\"issue-a\",\"issue-b\"]", "1700000000"
     };
     static const char *page_events_subjects_values[14] = {
         "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004", "1", "1", "pg-adapter-live-events",
@@ -204,6 +212,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = history_values;
         expected_count = 2;
         prefix = "SELECT COALESCE(json_agg(";
+    } else if (operation != NULL && strcmp(operation, "current_state") == 0) {
+        expected = current_state_values;
+        expected_count = 7;
+        prefix = "SELECT public.rh_reconcile_source_objects(";
     } else if (operation != NULL && strcmp(operation, "begin_run") == 0) {
         expected = begin_run_values;
         expected_count = 13;
@@ -345,6 +357,13 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
         result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? graph_query_poll_running_json :
             mode != NULL && strcmp(mode, "empty") == 0 ? graph_query_poll_not_found_json : graph_query_poll_succeeded_json;
+        return &result;
+    }
+    if (operation != NULL && strcmp(operation, "current_state") == 0) {
+        result.columns = 1;
+        result.rows = 1;
+        result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+        result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? current_state_duplicate_json : current_state_applied_json;
         return &result;
     }
     result.columns = 1;

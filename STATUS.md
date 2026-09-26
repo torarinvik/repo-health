@@ -182,6 +182,11 @@ observed IDs remain present evidence. The result exposes
 Duplicate IDs and inconsistent acquisition states fail closed.
 `tests/test_snapshot_reconcile_cli.sh` covers complete, empty, partial, failed,
 unsupported, replay, and malformed cases.
+The PostgreSQL path now persists the same scope-exact projection through
+`rh_cli postgres` operation `reconcile_source_objects`, backed by migration
+`002_current_state_reconciliation.sql`; fake-libpq, schema, and static
+migration gates pass. Its PostgreSQL-container transaction rehearsal is
+checked in but remains opt-in and has not been run in this environment.
 
 **M03 scope (in progress):** implemented — ecosystem-native semver
 (strict, prerelease precedence, build ignored), Cargo name normalization

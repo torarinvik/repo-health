@@ -270,6 +270,27 @@ module Postgres:
             outcome
 
     public:
+        # Persist one bounded source-object snapshot through the scope-locked
+        # database transaction. The observed JSON array is converted to text[]
+        # by PostgreSQL after bound-parameter parsing, never interpolated into SQL.
+        def rh_pg_reconcile_source_objects(conninfo: cstr, source_instance_id: cstr, run_id: cstr, capability: cstr, scope: cstr, acquisition: cstr, observed_json: cstr, captured_at: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if Base::rh_cstr_len_c(source_instance_id) != 36 or Base::rh_cstr_len_c(run_id) != 36
+            return -1 if Base::rh_cstr_len_c(capability) == 0 or Base::rh_cstr_len_c(capability) > 128
+            return -1 if Base::rh_cstr_len_c(scope) == 0 or Base::rh_cstr_len_c(scope) > 512
+            return -1 if Base::rh_cstr_len_c(observed_json) == 0 or Base::rh_cstr_len_c(observed_json) > 4194304
+            return -1 if captured_at < 0 or captured_at > 253402300799
+            captured_text: mutable darray[u8] = Postgres::rh_pg_decimal(captured_at)
+            captured_ptr: cstr = (&captured_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(source_instance_id)
+            params.push(run_id)
+            params.push(capability)
+            params.push(scope)
+            params.push(acquisition)
+            params.push(observed_json)
+            params.push(captured_ptr)
+            Postgres::rh_pg_text_params(conninfo, "SELECT public.rh_reconcile_source_objects($1::uuid, $2::uuid, $3::text, $4::text, $5::text, ARRAY(SELECT jsonb_array_elements_text($6::jsonb)), to_timestamp($7::double precision))::text", params, out)
+
         # Return bounded run-window coverage for one source and capability.
         # Missing request bounds are omitted because they cannot establish a
         # measurable interval; non-successful runs remain explicit gaps.

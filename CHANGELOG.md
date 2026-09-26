@@ -57,6 +57,12 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- `rh_cli postgres` now exposes the durable M02-06 current-state transaction
+  as `reconcile_source_objects`. It validates bounded scope and observed IDs
+  before connecting, binds all values through libpq parameters, and retains
+  database applied/duplicate status in `rh-postgres-current-state-result/1`.
+  Fake-libpq command coverage verifies exact parameter binding and rejects
+  malformed input before connection.
 - Additive PostgreSQL migration `002_current_state_reconciliation.sql` adds
   scope-keyed source-object states and an atomic reconciliation function.
   Only matching terminal complete/empty runs can mark unseen IDs absent;
