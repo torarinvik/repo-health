@@ -718,7 +718,10 @@ different IDs or verify caller ID stability. Product-owned thresholds and broade
 controls remain open. Operational
 runbooks (`docs/operations/runbooks.md`,
 M07-13), and a deterministic release evidence packet generator
-(`tools/release-packet.sh` + `tests/test_release_packet.sh`). A deletion
+(`tools/release-packet.sh` + `tests/test_release_packet.sh`). The incident
+runbooks include a distinct advisory-mismatch response that retains query and
+transformation provenance, treats OSV matching as fuzzy, and keeps unsupported
+or incomplete contexts unknown (`tests/test_docs.sh`). A deletion
 drill is now callable through `rh_cli ops delete --root <dir> --name
 <16-hex-object>` (`tests/test_store_cli.sh`): the command delegates to the
 guarded store primitive, rejects malformed/path-shaped keys, treats an

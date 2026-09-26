@@ -171,3 +171,37 @@ The `rh-evidence-transfer/1` package preserves arbitrary bytes and checks every
 blob against its FNV-1a-64 name before publishing. FNV detects accidental
 corruption; the package does not authenticate its sender or encrypt its
 contents. Protect it in transit and at rest with the chosen transport.
+
+## 9. Advisory mismatch
+
+Trigger: a user disputes an advisory match, an expected advisory is missing,
+or a provider result disagrees with the local version/range evaluation.
+
+1. Preserve the report, submitted package coordinate/version or commit, graph
+   node mapping, exact OSV request and response evidence, page cursors, and
+   captured full advisory record when hydration was requested. Record the
+   input, response, and transformation digests before changing anything.
+2. Establish which stage differs: package identity mapping, OSV's server-side
+   query, returned advisory aliases/affected ranges, local range evaluation,
+   or graph-to-query positional mapping. OSV package/version matching is
+   fuzzy; the submitted coordinate alone does not prove an exact match.
+3. Treat unsupported range forms, commit queries without implemented
+   Git-range matching, skipped/over-cap graph nodes, incomplete pagination,
+   and incomplete hydration as unknown or partial. Do not translate them into
+   `affected` or `not_affected`. Capture a new bounded query only when the
+   required coordinate or evidence is missing; it does not rewrite the old
+   report's pinned inputs.
+4. Replay the local matcher against the retained full advisory response and
+   exact dependency graph. If a parser or mapping defect is confirmed, add
+   the smallest response/graph pair as a regression fixture, correct and
+   version the mapping, then produce a new report. Keep the original result
+   available for audit and supersede it with an explanation; do not edit its
+   evidence in place.
+5. Re-evaluate any dependent policy decision and publication. An advisory
+   match describes affected-version evidence, not runtime exploitability.
+   Withdraw or correct downstream findings only for the subjects and report
+   revisions supported by the replay.
+6. Record: disputed subject and submitted context, original report ID, OSV
+   response and transformation digests, query completeness, stage/root cause,
+   fixture and parser version, superseding report/policy IDs, and remaining
+   unknowns.

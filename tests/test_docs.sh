@@ -49,6 +49,12 @@ echo "[docs] release doc forbids roadmap-as-released and hidden scores"
 grep -qi "roadmap" "$ROOT/docs/operations/RELEASE.md" || fail "release missing roadmap rule"
 grep -qi "hidden incompleteness" "$ROOT/docs/operations/RELEASE.md" || fail "release missing hidden-score rule"
 
+echo "[docs] advisory mismatch runbook preserves evidence and uncertainty"
+grep -q "## 9. Advisory mismatch" "$ROOT/docs/operations/runbooks.md" || fail "runbooks missing advisory mismatch procedure"
+grep -q "fuzzy" "$ROOT/docs/operations/runbooks.md" || fail "advisory procedure omits fuzzy server matching"
+grep -q "incomplete pagination" "$ROOT/docs/operations/runbooks.md" || fail "advisory procedure omits incomplete query handling"
+grep -q "not runtime exploitability" "$ROOT/docs/operations/runbooks.md" || fail "advisory procedure overstates applicability"
+
 echo "[docs] no safety/trust verdicts in process docs"
 if grep -riE "\bis safe\b|trustworthy|certified safe|health score" \
     "$ROOT/docs/GOVERNANCE.md" "$ROOT/docs/operations/MIGRATIONS.md" \
