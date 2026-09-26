@@ -130,6 +130,23 @@ grep -a -q "rh-evidence-transfer/1 fnv1a-64-hex" "$T/evidence.bundle" || fail "t
 for n in "$transfer_a" "$transfer_b"; do
   "$ROOT/build/rh_cli" store verify --root "$T/transfer-destination" --name "$n" >/dev/null || fail "transferred blob $n does not verify"
 done
+
+echo "[store] ops delete removes one validated evidence object and is idempotent"
+mkdir -p "$T/delete-store"
+"$ROOT/build/rh_cli" store put --root "$T/delete-store" --file "$T/transfer-a.bin" > "$T/delete-put.out" || fail "prepare deletable evidence"
+delete_name="$(awk '{print $3}' "$T/delete-put.out")"
+"$ROOT/build/rh_cli" ops delete --root "$T/delete-store" --name "$delete_name" | grep -q "deleted or already absent" || fail "delete existing evidence"
+[[ ! -e "$T/delete-store/$delete_name" ]] || fail "delete left evidence object"
+"$ROOT/build/rh_cli" ops delete --root "$T/delete-store" --name "$delete_name" >/dev/null || fail "repeat deletion should be idempotent"
+set +e
+"$ROOT/build/rh_cli" store verify --root "$T/delete-store" --name "$delete_name" >/dev/null 2>&1
+rc_deleted=$?
+"$ROOT/build/rh_cli" ops delete --root "$T/delete-store" --name ../outside >/dev/null 2>&1
+rc_delete_traversal=$?
+set -e
+[[ "$rc_deleted" -eq 5 ]] || fail "deleted evidence must verify as missing (got $rc_deleted)"
+[[ "$rc_delete_traversal" -eq 4 ]] || fail "path-like deletion key must fail closed (got $rc_delete_traversal)"
+[[ "$(cat "$T/outside")" == "preserve this file" ]] || fail "delete changed a path outside the evidence root"
 cmp "$T/transfer-a.bin" "$T/transfer-destination/$transfer_a" || fail "binary transfer changed NUL/newline bytes"
 cmp "$T/transfer-b.bin" "$T/transfer-destination/$transfer_b" || fail "text transfer changed bytes"
 "$ROOT/build/rh_cli" ops import --dest "$T/transfer-destination" --input "$T/evidence.bundle" | grep -q "imported=2" || fail "repeated portable import"

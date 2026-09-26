@@ -719,9 +719,15 @@ controls remain open. Operational
 runbooks (`docs/operations/runbooks.md`,
 M07-13), and a deterministic release evidence packet generator
 (`tools/release-packet.sh` + `tests/test_release_packet.sh`). A deletion
-drill exists (`rh_store_delete_blob` + `rh_replay_label`): removing a raw
-payload is idempotent, and a report whose referenced inputs are gone is
-labelled **not replayable** rather than silently recomputed (M07-08).
+drill is now callable through `rh_cli ops delete --root <dir> --name
+<16-hex-object>` (`tests/test_store_cli.sh`): the command delegates to the
+guarded store primitive, rejects malformed/path-shaped keys, treats an
+already-absent object as success, and reports that replayability must be
+reevaluated. The M07 execution-path drill (`rh_store_delete_blob` +
+`rh_replay_label`) confirms a report whose referenced inputs are gone is
+labelled **not replayable** rather than silently recomputed. Full identity-link
+revocation, cache invalidation, and authorized report regeneration across
+deployed backends remain open.
 Adversarial
 transport policy hardened (`src/rh_git.elisa`: loopback/private/link-local/
 CGNAT/benchmark/multicast/unspecified v4, IPv6 brackets/ULA/link-local,

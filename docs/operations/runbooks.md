@@ -118,10 +118,12 @@ to remove their data, or a rights review changes.
 
 1. Locate the rights entry in `ops/source-review-register.json` and its
    contact. Suspend collection for that source/subject.
-2. Apply deletion/restriction to raw payloads, projections, caches, and
-   exports. Where the raw byte store cannot be deleted by this build, the
-   object is de-referenced and excluded from all publication, and that gap
-   is recorded honestly.
+2. For one content-addressed raw object, run
+   `rh_cli ops delete --root <evidence-root> --name <16-hex-object>`.
+   The command serializes with writers, rejects malformed keys, and treats an
+   already-absent object as success. Apply the corresponding restriction to
+   projections, caches, and exports separately; this command does not discover
+   or invalidate those derived objects for you.
 3. Recompute affected metrics so removed subjects disappear from public
    aggregates (publication suppression gate, `src/rh_privacy.elisa`,
    withholds unknown/private members before any aggregate is published).
