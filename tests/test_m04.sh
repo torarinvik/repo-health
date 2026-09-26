@@ -24,7 +24,7 @@ grep -q "never guessed into maintainer" "$ROOT/src/rh_roles.elisa" || fail "no-r
 
 echo "[m04] S008: destructive merge is reversible; raw ledger untouched"
 grep -q "id-full-revoke-restores" "$ROOT/src/test_continuity.elisa" || fail "S008 full-revoke-restores check missing"
-grep -q "id-revision-back-to-1" "$ROOT/src/test_continuity.elisa" || fail "S008 revision-revert check missing"
+grep -q "id-revision-stable-after-revoke" "$ROOT/src/test_continuity.elisa" || fail "S008 monotonic revision check missing"
 
 echo "[m04] structural guarantee: identity layer cannot mutate raw events"
 # rh_identity.elisa is the only module allowed to map accounts->clusters,

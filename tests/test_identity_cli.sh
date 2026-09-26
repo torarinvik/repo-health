@@ -66,8 +66,9 @@ import json, sys
 a = json.load(open(sys.argv[1]))
 b = json.load(open(sys.argv[2]))
 # A has an extra accepted link (1-2); B has it revoked. Revision drops and
-# the cluster splits.
-assert a["identity_revision"] == 2 and b["identity_revision"] == 1, (a, b)
+# the cluster splits. The revision follows the ledger watermark, so revoking
+# a link cannot move the snapshot key backwards.
+assert a["identity_revision"] == 2 and b["identity_revision"] == 4, (a, b)
 assert b["clusters"] == [[0, 1], [2], [3]], b["clusters"]
 assert b["cluster_id_by_actor"] == [0, 0, 2, 3], b["cluster_id_by_actor"]
 print("[identity] revoke recompute OK")
