@@ -111,6 +111,8 @@ printf '{"schema":"rh-identity-input/1","actor_count":2,"links":[{"a":0,"b":5,"s
 "$ROOT/build/rh_cli" identity --input "$T/badactor.json" --out "$T/x" >/dev/null 2>&1; rc_actor=$?
 printf '{"schema":"rh-identity-input/1","actor_count":2,"links":[{"a":0,"b":1,"state":"accepted"}],"actor_kinds":["human","alien"]}' > "$T/badkind.json"
 "$ROOT/build/rh_cli" identity --input "$T/badkind.json" --out "$T/x" >/dev/null 2>&1; rc_kind=$?
+printf '{"schema":"rh-identity-input/1","actor_count":2,"links":[{"a":0,"b":1,"state":"accepted"}]}' > "$T/bad-revision.json"
+"$ROOT/build/rh_cli" identity --input "$T/bad-revision.json" --out "$T/x" >/dev/null 2>&1; rc_revision=$?
 printf '{"schema":"rh-identity-input/1","actor_count":2,"links":[],"actor_kinds":["human","unresolved"],"actor_kind_sources":["provider","made-up"]}' > "$T/badkindsource.json"
 "$ROOT/build/rh_cli" identity --input "$T/badkindsource.json" --out "$T/x" >/dev/null 2>&1; rc_kind_source=$?
 printf '{"schema":"rh-identity-input/1","actor_count":2,"links":[],"actor_kinds":["human","unresolved"],"actor_kind_sources":["project"]}' > "$T/badkindsourcecount.json"
@@ -130,7 +132,7 @@ printf '{"schema":"rh-identity-input/1","actor_count":1,"links":[],"actor_kind_e
 "$ROOT/build/rh_cli" identity --input "$T/badnative.json" --out "$T/x" >/dev/null 2>&1; rc_native_duplicate=$?
 "$ROOT/build/rh_cli" identity --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_state" "$rc_actor" "$rc_kind" "$rc_kind_source" "$rc_kind_source_count" "$rc_kind_time_count" "$rc_kind_time" "$rc_kind_time_without_kind" "$rc_kind_ref_count" "$rc_kind_ref" "$rc_kind_ref_without_kind" "$rc_native_duplicate" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_state" "$rc_actor" "$rc_kind" "$rc_revision" "$rc_kind_source" "$rc_kind_source_count" "$rc_kind_time_count" "$rc_kind_time" "$rc_kind_time_without_kind" "$rc_kind_ref_count" "$rc_kind_ref" "$rc_kind_ref_without_kind" "$rc_native_duplicate" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed identity input must exit 4 (got $rc)"
 done
 
