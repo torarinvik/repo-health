@@ -48,6 +48,11 @@ on the real execution path.
   host-scoped token auth, per-page evidence, a 3 MiB capture cap, and numeric
   pagination cursors. GitLab `released_at` is retained as the release event
   time. CLI fixtures cover scopes, token handling, failure evidence, and caps.
+- GitLab event collection now resumes each unfinished capability from a
+  validated numeric cursor with `--resume-from`, while skipping completed
+  capabilities and preserving their `not_attempted` state in the new segment.
+  Continuations are bound to the exact GitLab project scope and retain only the
+  current segment's events and pagination state.
 - M07 dependency inventory and update procedure in `docs/DEPENDENCIES.md`:
   compiler/build/test tools, live transport clients, native libraries, and
   optional PostgreSQL components are mapped to their boundaries and checks.

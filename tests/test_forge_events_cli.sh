@@ -330,8 +330,10 @@ if [[ "$url" == *"/api/v4/projects/"* && "$url" == *"/issues?state=all&"* ]]; th
   [[ "$url" != *'page=2' || -z "${RH_CURL_GITLAB_ISSUES_PAGE2:-}" ]] || body="$RH_CURL_GITLAB_ISSUES_PAGE2"
 elif [[ "$url" == *"/api/v4/projects/"* && "$url" == *"/merge_requests?"* ]]; then
   body="$RH_CURL_GITLAB_MERGE_REQUESTS"
+  [[ "$url" != *'page=2' || -z "${RH_CURL_GITLAB_MERGE_REQUESTS_PAGE2:-}" ]] || body="$RH_CURL_GITLAB_MERGE_REQUESTS_PAGE2"
 elif [[ "$url" == *"/api/v4/projects/"* && "$url" == *"/releases?per_page=100&"* ]]; then
   body="$RH_CURL_GITLAB_RELEASES"
+  [[ "$url" != *'page=2' || -z "${RH_CURL_GITLAB_RELEASES_PAGE2:-}" ]] || body="$RH_CURL_GITLAB_RELEASES_PAGE2"
 elif [[ "$url" == *"/pulls/7/reviews?"* && -n "${RH_CURL_REPO_REVIEW_7_PAGE1:-}" ]]; then
   body="$RH_CURL_REPO_REVIEW_7_PAGE1"
   [[ "$url" != *'page=2' ]] || body="$RH_CURL_REPO_REVIEW_7_PAGE2"
@@ -410,6 +412,28 @@ assert d["pagination"]["issues"] == {"next":"page=2","complete":False}, d["pagin
 print("[forge-events] GitLab page cap exposes a resumable numeric cursor")
 PY
 [[ "$(grep -c 'issues?state=all' "$T/gitlab-partial-curl.args")" -eq 1 ]] || fail "GitLab page cap fetched an unrequested page"
+printf '%s\n' '[{"iid":101,"state":"opened","created_at":"2023-11-18T22:13:20Z","web_url":"https://gitlab.com/group/subgroup/project/-/issues/101"}]' > "$T/gitlab-live-issues-page2.json"
+PATH="$T/bin:$PATH" RH_CURL_GITLAB_ISSUES="$T/gitlab-live-full-issues.json" RH_CURL_GITLAB_ISSUES_PAGE2="$T/gitlab-live-issues-page2.json" \
+  RH_CURL_GITLAB_MERGE_REQUESTS="$T/gitlab-live-merge-requests.json" RH_CURL_GITLAB_RELEASES="$T/gitlab-live-releases.json" \
+  RH_CURL_LOG="$T/gitlab-resume-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
+  "$ROOT/build/rh_cli" forge events --gitlab-project group/subgroup/project --max-pages 1 --resume-from "$T/gitlab-partial.out" --out "$T/gitlab-resume.out" >/dev/null || fail "GitLab event continuation"
+python3 - "$T/gitlab-resume.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert [event["native_id"] for event in d["events"]] == ["gitlab:101"], d["events"]
+assert d["capabilities"]["issues"]["status"] == "observed" and d["capabilities"]["issues"]["count"] == 1, d["capabilities"]
+assert d["capabilities"]["proposals"]["status"] == "not_attempted" and d["capabilities"]["releases"]["status"] == "not_attempted", d["capabilities"]
+assert all(d["pagination"][name]["complete"] for name in ("issues", "proposals", "releases")), d["pagination"]
+print("[forge-events] GitLab continuation resumes only unfinished capability pages")
+PY
+[[ "$(grep -c 'https://gitlab.com/api/v4/projects/' "$T/gitlab-resume-curl.args")" -eq 1 ]] || fail "GitLab continuation refetched completed capabilities"
+grep -Fq 'issues?state=all&per_page=100&page=2' "$T/gitlab-resume-curl.args" || fail "GitLab continuation ignored its numeric cursor"
+set +e
+PATH="$T/bin:$PATH" RH_CURL_LOG="$T/gitlab-wrong-scope.args" \
+  "$ROOT/build/rh_cli" forge events --gitlab-project other/project --max-pages 1 --resume-from "$T/gitlab-partial.out" --out "$T/gitlab-wrong-scope.out" >/dev/null 2>&1
+gitlab_wrong_scope_rc=$?
+set -e
+[[ "$gitlab_wrong_scope_rc" -eq 4 && ! -e "$T/gitlab-wrong-scope.args" && ! -e "$T/gitlab-wrong-scope.out" ]] || fail "GitLab continuation crossed project scope"
 : > "$T/gitlab-http-error.args"
 set +e
 PATH="$T/bin:$PATH" RH_CURL_HTTP_STATUS=403 RH_CURL_GITLAB_ISSUES="$T/gitlab-live-issues.json" \

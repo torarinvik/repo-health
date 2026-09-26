@@ -16,6 +16,11 @@ module ForgeEventsFetch:
             pull_number: mutable i64
             next_page: mutable i64
 
+        struct RhFefGitlabCursor:
+            issues_page: mutable i64
+            proposals_page: mutable i64
+            releases_page: mutable i64
+
         def rh_fef_component_char(byte: u8) -> bool:
             (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95
 
@@ -128,6 +133,54 @@ module ForgeEventsFetch:
                 return false if texts[start.usize() + i] != value[i]
                 i <- i + 1
             true
+
+        def rh_fef_gitlab_cursor_page(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, pagination: i64, key: u8&, page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            cursor: i64 = Json::rh_json_obj_get(nodes, texts, pagination, key)
+            return false if cursor < 0 or nodes[cursor.usize()].kind != Json::RH_JSON_OBJ
+            complete_idx: i64 = Json::rh_json_obj_get(nodes, texts, cursor, "complete")
+            next_idx: i64 = Json::rh_json_obj_get(nodes, texts, cursor, "next")
+            return false if complete_idx < 0 or nodes[complete_idx.usize()].kind != Json::RH_JSON_BOOL or next_idx < 0
+            if nodes[next_idx.usize()].kind == Json::RH_JSON_NULL:
+                return false if not Json::rh_json_is_true(nodes, raw, complete_idx)
+                page_out[0] <- 0
+                return true
+            return false if Json::rh_json_is_true(nodes, raw, complete_idx)
+            start: mutable i64 = 0
+            finish: mutable i64 = 0
+            return false if not Json::rh_json_str_span(nodes, next_idx, &start, &finish) or finish - start < 6
+            return false if texts[start.usize()] != 112 or texts[(start + 1).usize()] != 97 or texts[(start + 2).usize()] != 103 or texts[(start + 3).usize()] != 101 or texts[(start + 4).usize()] != 61
+            page: mutable i64 = 0
+            while index < finish |index: i64 = start + 5, finish, texts, page|:
+                digit: u8 = texts[index.usize()]
+                return false if digit < 48 or digit > 57 or page > 214748364
+                page <- page * 10 + (digit - 48).i64()
+                index <- index + 1
+            return false if page < 1 or page > 2147483640
+            page_out[0] <- page
+            true
+
+        def rh_fef_gitlab_resume(previous: darray[u8]&, project: cstr, cursor_out: mutable RhFefGitlabCursor&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(previous, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -2 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "schema"), &schema_s, &schema_e) or not Base::rh_bytes_equal_literal(texts, schema_s, schema_e, "rh-forge-events-result/1")
+            provider_s: mutable i64 = 0
+            provider_e: mutable i64 = 0
+            return -3 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "provider"), &provider_s, &provider_e) or not Base::rh_bytes_equal_literal(texts, provider_s, provider_e, "gitlab")
+            scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scope")
+            return -4 if scope_idx < 0 or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
+            project_s: mutable i64 = 0
+            project_e: mutable i64 = 0
+            return -5 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, scope_idx, "project_path"), &project_s, &project_e) or not ForgeEventsFetch::rh_fef_span_matches_cstr(texts, project_s, project_e, project)
+            pagination: i64 = Json::rh_json_obj_get(nodes, texts, root, "pagination")
+            return -6 if pagination < 0 or nodes[pagination.usize()].kind != Json::RH_JSON_OBJ
+            return -7 if not ForgeEventsFetch::rh_fef_gitlab_cursor_page(nodes, previous, texts, pagination, "issues", &cursor_out.issues_page)
+            return -8 if not ForgeEventsFetch::rh_fef_gitlab_cursor_page(nodes, previous, texts, pagination, "proposals", &cursor_out.proposals_page)
+            return -9 if not ForgeEventsFetch::rh_fef_gitlab_cursor_page(nodes, previous, texts, pagination, "releases", &cursor_out.releases_page)
+            0
 
         def rh_fef_review_resume(previous: darray[u8]&, repository: cstr, pending_out: mutable darray[RhFefReviewCursor]&, next_pull_page_out: mutable i64&, pulls_complete_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             nodes: mutable darray[Json::RhJsonNode] = []
@@ -358,12 +411,17 @@ module ForgeEventsFetch:
         def rh_fef_fetch_pages(repository: cstr, endpoint: cstr, capability: cstr, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint, capability, 1, max_pages, RH_FEF_PAGE_SIZE, evidence_base, records, &item_total[0], &byte_total[0], &complete_out[0], &next_page_out[0])
 
-        def rh_fef_fetch_gitlab_pages(project_path: darray[u8]&, endpoint: cstr, capability: cstr, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_fetch_gitlab_pages(project_path: darray[u8]&, endpoint: cstr, capability: cstr, start_page: i64, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return false if max_pages < 1 or max_pages > RH_FEF_MAX_PAGES
-            page_number: mutable i64 = 1
+            if start_page == 0:
+                complete_out[0] <- 1
+                next_page_out[0] <- 0
+                return true
+            return false if start_page < 1 or start_page > 2147483640 or start_page + max_pages - 1 > 2147483640
+            page_number: mutable i64 = start_page
             pages_fetched: mutable i64 = 0
             complete: mutable bool = false
-            while page_number <= max_pages and not complete |page_number, max_pages, pages_fetched, complete, records, item_total, byte_total, project_path, endpoint, capability, evidence_base|:
+            while pages_fetched < max_pages and not complete |page_number, max_pages, pages_fetched, complete, records, item_total, byte_total, project_path, endpoint, capability, evidence_base|:
                 url: mutable darray[u8] = []
                 Base::rh_push_text(url, "https://gitlab.com/api/v4/projects/")
                 url.extend(bytes_view(project_path))
@@ -412,9 +470,12 @@ module ForgeEventsFetch:
         # Fetch bounded GitLab issue, merge-request, and release pages. Project
         # paths are encoded as one API path component; provider Link headers are
         # never followed. Raw response, URL, status, and stderr stay local.
-        def rh_forge_events_gitlab_live(project: cstr, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_forge_events_gitlab_live(project: cstr, max_pages: i64, evidence_base: cstr, previous: darray[u8]&, has_resume: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if not ForgeEventsFetch::rh_fef_gitlab_project_valid(project) or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
             project_path: mutable darray[u8] = ForgeEventsFetch::rh_fef_gitlab_project_path(project)
+            cursor: mutable RhFefGitlabCursor = RhFefGitlabCursor{issues_page: 1, proposals_page: 1, releases_page: 1}
+            resume_status: i64 = ForgeEventsFetch::rh_fef_gitlab_resume(previous, project, &cursor) if has_resume else 0
+            return resume_status - 10 if resume_status < 0
             issues: mutable darray[u8] = []
             proposals: mutable darray[u8] = []
             releases: mutable darray[u8] = []
@@ -428,9 +489,9 @@ module ForgeEventsFetch:
             issues_next_page: mutable i64 = 1
             proposals_next_page: mutable i64 = 1
             releases_next_page: mutable i64 = 1
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "issues?state=all&per_page=100&page=", "issues", max_pages, evidence_base, issues, &issues_total, &byte_total, &issues_complete, &issues_next_page)
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "merge_requests?state=all&order_by=updated_at&sort=desc&per_page=100&page=", "merge-requests", max_pages, evidence_base, proposals, &proposals_total, &byte_total, &proposals_complete, &proposals_next_page)
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "releases?per_page=100&page=", "releases", max_pages, evidence_base, releases, &releases_total, &byte_total, &releases_complete, &releases_next_page)
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "issues?state=all&per_page=100&page=", "issues", cursor.issues_page, max_pages, evidence_base, issues, &issues_total, &byte_total, &issues_complete, &issues_next_page)
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "merge_requests?state=all&order_by=updated_at&sort=desc&per_page=100&page=", "merge-requests", cursor.proposals_page, max_pages, evidence_base, proposals, &proposals_total, &byte_total, &proposals_complete, &proposals_next_page)
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "releases?per_page=100&page=", "releases", cursor.releases_page, max_pages, evidence_base, releases, &releases_total, &byte_total, &releases_complete, &releases_next_page)
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             token: u8&? = getenv("RH_GITLAB_TOKEN")
@@ -441,13 +502,21 @@ module ForgeEventsFetch:
             Base::rh_push_text(capture, "authorized" if token != null else "not_requested")
             Base::rh_push_text(capture, "\"},\"scope\":{\"project_path\":\"")
             Base::rh_push_cstr(capture, project)
-            Base::rh_push_text(capture, "\"},\"capability_states\":{\"reviews\":\"not_attempted\"},\"issues\":[")
-            capture.extend(bytes_view(issues))
-            Base::rh_push_text(capture, "],\"proposals\":[")
-            capture.extend(bytes_view(proposals))
-            Base::rh_push_text(capture, "],\"releases\":[")
-            capture.extend(bytes_view(releases))
-            Base::rh_push_text(capture, "],\"pagination\":{\"issues\":")
+            Base::rh_push_text(capture, "\"},\"capability_states\":{\"reviews\":\"not_attempted\"")
+            Base::rh_push_text(capture, ",\"issues\":\"not_attempted\"") if cursor.issues_page == 0
+            Base::rh_push_text(capture, ",\"proposals\":\"not_attempted\"") if cursor.proposals_page == 0
+            Base::rh_push_text(capture, ",\"releases\":\"not_attempted\"") if cursor.releases_page == 0
+            Base::rh_push_text(capture, "}")
+            Base::rh_push_text(capture, ",\"issues\":[") if cursor.issues_page != 0
+            capture.extend(bytes_view(issues)) if cursor.issues_page != 0
+            Base::rh_push_text(capture, "]") if cursor.issues_page != 0
+            Base::rh_push_text(capture, ",\"proposals\":[") if cursor.proposals_page != 0
+            capture.extend(bytes_view(proposals)) if cursor.proposals_page != 0
+            Base::rh_push_text(capture, "]") if cursor.proposals_page != 0
+            Base::rh_push_text(capture, ",\"releases\":[") if cursor.releases_page != 0
+            capture.extend(bytes_view(releases)) if cursor.releases_page != 0
+            Base::rh_push_text(capture, "]") if cursor.releases_page != 0
+            Base::rh_push_text(capture, ",\"pagination\":{\"issues\":")
             ForgeEventsFetch::rh_fef_push_pagination(capture, issues_complete == 1, issues_next_page)
             Base::rh_push_text(capture, ",\"proposals\":")
             ForgeEventsFetch::rh_fef_push_pagination(capture, proposals_complete == 1, proposals_next_page)

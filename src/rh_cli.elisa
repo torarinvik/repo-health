@@ -189,7 +189,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli ops monitor --input <file> --out <file> | ops quota --input <file> --out <file>")
     rh_cli_err("       rh_cli pilot-review --input <file> --out <file>")
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
-    rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [--review-pull N | --review-repository] | --gitlab-project <group/path>) --out <file> [--max-pages N]")
+    rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [review options] | --gitlab-project <group/path> [--resume-from <result>]) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli staged-normalize --input <provider-specific staged token|rh-postgres-staged-forge-events-input/1> --out <file> [--postgres]")
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
     rh_cli_err("       rh_cli connector probe (--github-repo <owner/repo> [--all | --review-pull N | --collaborators] | --gitlab-project <group/project> --all | --instance <approved-instance.json> --repository <owner/repo> --all | --bitbucket-repo <workspace/repo> --all) --out <file>")
@@ -1709,7 +1709,7 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                     else:
                         return rh_cli_usage(2)
                     feq <- feq + 1
-            return rh_cli_usage(2) if feo_idx < 0 or (fei_idx < 0 and feg_idx < 0 and fgl_idx < 0) or (fei_idx >= 0 and (feg_idx >= 0 or fgl_idx >= 0)) or (feg_idx >= 0 and fgl_idx >= 0) or ((fer_idx >= 0 or fep_idx >= 0 or frepo_reviews or frepo_pull_limit_idx >= 0 or frepo_resume_idx >= 0) and (feg_idx < 0 or fgl_idx >= 0)) or (fep_idx >= 0 and fer_idx < 0) or (frepo_reviews and (fer_idx >= 0 or fep_idx >= 0)) or ((frepo_pull_limit_idx >= 0 or frepo_resume_idx >= 0) and not frepo_reviews)
+            return rh_cli_usage(2) if feo_idx < 0 or (fei_idx < 0 and feg_idx < 0 and fgl_idx < 0) or (fei_idx >= 0 and (feg_idx >= 0 or fgl_idx >= 0)) or (feg_idx >= 0 and fgl_idx >= 0) or ((fer_idx >= 0 or fep_idx >= 0 or frepo_reviews or frepo_pull_limit_idx >= 0) and (feg_idx < 0 or fgl_idx >= 0)) or (fep_idx >= 0 and fer_idx < 0) or (frepo_reviews and (fer_idx >= 0 or fep_idx >= 0)) or ((frepo_pull_limit_idx >= 0) and not frepo_reviews) or (frepo_resume_idx >= 0 and feg_idx < 0 and fgl_idx < 0)
             if fei_idx >= 0:
                 return rh_cli_usage(2) if fem_idx >= 0 or fer_idx >= 0 or fep_idx >= 0 or frepo_reviews or frepo_pull_limit_idx >= 0 or frepo_resume_idx >= 0
                 return rh_do_forge_events(slots[fei_idx], slots[feo_idx])
@@ -1720,7 +1720,11 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 return rh_cli_usage(2) if ok == 0 or parsed < 1 or parsed > 10
                 max_pages <- parsed
             if fgl_idx >= 0:
-                return rh_do_forge_events_gitlab(slots[fgl_idx], slots[feo_idx], max_pages)
+                gitlab_resume_path: mutable cstr = slots[feo_idx]
+                gitlab_has_resume: bool = frepo_resume_idx >= 0
+                if gitlab_has_resume:
+                    gitlab_resume_path <- slots[frepo_resume_idx]
+                return rh_do_forge_events_gitlab(slots[fgl_idx], slots[feo_idx], max_pages, gitlab_resume_path, gitlab_has_resume)
             if frepo_reviews:
                 pull_limit: mutable i64 = 10
                 if frepo_pull_limit_idx >= 0:
@@ -6906,13 +6910,30 @@ def rh_do_forge_events_github(repository: cstr, out_path: cstr, max_pages: i64) 
     rh_cli_out("forge events: GitHub issues, proposals, and releases collected")
     0
 
-def rh_do_forge_events_gitlab(project: cstr, out_path: cstr, max_pages: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_forge_events_gitlab(project: cstr, out_path: cstr, max_pages: i64, resume_path: cstr, has_resume: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected forge events output path (allowlist)")
         return 3
+    previous: mutable darray[u8] = []
+    if has_resume:
+        if not Git::rh_arg_safe(resume_path) or Base::rh_io_read(resume_path, previous) < 0 or previous.count > 8388608:
+            rh_cli_err("forge events: cannot read bounded GitLab continuation")
+            return 4
     body: mutable darray[u8] = []
-    if ForgeEventsFetch::rh_forge_events_gitlab_live(project, max_pages, out_path, body) != 0:
-        rh_cli_err("forge events: GitLab event collection failed (see page evidence)")
+    fetch_status: i64 = ForgeEventsFetch::rh_forge_events_gitlab_live(project, max_pages, out_path, previous, has_resume, body)
+    if fetch_status != 0:
+        if fetch_status == -17:
+            rh_cli_err("forge events: GitLab continuation rejected: invalid issue cursor")
+        elif fetch_status == -18:
+            rh_cli_err("forge events: GitLab continuation rejected: invalid merge-request cursor")
+        elif fetch_status == -19:
+            rh_cli_err("forge events: GitLab continuation rejected: invalid release cursor")
+        elif has_resume and fetch_status <= -11 and fetch_status >= -15:
+            rh_cli_err("forge events: GitLab continuation rejected: result/project mismatch")
+        elif fetch_status == -16:
+            rh_cli_err("forge events: GitLab continuation rejected: result pagination missing")
+        else:
+            rh_cli_err("forge events: GitLab event collection failed (see page evidence)")
         return 4
     body.push(10)
     if not Base::rh_io_write(out_path, body):
