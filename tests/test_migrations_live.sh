@@ -1035,6 +1035,8 @@ DO $$
 DECLARE
   outgoing_plan json;
   incoming_plan json;
+  batch_outgoing_plan json;
+  batch_incoming_plan json;
   outgoing_count integer;
   limited_count integer;
   incoming_count integer;
@@ -1056,6 +1058,8 @@ BEGIN
   END IF;
   EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT to_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND from_entity_id = ''00000000-0000-0000-0000-000001000001'' AND edge_kind = ''depends_on''' INTO outgoing_plan;
   EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT from_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND to_entity_id = ''00000000-0000-0000-0000-000001005002'' AND edge_kind = ''depends_on''' INTO incoming_plan;
+  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) WITH candidates AS MATERIALIZED (SELECT pm.from_entity_id, pm.to_entity_id FROM projection_membership AS pm WHERE pm.projection_id = ''00000000-0000-0000-0000-000000009001'' AND pm.edge_kind = ''depends_on'' AND pm.from_entity_id = ANY (ARRAY[''00000000-0000-0000-0000-000001000001''::uuid, ''00000000-0000-0000-0000-000001000002''::uuid]) ORDER BY pm.from_entity_id, pm.to_entity_id LIMIT 10001) SELECT from_entity_id, to_entity_id FROM candidates ORDER BY from_entity_id, to_entity_id LIMIT 10000' INTO batch_outgoing_plan;
+  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) WITH candidates AS MATERIALIZED (SELECT pm.from_entity_id, pm.to_entity_id FROM projection_membership AS pm WHERE pm.projection_id = ''00000000-0000-0000-0000-000000009001'' AND pm.edge_kind = ''depends_on'' AND pm.to_entity_id = ANY (ARRAY[''00000000-0000-0000-0000-000001005002''::uuid]) ORDER BY pm.to_entity_id, pm.from_entity_id LIMIT 10001) SELECT from_entity_id, to_entity_id FROM candidates ORDER BY to_entity_id, from_entity_id LIMIT 10000' INTO batch_incoming_plan;
   IF outgoing_plan::text LIKE '%"Node Type": "Seq Scan"%'
      OR outgoing_plan::text NOT LIKE '%dependency_outgoing%'
         AND outgoing_plan::text NOT LIKE '%projection_membership_pkey%' THEN
@@ -1064,6 +1068,15 @@ BEGIN
   IF incoming_plan::text LIKE '%"Node Type": "Seq Scan"%'
      OR incoming_plan::text NOT LIKE '%dependency_incoming%' THEN
     RAISE EXCEPTION 'incoming high-degree query did not use its adjacency index: %', incoming_plan;
+  END IF;
+  IF batch_outgoing_plan::text LIKE '%"Node Type": "Seq Scan"%'
+     OR batch_outgoing_plan::text NOT LIKE '%dependency_outgoing%'
+        AND batch_outgoing_plan::text NOT LIKE '%projection_membership_pkey%' THEN
+    RAISE EXCEPTION 'batched outgoing query did not use an adjacency index: %', batch_outgoing_plan;
+  END IF;
+  IF batch_incoming_plan::text LIKE '%"Node Type": "Seq Scan"%'
+     OR batch_incoming_plan::text NOT LIKE '%dependency_incoming%' THEN
+    RAISE EXCEPTION 'batched incoming query did not use its adjacency index: %', batch_incoming_plan;
   END IF;
   SELECT edges, truncated INTO result_edges, result_truncated
   FROM rh_projection_adjacency_batch(
