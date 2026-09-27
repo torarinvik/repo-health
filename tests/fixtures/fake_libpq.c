@@ -251,6 +251,12 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = enqueue_values;
         expected_count = 5;
         prefix = "SELECT public.rh_enqueue_collection_job(";
+    } else if (operation != NULL && (strcmp(operation, "source_stop") == 0 || strcmp(operation, "source_resume") == 0)) {
+        static const char *source_stop_values[4] = { "00000000-0000-0000-0000-000000000201", "operator@example.org", "Requested by project operator", "2026-01-10T00:00:00Z" };
+        static const char *source_resume_values[4] = { "00000000-0000-0000-0000-000000000201", "reviewer@example.org", "Opt-out withdrawn by operator", "2026-01-11T00:00:00Z" };
+        expected = strcmp(operation, "source_stop") == 0 ? source_stop_values : source_resume_values;
+        expected_count = 4;
+        prefix = strcmp(operation, "source_stop") == 0 ? "SELECT public.rh_request_source_stop(" : "SELECT public.rh_resolve_source_stop(";
     } else if (operation != NULL && strcmp(operation, "enqueue_graph") == 0) {
         expected = enqueue_graph_values;
         expected_count = 6;

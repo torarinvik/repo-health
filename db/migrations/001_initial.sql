@@ -24,6 +24,26 @@ CREATE TABLE source_instance (
     UNIQUE (kind, base_url, visibility_scope)
 );
 
+-- Operator stop requests are durable, auditable controls over future and
+-- currently leased collection work. Resolution never deletes the request.
+CREATE TABLE source_stop_request (
+    id uuid PRIMARY KEY,
+    source_instance_id uuid NOT NULL REFERENCES source_instance(id),
+    requested_at timestamptz NOT NULL,
+    requested_by text NOT NULL CHECK (length(btrim(requested_by)) BETWEEN 1 AND 256),
+    reason text NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 1024),
+    resolved_at timestamptz,
+    resolved_by text,
+    resolution_reason text,
+    CHECK ((resolved_at IS NULL AND resolved_by IS NULL AND resolution_reason IS NULL)
+        OR (resolved_at IS NOT NULL AND resolved_by IS NOT NULL AND resolution_reason IS NOT NULL
+            AND length(btrim(resolved_by)) BETWEEN 1 AND 256
+            AND length(btrim(resolution_reason)) BETWEEN 1 AND 1024
+            AND resolved_at >= requested_at))
+);
+CREATE UNIQUE INDEX source_stop_one_active
+    ON source_stop_request (source_instance_id) WHERE resolved_at IS NULL;
+
 CREATE TABLE capability_observation (
     id uuid PRIMARY KEY,
     source_instance_id uuid NOT NULL REFERENCES source_instance(id),
@@ -695,6 +715,8 @@ CREATE INDEX identity_current ON identity_assertion (account_id, scope, state, r
 CREATE INDEX finding_open ON finding (subject_id, visibility_scope) WHERE state = 'open';
 CREATE INDEX job_runnable ON job (priority DESC, next_attempt_at, created_at)
     WHERE state = 'queued' OR (state = 'running' AND lease_expires_at IS NOT NULL);
+CREATE INDEX job_source_active_collection ON job (source_instance_id, state, id)
+    WHERE kind = 'collection' AND state IN ('queued', 'running');
 CREATE INDEX outbox_pending ON outbox_event (created_at) WHERE published_at IS NULL;
 
 -- Register metadata only after the caller verifies the content-addressed blob.
@@ -809,7 +831,7 @@ BEGIN
     ) ON CONFLICT (id) DO NOTHING;
 
     IF NOT FOUND THEN
-        SELECT * INTO v_existing_source FROM source_instance WHERE id = p_source_id;
+        SELECT * INTO v_existing_source FROM source_instance WHERE id = p_source_id FOR UPDATE;
         IF NOT FOUND THEN
             RAISE EXCEPTION 'source instance identity conflict could not be read';
         END IF;
@@ -820,6 +842,10 @@ BEGIN
            OR v_existing_source.created_at IS DISTINCT FROM p_source_created_at THEN
             RAISE EXCEPTION 'source instance identity is already registered with different immutable metadata';
         END IF;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM source_stop_request WHERE source_instance_id = p_source_id AND resolved_at IS NULL) THEN
+        RAISE EXCEPTION 'collection source is stopped: %', p_source_id;
     END IF;
 
     INSERT INTO collection_run (
@@ -851,6 +877,99 @@ BEGIN
 END;
 $$;
 
+-- Record an operator stop and fence/cancel queued or leased collection work.
+-- Exact repeats return false. In-flight network calls may finish, but their
+-- incremented fencing token prevents any later page or terminal commit.
+CREATE FUNCTION rh_request_source_stop(
+    p_source_id uuid,
+    p_requested_by text,
+    p_reason text,
+    p_requested_at timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_source source_instance%ROWTYPE;
+    v_stop_id uuid;
+BEGIN
+    SELECT * INTO v_source FROM source_instance WHERE id = p_source_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'source does not exist: %', p_source_id;
+    END IF;
+    IF EXISTS (SELECT 1 FROM source_stop_request WHERE source_instance_id = p_source_id AND resolved_at IS NULL) THEN
+        RETURN false;
+    END IF;
+    v_stop_id := gen_random_uuid();
+    INSERT INTO source_stop_request (id, source_instance_id, requested_at, requested_by, reason)
+    VALUES (v_stop_id, p_source_id, p_requested_at, p_requested_by, p_reason);
+
+    UPDATE job
+    SET state = 'canceled',
+        fencing_token = fencing_token + 1,
+        worker_id = NULL,
+        lease_expires_at = NULL,
+        finished_at = p_requested_at
+    WHERE source_instance_id = p_source_id
+      AND kind = 'collection'
+      AND state IN ('queued', 'running');
+
+    UPDATE collection_run AS r
+    SET status = 'canceled',
+        completeness = CASE WHEN EXISTS (
+            SELECT 1 FROM collection_page AS page WHERE page.collection_run_id = r.id
+        ) THEN 'partial' ELSE 'unknown' END,
+        finished_at = p_requested_at,
+        coverage_details = r.coverage_details || jsonb_build_object('stop_reason', 'operator_stop', 'stopped_at', p_requested_at)
+    WHERE r.status = 'running'
+      AND EXISTS (
+          SELECT 1 FROM job AS j
+          WHERE j.source_instance_id = p_source_id
+            AND j.kind = 'collection'
+            AND j.state = 'canceled'
+            AND j.finished_at = p_requested_at
+            AND j.input_manifest->>'collection_run_id' = r.id::text
+      );
+
+    UPDATE job_attempt AS a
+    SET finished_at = p_requested_at,
+        outcome = 'operator_stopped',
+        error_kind = 'operator_stopped'
+    FROM job AS j
+    WHERE j.id = a.job_id
+      AND j.source_instance_id = p_source_id
+      AND j.kind = 'collection'
+      AND j.state = 'canceled'
+      AND a.finished_at IS NULL;
+    RETURN true;
+END;
+$$;
+
+-- A resume is an explicit audited action; it resolves the active request but
+-- does not revive canceled jobs or runs. The scheduler must create a new run.
+CREATE FUNCTION rh_resolve_source_stop(
+    p_source_id uuid,
+    p_resolved_by text,
+    p_resolution_reason text,
+    p_resolved_at timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_source source_instance%ROWTYPE;
+BEGIN
+    SELECT * INTO v_source FROM source_instance WHERE id = p_source_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'source does not exist: %', p_source_id;
+    END IF;
+    UPDATE source_stop_request
+    SET resolved_at = p_resolved_at,
+        resolved_by = p_resolved_by,
+        resolution_reason = p_resolution_reason
+    WHERE source_instance_id = p_source_id AND resolved_at IS NULL;
+    RETURN FOUND;
+END;
+$$;
+
 -- Queue a collection run with an immutable run binding. The worker performs
 -- acquisition outside this transaction, then commits pages under the lease.
 CREATE FUNCTION rh_enqueue_collection_job(
@@ -876,6 +995,9 @@ BEGIN
     FOR UPDATE OF r, s;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'collection run does not exist: %', p_run_id;
+    END IF;
+    IF EXISTS (SELECT 1 FROM source_stop_request WHERE source_instance_id = v_source_instance_id AND resolved_at IS NULL) THEN
+        RAISE EXCEPTION 'collection source is stopped: %', v_source_instance_id;
     END IF;
 
     SELECT * INTO v_existing_job
@@ -930,6 +1052,11 @@ AS $$
         FROM job AS j
         WHERE (j.state = 'queued' OR (j.state = 'running' AND j.lease_expires_at <= p_now))
           AND j.next_attempt_at <= p_now
+          AND (j.kind <> 'collection' OR NOT EXISTS (
+              SELECT 1 FROM source_stop_request AS stop_request
+              WHERE stop_request.source_instance_id = j.source_instance_id
+                AND stop_request.resolved_at IS NULL
+          ))
           AND (p_job_id IS NULL OR j.id = p_job_id)
           AND (p_job_kind IS NULL OR j.kind = p_job_kind)
         -- Collection evidence is essential work; optional graph projections

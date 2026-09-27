@@ -24,7 +24,7 @@ tables = set(re.findall(r"CREATE TABLE\s+([a-z_][a-z0-9_]*)", clean, re.I))
 functions = set(re.findall(r"CREATE FUNCTION\s+([a-z_][a-z0-9_]*)", clean, re.I))
 
 required_tables = {
-    "source_instance", "capability_observation", "credential_reference",
+    "source_instance", "source_stop_request", "capability_observation", "credential_reference",
     "collection_run", "collection_page", "collection_cursor", "job", "job_attempt",
     "graph_query_job",
     "staged_source_record",
@@ -47,7 +47,7 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_claim_graph_query_job", "rh_read_graph_query_request", "rh_get_graph_query_job", "rh_publish_graph_query_result", "rh_retry_graph_query_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events", "rh_reconcile_source_objects"} <= functions
+assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_request_source_stop", "rh_resolve_source_stop", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_claim_graph_query_job", "rh_read_graph_query_request", "rh_get_graph_query_job", "rh_publish_graph_query_result", "rh_retry_graph_query_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events", "rh_reconcile_source_objects"} <= functions
 assert all(
     re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).lstrip().startswith("BEGIN;") and
     re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).rstrip().endswith("COMMIT;")
@@ -91,6 +91,7 @@ assert "p_job_id IS NULL OR j.id = p_job_id" in clean
 assert "p_job_kind IS NULL OR j.kind = p_job_kind" in clean
 assert "CASE WHEN j.kind = 'collection' THEN 0 ELSE 1 END" in clean
 assert "load_shed_collection_backlog" in clean
+assert "collection source is stopped" in clean and "resolved_at IS NULL" in clean and "operator_stopped" in clean
 assert "essential.lease_expires_at > p_now" in clean
 assert "graph query request is malformed or exceeds the bounded payload limit" in clean
 assert "graph query result is malformed or exceeds the bounded payload limit" in clean
@@ -118,6 +119,7 @@ for fragment in (
     "CREATE INDEX dependency_outgoing",
     "CREATE INDEX evidence_digest_lookup",
     "CREATE INDEX metric_subject_lookup",
+    "CREATE INDEX job_source_active_collection",
 ):
     assert fragment in clean, f"missing invariant/index: {fragment}"
 

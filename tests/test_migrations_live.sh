@@ -1059,5 +1059,71 @@ END $$;
 SQL
 echo "[migrations-live] EXPLAIN ANALYZE confirms indexed high-degree incoming/outgoing adjacency"
 
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "durable operator source stop lifecycle"
+DO $$
+DECLARE
+  claimed record;
+BEGIN
+  IF NOT rh_begin_collection_run(
+    '00000000-0000-0000-0000-000000000201', 'fixture', 'https://example.org/stopped', 'public', 1,
+    '2026-01-09T00:00:00Z', '00000000-0000-0000-0000-000000000202', 'issues', 'fixture', '1',
+    NULL, NULL, '2026-01-09T00:00:00Z'
+  ) THEN RAISE EXCEPTION 'initial stop-test run was not created'; END IF;
+  IF NOT rh_begin_collection_run(
+    '00000000-0000-0000-0000-000000000201', 'fixture', 'https://example.org/stopped', 'public', 1,
+    '2026-01-09T00:00:00Z', '00000000-0000-0000-0000-000000000203', 'issues', 'fixture', '1',
+    NULL, NULL, '2026-01-09T00:00:00Z'
+  ) THEN RAISE EXCEPTION 'queued stop-test run was not created'; END IF;
+  IF NOT rh_enqueue_collection_job('00000000-0000-0000-0000-000000000202', '00000000-0000-0000-0000-000000000204', 1, '2026-01-09T00:00:00Z', '2026-01-09T00:00:00Z')
+     OR NOT rh_enqueue_collection_job('00000000-0000-0000-0000-000000000203', '00000000-0000-0000-0000-000000000205', 1, '2026-01-09T00:00:00Z', '2026-01-09T00:00:00Z') THEN
+    RAISE EXCEPTION 'stop-test jobs were not enqueued';
+  END IF;
+  SELECT * INTO claimed FROM rh_claim_next_job('stop-test-worker', '2026-01-09T00:00:01Z', 60, '00000000-0000-0000-0000-000000000204');
+  IF claimed.job_id <> '00000000-0000-0000-0000-000000000204'::uuid OR claimed.fencing_token <> 1 THEN
+    RAISE EXCEPTION 'stop-test job was not leased';
+  END IF;
+  IF NOT rh_request_source_stop('00000000-0000-0000-0000-000000000201', 'operator@example.org', 'Requested stop', '2026-01-10T00:00:00Z')
+     OR rh_request_source_stop('00000000-0000-0000-0000-000000000201', 'operator@example.org', 'Repeated stop', '2026-01-10T00:00:01Z') THEN
+    RAISE EXCEPTION 'source stop did not record once';
+  END IF;
+  IF (SELECT count(*) FROM job WHERE source_instance_id = '00000000-0000-0000-0000-000000000201' AND state = 'canceled') <> 2
+     OR (SELECT fencing_token FROM job WHERE id = '00000000-0000-0000-0000-000000000204') <> 2
+     OR (SELECT outcome FROM job_attempt WHERE job_id = '00000000-0000-0000-0000-000000000204') <> 'operator_stopped'
+     OR rh_heartbeat_job('00000000-0000-0000-0000-000000000204', 1, '2026-01-10T00:00:01Z', 60) THEN
+    RAISE EXCEPTION 'source stop failed to cancel and fence collection work';
+  END IF;
+  BEGIN
+    PERFORM rh_enqueue_collection_job('00000000-0000-0000-0000-000000000203', '00000000-0000-0000-0000-000000000208', 1, '2026-01-10T00:00:00Z', '2026-01-10T00:00:00Z');
+    RAISE EXCEPTION 'stopped source accepted an enqueue';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM = 'stopped source accepted an enqueue' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM rh_begin_collection_run(
+      '00000000-0000-0000-0000-000000000201', 'fixture', 'https://example.org/stopped', 'public', 1,
+      '2026-01-09T00:00:00Z', '00000000-0000-0000-0000-000000000206', 'issues', 'fixture', '1',
+      NULL, NULL, '2026-01-10T00:00:00Z'
+    );
+    RAISE EXCEPTION 'stopped source accepted a new run';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM = 'stopped source accepted a new run' THEN RAISE; END IF;
+  END;
+  IF NOT rh_resolve_source_stop('00000000-0000-0000-0000-000000000201', 'reviewer@example.org', 'Stop withdrawn', '2026-01-11T00:00:00Z')
+     OR rh_resolve_source_stop('00000000-0000-0000-0000-000000000201', 'reviewer@example.org', 'Repeated resume', '2026-01-11T00:00:01Z') THEN
+    RAISE EXCEPTION 'source stop resolution did not record once';
+  END IF;
+  IF (SELECT count(*) FROM source_stop_request WHERE source_instance_id = '00000000-0000-0000-0000-000000000201' AND resolved_at IS NOT NULL) <> 1
+     OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000204') <> 'canceled'
+     OR NOT rh_begin_collection_run(
+       '00000000-0000-0000-0000-000000000201', 'fixture', 'https://example.org/stopped', 'public', 1,
+       '2026-01-09T00:00:00Z', '00000000-0000-0000-0000-000000000206', 'issues', 'fixture', '1',
+       NULL, NULL, '2026-01-11T00:00:00Z'
+     ) THEN
+    RAISE EXCEPTION 'resume did not preserve the audit or permit a fresh run';
+  END IF;
+END $$;
+SQL
+echo "[migrations-live] audited source stop cancels/fences work, blocks new runs/jobs, and requires a fresh run after resume"
+
 echo "[migrations-live] source/run, staged normalization, enqueue/claim/finish, lease-reclaim audit, stale/expired fencing, rollback, and crash-recovery boundaries OK"
 echo "test_migrations_live OK"

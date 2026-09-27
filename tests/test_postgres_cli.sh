@@ -47,6 +47,25 @@ run_ok poll_graph duplicate get-graph-query-job
 run_ok poll_graph empty get-graph-query-job
 run_ok current_state applied reconcile-source-objects
 run_ok current_state duplicate reconcile-source-objects
+run_ok source_stop committed request-source-stop
+run_ok source_stop duplicate request-source-stop
+run_ok source_resume committed resolve-source-stop
+run_ok source_resume duplicate resolve-source-stop
+python3 - "$T/request-source-stop-committed.json" "$T/request-source-stop-duplicate.json" "$T/resolve-source-stop-committed.json" "$T/resolve-source-stop-duplicate.json" <<'PY'
+import json, sys
+stopped, already_stopped, resumed, already_running = [json.load(open(path)) for path in sys.argv[1:]]
+assert stopped["status"] == "stopped", stopped
+assert already_stopped["status"] == "already_stopped", already_stopped
+assert resumed["status"] == "resumed", resumed
+assert already_running["status"] == "not_stopped", already_running
+PY
+if RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=source_stop RH_FAKE_PG_EXPECT=failure \
+    "$ROOT/build/rh_cli" postgres --input "$ROOT/fixtures/postgres/request-source-stop-command.json" \
+      --out "$T/source-stop-failure.json" >/dev/null 2>&1; then
+  fail "source stop accepted a database failure"
+fi
+[[ ! -e "$T/source-stop-failure.json" ]] || fail "failed source stop wrote a result"
 RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
   RH_FAKE_PG_OPERATION=monitor RH_FAKE_PG_EXPECT=ok \
   "$ROOT/build/rh_cli" postgres monitor --expected-interval 3600 --out "$T/monitor.json" >/dev/null \
