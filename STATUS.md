@@ -481,7 +481,10 @@ too: `src/rh_identity_report.elisa` + `rh_cli identity --input <file> --out
 with the identity revision, clusters over ACCEPTED links only, a per-actor
 cluster map, and actor-kind stratification; rejecting/proposing changes
 nothing and revoking recomputes clusters and changes the revision with no
-raw record rewritten (`tests/test_identity_cli.sh`). Declared roles are a
+raw record rewritten (`tests/test_identity_cli.sh`). Identity normalization
+also writes a digest-bound transformation sidecar for exact input/output bytes
+and pinned configuration, separate from the evidence-store verification
+report. Declared roles are a
 real path too: `src/rh_roles_report.elisa` + `rh_cli roles --input <file>
 --out <file>` emit `rh-roles-result/1` with time-scoped role/permission
 queries (a revoked or not-yet-effective declaration is inactive, an

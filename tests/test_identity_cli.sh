@@ -29,10 +29,16 @@ import hashlib, json, sys
 source, output = sys.argv[1:]
 v = json.load(open(output + ".evidence-verification.json"))
 n = json.load(open(output + ".identity-review-notices.json"))
+tr = json.load(open(output + ".transformations.json"))
 assert v["state"] == "unverified" and v["verified_reference_count"] == 0, v
 assert n["state"] == "unverified" and n["notice_count"] == 0 and n["notices"] == [], n
 assert v["source_input_sha256"] == n["source_input_sha256"] == hashlib.sha256(open(source, "rb").read()).hexdigest()
 assert v["identity_output_sha256"] == n["identity_output_sha256"] == hashlib.sha256(open(output, "rb").read()).hexdigest()
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "reviewed-identity-ledger", tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(source, "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(output, "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/reviewed-identity-ledger/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 print("[identity] absent evidence-store state is explicit and bound")
 PY
 python3 - "$T/a.out" <<'PY'
