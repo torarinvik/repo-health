@@ -3937,6 +3937,8 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         yedges: mutable darray[Package::RhDepEdge] = []
         yunres: mutable darray[Package::RhUnresolved] = []
         yartifacts: mutable darray[Package::RhArtifact] = []
+        poetry_lock_bytes: mutable darray[u8] = []
+        has_poetry_lock: bool = file_exists(poetry_lock_ptr)
         yroot: i64 = |pyb, ypkgs, ypool, yreqs, yedges, yunres|
             yunk: mutable i64 = 0
             block_result: i64 = Package::rh_pypi_parse_pep621(pyb, ypkgs, ypool, yreqs, yedges, yunres, &yunk)
@@ -3944,8 +3946,7 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         if yroot < 0:
             rh_cli_err("deps: malformed pyproject.toml PEP 621 subset (structured failure, no partial graph)")
             return 4
-        if file_exists(poetry_lock_ptr):
-            poetry_lock_bytes: mutable darray[u8] = []
+        if has_poetry_lock:
             if Base::rh_io_read(poetry_lock_ptr, poetry_lock_bytes) < 0:
                 rh_cli_err("deps: cannot read poetry.lock")
                 return 4
@@ -3972,6 +3973,30 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         yfp: cstr = (&yf[0]).cast[cstr] can Unsafe.PointerCast
         if not Base::rh_io_write(yfp, yg):
             rh_cli_err("deps: cannot write pypi graph")
+            return 4
+        pyproject_transform_input: mutable darray[u8] =
+            pyproject_transform_input: mutable darray[u8] = []
+            Base::rh_push_decimal_i64(pyproject_transform_input, pyb.count.i64())
+            pyproject_transform_input.push(58)
+            pyproject_transform_input.extend(bytes_view(pyb))
+            Base::rh_push_decimal_i64(pyproject_transform_input, poetry_lock_bytes.count.i64())
+            pyproject_transform_input.push(58)
+            pyproject_transform_input.extend(bytes_view(poetry_lock_bytes))
+            Base::rh_push_decimal_i64(pyproject_transform_input, osv_source_bytes.count.i64())
+            pyproject_transform_input.push(58)
+            pyproject_transform_input.extend(bytes_view(osv_source_bytes))
+            pyproject_transform_input
+        pyproject_transform_configuration: mutable darray[u8] =
+            pyproject_transform_configuration: mutable darray[u8] = []
+            Base::rh_push_text(pyproject_transform_configuration, "repo-health/python-pyproject/1;poetry-lock=")
+            Base::rh_push_text(pyproject_transform_configuration, "present" if has_poetry_lock else "absent")
+            Base::rh_push_text(pyproject_transform_configuration, ";osv=")
+            Base::rh_push_text(pyproject_transform_configuration, "fetched" if has_osv_url else "file" if resolved_has_osv else "none")
+            pyproject_transform_configuration.push(0)
+            pyproject_transform_configuration
+        pyproject_transform_configuration_ptr: cstr = (&pyproject_transform_configuration[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_cli_write_adapter_transformation(pyproject_transform_input, yg, "python-pyproject-graph", "rh-dep-graph/1", pyproject_transform_configuration_ptr, "[{\"source\":\"PEP 621 project dependency declarations and optional groups\",\"target\":\"PyPI root requirements and scopes\",\"state\":\"preserved\"},{\"source\":\"exact Poetry lock package identities, versions, and dependencies\",\"target\":\"resolved nodes, scoped edges, and artifacts\",\"state\":\"transformed\"},{\"source\":\"markers, version ranges, and unsupported Poetry constructs\",\"target\":\"unresolved requirements\",\"state\":\"unknown\"},{\"source\":\"unsupported PEP 621 or Poetry syntax\",\"target\":\"graph projection\",\"state\":\"unsupported\"},{\"source\":\"optional retained OSV response\",\"target\":\"advisory matches\",\"state\":\"transformed\"},{\"source\":\"unmodeled pyproject and Poetry metadata\",\"target\":\"canonical graph\",\"state\":\"discarded\"}]", yfp):
+            rh_cli_err("deps: cannot write pyproject transformation report")
             return 4
         eco_codes.push(2)
         declared.push(yreqs.count.i64())

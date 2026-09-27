@@ -298,10 +298,18 @@ test = [
 EOF
 "$ROOT/build/rh_cli" deps --repo "$T/pep621src" --out "$T/pep621out" \
   | grep -q "ecosystems=1 pypi=2/4 unresolved=2 unsupported=0" || fail "pep621 deps summary"
-python3 - "$T/pep621out/deps-pypi-graph.json" "$T/pep621out/deps-metrics.json" <<'PY'
-import json, sys
+python3 - "$T/pep621out/deps-pypi-graph.json" "$T/pep621out/deps-metrics.json" "$T/pep621src/pyproject.toml" <<'PY'
+import hashlib, json, sys
 g = json.load(open(sys.argv[1]))
 metrics = {item["key"]: item for item in json.load(open(sys.argv[2]))["metrics"]}
+source = open(sys.argv[3], "rb").read()
+report = json.load(open(sys.argv[1] + ".transformations.json"))
+framed = str(len(source)).encode() + b":" + source + b"0:0:"
+assert report["adapter"] == "python-pyproject-graph", report
+assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/python-pyproject/1;poetry-lock=absent;osv=none").hexdigest(), report
+assert {field["state"] for field in report["fields"]} >= {"preserved", "transformed", "unknown", "unsupported", "discarded"}, report
 assert g["ecosystem"] == "pypi", g
 assert [n["name"] for n in g["nodes"]] == ["root", "Django", "pytest"], g["nodes"]
 assert [(e["to"], e["scope"]) for e in g["edges"]] == [(1, "normal"), (2, "optional")], g["edges"]
@@ -403,9 +411,14 @@ files = []
 EOF
 "$ROOT/build/rh_cli" deps --repo "$T/poetry-lock" --out "$T/poetry-lock-out" \
   | grep -q "ecosystems=1 pypi=4/5 unresolved=1 unsupported=0" || fail "Poetry lock summary"
-python3 - "$T/poetry-lock-out/deps-pypi-graph.json" <<'PY'
-import json, sys
+python3 - "$T/poetry-lock-out/deps-pypi-graph.json" "$T/poetry-lock/pyproject.toml" "$T/poetry-lock/poetry.lock" <<'PY'
+import hashlib, json, sys
 graph = json.load(open(sys.argv[1]))
+project, lock = (open(path, "rb").read() for path in sys.argv[2:])
+report = json.load(open(sys.argv[1] + ".transformations.json"))
+framed = b"".join(str(len(value)).encode() + b":" + value for value in (project, lock, b""))
+assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/python-pyproject/1;poetry-lock=present;osv=none").hexdigest(), report
 nodes = graph["nodes"]
 assert [n["name"] for n in nodes] == ["root", "requests", "urllib3", "pytest", "conditional"], nodes
 assert {(e["from"], e["to"], e["scope"]) for e in graph["edges"]} == {(0, 1, "normal"), (1, 2, "normal"), (1, 2, "dev"), (0, 3, "dev")}, graph["edges"]
