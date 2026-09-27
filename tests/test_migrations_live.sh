@@ -1057,11 +1057,11 @@ VALUES ('00000000-0000-0000-0000-000001006000', 'package_version', 'tenant-priva
 INSERT INTO graph_projection
     (id, projection_kind, visibility_scope, input_cutoff, as_of, identity_revision, mapping_revision, completeness, manifest_digest)
 VALUES ('00000000-0000-0000-0000-000000009001', 'dependency', 'public',
-        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'identity-1', 'mapping-1', 'complete', 'fixture');
+        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'identity-high-degree', 'mapping-1', 'complete', 'fixture');
 INSERT INTO graph_projection
     (id, projection_kind, visibility_scope, input_cutoff, as_of, identity_revision, mapping_revision, completeness, manifest_digest)
 VALUES ('00000000-0000-0000-0000-000000009002', 'dependency', 'public',
-        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'identity-1', 'mapping-1', 'partial', 'partial-fixture');
+        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'identity-partial', 'mapping-1', 'partial', 'partial-fixture');
 INSERT INTO projection_membership (projection_id, from_entity_id, to_entity_id, edge_kind, known_at)
 SELECT '00000000-0000-0000-0000-000000009001',
        '00000000-0000-0000-0000-000001000001',
@@ -1140,8 +1140,8 @@ BEGIN
           '00000000-0000-0000-0000-000001000002'::uuid], 10000
   );
   outgoing_count := jsonb_array_length(result_edges);
-  IF outgoing_count <> 4030 OR result_truncated THEN
-    RAISE EXCEPTION 'batched outgoing adjacency returned % rows (truncated=%), expected 4030 complete rows', outgoing_count, result_truncated;
+  IF outgoing_count <> 4031 OR result_truncated THEN
+    RAISE EXCEPTION 'batched outgoing adjacency returned % rows (truncated=%), expected 4031 complete rows', outgoing_count, result_truncated;
   END IF;
   SELECT edges, truncated INTO result_edges, result_truncated
   FROM rh_projection_adjacency_batch(
@@ -1244,12 +1244,12 @@ BEGIN
   projection_input := jsonb_build_object(
     'schema', 'rh-postgres-projection-input/1',
     'projection', jsonb_build_object(
-      'id', '00000000-0000-0000-0000-000000009002',
+      'id', '00000000-0000-0000-0000-000000009004',
       'projection_kind', 'dependency',
       'visibility_scope', 'public',
       'input_cutoff', '2026-01-01T00:00:00Z',
       'as_of', '2026-01-01T00:00:00Z',
-      'identity_revision', 'identity-1',
+      'identity_revision', 'identity-walk',
       'mapping_revision', 'mapping-1',
       'completeness', 'complete',
       'manifest_digest', repeat('a', 64)
@@ -1264,7 +1264,7 @@ BEGIN
     RAISE EXCEPTION 'graph projection store did not distinguish first write from exact replay';
   END IF;
   walk_result := rh_projection_adjacency_walk(
-    '00000000-0000-0000-0000-000000009002', 'public', 'depends_on', 'outgoing',
+    '00000000-0000-0000-0000-000000009004', 'public', 'depends_on', 'outgoing',
     '00000000-0000-0000-0000-000001000001', 10, 5, 10
   );
   IF walk_result->>'projection_available' <> 'true'
@@ -1273,14 +1273,14 @@ BEGIN
     RAISE EXCEPTION 'one-call projection walk did not return the full two-edge chain: %', walk_result;
   END IF;
   walk_result := rh_projection_adjacency_walk(
-    '00000000-0000-0000-0000-000000009002', 'public', 'depends_on', 'outgoing',
+    '00000000-0000-0000-0000-000000009004', 'public', 'depends_on', 'outgoing',
     '00000000-0000-0000-0000-000001000001', 1, 5, 10
   );
   IF walk_result->>'truncated' <> 'true' OR jsonb_array_length(walk_result->'edges') <> 2 THEN
     RAISE EXCEPTION 'node-capped projection walk lost its boundary probe: %', walk_result;
   END IF;
   walk_result := rh_projection_adjacency_walk(
-    '00000000-0000-0000-0000-000000009002', 'public', 'depends_on', 'outgoing',
+    '00000000-0000-0000-0000-000000009004', 'public', 'depends_on', 'outgoing',
     '00000000-0000-0000-0000-000001000001', 10, 1, 10
   );
   IF walk_result->>'truncated' <> 'true' OR jsonb_array_length(walk_result->'edges') <> 2 THEN
@@ -1288,7 +1288,7 @@ BEGIN
   END IF;
   SELECT edges, truncated INTO result_edges, result_truncated
   FROM rh_projection_adjacency_batch(
-    '00000000-0000-0000-0000-000000009002', 'public', 'depends_on', 'outgoing',
+    '00000000-0000-0000-0000-000000009004', 'public', 'depends_on', 'outgoing',
     ARRAY['00000000-0000-0000-0000-000001000001'::uuid], 10
   );
   IF jsonb_array_length(result_edges) <> 1 OR result_truncated
@@ -1347,7 +1347,7 @@ BEGIN
       'visibility_scope', 'public',
       'input_cutoff', '2026-01-01T00:00:00Z',
       'as_of', '2026-01-01T00:00:00Z',
-      'identity_revision', 'identity-1',
+      'identity_revision', 'identity-chunk',
       'mapping_revision', 'mapping-1',
       'completeness', 'complete',
       'manifest_digest', repeat('b', 64)
