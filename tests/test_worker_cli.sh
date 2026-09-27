@@ -79,20 +79,28 @@ assert d["decisions"][1]["source_id"] == 10 and d["decisions"][1]["mode"] == "sk
 print("[worker] global full-reconcile priority OK")
 PY
 
-echo "[worker] bounded service rotates across successive timestamps"
+echo "[worker] explicit cursor rotates bounded service across identical timestamps"
 python3 - "$ROOT/build/rh_cli" "$T" <<'PY'
 import json, pathlib, subprocess, sys
 cli, root = sys.argv[1], pathlib.Path(sys.argv[2])
 sources = [{"source_id": i, "interval_secs": 10000, "last_full_reconcile": 0} for i in (1, 2, 3)]
-for now, expected in enumerate((1, 2, 3)):
-    input_path, output_path = root / f"rotation-{now}.json", root / f"rotation-{now}.out"
-    input_path.write_text(json.dumps({"schema": "rh-worker-input/1", "capacity": 1, "now": now, "sources": sources}))
+cursor = 0
+for tick, expected in enumerate((1, 2, 3)):
+    input_path, output_path = root / f"rotation-{tick}.json", root / f"rotation-{tick}.out"
+    input_path.write_text(json.dumps({"schema": "rh-worker-input/1", "capacity": 1, "now": 5000, "rotation_cursor": cursor, "sources": sources}))
     subprocess.run([cli, "worker", "tick", "--input", str(input_path), "--out", str(output_path)], check=True, stdout=subprocess.DEVNULL)
     plan = json.loads(output_path.read_text())
     served = [row["source_id"] for row in plan["decisions"] if row["mode"] != "skipped"]
-    assert served == [expected], (now, expected, served, plan)
-print("[worker] rotating bounded service OK")
+    assert served == [expected], (tick, expected, served, plan)
+    cursor = plan["next_rotation_cursor"]
+    assert cursor == (tick + 1) % len(sources), (tick, cursor, plan)
+print("[worker] persisted cursor rotates service without timestamp dependence")
 PY
+
+echo "[worker] invalid rotation cursor fails closed"
+if "$ROOT/build/rh_cli" worker tick --input <(printf '%s' '{"schema":"rh-worker-input/1","capacity":1,"now":1,"rotation_cursor":-1,"sources":[]}') --out "$T/invalid-rotation.out" >/dev/null 2>&1; then
+  fail "negative rotation cursor must be rejected"
+fi
 
 echo "[worker] determinism"
 a="$("$ROOT/build/rh_cli" worker tick --input "$T/in.json" --out "$T/d1" >/dev/null; cat "$T/d1")"

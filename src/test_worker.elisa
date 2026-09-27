@@ -28,7 +28,7 @@ def check_pass(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Co
     h: mutable Job::RhHost = Job::rh_sched_host(10, 1, 1, 100)
     slots: mutable darray[Job::RhSlot] = Job::rh_sched_slots(4)
     dec: mutable darray[Worker::RhWorkerDecision] = []
-    enq: i64 = Worker::rh_worker_pass(srcs, &h, slots, 2500, dec)
+    enq: i64 = Worker::rh_worker_pass(srcs, &h, slots, 2500, 2500, dec)
     wcheck(enq == 2, "pass-enqueued-two", fails)
     wcheck(dec[0].source_id == 1 and dec[0].mode == 1, "pass-src1-full", fails)
     wcheck(dec[0].horizon_secs == 1500, "pass-src1-horizon", fails)
@@ -50,7 +50,7 @@ def check_bounded(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic,
     h: mutable Job::RhHost = Job::rh_sched_host(100, 1, 1, 100)
     slots: mutable darray[Job::RhSlot] = Job::rh_sched_slots(1)
     dec: mutable darray[Worker::RhWorkerDecision] = []
-    enq: i64 = Worker::rh_worker_pass(srcs, &h, slots, 5000, dec)
+    enq: i64 = Worker::rh_worker_pass(srcs, &h, slots, 5000, 5000, dec)
     wcheck(enq == 1, "bounded-enq-one", fails)
     wcheck(dec[0].mode == 1, "bounded-first-full", fails)
     wcheck(dec[1].mode == 0 and dec[2].mode == 0, "bounded-rest-skipped", fails)
@@ -67,7 +67,7 @@ def check_quota(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, C
     h: mutable Job::RhHost = Job::rh_sched_host(0, 0, 1, 100)
     slots: mutable darray[Job::RhSlot] = Job::rh_sched_slots(4)
     dec: mutable darray[Worker::RhWorkerDecision] = []
-    enq: i64 = Worker::rh_worker_pass(srcs, &h, slots, 5000, dec)
+    enq: i64 = Worker::rh_worker_pass(srcs, &h, slots, 5000, 5000, dec)
     wcheck(enq == 0, "quota-none-enq", fails)
     wcheck(dec[0].mode == 0 and dec[0].debt == 5, "quota-skipped-visible", fails)
     return
@@ -80,12 +80,11 @@ def check_priority_and_rotation(fails: mutable i64&) -> void can[Memory.Allocate
     priority_host: mutable Job::RhHost = Job::rh_sched_host(10, 1, 1, 100)
     priority_slots: mutable darray[Job::RhSlot] = Job::rh_sched_slots(1)
     priority_decisions: mutable darray[Worker::RhWorkerDecision] = []
-    priority_enqueued: i64 = Worker::rh_worker_pass(priority_sources, &priority_host, priority_slots, 2500, priority_decisions)
+    priority_enqueued: i64 = Worker::rh_worker_pass(priority_sources, &priority_host, priority_slots, 2500, 2500, priority_decisions)
     wcheck(priority_enqueued == 1 and priority_decisions[0].source_id == 20 and priority_decisions[0].mode == 1, "priority-full-before-incremental", fails)
     wcheck(priority_decisions[1].source_id == 10 and priority_decisions[1].mode == 0, "priority-incremental-skipped", fails)
 
-    # Each new second rotates the first bounded service opportunity through the
-    # input table; no source is permanently favored by its configured position.
+    # A carried cursor rotates service even when successive passes share a timestamp.
     sources: mutable darray[Worker::RhSourceJob] = []
     sources.push(Worker::rh_worker_source(1, 10000, 0, 0, 0))
     sources.push(Worker::rh_worker_source(2, 10000, 0, 0, 0))
@@ -96,7 +95,7 @@ def check_priority_and_rotation(fails: mutable i64&) -> void can[Memory.Allocate
                 h: mutable Job::RhHost = Job::rh_sched_host(10, 1, 1, 100)
                 slots: mutable darray[Job::RhSlot] = Job::rh_sched_slots(1)
                 decisions: mutable darray[Worker::RhWorkerDecision] = []
-                enqueued: i64 = Worker::rh_worker_pass(sources, &h, slots, tick, decisions)
+                enqueued: i64 = Worker::rh_worker_pass(sources, &h, slots, 0, tick, decisions)
                 enqueued == 1 and decisions[0].source_id == tick + 1
             if not service_ok:
                 served <- false
@@ -110,11 +109,11 @@ def check_determinism(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Pa
     h1: mutable Job::RhHost = Job::rh_sched_host(10, 1, 1, 100)
     slots1: mutable darray[Job::RhSlot] = Job::rh_sched_slots(4)
     d1: mutable darray[Worker::RhWorkerDecision] = []
-    _ = Worker::rh_worker_pass(srcs, &h1, slots1, 700, d1)
+    _ = Worker::rh_worker_pass(srcs, &h1, slots1, 700, 700, d1)
     h2: mutable Job::RhHost = Job::rh_sched_host(10, 1, 1, 100)
     slots2: mutable darray[Job::RhSlot] = Job::rh_sched_slots(4)
     d2: mutable darray[Worker::RhWorkerDecision] = []
-    _ = Worker::rh_worker_pass(srcs, &h2, slots2, 700, d2)
+    _ = Worker::rh_worker_pass(srcs, &h2, slots2, 700, 700, d2)
     same: mutable bool = d1.count == d2.count
     if same:
         while k < d1.count |k: usize = 0, d1, d2, same|:

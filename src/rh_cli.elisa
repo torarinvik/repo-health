@@ -7887,11 +7887,20 @@ def rh_do_worker_tick(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloca
             overlap <- ov
         srcs.push(Worker::rh_worker_source(source_id, interval, last_full, cursor, overlap))
         child <- nodes[child.usize()].next_sibling
+    rotation_cursor: mutable i64 = now
+    rotation_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "rotation_cursor")
+    if rotation_idx >= 0:
+        ok_rotation: mutable i64 = 0
+        supplied_rotation: i64 = Json::rh_json_int(nodes, raw, rotation_idx, &ok_rotation)
+        if ok_rotation == 0 or supplied_rotation < 0:
+            rh_cli_err("worker: invalid rotation_cursor (fail closed)")
+            return 4
+        rotation_cursor <- supplied_rotation
     slots: mutable darray[Job::RhSlot] = Job::rh_sched_slots(cap)
     h: mutable Job::RhHost = Job::rh_sched_host(1000000, hq, hb, hm)
     dec: mutable darray[Worker::RhWorkerDecision] = []
     hl: Worker::RhWorkerHealth =
-        enq: i64 = Worker::rh_worker_pass(srcs, &h, slots, now, dec)
+        enq: i64 = Worker::rh_worker_pass(srcs, &h, slots, now, rotation_cursor, dec)
         Worker::rh_worker_health(dec, enq)
     body: mutable darray[u8] =
         body: mutable darray[u8] = []
@@ -7899,6 +7908,13 @@ def rh_do_worker_tick(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloca
         Base::rh_push_decimal_i64(body, cap)
         Base::rh_push_text(body, ",\"now\":")
         Base::rh_push_decimal_i64(body, now)
+        Base::rh_push_text(body, ",\"next_rotation_cursor\":")
+        next_rotation_cursor: i64 =
+            if srcs.count == 0:
+                0
+            else:
+                (rotation_cursor % srcs.count.i64() + 1) % srcs.count.i64()
+        Base::rh_push_decimal_i64(body, next_rotation_cursor)
         Base::rh_push_text(body, ",\"decisions\":[")
         body
     while k < dec.count |k: usize = 0, dec, body|:
