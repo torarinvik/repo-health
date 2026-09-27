@@ -1,8 +1,9 @@
 # Agent integration
 
 `rh_cli agent-check` gives coding agents a narrow, machine-readable way to check
-whether an exact package identity occurs in a supplied dependency graph or
-CycloneDX inventory. It does not resolve dependencies or contact a registry.
+whether an exact package identity occurs in a supplied dependency graph,
+CycloneDX inventory, or SPDX 2.3 inventory. It does not resolve dependencies
+or contact a registry.
 
 ```sh
 rh_cli agent-check \
@@ -11,10 +12,11 @@ rh_cli agent-check \
   --out result.json
 ```
 
-A query uses `rh-agent-query/1`. `source_kind` is `dependency_graph` or
-`cyclonedx`; both require exact `name` and `version` strings. Dependency-graph
-queries also require an exact `ecosystem` string. Version ranges and wildcard
-operators are rejected. Extra prose and unknown fields are ignored.
+A query uses `rh-agent-query/1`. `source_kind` is `dependency_graph`,
+`cyclonedx`, or `spdx`; all require exact `name` and `version` strings.
+Dependency-graph queries also require an exact `ecosystem` string. Version
+ranges and wildcard operators are rejected. Extra prose and unknown fields are
+ignored.
 
 Example dependency-graph query:
 

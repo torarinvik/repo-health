@@ -1,6 +1,7 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_inventory.elisa"
+include "./rh_spdx.elisa"
 include "./rh_sha256.elisa"
 
 module Agent:
@@ -149,6 +150,55 @@ module Agent:
                 out.push(34)
             0
 
+        def rh_agent_spdx_result(raw: darray[u8]&, query_texts: darray[u8]&, name_start: i64, name_end: i64, version_start: i64, version_end: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            pool: mutable darray[u8] = []
+            packages: mutable darray[Spdx::RhSpdxPackage] = []
+            spdx: mutable Spdx::RhSpdx = Spdx::RhSpdx{ok: 0, spec_unsupported: 0, packages: 0, invalid_packages: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0}
+            return -1 if Spdx::rh_spdx_parse(raw, pool, packages, &spdx) != 0
+            total: mutable i64 = 0
+            while i < packages.count |i: usize = 0, packages, pool, query_texts, name_start, name_end, version_start, version_end|:
+                p: Spdx::RhSpdxPackage = packages[i]
+                if p.version_s >= 0 and rh_agent_span_eq(pool, p.name_s, p.name_e, query_texts, name_start, name_end) and rh_agent_span_eq(pool, p.version_s, p.version_e, query_texts, version_start, version_end):
+                    total <- total + 1
+                i <- i + 1
+            Base::rh_push_text(out, "\"matches\":[")
+            while i < packages.count |i: usize = 0, emitted: i64 = 0, packages, pool, query_texts, name_start, name_end, version_start, version_end, out|:
+                p: Spdx::RhSpdxPackage = packages[i]
+                if p.version_s >= 0 and emitted < RH_AGENT_MATCH_LIMIT and rh_agent_span_eq(pool, p.name_s, p.name_e, query_texts, name_start, name_end) and rh_agent_span_eq(pool, p.version_s, p.version_e, query_texts, version_start, version_end):
+                    if emitted > 0:
+                        out.push(44)
+                    Base::rh_push_text(out, "{\"package_index\":")
+                    Base::rh_push_decimal_i64(out, i.i64())
+                    Base::rh_push_text(out, ",\"name\":\"")
+                    Base::rh_json_escape(out, pool, p.name_s, p.name_e)
+                    Base::rh_push_text(out, "\",\"version\":\"")
+                    Base::rh_json_escape(out, pool, p.version_s, p.version_e)
+                    Base::rh_push_text(out, "\",\"purl\":")
+                    if p.purl_s < 0:
+                        Base::rh_push_text(out, "null")
+                    else:
+                        out.push(34)
+                        Base::rh_json_escape(out, pool, p.purl_s, p.purl_e)
+                        out.push(34)
+                    Base::rh_push_text(out, ",\"hash_count\":")
+                    Base::rh_push_decimal_i64(out, p.hash_count)
+                    Base::rh_push_text(out, ",\"valid_sha256\":")
+                    Base::rh_push_decimal_i64(out, p.valid_sha256)
+                    out.push(125)
+                    emitted <- emitted + 1
+                i <- i + 1
+            Base::rh_push_text(out, "],\"match_count\":")
+            Base::rh_push_decimal_i64(out, total)
+            Base::rh_push_text(out, ",\"matches_truncated\":")
+            Base::rh_push_text(out, "true" if total > RH_AGENT_MATCH_LIMIT else "false")
+            if spdx.spec_unsupported != 0:
+                Base::rh_push_text(out, ",\"status\":\"unsupported_inventory_schema\"")
+            else:
+                Base::rh_push_text(out, ",\"status\":\"")
+                Base::rh_push_text(out, "found_in_snapshot" if total > 0 else "not_found_in_snapshot")
+                out.push(34)
+            0
+
     public:
         def rh_agent_check(query_raw: darray[u8]&, source_raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             qnodes: mutable darray[Json::RhJsonNode] = []
@@ -190,6 +240,8 @@ module Agent:
                 return -1 if rh_agent_dependency_result(source_raw, qtexts, ecosystem_s, ecosystem_e, name_s, name_e, version_s, version_e, out) != 0
             elif rh_agent_query_eq(qtexts, kind_s, kind_e, "cyclonedx"):
                 return -1 if rh_agent_inventory_result(source_raw, qtexts, name_s, name_e, version_s, version_e, out) != 0
+            elif rh_agent_query_eq(qtexts, kind_s, kind_e, "spdx"):
+                return -1 if rh_agent_spdx_result(source_raw, qtexts, name_s, name_e, version_s, version_e, out) != 0
             else:
                 return -1
             Base::rh_push_text(out, ",\"interpretation\":\"Exact records in the supplied snapshot only; this is not a policy decision. Repository prose and unknown fields do not affect the result.\"}")

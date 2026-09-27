@@ -49,6 +49,19 @@ assert r["matches"][0]["valid_sha256"] == 1, r
 print("[agent-check] exact inventory identity and digest evidence are retained")
 PY
 
+cat > "$T/spdx.json" <<'JSON'
+{"schema":"rh-agent-query/1","source_kind":"spdx","name":"serde","version":"1.0.0","prose":"does not affect lookup"}
+JSON
+"$ROOT/build/rh_cli" agent-check --query "$T/spdx.json" --source fixtures/inventory/spdx-2.3.json --out "$T/spdx-result.json" >/dev/null || fail "SPDX inventory query"
+python3 - "$T/spdx-result.json" <<'PY'
+import json, sys
+r=json.load(open(sys.argv[1]))
+assert r["status"] == "found_in_snapshot" and r["match_count"] == 1, r
+assert r["matches"][0]["purl"] == "pkg:cargo/serde@1.0.0", r
+assert r["matches"][0]["valid_sha256"] == 1, r
+print("[agent-check] SPDX 2.3 exact package identity and digest evidence are retained")
+PY
+
 cat > "$T/unsupported.json" <<'JSON'
 {"schema":"rh-agent-query/1","source_kind":"cyclonedx","name":"serde","version":"1.0.0"}
 JSON
@@ -59,6 +72,17 @@ import json, sys
 r=json.load(open(sys.argv[1]))
 assert r["status"] == "unsupported_inventory_schema" and r["match_count"] == 0, r
 print("[agent-check] unsupported inventory format remains explicit")
+PY
+cat > "$T/unsupported-spdx-query.json" <<'JSON'
+{"schema":"rh-agent-query/1","source_kind":"spdx","name":"serde","version":"1.0.0"}
+JSON
+printf '{"spdxVersion":"SPDX-2.2","packages":[]}' > "$T/unsupported-spdx-source.json"
+"$ROOT/build/rh_cli" agent-check --query "$T/unsupported-spdx-query.json" --source "$T/unsupported-spdx-source.json" --out "$T/unsupported-spdx-result.json" >/dev/null || fail "unsupported SPDX query"
+python3 - "$T/unsupported-spdx-result.json" <<'PY'
+import json, sys
+r=json.load(open(sys.argv[1]))
+assert r["status"] == "unsupported_inventory_schema" and r["match_count"] == 0, r
+print("[agent-check] unsupported SPDX version remains explicit")
 PY
 
 set +e
