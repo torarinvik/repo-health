@@ -3232,6 +3232,73 @@ module Package:
             0
 
     private:
+        def rh_pypi_caret_satisfies(pool: darray[u8]&, version_s: usize, version_e: usize, constraint_s: usize, constraint_e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            lower_cmp: mutable i64 = 0
+            return -1 if not rh_pypi_release_cmp(pool, version_s, version_e, constraint_s, constraint_e, &lower_cmp)
+            return 0 if lower_cmp < 0
+            target_start: mutable usize = constraint_s
+            target_end: mutable usize = constraint_s
+            target_idx: mutable usize = 0
+            found_nonzero: mutable bool = false
+            segment_index: mutable usize = 0
+            while target_start < constraint_e |target_start, target_end, target_idx, found_nonzero, segment_index, constraint_e, pool|:
+                target_end <- target_start
+                while target_end < constraint_e and pool[target_end] != 46 |target_end, constraint_e, pool|:
+                    target_end <- target_end + 1
+                nonzero: mutable bool = false
+                while digit < target_end |digit: usize = target_start, target_end, pool, nonzero|:
+                    nonzero <- true if pool[digit] != 48
+                    digit <- digit + 1
+                if nonzero and not found_nonzero:
+                    target_idx <- segment_index
+                    found_nonzero <- true
+                    break
+                segment_index <- segment_index + 1
+                break if target_end >= constraint_e
+                target_start <- target_end + 1
+            if not found_nonzero:
+                target_idx <- segment_index - 1
+                target_start <- constraint_s
+                segment_index <- 0
+                while segment_index < target_idx |segment_index, target_idx, constraint_e, pool, target_start|:
+                    while target_start < constraint_e and pool[target_start] != 46 |target_start, constraint_e, pool|:
+                        target_start <- target_start + 1
+                    target_start <- target_start + 1
+                    segment_index <- segment_index + 1
+                target_end <- target_start
+                while target_end < constraint_e and pool[target_end] != 46 |target_end, constraint_e, pool|:
+                    target_end <- target_end + 1
+            upper: mutable darray[u8] = []
+            for i in constraint_s..<target_start |i, pool, upper|:
+                upper.push(pool[i])
+            digits: mutable darray[u8] = []
+            for i in target_start..<target_end |i, pool, digits|:
+                digits.push(pool[i])
+            carry: mutable bool = true
+            while digit > 0 and carry |digit: usize = digits.count, digits, carry|:
+                digit <- digit - 1
+                if digits[digit] == 57:
+                    digits[digit] <- 48
+                else:
+                    digits[digit] <- digits[digit] + 1
+                    carry <- false
+            reversed: mutable darray[u8] = []
+            reversed.push(49) if carry
+            while i > 0 |i: usize = digits.count, digits, reversed|:
+                i <- i - 1
+                reversed.push(digits[i])
+            while i > 0 |i: usize = reversed.count, reversed, upper|:
+                i <- i - 1
+                upper.push(reversed[i])
+            compare_pool: mutable darray[u8] = []
+            for i in version_s..<version_e |i, pool, compare_pool|:
+                compare_pool.push(pool[i])
+            upper_start: usize = compare_pool.count
+            compare_pool.extend(bytes_view(upper))
+            upper_cmp: mutable i64 = 0
+            return -1 if not rh_pypi_release_cmp(compare_pool, 0, version_e - version_s, upper_start, compare_pool.count, &upper_cmp)
+            1 if upper_cmp < 0 else 0
+
         # Compare the numeric release subset of PEP 440 without integer parsing,
         # so arbitrarily large release components remain exact. Prereleases,
         # epochs, local labels, and post/dev releases are rejected by the caller.
@@ -3300,6 +3367,7 @@ module Package:
         # not, and -1 for PEP 440 forms outside this explicit numeric subset.
         def rh_pypi_constraint_satisfies(pool: darray[u8]&, version_s: usize, version_e: usize, constraint_s: usize, constraint_e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if version_s >= version_e or constraint_s >= constraint_e or version_e > pool.count or constraint_e > pool.count
+            return rh_pypi_caret_satisfies(pool, version_s, version_e, constraint_s + 1, constraint_e) if pool[constraint_s] == 94
             a: mutable usize = constraint_s
             b: mutable usize = constraint_e
             while a < b and (pool[a] == 32 or pool[a] == 9) |a, b, pool|:
