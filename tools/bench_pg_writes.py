@@ -47,14 +47,17 @@ subprocess.run([
     "-p", "127.0.0.1::5432", image,
 ], check=True, stdout=subprocess.DEVNULL)
 try:
-    ready = False
+    ready_checks = 0
     for _ in range(60):
         check = subprocess.run([docker, "exec", container, "pg_isready", "-U", "postgres", "-d", "repo_health"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if check.returncode == 0:
-            ready = True
-            break
+            ready_checks += 1
+            if ready_checks >= 3:
+                break
+        else:
+            ready_checks = 0
         time.sleep(1)
-    if not ready:
+    if ready_checks < 3:
         raise RuntimeError("PostgreSQL did not become ready")
     docker_exec("mkdir", "-p", "/tmp/rh-bench")
     subprocess.run([docker, "cp", str(root / "db/migrations/001_initial.sql"), container + ":/tmp/rh-bench/001_initial.sql"], check=True, stdout=subprocess.DEVNULL)
