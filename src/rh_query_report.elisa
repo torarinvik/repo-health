@@ -5,7 +5,8 @@
 # breakdown (so one failed capability cannot read as a failed project), an
 # optional bounded graph traversal, and an optional bounded-job lease sequence
 # (claim/renew/finish/budget) with fencing tokens. Malformed requests fail
-# closed.
+# closed. An optional graph.entity_ids array parallels graph.nodes and lets the
+# result preserve external entity identity beside each reachable node index.
 
 include "./rh_base.elisa"
 include "./rh_json.elisa"
@@ -14,6 +15,10 @@ include "./rh_graph.elisa"
 
 module QueryReport:
     private:
+        struct RhQueryEntityId:
+            start: mutable i64
+            end: mutable i64
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_qr_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, lit)
@@ -81,6 +86,12 @@ module QueryReport:
         def rh_qr_graph_direction(texts: darray[u8]&, s: i64, e: i64) -> i64:
             return 0 if rh_qr_eq(texts, s, e, "downstream")
             return 1 if rh_qr_eq(texts, s, e, "upstream")
+            -1
+
+        def rh_qr_graph_index(ids: darray[i64]&, id: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while index < ids.count |index: usize = 0, ids, id|:
+                return index.i64() if ids[index] == id
+                index <- index + 1
             -1
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
@@ -174,7 +185,9 @@ module QueryReport:
             has_graph: mutable bool = false
             graph_direction: mutable i64 = 0
             graph_result: mutable darray[i64] = []
+            graph_ids: mutable darray[i64] = []
             graph_truncated: mutable i64 = 0
+            graph_entity_ids: mutable darray[RhQueryEntityId] = []
             graph_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "graph")
             if graph_idx >= 0:
                 return -1 if nodes[graph_idx.usize()].kind != Json::RH_JSON_OBJ
@@ -199,7 +212,6 @@ module QueryReport:
                 if graph_max_depth_ok == 0:
                     graph_max_depth <- 8
                 return -1 if graph_max_depth <= 0 or graph_max_depth > Query::RH_QPAGE_MAX
-                graph_ids: mutable darray[i64] = []
                 graph_nodes_arr: Json::RhJsonNode = nodes[graph_nodes_idx.usize()]
                 while gn >= 0 |gn: i64 = graph_nodes_arr.first_child, nodes, raw, graph_ids|:
                     return -1 if nodes[gn.usize()].kind != Json::RH_JSON_NUM
@@ -209,6 +221,21 @@ module QueryReport:
                     graph_ids.push(graph_value)
                     gn <- nodes[gn.usize()].next_sibling
                 return -1 if not Graph::rh_contains(graph_ids, subject)
+                entity_ids_idx: i64 = Json::rh_json_obj_get(nodes, texts, graph_idx, "entity_ids")
+                if entity_ids_idx >= 0:
+                    return -1 if nodes[entity_ids_idx.usize()].kind != Json::RH_JSON_ARR or nodes[entity_ids_idx.usize()].child_count != graph_ids.count.i64()
+                    entity_node: Json::RhJsonNode = nodes[entity_ids_idx.usize()]
+                    while entity_child >= 0 |entity_child: i64 = entity_node.first_child, nodes, texts, graph_entity_ids|:
+                        return -1 if nodes[entity_child.usize()].kind != Json::RH_JSON_STR
+                        entity_start: mutable i64 = 0
+                        entity_end: mutable i64 = 0
+                        return -1 if not Json::rh_json_str_span(nodes, entity_child, &entity_start, &entity_end) or entity_start >= entity_end
+                        for prior_entity in 0..<graph_entity_ids.count |prior_entity, graph_entity_ids, texts, entity_start, entity_end|:
+                            prior_span: RhQueryEntityId = graph_entity_ids[prior_entity]
+                            return -1 if Base::rh_bytes_equal_span(texts, prior_span.start, prior_span.end, texts, entity_start, entity_end)
+                        graph_entity_ids.push(RhQueryEntityId{start: entity_start, end: entity_end})
+                        entity_child <- nodes[entity_child.usize()].next_sibling
+                    return -1 if graph_entity_ids.count.i64() != graph_ids.count.i64()
                 graph_edges: mutable darray[Graph::RhGraphEdge] = []
                 graph_edges_arr: Json::RhJsonNode = nodes[graph_edges_idx.usize()]
                 while ge >= 0 |ge: i64 = graph_edges_arr.first_child, nodes, raw, texts, graph_ids, graph_edges|:
@@ -271,7 +298,19 @@ module QueryReport:
                         out.push(44)
                     Base::rh_push_decimal_i64(out, graph_result[i.usize()])
                     i <- i + 1
-                Base::rh_push_text(out, "],\"truncated\":")
+                Base::rh_push_text(out, "]")
+                if graph_entity_ids.count > 0:
+                    Base::rh_push_text(out, ",\"node_entities\":[")
+                    while i < graph_result.count.i64() |i: i64 = 0, graph_result, graph_ids, graph_entity_ids, texts, out|:
+                        if i > 0:
+                            out.push(44)
+                        entity_index: i64 = rh_qr_graph_index(graph_ids, graph_result[i.usize()])
+                        return -1 if entity_index < 0 or entity_index >= graph_entity_ids.count.i64()
+                        entity_span: RhQueryEntityId = graph_entity_ids[entity_index.usize()]
+                        Base::rh_json_escape(out, texts, entity_span.start.usize(), entity_span.end.usize())
+                        i <- i + 1
+                    Base::rh_push_text(out, "]")
+                Base::rh_push_text(out, ",\"truncated\":")
                 Base::rh_push_text(out, "true" if graph_truncated == 1 else "false")
                 Base::rh_push_text(out, ",\"complete\":")
                 Base::rh_push_text(out, "false" if graph_truncated == 1 else "true")

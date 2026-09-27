@@ -81,6 +81,23 @@ assert up == {"direction": "upstream", "nodes": [3, 2], "truncated": True, "comp
 print("[query] graph direction + bounded truncation OK")
 PY
 
+cat > "$T/graph-entity-map.json" <<'JSON'
+{"schema":"rh-query-input/1","kind":"upstream","ids":[1],"graph":{"direction":"upstream","subject":1,"nodes":[1,2,3],"entity_ids":["entity-root","entity-middle","entity-leaf"],"edges":[{"from":1,"to":2},{"from":2,"to":3}],"max_nodes":10,"max_depth":8}}
+JSON
+"$ROOT/build/rh_cli" query --input "$T/graph-entity-map.json" --out "$T/graph-entity-map.out" >/dev/null || fail "graph entity mapping"
+python3 - "$T/graph-entity-map.out" <<'PY'
+import json, sys
+graph = json.load(open(sys.argv[1]))["graph"]
+assert graph == {
+    "direction": "upstream",
+    "nodes": [2, 3],
+    "node_entities": ["entity-middle", "entity-leaf"],
+    "truncated": False,
+    "complete": True,
+}, graph
+print("[query] graph traversal preserves caller entity identities")
+PY
+
 cat > "$T/graph-up-fanout.json" <<'JSON'
 {"schema":"rh-query-input/1","kind":"upstream","ids":[1,2,3],"cursor":-1,"limit":10,"graph":{"direction":"upstream","subject":1,"nodes":[1,2,3],"edges":[{"from":1,"to":2},{"from":1,"to":3}],"max_nodes":1,"max_depth":8}}
 JSON
@@ -120,9 +137,13 @@ printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[],"job":{"ops":[{"o
 "$ROOT/build/rh_cli" query --input "$T/badphase.json" --out "$T/x" >/dev/null 2>&1; rc_phase=$?
 printf '{"schema":"rh-query-input/1","kind":"metrics","ids":[],"graph":{"subject":1,"nodes":[1],"edges":[{"from":1,"to":2}]}}' > "$T/badgraph.json"
 "$ROOT/build/rh_cli" query --input "$T/badgraph.json" --out "$T/x" >/dev/null 2>&1; rc_graph=$?
+printf '{"schema":"rh-query-input/1","kind":"upstream","ids":[],"graph":{"direction":"upstream","subject":1,"nodes":[1,2],"entity_ids":["same","same"],"edges":[{"from":1,"to":2}]}}' > "$T/duplicate-entity-map.json"
+"$ROOT/build/rh_cli" query --input "$T/duplicate-entity-map.json" --out "$T/x" >/dev/null 2>&1; rc_entity_duplicate=$?
+printf '{"schema":"rh-query-input/1","kind":"upstream","ids":[],"graph":{"direction":"upstream","subject":1,"nodes":[1,2],"entity_ids":["only-one"],"edges":[{"from":1,"to":2}]}}' > "$T/short-entity-map.json"
+"$ROOT/build/rh_cli" query --input "$T/short-entity-map.json" --out "$T/x" >/dev/null 2>&1; rc_entity_count=$?
 "$ROOT/build/rh_cli" query --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_kind" "$rc_ids" "$rc_unsorted" "$rc_duplicate" "$rc_negative" "$rc_cursor" "$rc_limit" "$rc_state" "$rc_phase" "$rc_graph" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_kind" "$rc_ids" "$rc_unsorted" "$rc_duplicate" "$rc_negative" "$rc_cursor" "$rc_limit" "$rc_state" "$rc_phase" "$rc_graph" "$rc_entity_duplicate" "$rc_entity_count" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed query input must exit 4 (got $rc)"
 done
 
