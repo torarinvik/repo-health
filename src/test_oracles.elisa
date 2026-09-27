@@ -44,22 +44,35 @@ def observation_decode_rejects(document: u8&) -> bool can[Memory.Allocate, Abort
     decoded: mutable Observation::RhObservation = Observation::rh_observation_make(Observation::RH_ST_UNAVAILABLE, Observation::RhMetricValue.Absent, false)
     not ObservationCodec::rh_observation_decode(raw, &decoded)
 
+def observation_decode_rejects_overbound_evidence() -> bool can[Memory.Allocate, Abort.Panic]:
+    raw: mutable darray[u8] = []
+    Base::rh_push_text(raw, "{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[")
+    for index in 0..<(Observation::RH_MAX_EVIDENCE_LINKS + 1) |index, raw|:
+        Base::rh_push_text(raw, "\"git_log\"")
+        Base::rh_push_text(raw, ",") if index < Observation::RH_MAX_EVIDENCE_LINKS
+    Base::rh_push_text(raw, "]}")
+    decoded: mutable Observation::RhObservation = Observation::rh_observation_make(Observation::RH_ST_UNAVAILABLE, Observation::RhMetricValue.Absent, false)
+    not ObservationCodec::rh_observation_decode(raw, &decoded)
+
 def observation_evidence_roundtrip() -> bool can[Memory.Allocate, Abort.Panic]:
     quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Unknown, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Unknown, provenance: Observation::RhProvenanceQuality.Unknown}
-    evidence: Observation::RhEvidenceLinks = Observation::RhEvidenceLinks{count: 2, first: Observation::RhEvidenceObject.GitLog, second: Observation::RhEvidenceObject.GitShallow}
+    evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+    Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.GitLog)
+    Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.GitShallow)
+    Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.GitFiles)
+    Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.GitDefaultCount)
+    Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.BundleManifest)
     observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Count(2), false, quality, evidence)
     encoded: mutable darray[u8] = []
     return false if not ObservationCodec::rh_observation_encode(observation, encoded)
     decoded: mutable Observation::RhObservation = observation
     return false if not ObservationCodec::rh_observation_decode(encoded, &decoded)
-    return false if decoded.evidence.count != 2 or decoded.evidence.first != Observation::RhEvidenceObject.GitLog or decoded.evidence.second != Observation::RhEvidenceObject.GitShallow
-    manifest_evidence: Observation::RhEvidenceLinks = Observation::RhEvidenceLinks{count: 1, first: Observation::RhEvidenceObject.BundleManifest, second: Observation::RhEvidenceObject.GitLog}
-    manifest_observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Count(1), false, quality, manifest_evidence)
-    manifest_encoded: mutable darray[u8] = []
-    return false if not ObservationCodec::rh_observation_encode(manifest_observation, manifest_encoded)
-    manifest_decoded: mutable Observation::RhObservation = manifest_observation
-    return false if not ObservationCodec::rh_observation_decode(manifest_encoded, &manifest_decoded)
-    manifest_decoded.evidence.count == 1 and manifest_decoded.evidence.first == Observation::RhEvidenceObject.BundleManifest
+    return false if Observation::rh_evidence_links_count(decoded.evidence) != 5
+    return false if Observation::rh_evidence_links_get(decoded.evidence, 0) != Observation::RhEvidenceObject.GitLog
+    return false if Observation::rh_evidence_links_get(decoded.evidence, 1) != Observation::RhEvidenceObject.GitShallow
+    return false if Observation::rh_evidence_links_get(decoded.evidence, 2) != Observation::RhEvidenceObject.GitFiles
+    return false if Observation::rh_evidence_links_get(decoded.evidence, 3) != Observation::RhEvidenceObject.GitDefaultCount
+    Observation::rh_evidence_links_get(decoded.evidence, 4) == Observation::RhEvidenceObject.BundleManifest
 
 def check_byte_helpers(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     empty: darray[u8] = []
@@ -192,23 +205,19 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check(serialized_cross_product, "typed-observation-json-roundtrip-cross-product", &fails)
     check(observation_evidence_roundtrip(), "typed-observation-evidence-link-roundtrip", &fails)
     report_quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Partial, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.EvidenceBacked}
-    overfull_evidence: Observation::RhObservation = Observation::rh_observation_make_with_evidence(
-        Observation::RH_ST_OBSERVED,
-        Observation::RhMetricValue.Count(1),
-        false,
-        report_quality,
-        Observation::RhEvidenceLinks{count: 3, first: Observation::RhEvidenceObject.GitLog, second: Observation::RhEvidenceObject.GitShallow}
-    )
-    check(not Observation::rh_observation_valid(overfull_evidence), "typed-observation-rejects-evidence-overbound", &fails)
+    duplicate_links: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+    Observation::rh_evidence_links_push(&duplicate_links, Observation::RhEvidenceObject.GitLog)
+    Observation::rh_evidence_links_push(&duplicate_links, Observation::RhEvidenceObject.GitLog)
     duplicate_evidence: Observation::RhObservation = Observation::rh_observation_make_with_evidence(
         Observation::RH_ST_OBSERVED,
         Observation::RhMetricValue.Count(1),
         false,
         Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Complete, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.EvidenceBacked},
-        Observation::RhEvidenceLinks{count: 2, first: Observation::RhEvidenceObject.GitLog, second: Observation::RhEvidenceObject.GitLog}
+        duplicate_links
     )
     check(not Observation::rh_observation_valid(duplicate_evidence), "typed-observation-rejects-duplicate-evidence", &fails)
-    quality_evidence: Observation::RhEvidenceLinks = Observation::RhEvidenceLinks{count: 1, first: Observation::RhEvidenceObject.GitLog, second: Observation::RhEvidenceObject.GitLog}
+    quality_evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+    Observation::rh_evidence_links_push(&quality_evidence, Observation::RhEvidenceObject.GitLog)
     check(observation_roundtrip(Observation::rh_observation_make_with_evidence(Observation::RH_ST_PARTIAL, Observation::RhMetricValue.Ratio(1, 2), true, report_quality, quality_evidence)), "typed-quality-json-roundtrip", &fails)
     check(not Observation::rh_observation_valid(Observation::rh_observation_make_with_quality(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Count(0), false, Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Complete, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.EvidenceBacked})), "typed-evidence-backed-requires-links", &fails)
     observed_partial_quality: Observation::RhObservation = Observation::rh_observation_make_with_quality(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Count(1), false, Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Partial, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.Unknown})
@@ -222,7 +231,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count_pair\",\"first\":2,\"second\":1},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-count-pair-order-rejected", &fails)
     check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"nonsense\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-unknown-quality-label-rejected", &fails)
     check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[\"unknown\"]}"), "codec-unknown-evidence-link-rejected", &fails)
-    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[\"git_log\",\"git_shallow\",\"git_files\"]}"), "codec-evidence-overbound-rejected", &fails)
+    check(observation_decode_rejects_overbound_evidence(), "codec-evidence-overbound-rejected", &fails)
     check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[\"git_log\",\"git_log\"]}"), "codec-duplicate-evidence-rejected", &fails)
     check(observation_decode_rejects("not-json"), "codec-malformed-json-rejected", &fails)
 
