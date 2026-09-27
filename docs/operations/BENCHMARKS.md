@@ -154,3 +154,13 @@ latencies varied substantially and memory use is material. This is a single
 synthetic local run; it does not support deployment capacity claims. Ordinary
 JSON adapter parsing remains capped at 200,000 nodes, and larger aggregate
 workloads still require memory measurement before increasing the explicit cap.
+
+
+The aggregate command now uses a dedicated parser limit while all ordinary JSON
+adapters keep the 200,000-node default. A hard ceiling of 2 million nodes
+limits that opt-in path; aggregate inputs use 1.5 million. A 20,000-event
+worktree run (two repetitions) measured 981 ms full and 637 ms partial medians,
+with 38.0 MiB and 40.0 MiB maximum peak RSS respectively. The clean 100,000-
+event run above demonstrates the upper tested point. Both workloads matched
+full and cached output bytes. The 100k memory and latency costs make further
+cap increases contingent on explicit resource measurements.
