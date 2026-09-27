@@ -126,3 +126,17 @@ exposes a concrete input-scale ceiling; larger aggregate workloads need a
 bounded parsing strategy or a justified parser budget change before they can
 be benchmarked. These measurements remain local synthetic evidence, not a
 capacity claim.
+
+
+After replacing sibling-chain walks in the bounded JSON DOM with a retained
+last-child index, a clean run at revision `c60f219` repeated the 12,000-event,
+three-repetition workload. Full recomputation measured 316 ms median and
+30.39 MiB maximum individual-child peak RSS; partial-cache recomputation
+measured 201 ms median and 31.82 MiB maximum peak RSS, reusing 103/105 rows.
+Both paths again produced output SHA-256
+`37f5dcb7bbb35fb7c28709fde2982d27440ed3e6d8b115e9d3dd02dd7957d177`. On the
+same machine, this is about 80% lower full-recompute median and 84% lower
+partial-cache median than the earlier 12,000-event sample. The three-sample
+result is a local comparison, not a general speedup guarantee. The independent
+JSON-node ceiling remains: 20,000 events are rejected before aggregate
+measurement.
