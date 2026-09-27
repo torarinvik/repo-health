@@ -120,19 +120,12 @@ module Report:
 
         # Absent value: no "value" member at all (never null-as-zero).
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_emit_absent(buffer: mutable darray[u8]&, key: u8&, status: u8, reason: u8&) -> void can[Memory.Allocate, Abort.Panic]:
-            needs_incompleteness: bool = status == Observation::RH_ST_PARTIAL or status == Observation::RH_ST_STALE
-            observation: Observation::RhObservation = Observation::rh_observation_make(status, Observation::RhMetricValue.Absent, needs_incompleteness and reason[0] != 0)
-            if not Observation::rh_observation_valid(observation):
-                rh_emit_contract_error(buffer, key, "1.0.0")
-                return
-            Base::rh_push_text(buffer, "{\"key\":\"")
-            Base::rh_push_text(buffer, key)
-            Base::rh_push_text(buffer, "\",\"version\":\"1.0.0\",\"status\":\"")
-            Base::rh_push_text(buffer, Observation::rh_status_label(status))
-            Base::rh_push_text(buffer, "\",\"reason\":\"")
-            Base::rh_push_text(buffer, reason)
-            Base::rh_push_text(buffer, "\"}")
+        def rh_emit_absent(buffer: mutable darray[u8]&,
+                           key: u8&,
+                           status: u8,
+                           reason: u8&,
+                           evidence: Observation::RhEvidenceLink) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_emit_absent_with_evidence(buffer, key, status, reason, evidence)
 
         def rh_emit_absent_with_evidence(buffer: mutable darray[u8]&, key: u8&, status: u8, reason: u8&, evidence: Observation::RhEvidenceLink) -> void can[Memory.Allocate, Abort.Panic]:
             observation: Observation::RhObservation = rh_report_observation(status, Observation::RhMetricValue.Absent, true, rh_report_evidence(evidence, evidence, 1))
@@ -150,13 +143,32 @@ module Report:
             rh_emit_observation_evidence(buffer, observation)
             Base::rh_push_text(buffer, "}")
 
+        def rh_emit_absent_unbacked(buffer: mutable darray[u8]&, key: u8&, status: u8, reason: u8&) -> void can[Memory.Allocate, Abort.Panic]:
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_quality(
+                status,
+                Observation::RhMetricValue.Absent,
+                false,
+                Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Unknown, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Unknown, provenance: Observation::RhProvenanceQuality.Unknown}
+            )
+            if reason[0] == 0 or not Observation::rh_observation_valid(observation):
+                rh_emit_contract_error(buffer, key, "1.0.0")
+                return
+            Base::rh_push_text(buffer, "{\"key\":\"")
+            Base::rh_push_text(buffer, key)
+            Base::rh_push_text(buffer, "\",\"version\":\"1.0.0\",\"status\":\"")
+            Base::rh_push_text(buffer, Observation::rh_status_label(status))
+            Base::rh_push_text(buffer, "\",\"reason\":\"")
+            Base::rh_push_text(buffer, reason)
+            Base::rh_push_text(buffer, "\"")
+            rh_emit_quality_dimensions(buffer, observation)
+            Base::rh_push_text(buffer, ",\"evidence\":[]}")
+
         # Versioned absent value; denominator changes must remain visible even when
         # the observation has no numeric value.
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_emit_absent_version(buffer: mutable darray[u8]&, key: u8&, version: u8&, status: u8, reason: u8&) -> void can[Memory.Allocate, Abort.Panic]:
-            needs_incompleteness: bool = status == Observation::RH_ST_PARTIAL or status == Observation::RH_ST_STALE
-            observation: Observation::RhObservation = Observation::rh_observation_make(status, Observation::RhMetricValue.Absent, needs_incompleteness and reason[0] != 0)
-            if not Observation::rh_observation_valid(observation):
+        def rh_emit_absent_version(buffer: mutable darray[u8]&, key: u8&, version: u8&, status: u8, reason: u8&, evidence: Observation::RhEvidenceLink) -> void can[Memory.Allocate, Abort.Panic]:
+            observation: Observation::RhObservation = rh_report_observation(status, Observation::RhMetricValue.Absent, true, rh_report_evidence(evidence, evidence, 1))
+            if reason[0] == 0 or not Observation::rh_observation_valid(observation):
                 rh_emit_contract_error(buffer, key, version)
                 return
             Base::rh_push_text(buffer, "{\"key\":\"")
@@ -167,7 +179,10 @@ module Report:
             Base::rh_push_text(buffer, Observation::rh_status_label(status))
             Base::rh_push_text(buffer, "\",\"reason\":\"")
             Base::rh_push_text(buffer, reason)
-            Base::rh_push_text(buffer, "\"}")
+            Base::rh_push_text(buffer, "\"")
+            rh_emit_quality_dimensions(buffer, observation)
+            rh_emit_observation_evidence(buffer, observation)
+            Base::rh_push_text(buffer, "}")
 
         # Ratio value {"num":N,"den":D}; partial/stale values carry a reason.
         # private to this file (modules retried after re-seed; see CHANGELOG).
@@ -188,7 +203,7 @@ module Report:
                 rh_report_evidence(rh_evidence_link(Observation::RhEvidenceObject.GitLog), rh_evidence_link(Observation::RhEvidenceObject.GitShallow), 2)
             )
             if not Observation::rh_observation_valid(observation):
-                rh_emit_absent_version(buffer, key, version, Observation::RH_ST_ERROR, "invalid-observation-contract")
+                rh_emit_absent_version(buffer, key, version, Observation::RH_ST_ERROR, "invalid-observation-contract", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
                 return
             Base::rh_push_text(buffer, "{\"key\":\"")
             Base::rh_push_text(buffer, key)
@@ -254,13 +269,13 @@ module Report:
 
         def rh_emit_file_metric(buffer: mutable darray[u8]&, key: u8&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
             if value < 0:
-                rh_emit_absent(buffer, key, 2, "snapshot-file-list-unavailable")
+                rh_emit_absent(buffer, key, 2, "snapshot-file-list-unavailable", rh_evidence_link(Observation::RhEvidenceObject.GitFiles))
             else:
                 rh_emit_bool(buffer, key, value, rh_evidence_link(Observation::RhEvidenceObject.GitFiles))
 
         def rh_emit_file_count(buffer: mutable darray[u8]&, key: u8&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
             if value < 0:
-                rh_emit_absent(buffer, key, 2, "snapshot-file-list-unavailable")
+                rh_emit_absent(buffer, key, 2, "snapshot-file-list-unavailable", rh_evidence_link(Observation::RhEvidenceObject.GitFiles))
             else:
                 rh_emit_count_with_evidence_reason(buffer, key, Observation::RH_ST_OBSERVED, value, "", rh_evidence_link(Observation::RhEvidenceObject.GitFiles))
 
@@ -400,7 +415,7 @@ module Report:
             rh_emit_count(out, "history.rejected_record_count", 0, snap.rejected)
             Base::rh_push_text(out, ",")
             if ctx.files.missing_objects < 0:
-                rh_emit_absent(out, "history.missing_object_count", 2, "snapshot-file-list-unavailable")
+                rh_emit_absent(out, "history.missing_object_count", 2, "snapshot-file-list-unavailable", rh_evidence_link(Observation::RhEvidenceObject.GitFiles))
             elif ctx.files.source_bytes < 0:
                 rh_emit_count_with_evidence_reason(out, "history.missing_object_count", Observation::RH_ST_PARTIAL, ctx.files.missing_objects, "blob-size-unavailable", rh_evidence_link(Observation::RhEvidenceObject.GitFiles))
             else:
@@ -416,7 +431,7 @@ module Report:
                 rh_emit_count_with_evidence_reason(out, "history.revisions_reachable_default", Observation::RH_ST_OBSERVED, ctx.default_revisions, "", rh_evidence_link(Observation::RhEvidenceObject.GitDefaultCount))
             Base::rh_push_text(out, ",")
             if ctx.git_metrics.revisions_observed == 0:
-                rh_emit_absent(out, "history.first_author_time", 6, "empty-history")
+                rh_emit_absent(out, "history.first_author_time", 6, "empty-history", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 rh_emit_timestamp(out, "history.first_author_time", 0, ctx.git_metrics.first_author_time)
             Base::rh_push_text(out, ",")
@@ -439,27 +454,27 @@ module Report:
             rh_emit_count(out, "activity.active_days", 0, ctx.git_metrics.active_days)
             Base::rh_push_text(out, ",")
             if ctx.git_metrics.longest_gap_days < 0:
-                rh_emit_absent(out, "activity.longest_observed_gap_days", 6, "fewer-than-two-events")
+                rh_emit_absent(out, "activity.longest_observed_gap_days", 6, "fewer-than-two-events", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 rh_emit_count(out, "activity.longest_observed_gap_days", 0, ctx.git_metrics.longest_gap_days)
             Base::rh_push_text(out, ",")
             if ctx.git_metrics.median_interevent_hours < 0:
-                rh_emit_absent(out, "activity.median_interevent_hours", 6, "fewer-than-two-events")
+                rh_emit_absent(out, "activity.median_interevent_hours", 6, "fewer-than-two-events", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 rh_emit_count(out, "activity.median_interevent_hours", 0, ctx.git_metrics.median_interevent_hours)
             Base::rh_push_text(out, ",")
             if ctx.git_metrics.weekly_slope_den <= 0:
-                rh_emit_absent(out, "activity.weekly_count_slope", 6, "fewer-than-two-complete-weeks")
+                rh_emit_absent(out, "activity.weekly_count_slope", 6, "fewer-than-two-complete-weeks", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 rh_emit_ratio(out, "activity.weekly_count_slope", 0, ctx.git_metrics.weekly_slope_num, ctx.git_metrics.weekly_slope_den)
             Base::rh_push_text(out, ",")
             if ctx.git_metrics.weekly_variance_den <= 0:
-                rh_emit_absent(out, "activity.weekly_count_variance", 6, "no-complete-weeks")
+                rh_emit_absent(out, "activity.weekly_count_variance", 6, "no-complete-weeks", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 rh_emit_ratio(out, "activity.weekly_count_variance", 0, ctx.git_metrics.weekly_variance_num, ctx.git_metrics.weekly_variance_den)
             Base::rh_push_text(out, ",")
             if ctx.git_metrics.commits == 0:
-                rh_emit_absent(out, "activity.bot_event_share", 6, "empty-window-no-events")
+                rh_emit_absent(out, "activity.bot_event_share", 6, "empty-window-no-events", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 rh_emit_ratio(out, "activity.bot_event_share", 0, ctx.git_metrics.bot_events, ctx.git_metrics.commits)
             Base::rh_push_text(out, ",")
@@ -478,7 +493,7 @@ module Report:
             rh_emit_count(out, "contributor.unclassified_accounts", 0, ctx.git_metrics.unclassified_accounts)
             Base::rh_push_text(out, ",")
             if ctx.git_metrics.first_observed_actors < 0:
-                rh_emit_absent(out, "contributor.first_observed_contributors", 4, "windowed-history-cannot-establish-first-observed")
+                rh_emit_absent(out, "contributor.first_observed_contributors", 4, "windowed-history-cannot-establish-first-observed", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 rh_emit_count(out, "contributor.first_observed_contributors", 0, ctx.git_metrics.first_observed_actors)
             Base::rh_push_text(out, ",")
@@ -491,14 +506,14 @@ module Report:
             rh_emit_count(out, "contributor.contributors_over_20_events", 0, ctx.git_metrics.actors_over_20)
             Base::rh_push_text(out, ",")
             if ctx.git_metrics.actor_count == 0:
-                rh_emit_absent(out, "contributor.single_event_share", 6, "empty-window-no-actors")
+                rh_emit_absent(out, "contributor.single_event_share", 6, "empty-window-no-actors", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 rh_emit_ratio(out, "contributor.single_event_share", 0, ctx.git_metrics.single_event_actors, ctx.git_metrics.actor_count)
             Base::rh_push_text(out, ",")
             rh_emit_count(out, "contributors.automation_known", 0, ctx.bots)
             Base::rh_push_text(out, ",")
             if ctx.cov_den == 0:
-                rh_emit_absent(out, "coverage.window_completeness", 6, "empty-window-no-complete-month")
+                rh_emit_absent(out, "coverage.window_completeness", 6, "empty-window-no-complete-month", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 if ctx.cov_state == 0:
                     rh_emit_ratio(out, "coverage.window_completeness", 0, ctx.cov_num, ctx.cov_den)
@@ -506,7 +521,7 @@ module Report:
                     rh_emit_ratio_version_reason(out, "coverage.window_completeness", "1.0.0", 4, ctx.cov_num, ctx.cov_den, "history-coverage-incomplete")
             Base::rh_push_text(out, ",")
             if ctx.cov_v2_den == 0:
-                rh_emit_absent_version(out, "coverage.window_completeness", "2.0.0", 6, "empty-window-no-complete-month")
+                rh_emit_absent_version(out, "coverage.window_completeness", "2.0.0", 6, "empty-window-no-complete-month", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 if ctx.cov_state == 0:
                     rh_emit_ratio_version(out, "coverage.window_completeness", "2.0.0", 0, ctx.cov_v2_num, ctx.cov_v2_den)
@@ -516,12 +531,12 @@ module Report:
             rh_emit_count_pair(out, "history.collection_complete_windows", "complete", 1 if ctx.cov_state == 0 else 0, "requested", 1, rh_evidence_link(Observation::RhEvidenceObject.GitLog), rh_evidence_link(Observation::RhEvidenceObject.GitShallow))
             Base::rh_push_text(out, ",")
             if ctx.fresh_age < 0:
-                rh_emit_absent(out, "freshness.evidence_max_age_hours", 2, "no-commit-events-in-window")
+                rh_emit_absent(out, "freshness.evidence_max_age_hours", 2, "no-commit-events-in-window", rh_evidence_link(Observation::RhEvidenceObject.GitLog))
             else:
                 rh_emit_count(out, "freshness.evidence_max_age_hours", 0, ctx.fresh_age)
             Base::rh_push_text(out, ",")
             if snap.manifest == 2:
-                rh_emit_absent(out, "source.manifest_presence", 2, "non-local-source-no-file-access")
+                rh_emit_absent_unbacked(out, "source.manifest_presence", 2, "non-local-source-no-file-access")
             else:
                 rh_emit_enum(out, "source.manifest_presence", 0, snap.manifest, rh_manifest_label(snap.manifest), false)
             Base::rh_push_text(out, ",")

@@ -51,6 +51,13 @@ assert default_revisions["quality_dimensions"] == {
     "completeness":"complete", "freshness":"unknown",
     "validity":"valid", "provenance":"evidence_backed",
 }, default_revisions
+for metric in d["metrics"]:
+    assert isinstance(metric.get("evidence"), list) and metric["evidence"], metric
+    assert set(metric.get("quality_dimensions", {})) == {
+        "completeness", "freshness", "validity", "provenance"
+    }, metric
+assert m["history.first_author_time"]["evidence"] == ["evidence/git-log.bin"], m
+assert m["freshness.evidence_max_age_hours"]["quality_dimensions"]["validity"] == "unknown", m
 print("[m01] F001 empty OK")
 EOF
 
