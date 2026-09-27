@@ -647,6 +647,42 @@ def check_python_requirement_fuzz(fails: mutable i64&) -> void can[Memory.Alloca
         check_python_requirement_fuzz_case(fuzzed, fails)
         trial <- trial + 1
 
+def check_poetry_lock_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    packages: mutable darray[Package::RhPkgNode] = []
+    pool: mutable darray[u8] = []
+    requirements: mutable darray[Package::RhRequire] = []
+    artifacts: mutable darray[Package::RhArtifact] = []
+    unknown: mutable i64 = 0
+    parsed: i64 = Package::rh_pypi_poetry_lock_parse(raw, packages, pool, requirements, artifacts, &unknown)
+    bounded: mutable bool = (parsed < 0 or parsed <= raw.count.i64()) and packages.count <= raw.count + 1 and pool.count.i64() <= raw.count.i64() * 8 + 32 and requirements.count <= raw.count and artifacts.count <= raw.count and unknown >= 0 and unknown <= raw.count.i64() + 1
+    while artifact_index < artifacts.count |artifact_index: usize = 0, artifacts, packages, pool, bounded|:
+        artifact: Package::RhArtifact = artifacts[artifact_index]
+        bounded <- false if artifact.package_node < 0 or artifact.package_node >= packages.count.i64() or artifact.expected_s < 0 or artifact.expected_e <= artifact.expected_s or artifact.expected_e > pool.count.i64()
+        artifact_index <- artifact_index + 1
+    t7check(bounded, "poetry-lock-fuzz-bounds", fails)
+    return
+
+def check_poetry_lock_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    corpus: mutable darray[u8] = []
+    Base::rh_push_text(corpus, "[metadata]\nlock-version = \"2.1\"\npython-versions = \"*\"\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\noptional = false\npython-versions = \"*\"\ngroups = [\"main\"]\nfiles = [\n {file = \"requests hash = x].whl\", hash = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"},\n]\n[package.dependencies]\nurllib3 = \">=1.21,<3.0\"\n\n[[package]]\nname = \"urllib3\"\nversion = \"2.2.0\"\noptional = false\npython-versions = \"*\"\ngroups = [\"main\"]\nfiles = []\n")
+    check_poetry_lock_fuzz_case(corpus, fails)
+    while trial < 64 |trial: i64 = 0, rng: i64 = 9219431, corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < corpus.count |copied: usize = 0, corpus, fuzzed|:
+            fuzzed.push(corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_poetry_lock_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+    return
+
     project_corpus: mutable darray[u8] = []
     Base::rh_push_text(project_corpus, "[project]\nname = \"sample\"\nversion = \"1.0.0\"\ndependencies = [\n  \"requests==2.32.0\",\n  \"colorama>=0.4\",\n]\n[project.optional-dependencies]\ntest = [\"pytest==8.0.0\"]\n")
     while trial < 128 |trial: i64 = 0, rng: i64 = 9486832, project_corpus, fails|:
@@ -989,6 +1025,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_xml_lock_fuzz(&fails)
     check_gem_composer_fuzz(&fails)
     check_python_requirement_fuzz(&fails)
+    check_poetry_lock_fuzz(&fails)
     check_pep621_requirement_coordinates(&fails)
     check_semver_hardening(&fails)
     check_semver_fuzz(&fails)
