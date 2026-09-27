@@ -22,6 +22,7 @@ struct RhAggregateEvent:
 
 struct RhAggregatePartition:
     bucket: mutable i64
+    event_count: mutable usize
     signature_input: mutable darray[u8]
     signature: mutable darray[u8]
     cached_row: mutable darray[u8]
@@ -32,7 +33,7 @@ module Aggregates:
             while i < partitions.count |i: usize = 0, partitions, bucket|:
                 return i.i64() if partitions[i].bucket == bucket
                 i <- i + 1
-            partitions.push(RhAggregatePartition{bucket: bucket, signature_input: [], signature: [], cached_row: []})
+            partitions.push(RhAggregatePartition{bucket: bucket, event_count: 0, signature_input: [], signature: [], cached_row: []})
             (partitions.count - 1).i64()
 
         def rh_aggregate_append_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
@@ -240,37 +241,55 @@ module Aggregates:
                 i <- i + 1
             -1
 
-        def rh_aggregate_actor_seen(bucket: i64, actor_s: i64, actor_e: i64, actor_buckets: darray[i64]&, actor_starts: darray[i64]&, actor_ends: darray[i64]&, texts: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
-            while i < actor_buckets.count |i: usize = 0, actor_buckets, actor_starts, actor_ends, bucket, actor_s, actor_e, texts|:
-                if actor_buckets[i] == bucket and Base::rh_bytes_equal_span(texts, actor_starts[i], actor_ends[i], texts, actor_s, actor_e):
-                    return true
+        def rh_aggregate_key_hash(bucket: i64, start: mutable i64, end: mutable i64, texts: mutable darray[u8]&) -> usize can[Memory.Allocate, Abort.Panic]:
+            hash: mutable i64 = bucket % 2147483647
+            while i < end - start |hash, i: i64 = 0, end, start, texts|:
+                hash <- (hash * 33 + texts[(start + i).usize()].i64()) % 2147483647
                 i <- i + 1
-            false
+            hash.usize()
 
-        def rh_aggregate_add(bucket: i64, actor_s: i64, actor_e: i64, role_s: i64, role_e: i64, texts: darray[u8]&, bucket_ids: mutable darray[i64]&, event_counts: mutable darray[i64]&, actor_buckets: mutable darray[i64]&, actor_starts: mutable darray[i64]&, actor_ends: mutable darray[i64]&, role_buckets: mutable darray[i64]&, role_starts: mutable darray[i64]&, role_ends: mutable darray[i64]&, role_counts: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_aggregate_table(capacity: usize) -> mutable darray[i64] can[Memory.Allocate, Abort.Panic]:
+            table: mutable darray[i64] = []
+            while i < capacity |i: usize = 0, capacity, table|:
+                table.push(0)
+                i <- i + 1
+            table
+
+        def rh_aggregate_actor_insert(bucket: i64, actor_s: i64, actor_e: i64, actor_buckets: mutable darray[i64]&, actor_starts: mutable darray[i64]&, actor_ends: mutable darray[i64]&, texts: mutable darray[u8]&, table: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            slot: mutable usize = Aggregates::rh_aggregate_key_hash(bucket, actor_s, actor_e, texts) % table.count
+            while table[slot] != 0 |slot, table, bucket, actor_s, actor_e, actor_buckets, actor_starts, actor_ends, texts|:
+                idx: usize = (table[slot] - 1).usize()
+                if actor_buckets[idx] == bucket and Base::rh_bytes_equal_span(texts, actor_starts[idx], actor_ends[idx], texts, actor_s, actor_e):
+                    return
+                slot <- (slot + 1) % table.count
+            actor_buckets.push(bucket)
+            actor_starts.push(actor_s)
+            actor_ends.push(actor_e)
+            table[slot] <- actor_buckets.count.i64()
+
+        def rh_aggregate_role_increment(bucket: i64, role_s: i64, role_e: i64, role_buckets: mutable darray[i64]&, role_starts: mutable darray[i64]&, role_ends: mutable darray[i64]&, role_counts: mutable darray[i64]&, texts: mutable darray[u8]&, table: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            slot: mutable usize = Aggregates::rh_aggregate_key_hash(bucket, role_s, role_e, texts) % table.count
+            while table[slot] != 0 |slot, table, bucket, role_s, role_e, role_buckets, role_starts, role_ends, role_counts, texts|:
+                idx: usize = (table[slot] - 1).usize()
+                if role_buckets[idx] == bucket and Base::rh_bytes_equal_span(texts, role_starts[idx], role_ends[idx], texts, role_s, role_e):
+                    role_counts[idx] <- role_counts[idx] + 1
+                    return
+                slot <- (slot + 1) % table.count
+            role_buckets.push(bucket)
+            role_starts.push(role_s)
+            role_ends.push(role_e)
+            role_counts.push(1)
+            table[slot] <- role_buckets.count.i64()
+
+        def rh_aggregate_add(bucket: i64, actor_s: i64, actor_e: i64, role_s: i64, role_e: i64, texts: mutable darray[u8]&, bucket_ids: mutable darray[i64]&, event_counts: mutable darray[i64]&, actor_buckets: mutable darray[i64]&, actor_starts: mutable darray[i64]&, actor_ends: mutable darray[i64]&, actor_table: mutable darray[i64]&, role_buckets: mutable darray[i64]&, role_starts: mutable darray[i64]&, role_ends: mutable darray[i64]&, role_counts: mutable darray[i64]&, role_table: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             bucket_idx: mutable i64 = Aggregates::rh_aggregate_bucket(bucket_ids, bucket)
             if bucket_idx < 0:
                 bucket_ids.push(bucket)
                 event_counts.push(0)
                 bucket_idx <- bucket_ids.count.i64() - 1
             event_counts[bucket_idx.usize()] <- event_counts[bucket_idx.usize()] + 1
-            if not Aggregates::rh_aggregate_actor_seen(bucket, actor_s, actor_e, actor_buckets, actor_starts, actor_ends, texts):
-                actor_buckets.push(bucket)
-                actor_starts.push(actor_s)
-                actor_ends.push(actor_e)
-            role_idx: mutable i64 = -1
-            while ri < role_buckets.count |ri: usize = 0, role_buckets, role_starts, role_ends, bucket, role_s, role_e, texts|:
-                if role_buckets[ri] == bucket and Base::rh_bytes_equal_span(texts, role_starts[ri], role_ends[ri], texts, role_s, role_e):
-                    role_idx <- ri.i64()
-                    break
-                ri <- ri + 1
-            if role_idx < 0:
-                role_buckets.push(bucket)
-                role_starts.push(role_s)
-                role_ends.push(role_e)
-                role_counts.push(1)
-            else:
-                role_counts[role_idx.usize()] <- role_counts[role_idx.usize()] + 1
+            Aggregates::rh_aggregate_actor_insert(bucket, actor_s, actor_e, actor_buckets, actor_starts, actor_ends, texts, actor_table)
+            Aggregates::rh_aggregate_role_increment(bucket, role_s, role_e, role_buckets, role_starts, role_ends, role_counts, texts, role_table)
             bucket_idx
 
         def rh_aggregate_emit_row(out: mutable darray[u8]&, bucket: i64, bucket_idx: usize, event_counts: darray[i64]&, actor_buckets: darray[i64]&, role_buckets: darray[i64]&, role_starts: darray[i64]&, role_ends: darray[i64]&, role_counts: darray[i64]&, texts: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
@@ -371,6 +390,7 @@ module Aggregates:
             while i < events.count |i: usize = 0, events, texts, daily_partitions, weekly_partitions|:
                 event: RhAggregateEvent = events[i]
                 daily_idx: i64 = Aggregates::rh_aggregate_partition(daily_partitions, event.at / 86400)
+                daily_partitions[daily_idx.usize()].event_count <- daily_partitions[daily_idx.usize()].event_count + 1
                 daily_signature_input: mutable darray[u8] = daily_partitions[daily_idx.usize()].signature_input
                 Aggregates::rh_aggregate_append_span(daily_signature_input, texts, event.id_s, event.id_e)
                 Aggregates::rh_aggregate_append_span(daily_signature_input, texts, event.actor_s, event.actor_e)
@@ -380,6 +400,7 @@ module Aggregates:
                 daily_signature_input.push(59)
                 daily_partitions[daily_idx.usize()].signature_input <- daily_signature_input
                 weekly_idx: i64 = Aggregates::rh_aggregate_partition(weekly_partitions, event.at / 604800)
+                weekly_partitions[weekly_idx.usize()].event_count <- weekly_partitions[weekly_idx.usize()].event_count + 1
                 weekly_signature_input: mutable darray[u8] = weekly_partitions[weekly_idx.usize()].signature_input
                 Aggregates::rh_aggregate_append_span(weekly_signature_input, texts, event.id_s, event.id_e)
                 Aggregates::rh_aggregate_append_span(weekly_signature_input, texts, event.actor_s, event.actor_e)
@@ -401,34 +422,48 @@ module Aggregates:
                 i <- i + 1
             Aggregates::rh_aggregate_sort_partitions(daily_partitions)
             Aggregates::rh_aggregate_sort_partitions(weekly_partitions)
+            daily_recompute_events: mutable usize = 0
+            weekly_recompute_events: mutable usize = 0
+            while i < daily_partitions.count |i: usize = 0, daily_partitions, daily_recompute_events|:
+                daily_recompute_events <- daily_recompute_events + daily_partitions[i].event_count if daily_partitions[i].cached_row.count == 0
+                i <- i + 1
+            while i < weekly_partitions.count |i: usize = 0, weekly_partitions, weekly_recompute_events|:
+                weekly_recompute_events <- weekly_recompute_events + weekly_partitions[i].event_count if weekly_partitions[i].cached_row.count == 0
+                i <- i + 1
             daily_buckets: mutable darray[i64] = []
             daily_counts: mutable darray[i64] = []
             daily_actor_buckets: mutable darray[i64] = []
             daily_actor_starts: mutable darray[i64] = []
             daily_actor_ends: mutable darray[i64] = []
+            daily_table_capacity: usize = daily_recompute_events * 2 + 1
+            daily_actor_table: mutable darray[i64] = Aggregates::rh_aggregate_table(daily_table_capacity)
             daily_role_buckets: mutable darray[i64] = []
             daily_role_starts: mutable darray[i64] = []
             daily_role_ends: mutable darray[i64] = []
             daily_role_counts: mutable darray[i64] = []
+            daily_role_table: mutable darray[i64] = Aggregates::rh_aggregate_table(daily_table_capacity)
             weekly_buckets: mutable darray[i64] = []
             weekly_counts: mutable darray[i64] = []
             weekly_actor_buckets: mutable darray[i64] = []
             weekly_actor_starts: mutable darray[i64] = []
             weekly_actor_ends: mutable darray[i64] = []
+            weekly_table_capacity: usize = weekly_recompute_events * 2 + 1
+            weekly_actor_table: mutable darray[i64] = Aggregates::rh_aggregate_table(weekly_table_capacity)
             weekly_role_buckets: mutable darray[i64] = []
             weekly_role_starts: mutable darray[i64] = []
             weekly_role_ends: mutable darray[i64] = []
             weekly_role_counts: mutable darray[i64] = []
-            while i < events.count |i: usize = 0, events, texts, daily_partitions, weekly_partitions, daily_buckets, daily_counts, daily_actor_buckets, daily_actor_starts, daily_actor_ends, daily_role_buckets, daily_role_starts, daily_role_ends, daily_role_counts, weekly_buckets, weekly_counts, weekly_actor_buckets, weekly_actor_starts, weekly_actor_ends, weekly_role_buckets, weekly_role_starts, weekly_role_ends, weekly_role_counts|:
+            weekly_role_table: mutable darray[i64] = Aggregates::rh_aggregate_table(weekly_table_capacity)
+            while i < events.count |i: usize = 0, events, texts, daily_partitions, weekly_partitions, daily_buckets, daily_counts, daily_actor_buckets, daily_actor_starts, daily_actor_ends, daily_actor_table, daily_role_buckets, daily_role_starts, daily_role_ends, daily_role_counts, daily_role_table, weekly_buckets, weekly_counts, weekly_actor_buckets, weekly_actor_starts, weekly_actor_ends, weekly_actor_table, weekly_role_buckets, weekly_role_starts, weekly_role_ends, weekly_role_counts, weekly_role_table|:
                 event: RhAggregateEvent = events[i]
                 day: i64 = event.at / 86400
                 week: i64 = event.at / 604800
                 daily_idx: i64 = Aggregates::rh_aggregate_partition(daily_partitions, day)
                 if daily_partitions[daily_idx.usize()].cached_row.count == 0:
-                    Aggregates::rh_aggregate_add(day, event.actor_s, event.actor_e, event.role_s, event.role_e, texts, daily_buckets, daily_counts, daily_actor_buckets, daily_actor_starts, daily_actor_ends, daily_role_buckets, daily_role_starts, daily_role_ends, daily_role_counts)
+                    Aggregates::rh_aggregate_add(day, event.actor_s, event.actor_e, event.role_s, event.role_e, texts, daily_buckets, daily_counts, daily_actor_buckets, daily_actor_starts, daily_actor_ends, daily_actor_table, daily_role_buckets, daily_role_starts, daily_role_ends, daily_role_counts, daily_role_table)
                 weekly_idx: i64 = Aggregates::rh_aggregate_partition(weekly_partitions, week)
                 if weekly_partitions[weekly_idx.usize()].cached_row.count == 0:
-                    Aggregates::rh_aggregate_add(week, event.actor_s, event.actor_e, event.role_s, event.role_e, texts, weekly_buckets, weekly_counts, weekly_actor_buckets, weekly_actor_starts, weekly_actor_ends, weekly_role_buckets, weekly_role_starts, weekly_role_ends, weekly_role_counts)
+                    Aggregates::rh_aggregate_add(week, event.actor_s, event.actor_e, event.role_s, event.role_e, texts, weekly_buckets, weekly_counts, weekly_actor_buckets, weekly_actor_starts, weekly_actor_ends, weekly_actor_table, weekly_role_buckets, weekly_role_starts, weekly_role_ends, weekly_role_counts, weekly_role_table)
                 i <- i + 1
             Aggregates::rh_aggregate_sort_buckets(daily_buckets, daily_counts)
             Aggregates::rh_aggregate_sort_buckets(weekly_buckets, weekly_counts)
