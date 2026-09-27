@@ -1155,6 +1155,8 @@ A forecast is a model result with a horizon and population—not a fact that the
 
 **Current repository checkpoint:** `rh_cli forecast` consumes `rh-forecast-input/2` and emits `rh-forecast-result/2`. The envelope requires an observable binary outcome, temporal/family-separated/censoring-aware split declarations, and exact model and baseline Brier scores with a matching submitted cohort identifier and sample count. It validates captured evaluation evidence; it does not train the model or independently verify the supplied split membership or cohort identity, and remains opt-in and separate from policy.
 
+`rh_cli experimental` also emits a digest-bound transformation report for exact input/output bytes and the pinned evaluation configuration, mapping admissibility decisions, horizon/censoring calculations, and retained exclusion reasons.
+
 ### 16.3 Publication anomaly analysis
 
 Study deviations in artifact digests, source mappings, publishing actors, release cadence, and dependency changes. A model may flag an unusual event for review; unusual does not mean malicious.

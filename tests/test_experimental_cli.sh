@@ -20,9 +20,13 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-experimental-input/1","specs":[{"key":"discontinuity.no_qualifying_release_in_horizon","wave":7,"cost":"low","limits":["a","b"],"opt_in":true},{"key":"x.wrongwave","wave":1,"cost":"high","limits":["x"],"opt_in":true},{"key":"x.nooptin","wave":7,"cost":"low","limits":["x"],"opt_in":false},{"key":"x.nocost","wave":7,"limits":["x"],"opt_in":true},{"key":"x.nolimits","wave":7,"cost":"low","limits":[],"opt_in":true}],"observations":[{"follow_up_complete":true,"qualifying_release_in_horizon":true},{"follow_up_complete":true,"qualifying_release_in_horizon":false},{"follow_up_complete":false,"qualifying_release_in_horizon":false}]}
 JSON
 "$ROOT/build/rh_cli" experimental --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" <<'PY'
+python3 - "$T/in.json" "$T/out.json" "$T/out.json.transformations.json" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1]))
+import hashlib
+from pathlib import Path
+raw = Path(sys.argv[1]).read_bytes()
+normalized = Path(sys.argv[2]).read_bytes()
+d = json.loads(normalized)
 assert d["schema"] == "rh-experimental-result/1", d
 by = {s["key"]: s for s in d["specs"]}
 assert by["discontinuity.no_qualifying_release_in_horizon"]["admissible"] is True, by
@@ -37,6 +41,14 @@ assert v == {"with_release": 1, "without_release": 1, "censored": 1,
 assert d["label"] == "experimental: observable horizon outcome, not a reliability or abandonment label", d["label"]
 assert "excluded from the default policy path" in d["note"], d["note"]
 assert "not a claim about the project" in d["note"], d["note"]
+sidecar = json.load(open(sys.argv[3]))
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "experimental-metric-evaluation", sidecar
+assert sidecar["output_schema"] == "rh-experimental-result/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/experimental-metric-evaluation/1").hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["transformed", "transformed", "preserved"], sidecar
 print("[experimental] admissibility + outcome OK")
 PY
 
