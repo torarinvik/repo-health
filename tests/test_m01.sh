@@ -67,6 +67,10 @@ assert m["history.commit_count"]["value"] == 3, m
 assert m["history.reachable_revisions"]["value"] == 3, m
 assert m["history.revisions_reachable_default"]["value"] == 3, m
 assert m["history.collection_complete_windows"]["value"] == {"complete": 1, "requested": 1}, m
+assert m["history.collection_complete_windows"]["quality_dimensions"] == {
+    "completeness":"complete", "freshness":"unknown",
+    "validity":"valid", "provenance":"evidence_backed",
+}, m["history.collection_complete_windows"]
 assert m["history.rejected_record_count"]["value"] == 0, m
 assert m["contributors.raw_identity_count"]["value"] == 2, m
 assert m["activity.active_complete_months"]["value"] == 3, m
