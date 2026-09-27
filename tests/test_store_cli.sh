@@ -132,7 +132,7 @@ for n in "$transfer_a" "$transfer_b"; do
 done
 
 echo "[store] optional detached signature authenticates transfer before publication"
-printf 'operator transfer signing key' > "$T/transfer.key"
+printf 'operator transfer signing key 0123456789abcdef' > "$T/transfer.key"
 chmod 600 "$T/transfer.key"
 "$ROOT/build/rh_cli" ops export --root "$T/transfer-source" --manifest "$T/transfer.manifest" --out "$T/signed.bundle" --key "$T/transfer.key" --sig "$T/signed.bundle.sig" >/dev/null || fail "signed portable export"
 "$ROOT/build/rh_cli" ops import --dest "$T/signed-destination" --input "$T/signed.bundle" --key "$T/transfer.key" --sig "$T/signed.bundle.sig" >/dev/null || fail "authenticated portable import"

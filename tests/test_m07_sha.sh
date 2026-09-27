@@ -20,7 +20,7 @@ echo "$out"
 [[ "$out" == "M07 SHA OK" ]] || fail "unexpected vector output"
 
 rm -rf "$T"; mkdir -p "$T"
-printf 'release-key-v1\n' > "$T/key"
+printf 'release-key-v1-0123456789abcdef0123456789abcdef' > "$T/key"
 printf '{"release":"1.0.0","packet":true}\n' > "$T/packet.json"
 
 echo "[m07-sha] CLI sign/verify round-trip"
@@ -45,20 +45,23 @@ set +e
 printf '{"release":"1.0.0","packet":false}\n' > "$T/packet.json"
 "$ROOT/build/rh_cli" verify --key "$T/key" --subject "$T/packet.json" --sig "$T/packet.sig" >/dev/null 2>&1
 rc_tamper=$?
-printf 'other-key\n' > "$T/key2"
+printf 'other-key--0123456789abcdef0123456789abcdef' > "$T/key2"
 printf '{"release":"1.0.0","packet":true}\n' > "$T/packet.json"
 "$ROOT/build/rh_cli" verify --key "$T/key2" --subject "$T/packet.json" --sig "$T/packet.sig" >/dev/null 2>&1
 rc_wrongkey=$?
 : > "$T/emptykey"
 "$ROOT/build/rh_cli" sign --key "$T/emptykey" --subject "$T/packet.json" --sig "$T/empty.sig" >/dev/null 2>&1
 rc_empty=$?
+printf 'short' > "$T/shortkey"
+"$ROOT/build/rh_cli" sign --key "$T/shortkey" --subject "$T/packet.json" --sig "$T/short.sig" >/dev/null 2>&1
+rc_short=$?
 printf 'not json\n' > "$T/bad.sig"
 "$ROOT/build/rh_cli" verify --key "$T/key" --subject "$T/packet.json" --sig "$T/bad.sig" >/dev/null 2>&1
 rc_badsig=$?
 set -e
 [[ "$rc_tamper" -eq 5 ]] || fail "tampered subject must exit 5 (got $rc_tamper)"
 [[ "$rc_wrongkey" -eq 5 ]] || fail "wrong key must exit 5 (got $rc_wrongkey)"
-[[ "$rc_empty" -eq 3 ]] || fail "empty key must exit 3 (got $rc_empty)"
+[[ "$rc_empty" -eq 3 && "$rc_short" -eq 3 ]] || fail "empty/short key must exit 3 (got $rc_empty/$rc_short)"
 [[ "$rc_badsig" -eq 3 ]] || fail "malformed signature must exit 3 (got $rc_badsig)"
 echo "[m07-sha] negative controls OK"
 

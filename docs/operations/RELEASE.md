@@ -39,8 +39,12 @@ SHA-256 (FIPS 180-4) + HMAC-SHA256 (RFC 2104), checked against published
 vectors in `tests/test_m07_sha.sh`.
 
 Before reading a signing or verification key, the CLI opens it without
-following a symlink and enforces owner-only mode (`0600`). Keep the shared key
-outside collection workers and transfer it only through a trusted channel.
+following a symlink and enforces owner-only mode (`0600`). Keys must contain
+between 32 and 4,096 bytes; generate at least 32 bytes from a cryptographically
+secure random source. Keep the shared key outside collection workers and
+transfer it only through a trusted channel. Rotate keys through a reviewed
+release procedure and retain old verification keys only as long as needed for
+the artifacts they authenticate.
 
 **What a verified signature means:** the subject bytes are unchanged and
 the verifier holds the same shared key. It is *not* a public-key signature,
