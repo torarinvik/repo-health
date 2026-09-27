@@ -25,7 +25,7 @@ partial/failed-run behavior; it still needs an executed PostgreSQL environment.
 The additive
 [`db/migrations/003_projection_adjacency_batch.sql`](../../db/migrations/003_projection_adjacency_batch.sql)
 adds a bounded read over an immutable graph projection. It accepts one to 256
-seed UUIDs, a direction and edge kind, and a result limit up to 10,000; the
+seed UUIDs, a direction and edge kind, and a result limit up to 10,000. The
 result contains an ordered edge page and an explicit `truncated` flag. A
 projection whose visibility does not match returns an empty page. The
 `read_projection_adjacency_batch` command validates identifiers and bounds
@@ -34,9 +34,16 @@ read primitive. The `run_graph_query_job` command claims one persisted request,
 evaluates its bounded `rh-query-input/1` graph snapshot, and publishes the
 result with the claim's fencing token. It uses the existing evaluator and does
 not yet read adjacency through this projection batch primitive.
-The live migration rehearsal checks both directions, visibility mismatch, and
-truncation; this PostgreSQL 16 gate has not been run in environments without a
-Docker daemon.
+
+The additive
+[`db/migrations/007_projection_adjacency_temporal_metadata.sql`](../../db/migrations/007_projection_adjacency_temporal_metadata.sql)
+replaces the batch function without changing migration 003. Its ordered edge
+records retain `valid_from`, `valid_to`, and `known_at`; the PostgreSQL CLI
+contract and live migration test assert these values for outgoing and incoming
+reads.
+The live migration rehearsal checks both directions, temporal metadata,
+visibility mismatch, and truncation. The non-live CLI test checks the returned
+JSON contract; a PostgreSQL 16 run is required for the migration behavior.
 
 The additive
 [`db/migrations/004_graph_query_claim_attempt.sql`](../../db/migrations/004_graph_query_claim_attempt.sql)

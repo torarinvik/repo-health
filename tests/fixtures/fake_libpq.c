@@ -455,7 +455,7 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.columns = 1;
         result.rows = 1;
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
-        result.value = "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000001\",\"to\":\"00000000-0000-0000-0000-000001000002\"}],\"truncated\":true}";
+        result.value = "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000001\",\"to\":\"00000000-0000-0000-0000-000001000002\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":true}";
         return &result;
     }
     if (operation != NULL && strcmp(operation, "store_projection") == 0) {

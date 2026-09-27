@@ -9,7 +9,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATIONS="$ROOT/db/migrations"
 
 fail() { echo "[migrations] FAIL: $1" >&2; exit 1; }
-[[ -f "$MIGRATIONS/001_initial.sql" && -f "$MIGRATIONS/002_current_state_reconciliation.sql" && -f "$MIGRATIONS/003_projection_adjacency_batch.sql" && -f "$MIGRATIONS/004_graph_query_claim_attempt.sql" && -f "$MIGRATIONS/005_store_graph_projection.sql" && -f "$MIGRATIONS/006_stage_graph_projection_chunks.sql" ]] || fail "expected migration is missing"
+[[ -f "$MIGRATIONS/001_initial.sql" && -f "$MIGRATIONS/002_current_state_reconciliation.sql" && -f "$MIGRATIONS/003_projection_adjacency_batch.sql" && -f "$MIGRATIONS/004_graph_query_claim_attempt.sql" && -f "$MIGRATIONS/005_store_graph_projection.sql" && -f "$MIGRATIONS/006_stage_graph_projection_chunks.sql" && -f "$MIGRATIONS/007_projection_adjacency_temporal_metadata.sql" ]] || fail "expected migration is missing"
 
 python3 - "$MIGRATIONS" <<'PY'
 import re
@@ -139,6 +139,13 @@ assert "incoming high-degree query did not use its adjacency index" in live_plan
 assert "batched outgoing adjacency returned" in live_plan
 assert "batched incoming adjacency returned" in live_plan
 assert "batched adjacency crossed projection visibility scope" in live_plan
+temporal_upgrade = Path(sys.argv[1]) / "007_projection_adjacency_temporal_metadata.sql"
+temporal_sql = re.sub(r"--[^\n]*", "", temporal_upgrade.read_text(encoding="utf-8"))
+assert "CREATE OR REPLACE FUNCTION rh_projection_adjacency_batch" in temporal_sql
+for field in ("valid_from", "valid_to", "known_at"):
+    assert f"'{field}'" in temporal_sql
+assert "batched outgoing adjacency lost edge temporal metadata" in live_plan
+assert "batched incoming adjacency lost known-at metadata" in live_plan
 print(f"[migrations] target contract OK: {len(tables)} tables, {len(functions)} functions")
 PY
 

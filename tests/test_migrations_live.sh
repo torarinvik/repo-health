@@ -49,6 +49,8 @@ docker cp "$ROOT/db/migrations/005_store_graph_projection.sql" "$CONTAINER:/tmp/
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/005_store_graph_projection.sql >/dev/null || fail "apply graph-projection storage migration"
 docker cp "$ROOT/db/migrations/006_stage_graph_projection_chunks.sql" "$CONTAINER:/tmp/006_stage_graph_projection_chunks.sql" || fail "copy projection-chunk migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/006_stage_graph_projection_chunks.sql >/dev/null || fail "apply projection-chunk migration"
+docker cp "$ROOT/db/migrations/007_projection_adjacency_temporal_metadata.sql" "$CONTAINER:/tmp/007_projection_adjacency_temporal_metadata.sql" || fail "copy projection-adjacency temporal metadata migration"
+docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/007_projection_adjacency_temporal_metadata.sql >/dev/null || fail "apply projection-adjacency temporal metadata migration"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
 DO $$
@@ -1103,6 +1105,24 @@ BEGIN
   IF limited_count <> 37 OR NOT result_truncated THEN
     RAISE EXCEPTION 'batched adjacency limit returned % rows (truncated=%), expected 37 and truncated', limited_count, result_truncated;
   END IF;
+  UPDATE projection_membership
+  SET valid_from = '2026-01-02T00:00:00Z',
+      valid_to = '2026-02-02T00:00:00Z',
+      known_at = '2026-01-03T00:00:00Z'
+  WHERE projection_id = '00000000-0000-0000-0000-000000009001'
+    AND from_entity_id = '00000000-0000-0000-0000-000001000001'
+    AND to_entity_id = '00000000-0000-0000-0000-000001000002'
+    AND edge_kind = 'depends_on';
+  SELECT edges, truncated INTO result_edges, result_truncated
+  FROM rh_projection_adjacency_batch(
+    '00000000-0000-0000-0000-000000009001', 'public', 'depends_on', 'outgoing',
+    ARRAY['00000000-0000-0000-0000-000001000001'::uuid], 10000
+  );
+  IF result_edges->0->>'valid_from' IS DISTINCT FROM '2026-01-02T00:00:00+00:00'
+     OR result_edges->0->>'valid_to' IS DISTINCT FROM '2026-02-02T00:00:00+00:00'
+     OR result_edges->0->>'known_at' IS DISTINCT FROM '2026-01-03T00:00:00+00:00' THEN
+    RAISE EXCEPTION 'batched outgoing adjacency lost edge temporal metadata: %', result_edges->0;
+  END IF;
   SELECT edges, truncated INTO result_edges, result_truncated
   FROM rh_projection_adjacency_batch(
     '00000000-0000-0000-0000-000000009001', 'public', 'depends_on', 'incoming',
@@ -1111,6 +1131,9 @@ BEGIN
   incoming_count := jsonb_array_length(result_edges);
   IF incoming_count <> 4000 OR result_truncated THEN
     RAISE EXCEPTION 'batched incoming adjacency returned % rows (truncated=%), expected 4000 complete rows', incoming_count, result_truncated;
+  END IF;
+  IF result_edges->0->>'known_at' IS DISTINCT FROM '2026-01-01T00:00:00+00:00' THEN
+    RAISE EXCEPTION 'batched incoming adjacency lost known-at metadata: %', result_edges->0;
   END IF;
   SELECT edges, truncated INTO result_edges, result_truncated
   FROM rh_projection_adjacency_batch(
