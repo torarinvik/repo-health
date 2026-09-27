@@ -85,8 +85,11 @@ projections up to 200,000 edges. Retries with the same metadata and chunk are id
 incomplete chunks remain invisible, and publication occurs only after all
 chunks and edge counts reconcile. CLI tests cover a 10,001-edge write split
 across two calls and exact replay. Live PostgreSQL validation of the staging
-path remains open. The persisted-snapshot worker does not yet load projections
-through this path.
+path remains open. The projection-backed graph-query worker now loads
+bounded neighborhoods through the adjacency batch API, preserving entity UUIDs
+and source truncation before publishing the result. The adapter includes an
+explicit projection-availability bit so a missing or cross-scope projection
+cannot become a false complete-empty graph.
 
 Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa),
 with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).

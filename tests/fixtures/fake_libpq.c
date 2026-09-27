@@ -8,6 +8,7 @@ typedef struct { int status; int rows; int columns; const char *value; } FakeRes
 static FakeConnection connection = { 1 };
 static FakeResult result = { 2, 1, 1, "t" };
 static int run_graph_query_transition = 0;
+static int run_graph_projection_adjacency_round = -1;
 static int bulk_projection_chunk_index = -1;
 static const char *claim_cells[3] = {
     "00000000-0000-0000-0000-000000000004", "5", "2026-01-01 00:02:00+00"
@@ -28,6 +29,8 @@ static const char *evidence_references_unsorted_json =
     "{\"storage_keys\":[\"fnv1a64:f5e19178d3ff184e\",\"fnv1a64:0000000000000000\"],\"invalid_count\":0,\"truncated\":false,\"count\":2}";
 static const char *graph_query_claimed_json =
     "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_graph_query_job\",\"status\":\"claimed\",\"job_id\":\"00000000-0000-0000-0000-000000000099\",\"fencing_token\":1,\"attempt_count\":1,\"lease_expires_at\":\"2026-01-01T00:02:00+00:00\",\"request\":{\"schema\":\"rh-query-input/1\",\"kind\":\"downstream\",\"ids\":[1],\"graph\":{\"direction\":\"downstream\",\"subject\":1,\"nodes\":[1,2],\"edges\":[{\"from\":2,\"to\":1}],\"max_nodes\":20,\"max_depth\":5}}}";
+static const char *graph_projection_claimed_json =
+    "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_graph_query_job\",\"status\":\"claimed\",\"job_id\":\"00000000-0000-0000-0000-000000000099\",\"fencing_token\":1,\"attempt_count\":1,\"lease_expires_at\":\"2026-01-01T00:02:00+00:00\",\"request\":{\"schema\":\"rh-query-input/1\",\"kind\":\"downstream\",\"ids\":[],\"graph\":{\"direction\":\"downstream\",\"subject\":1,\"nodes\":[1],\"entity_ids\":[\"00000000-0000-0000-0000-000001000001\"],\"edges\":[],\"max_nodes\":10,\"max_depth\":5,\"projection\":{\"id\":\"00000000-0000-0000-0000-000000009001\",\"subject_entity_id\":\"00000000-0000-0000-0000-000001000001\",\"edge_kind\":\"depends_on\",\"visibility_scope\":\"public\"}}}}";
 static const char *graph_query_empty_json =
     "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_graph_query_job\",\"status\":\"empty\"}";
 static const char *graph_query_malformed_json =
@@ -293,6 +296,50 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             expected_count = 8;
         prefix = run_graph_query_transition == 1 ? "SELECT public.rh_publish_graph_query_result(" :
             run_graph_query_transition == 2 ? "SELECT public.rh_retry_graph_query_job(" : "SELECT public.rh_claim_graph_query_job_with_attempt(";
+    } else if (operation != NULL && strcmp(operation, "run_graph_projection") == 0) {
+        static const char *projection_batch_root[6] = {
+            "00000000-0000-0000-0000-000000009001", "public", "depends_on", "incoming",
+            "[\"00000000-0000-0000-0000-000001000001\"]", "10000"
+        };
+        static const char *projection_batch_middle[6] = {
+            "00000000-0000-0000-0000-000000009001", "public", "depends_on", "incoming",
+            "[\"00000000-0000-0000-0000-000001000002\"]", "9999"
+        };
+        static const char *projection_batch_leaf[6] = {
+            "00000000-0000-0000-0000-000000009001", "public", "depends_on", "incoming",
+            "[\"00000000-0000-0000-0000-000001000003\"]", "9998"
+        };
+        run_graph_projection_adjacency_round = -1;
+        if (query != NULL && strncmp(query, "SELECT public.rh_publish_graph_query_result(", strlen("SELECT public.rh_publish_graph_query_result(")) == 0) {
+            run_graph_query_transition = 1;
+            expected = run_graph_publish_values;
+            expected_count = 4;
+            prefix = "SELECT public.rh_publish_graph_query_result(";
+        } else if (query != NULL && strncmp(query, "SELECT public.rh_retry_graph_query_job(", strlen("SELECT public.rh_retry_graph_query_job(")) == 0) {
+            run_graph_query_transition = 2;
+            expected = run_graph_retry_values;
+            expected_count = 8;
+            prefix = "SELECT public.rh_retry_graph_query_job(";
+        } else if (query != NULL && strncmp(query, "SELECT jsonb_build_object('edges', adjacency.edges", strlen("SELECT jsonb_build_object('edges', adjacency.edges")) == 0) {
+            run_graph_query_transition = 3;
+            expected_count = 6;
+            prefix = "SELECT jsonb_build_object('edges', adjacency.edges";
+            if (values != NULL && count == 6 && values[4] != NULL && strstr(values[4], "00000000-0000-0000-0000-000001000001") != NULL) {
+                expected = projection_batch_root;
+                run_graph_projection_adjacency_round = 0;
+            } else if (values != NULL && count == 6 && values[4] != NULL && strstr(values[4], "00000000-0000-0000-0000-000001000002") != NULL) {
+                expected = projection_batch_middle;
+                run_graph_projection_adjacency_round = 1;
+            } else {
+                expected = projection_batch_leaf;
+                run_graph_projection_adjacency_round = 2;
+            }
+        } else {
+            run_graph_query_transition = 0;
+            expected = claim_graph_values;
+            expected_count = 4;
+            prefix = "SELECT public.rh_claim_graph_query_job_with_attempt(";
+        }
     } else if (operation != NULL && strcmp(operation, "publish_graph") == 0) {
         expected = publish_graph_values;
         expected_count = 4;
@@ -390,6 +437,8 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             fprintf(stderr, "fake libpq ingest call mismatch: query=%s count=%d expected=%d prefix=%s\n", query == NULL ? "(null)" : query, count, expected_count, prefix);
         if (operation != NULL && strcmp(operation, "run_graph_query") == 0)
             fprintf(stderr, "fake libpq graph worker call mismatch: query=%s count=%d expected=%d prefix=%s\n", query == NULL ? "(null)" : query, count, expected_count, prefix);
+        if (operation != NULL && strcmp(operation, "run_graph_projection") == 0)
+            fprintf(stderr, "fake libpq projection worker call mismatch: transition=%d query=%s count=%d expected=%d prefix=%s\n", run_graph_query_transition, query == NULL ? "(null)" : query, count, expected_count, prefix);
         return NULL;
     }
     if (bulk_projection_chunk) {
@@ -411,7 +460,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             return NULL;
         }
         bulk_projection_chunk_index = chunk_one ? 1 : 0;
-    } else for (int i = 0; i < count; ++i)
+    } else for (int i = 0; i < count; ++i) {
+        if (operation != NULL && strcmp(operation, "run_graph_projection") == 0 &&
+            run_graph_query_transition == 1 && i == 3)
+            continue;
         if (values[i] == NULL || strcmp(values[i], expected[i]) != 0) {
             if (operation != NULL && strcmp(operation, "adoption_history") == 0)
                 fprintf(stderr, "fake libpq adoption parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
@@ -419,8 +471,20 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
                 fprintf(stderr, "fake libpq ingest parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
             if (operation != NULL && strcmp(operation, "run_graph_query") == 0)
                 fprintf(stderr, "fake libpq graph worker parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
+            if (operation != NULL && strcmp(operation, "run_graph_projection") == 0)
+                fprintf(stderr, "fake libpq projection worker parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
             return NULL;
         }
+    }
+    if (operation != NULL && strcmp(operation, "run_graph_projection") == 0 && run_graph_query_transition == 1) {
+        int truncated_case = mode != NULL && strcmp(mode, "truncated") == 0;
+        if (values[3] == NULL ||
+            (truncated_case && (strstr(values[3], "\"nodes\":[2]") == NULL || strstr(values[3], "\"truncated\":true") == NULL || strstr(values[3], "\"complete\":false") == NULL)) ||
+            (!truncated_case && (strstr(values[3], "\"nodes\":[2,3]") == NULL || strstr(values[3], "00000000-0000-0000-0000-000001000002") == NULL || strstr(values[3], "00000000-0000-0000-0000-000001000003") == NULL || strstr(values[3], "\"truncated\":false") == NULL))) {
+            fprintf(stderr, "fake libpq projection worker published an unexpected traversal: %s\n", values[3] == NULL ? "(null)" : values[3]);
+            return NULL;
+        }
+    }
     if (claim_query || (operation != NULL && (strcmp(operation, "claim") == 0 || strcmp(operation, "claim_collection") == 0))) {
         result.columns = 3;
         result.rows = mode != NULL && strcmp(mode, "duplicate") == 0 ? 0 : 1;
@@ -443,6 +507,27 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             mode != NULL && strcmp(mode, "malformed") == 0 ? graph_query_malformed_json : graph_query_claimed_json;
         return &result;
     }
+    if (operation != NULL && strcmp(operation, "run_graph_projection") == 0) {
+        result.columns = 1;
+        result.rows = 1;
+        result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+        if (run_graph_query_transition == 3) {
+            result.value = run_graph_projection_adjacency_round == 0 ?
+                (mode != NULL && strcmp(mode, "truncated") == 0 ?
+                    "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000002\",\"to\":\"00000000-0000-0000-0000-000001000001\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":true,\"projection_available\":true}" :
+                    (mode != NULL && strcmp(mode, "unavailable") == 0 ?
+                        "{\"edges\":[],\"truncated\":false,\"projection_available\":false}" :
+                        "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000002\",\"to\":\"00000000-0000-0000-0000-000001000001\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":false,\"projection_available\":true}")) :
+                run_graph_projection_adjacency_round == 1 ?
+                "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000003\",\"to\":\"00000000-0000-0000-0000-000001000002\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":false,\"projection_available\":true}" :
+                "{\"edges\":[],\"truncated\":false,\"projection_available\":true}";
+        } else if (run_graph_query_transition == 1 || run_graph_query_transition == 2) {
+            result.value = "t";
+        } else {
+            result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? graph_query_empty_json : graph_projection_claimed_json;
+        }
+        return &result;
+    }
     if (operation != NULL && strcmp(operation, "poll_graph") == 0) {
         result.columns = 1;
         result.rows = 1;
@@ -455,7 +540,7 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.columns = 1;
         result.rows = 1;
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
-        result.value = "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000001\",\"to\":\"00000000-0000-0000-0000-000001000002\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":true}";
+        result.value = "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000001\",\"to\":\"00000000-0000-0000-0000-000001000002\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":true,\"projection_available\":true}";
         return &result;
     }
     if (operation != NULL && strcmp(operation, "store_projection") == 0) {

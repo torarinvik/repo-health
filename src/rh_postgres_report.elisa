@@ -10,6 +10,14 @@ include "./rh_job.elisa"
 
 module PostgresReport:
     private:
+        struct RhPgProjectionNode:
+            start: mutable i64
+            end: mutable i64
+
+        struct RhPgProjectionEdge:
+            from: mutable i64
+            dst: mutable i64
+
         const RH_PG_REPORT_MAX_BYTES: usize = 1048576
         const RH_PG_REPORT_MAX_NORMALIZATION_BYTES: usize = 20971520
         const RH_PG_REPORT_MAX_INGEST_BYTES: usize = 4194304
@@ -54,6 +62,231 @@ module PostgresReport:
             return false if ok == 0 or value < min_value or value > max_value
             value_out[0] <- value
             true
+
+        def rh_pg_report_projection_node_index(entity_text: darray[u8]&, entities: darray[RhPgProjectionNode]&, source: darray[u8]&, start: i64, end: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while index < entities.count |index: usize = 0, entity_text, entities, source, start, end|:
+                entity: RhPgProjectionNode = entities[index]
+                return index.i64() if Base::rh_bytes_equal_span(entity_text, entity.start, entity.end, source, start, end)
+                index <- index + 1
+            -1
+
+        # Materialize a bounded, temporal projection neighborhood into the
+        # existing in-memory query evaluator's graph input. Each database read
+        # is batched and scoped; the returned source cap remains explicit.
+        def rh_pg_report_projection_query(request_raw: darray[u8]&, conninfo: cstr, query_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if request_raw.count < 2 or request_raw[request_raw.count - 1] != 0
+            request: mutable darray[u8] = []
+            while i + 1 < request_raw.count |i: usize = 0, request_raw, request|:
+                request.push(request_raw[i])
+                i <- i + 1
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(request, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            graph_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "graph")
+            return -1 if graph_idx < 0 or nodes[graph_idx.usize()].kind != Json::RH_JSON_OBJ
+            projection_idx: i64 = Json::rh_json_obj_get(nodes, texts, graph_idx, "projection")
+            return -1 if projection_idx < 0 or nodes[projection_idx.usize()].kind != Json::RH_JSON_OBJ
+
+            projection_s: mutable i64 = 0
+            projection_e: mutable i64 = 0
+            subject_s: mutable i64 = 0
+            subject_e: mutable i64 = 0
+            edge_kind_s: mutable i64 = 0
+            edge_kind_e: mutable i64 = 0
+            visibility_s: mutable i64 = 0
+            visibility_e: mutable i64 = 0
+            direction_s: mutable i64 = 0
+            direction_e: mutable i64 = 0
+            return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "id", &projection_s, &projection_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, projection_s, projection_e)
+            return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "subject_entity_id", &subject_s, &subject_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, subject_s, subject_e)
+            return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "edge_kind", &edge_kind_s, &edge_kind_e, false) or edge_kind_e - edge_kind_s > 64
+            return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "visibility_scope", &visibility_s, &visibility_e, false) or not PostgresReport::rh_pg_report_visibility_ok(texts, visibility_s, visibility_e)
+            return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, graph_idx, "direction", &direction_s, &direction_e, false)
+            downstream: bool = PostgresReport::rh_pg_report_eq(texts, direction_s, direction_e, "downstream")
+            upstream: bool = PostgresReport::rh_pg_report_eq(texts, direction_s, direction_e, "upstream")
+            return -1 if not downstream and not upstream
+            batch_direction: mutable darray[u8] = []
+            Base::rh_push_text(batch_direction, "incoming" if downstream else "outgoing")
+
+            max_nodes: mutable i64 = 100
+            max_nodes_idx: i64 = Json::rh_json_obj_get(nodes, texts, graph_idx, "max_nodes")
+            if max_nodes_idx >= 0:
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, request, texts, graph_idx, "max_nodes", 1, Query::RH_QPAGE_MAX, &max_nodes)
+            max_depth: mutable i64 = 8
+            max_depth_idx: i64 = Json::rh_json_obj_get(nodes, texts, graph_idx, "max_depth")
+            if max_depth_idx >= 0:
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, request, texts, graph_idx, "max_depth", 1, Query::RH_QPAGE_MAX, &max_depth)
+
+            projection_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, projection_s, projection_e)
+            edge_kind: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, edge_kind_s, edge_kind_e)
+            visibility: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, visibility_s, visibility_e)
+            batch_direction.push(0)
+            projection_ptr: cstr = (&projection_id[0]).cast[cstr] can Unsafe.PointerCast
+            edge_kind_ptr: cstr = (&edge_kind[0]).cast[cstr] can Unsafe.PointerCast
+            visibility_ptr: cstr = (&visibility[0]).cast[cstr] can Unsafe.PointerCast
+            direction_ptr: cstr = (&batch_direction[0]).cast[cstr] can Unsafe.PointerCast
+
+            entity_text: mutable darray[u8] = []
+            entities: mutable darray[RhPgProjectionNode] = []
+            while i < subject_e - subject_s |i: i64 = 0, texts, subject_s, subject_e, entity_text|:
+                entity_text.push(texts[(subject_s + i).usize()])
+                i <- i + 1
+            entities.push(RhPgProjectionNode{start: 0, end: entity_text.count.i64()})
+            frontier: mutable darray[i64] = [0]
+            graph_edges: mutable darray[RhPgProjectionEdge] = []
+            source_truncated: mutable bool = false
+            depth: mutable i64 = 0
+            while depth <= max_depth and frontier.count > 0 and not source_truncated |depth, frontier, entities, entity_text, graph_edges, source_truncated, max_depth, max_nodes, conninfo, projection_ptr, visibility_ptr, edge_kind_ptr, direction_ptr|:
+                next_frontier: mutable darray[i64] = []
+                batch_start: mutable usize = 0
+                while batch_start < frontier.count and not source_truncated |batch_start, frontier, entities, entity_text, next_frontier, graph_edges, source_truncated, max_nodes, conninfo, projection_ptr, visibility_ptr, edge_kind_ptr, direction_ptr|:
+                    if graph_edges.count.i64() >= 10000:
+                        source_truncated <- true
+                        break
+                    batch_end: usize = batch_start + 256 if frontier.count - batch_start > 256 else frontier.count
+                    seed_json: mutable darray[u8] = []
+                    seed_json.push(91)
+                    while seed_index < batch_end |seed_index: usize = batch_start, batch_end, frontier, entities, entity_text, seed_json|:
+                        if seed_index > batch_start:
+                            seed_json.push(44)
+                        seed_entity: RhPgProjectionNode = entities[frontier[seed_index].usize()]
+                        seed_json.push(34)
+                        while seed_offset < seed_entity.end - seed_entity.start |seed_offset: i64 = 0, seed_entity, entity_text, seed_json|:
+                            seed_json.push(entity_text[(seed_entity.start + seed_offset).usize()])
+                            seed_offset <- seed_offset + 1
+                        seed_json.push(34)
+                        seed_index <- seed_index + 1
+                    seed_json.push(93)
+                    seed_json.push(0)
+                    seed_ptr: cstr = (&seed_json[0]).cast[cstr] can Unsafe.PointerCast
+                    adjacency_raw: mutable darray[u8] = []
+                    edge_limit: i64 = 10000 - graph_edges.count.i64()
+                    read_count: i64 = Postgres::rh_pg_projection_adjacency_batch(conninfo, projection_ptr, visibility_ptr, edge_kind_ptr, direction_ptr, seed_ptr, edge_limit, adjacency_raw)
+                    return -1 if read_count <= 0 or adjacency_raw.count > 1048576
+                    adjacency_nodes: mutable darray[Json::RhJsonNode] = []
+                    adjacency_texts: mutable darray[u8] = []
+                    adjacency_root: i64 = Json::rh_json_parse(adjacency_raw, adjacency_nodes, adjacency_texts)
+                    return -1 if adjacency_root < 0 or adjacency_nodes[adjacency_root.usize()].kind != Json::RH_JSON_OBJ
+                    edges_idx: i64 = Json::rh_json_obj_get(adjacency_nodes, adjacency_texts, adjacency_root, "edges")
+                    truncated_idx: i64 = Json::rh_json_obj_get(adjacency_nodes, adjacency_texts, adjacency_root, "truncated")
+                    available_idx: i64 = Json::rh_json_obj_get(adjacency_nodes, adjacency_texts, adjacency_root, "projection_available")
+                    return -1 if edges_idx < 0 or adjacency_nodes[edges_idx.usize()].kind != Json::RH_JSON_ARR or truncated_idx < 0 or adjacency_nodes[truncated_idx.usize()].kind != Json::RH_JSON_BOOL or available_idx < 0 or adjacency_nodes[available_idx.usize()].kind != Json::RH_JSON_BOOL
+                    return -1 if not Json::rh_json_is_true(adjacency_nodes, adjacency_raw, available_idx)
+                    batch_truncated: bool = Json::rh_json_is_true(adjacency_nodes, adjacency_raw, truncated_idx)
+                    edge_idx: mutable i64 = adjacency_nodes[edges_idx.usize()].first_child
+                    while edge_idx >= 0 and not source_truncated |edge_idx, adjacency_nodes, adjacency_texts, adjacency_raw, entities, entity_text, next_frontier, graph_edges, source_truncated, max_nodes, max_depth, depth|:
+                        from_s: mutable i64 = 0
+                        from_e: mutable i64 = 0
+                        to_s: mutable i64 = 0
+                        to_e: mutable i64 = 0
+                        return -1 if not PostgresReport::rh_pg_report_span(adjacency_nodes, adjacency_texts, edge_idx, "from", &from_s, &from_e, false) or not PostgresReport::rh_pg_report_uuid_valid(adjacency_texts, from_s, from_e)
+                        return -1 if not PostgresReport::rh_pg_report_span(adjacency_nodes, adjacency_texts, edge_idx, "to", &to_s, &to_e, false) or not PostgresReport::rh_pg_report_uuid_valid(adjacency_texts, to_s, to_e)
+                        from_index: mutable i64 = PostgresReport::rh_pg_report_projection_node_index(entity_text, entities, adjacency_texts, from_s, from_e)
+                        if from_index < 0:
+                            if entities.count.i64() >= max_nodes + 2:
+                                source_truncated <- true
+                            else:
+                                from_start: i64 = entity_text.count.i64()
+                                while from_offset < from_e - from_s |from_offset: i64 = 0, adjacency_texts, from_s, from_e, entity_text|:
+                                    entity_text.push(adjacency_texts[(from_s + from_offset).usize()])
+                                    from_offset <- from_offset + 1
+                                entities.push(RhPgProjectionNode{start: from_start, end: entity_text.count.i64()})
+                                from_index <- entities.count.i64() - 1
+                                next_frontier.push(from_index) if depth < max_depth
+                        to_index: mutable i64 = PostgresReport::rh_pg_report_projection_node_index(entity_text, entities, adjacency_texts, to_s, to_e)
+                        if to_index < 0 and not source_truncated:
+                            if entities.count.i64() >= max_nodes + 2:
+                                source_truncated <- true
+                            else:
+                                to_start: i64 = entity_text.count.i64()
+                                while to_offset < to_e - to_s |to_offset: i64 = 0, adjacency_texts, to_s, to_e, entity_text|:
+                                    entity_text.push(adjacency_texts[(to_s + to_offset).usize()])
+                                    to_offset <- to_offset + 1
+                                entities.push(RhPgProjectionNode{start: to_start, end: entity_text.count.i64()})
+                                to_index <- entities.count.i64() - 1
+                                next_frontier.push(to_index) if depth < max_depth
+                        if not source_truncated:
+                            graph_edges.push(RhPgProjectionEdge{from: from_index, dst: to_index})
+                        edge_idx <- adjacency_nodes[edge_idx.usize()].next_sibling
+                    source_truncated <- true if batch_truncated
+                    batch_start <- batch_end
+                frontier <- next_frontier
+                depth <- depth + 1
+
+            Base::rh_push_text(query_out, "{\"schema\":\"rh-query-input/1\",\"kind\":\"")
+            request_kind_s: mutable i64 = 0
+            request_kind_e: mutable i64 = 0
+            return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "kind", &request_kind_s, &request_kind_e, false)
+            Base::rh_json_escape(query_out, texts, request_kind_s.usize(), request_kind_e.usize())
+            ids_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "ids")
+            return -1 if ids_idx < 0 or nodes[ids_idx.usize()].kind != Json::RH_JSON_ARR
+            ids_node: Json::RhJsonNode = nodes[ids_idx.usize()]
+            return -1 if ids_node.text_start < 0 or ids_node.text_end <= ids_node.text_start
+            Base::rh_push_text(query_out, "\",\"ids\":")
+            while raw_offset < ids_node.text_end |raw_offset: i64 = ids_node.text_start, request, ids_node, query_out|:
+                query_out.push(request[raw_offset.usize()])
+                raw_offset <- raw_offset + 1
+            cursor_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "cursor")
+            if cursor_idx >= 0:
+                cursor_node: Json::RhJsonNode = nodes[cursor_idx.usize()]
+                return -1 if cursor_node.text_start < 0 or cursor_node.text_end <= cursor_node.text_start
+                Base::rh_push_text(query_out, ",\"cursor\":")
+                while raw_offset < cursor_node.text_end |raw_offset: i64 = cursor_node.text_start, request, cursor_node, query_out|:
+                    query_out.push(request[raw_offset.usize()])
+                    raw_offset <- raw_offset + 1
+            limit_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "limit")
+            if limit_idx >= 0:
+                limit_node: Json::RhJsonNode = nodes[limit_idx.usize()]
+                return -1 if limit_node.text_start < 0 or limit_node.text_end <= limit_node.text_start
+                Base::rh_push_text(query_out, ",\"limit\":")
+                while raw_offset < limit_node.text_end |raw_offset: i64 = limit_node.text_start, request, limit_node, query_out|:
+                    query_out.push(request[raw_offset.usize()])
+                    raw_offset <- raw_offset + 1
+            scan_states_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scan_states")
+            if scan_states_idx >= 0:
+                scan_states_node: Json::RhJsonNode = nodes[scan_states_idx.usize()]
+                return -1 if scan_states_node.kind != Json::RH_JSON_ARR or scan_states_node.text_start < 0 or scan_states_node.text_end <= scan_states_node.text_start
+                Base::rh_push_text(query_out, ",\"scan_states\":")
+                while raw_offset < scan_states_node.text_end |raw_offset: i64 = scan_states_node.text_start, request, scan_states_node, query_out|:
+                    query_out.push(request[raw_offset.usize()])
+                    raw_offset <- raw_offset + 1
+            Base::rh_push_text(query_out, ",\"graph\":{\"direction\":\"")
+            Base::rh_json_escape(query_out, texts, direction_s.usize(), direction_e.usize())
+            Base::rh_push_text(query_out, "\",\"subject\":1,\"nodes\":[")
+            while i < entities.count.i64() |i: i64 = 0, entities, query_out|:
+                if i > 0:
+                    query_out.push(44)
+                Base::rh_push_decimal_i64(query_out, i + 1)
+                i <- i + 1
+            Base::rh_push_text(query_out, "],\"entity_ids\":[")
+            while i < entities.count.i64() |i: i64 = 0, entities, entity_text, query_out|:
+                if i > 0:
+                    query_out.push(44)
+                entity: RhPgProjectionNode = entities[i.usize()]
+                query_out.push(34)
+                Base::rh_json_escape(query_out, entity_text, entity.start.usize(), entity.end.usize())
+                query_out.push(34)
+                i <- i + 1
+            Base::rh_push_text(query_out, "],\"edges\":[")
+            while i < graph_edges.count.i64() |i: i64 = 0, graph_edges, query_out|:
+                if i > 0:
+                    query_out.push(44)
+                edge: RhPgProjectionEdge = graph_edges[i.usize()]
+                Base::rh_push_text(query_out, "{\"from\":")
+                Base::rh_push_decimal_i64(query_out, edge.from + 1)
+                Base::rh_push_text(query_out, ",\"to\":")
+                Base::rh_push_decimal_i64(query_out, edge.dst + 1)
+                query_out.push(125)
+                i <- i + 1
+            Base::rh_push_text(query_out, "],\"max_nodes\":")
+            Base::rh_push_decimal_i64(query_out, max_nodes)
+            Base::rh_push_text(query_out, ",\"max_depth\":")
+            Base::rh_push_decimal_i64(query_out, max_depth)
+            Base::rh_push_text(query_out, ",\"source_truncated\":")
+            Base::rh_push_text(query_out, "true" if source_truncated else "false")
+            Base::rh_push_text(query_out, "}}")
+            query_out.count.i64()
 
         # Split a validated projection document into bounded database calls.
         # Chunk buffers and edge cursors stay inside each scoped iteration.
@@ -1071,9 +1304,14 @@ module PostgresReport:
                     Base::rh_push_text(out, "\"}")
                     return 0
                 query_input: mutable darray[u8] = []
-                while i + 1 < request_raw.count |i: usize = 0, request_raw, query_input|:
-                    query_input.push(request_raw[i])
-                    i <- i + 1
+                claim_graph_idx: i64 = Json::rh_json_obj_get(claim_nodes, claim_texts, request_idx, "graph")
+                projection_query_idx: i64 = Json::rh_json_obj_get(claim_nodes, claim_texts, claim_graph_idx, "projection")
+                if projection_query_idx >= 0:
+                    return -1 if PostgresReport::rh_pg_report_projection_query(request_raw, conninfo, query_input) <= 0
+                else:
+                    while i + 1 < request_raw.count |i: usize = 0, request_raw, query_input|:
+                        query_input.push(request_raw[i])
+                        i <- i + 1
                 query_result: mutable darray[u8] = []
                 return -1 if QueryReport::rh_query_report(query_input, query_result) != 0 or query_result.count == 0
                 query_result.push(0)

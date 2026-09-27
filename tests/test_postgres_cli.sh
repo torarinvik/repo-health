@@ -41,6 +41,8 @@ run_ok claim_graph duplicate claim-graph-query-job
 run_ok run_graph_query committed run-graph-query-job
 run_ok run_graph_query duplicate run-graph-query-job
 run_ok run_graph_query malformed run-graph-query-job
+run_ok run_graph_projection committed run-graph-query-job
+run_ok run_graph_projection truncated run-graph-query-job
 run_ok projection_batch ok read-projection-adjacency-batch
 run_ok store_projection stored store-graph-projection
 run_ok store_projection duplicate store-graph-projection
@@ -165,6 +167,7 @@ assert d == {
             "known_at": "2026-01-01T00:00:00Z",
         }],
         "truncated": True,
+        "projection_available": True,
     },
 }, d
 print("[postgres-cli] bounded batched adjacency result and truncation state retained")
@@ -253,6 +256,23 @@ assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operati
 assert json.load(open(sys.argv[2])) == {"schema":"rh-postgres-result/1","operation":"run_graph_query_job","status":"empty"}
 assert json.load(open(sys.argv[3])) == {"schema":"rh-postgres-result/1","operation":"run_graph_query_job","status":"dead_letter"}
 PY
+python3 - "$T/run-graph-query-job-committed.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"run_graph_query_job","status":"published"}
+PY
+python3 - "$T/run-graph-query-job-truncated.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"run_graph_query_job","status":"published"}
+PY
+set +e
+RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+  RH_FAKE_PG_OPERATION=run_graph_projection RH_FAKE_PG_EXPECT=unavailable \
+  "$ROOT/build/rh_cli" postgres --input "$T/run-graph-query-job-command.json" \
+    --out "$T/run-graph-query-job-unavailable.json" >/dev/null 2>&1
+unavailable_projection_rc=$?
+set -e
+[[ "$unavailable_projection_rc" -eq 4 && ! -e "$T/run-graph-query-job-unavailable.json" ]] \
+  || fail "unavailable projection was published as an empty complete graph"
 python3 - "$T/publish-graph-query-result-committed.json" "$T/publish-graph-query-result-duplicate.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"publish_graph_query_result","status":"published"}
