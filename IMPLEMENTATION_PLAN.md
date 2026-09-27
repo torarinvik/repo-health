@@ -346,6 +346,8 @@ Create the smallest foundation that prevents later modules from inventing incomp
 
 **M00-04 observation increment:** `Observation` now has an explicit status-domain predicate; consistency rejects out-of-domain status codes instead of treating them as valueless states. Ratio contracts distinguish bounded shares from general signed ratios, requiring every general ratio to have a positive denominator while allowing negative slopes. Independent `test_oracles` cover invalid status bytes and defined/undefined signed ratios. This tightens the value contract but does not yet provide the planned tagged value variants, evidence/quality envelope, or complete report serialization validation; the M00-04 exit gate remains open.
 
+**M00-04 report-path increment:** Versioned ratio serialization now shares one emitter, and partial coverage ratios include the explicit `history-coverage-incomplete` reason in both metric versions. The shallow-clone report fixture asserts that both partial ratios retain this reason (`tests/test_m01.sh`). Full typed serialization and quality-dimension validation remain open.
+
 ### 5.3 Essential invariants
 
 ```text
