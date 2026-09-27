@@ -119,6 +119,48 @@ if "$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out 
 fi
 echo "[downstream] identity revision creates a new snapshot and invalidates the superseded cache entry"
 
+# Reviewed revocation uses the real identity revision to rebuild and invalidate
+# a dependent projection while preserving the raw actor ledger.
+printf 'identity correction evidence\n' > "$T/identity-correction-evidence.txt"
+identity_evidence=$("$ROOT/build/rh_cli" store put --root "$T/identity-evidence" --file "$T/identity-correction-evidence.txt" | awk '{print $3}')
+python3 - "$T/identity-before.json" "$T/identity-after.json" "$identity_evidence" <<'PY'
+import json, sys
+before_path, after_path, evidence = sys.argv[1:]
+actors = [
+    {"source":"github","source_instance":"github.com/acme","native_object_id":"account-1","display_name":"one","aliases":[]},
+    {"source":"gitlab","source_instance":"gitlab.com/acme","native_object_id":"account-2","display_name":"two","aliases":[]},
+    {"source":"github","source_instance":"github.com/acme","native_object_id":"account-3","display_name":"three","aliases":[]},
+]
+review = {"reviewed_by":"maintainer-a","reviewed_at":1700000000,"review_reason":"Accounts controlled by one project contributor","evidence_ref":evidence}
+before = {"schema":"rh-identity-input/1","actor_count":3,"actors":actors,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1,**review}]}
+after = json.loads(json.dumps(before))
+after["links"][0].update(state="revoked", revision_added=2, reviewed_by="maintainer-b", reviewed_at=1700000100, review_reason="Account owner challenged the merge")
+for path, value in ((before_path, before), (after_path, after)):
+    with open(path, "w") as output:
+        json.dump(value, output, separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" identity --input "$T/identity-before.json" --out "$T/identity-before.result" --evidence-store "$T/identity-evidence" >/dev/null || fail "pre-correction identity review"
+"$ROOT/build/rh_cli" identity --input "$T/identity-after.json" --out "$T/identity-after.result" --evidence-store "$T/identity-evidence" >/dev/null || fail "revoked identity review"
+python3 - "$T/identity-before.json" "$T/identity-after.json" "$T/identity-before.result" "$T/identity-after.result" <<'PY'
+import json, sys
+before_input, after_input, before_result, after_result = map(lambda p: json.load(open(p)), sys.argv[1:])
+assert before_input["actors"] == after_input["actors"], "raw actor ledger changed during link revocation"
+assert before_result["identity_revision"] == 1 and before_result["cluster_count"] == 2, before_result
+assert after_result["identity_revision"] == 2 and after_result["cluster_count"] == 3, after_result
+assert after_result["clusters"] == [[0], [1], [2]], after_result
+print("[downstream] raw actors stay fixed while reviewed revocation advances identity and splits clusters")
+PY
+before_revision=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["identity_revision"])' "$T/identity-before.result")
+after_revision=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["identity_revision"])' "$T/identity-after.result")
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/revocation-before" --snapshot-root "$T/revocation-snapshots" --identity-revision "$before_revision" >/dev/null || fail "pre-correction projection regeneration"
+"$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/revocation-after" --snapshot-root "$T/revocation-snapshots" --identity-revision "$after_revision" >/dev/null || fail "corrected projection regeneration"
+before_snapshot=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["projection"]["snapshot_id"])' "$T/revocation-before/downstream.json")
+after_snapshot=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["projection"]["snapshot_id"])' "$T/revocation-after/downstream.json")
+[[ "$before_snapshot" != "$after_snapshot" ]] || fail "identity revocation reused the old projection snapshot"
+"$ROOT/build/rh_cli" ops delete --root "$T/revocation-snapshots" --name "$before_snapshot" >/dev/null || fail "invalidate pre-correction identity projection"
+"$ROOT/build/rh_cli" store verify --root "$T/revocation-snapshots" --name "$after_snapshot" >/dev/null || fail "corrected identity projection missing"
+echo "[downstream] reviewed revocation regenerates a new identity-bound snapshot and invalidates the old one"
+
 # Cycle: 1->2, 2->1 (plus an isolated node 0).
 cat > "$T/cycle.json" <<'JSON'
 {"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"iso","version":"1"},{"id":1,"name":"a","version":"1"},{"id":2,"name":"b","version":"1"}],"edges":[{"from":1,"to":2,"scope":"normal"},{"from":2,"to":1,"scope":"normal"}],"unresolved":[],"advisories":[]}
