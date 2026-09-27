@@ -59,6 +59,19 @@ and version, and environment metadata. This is a local synthetic measurement,
 not deployment capacity evidence. `tests/test_pg_write_bench.sh` is skipped in
 the ordinary suite and runs the live profile when `RH_PG_WRITE_BENCH=1`.
 
+A clean five-sample profile at revision `6e71b8bc758aa62b147be9ad571550b7209eba01`
+ran on macOS 27 / arm64 (10 logical CPUs, 24 GiB RAM), with PostgreSQL 16.15
+on Alpine Linux in Docker. Median / p95 CLI latency was 46.271 / 47.798 ms for
+10 events, 67.311 / 69.174 ms for 100, and 238.648 / 240.456 ms for 1,000;
+peak CLI RSS was 21.06, 21.36, and 25.11 MiB, respectively. At 1,000 events,
+the event, subject, and actor JSON arguments were 404,781, 132,001, and 186,661
+bytes. The command input SHA-256 was
+`5ac0da4f1565707d0bcdd6786ec7eb29079eec72597cfbe6dc699b73da16a5f5`. The
+manifest contains all five latency and RSS samples, the other input digests,
+and machine metadata. These timings include a fresh CLI process and one local
+database round trip per page; they are synthetic local evidence, not service
+capacity or production PostgreSQL performance claims.
+
 
 A clean run at revision `ef45ca0805f7b545bf63c7e2e18fbe08696118dd` on macOS
 27 / arm64 (10 logical CPUs, 24 GiB RAM), with ten repetitions after one
