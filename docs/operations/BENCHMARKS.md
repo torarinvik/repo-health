@@ -100,3 +100,15 @@ of reused partition rows. Set `RH_AGG_BENCH_EVENTS`, `RH_AGG_BENCH_REPS`,
 and manifest path. This synthetic benchmark includes input parsing and local
 state-store I/O, uses no external services, and does not establish a deployed
 capacity limit.
+
+One pinned local run at revision `422472f` used 10,000 events across 91 daily
+and 14 weekly partitions on macOS 27 / arm64 / Apple M5 (10 logical CPUs,
+24 GiB RAM). Five measured repetitions after one warmup reported full
+recomputation median/p95/max of 1,070/1,317/1,374 ms and partial-cache
+median/p95/max of 914/1,099/1,128 ms. A one-event actor correction reused 103
+of 105 partition rows, and full and partial output bytes matched
+(`6cc6ba4ac00af04fdf9a6556dd22ae317ea20fd035f05d9c7327743546b24061`). Maximum
+individual-child peak RSS was 18.17 MiB full and 18.46 MiB partial. Seeding the
+prior cache took a separate median 1,193 ms and is excluded from the partial
+timings. This is a single local synthetic profile; it is not a service
+capacity or production workload claim.
