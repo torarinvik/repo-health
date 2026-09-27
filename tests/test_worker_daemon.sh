@@ -34,6 +34,21 @@ assert a["decisions"] == b["decisions"], (a, b)
 print("[worker-daemon] refreshed plan remains schema-valid")
 PY
 
+echo "[worker-daemon] persisted cursor survives daemon restart at the same timestamp"
+cat > "$T/round-a.json" <<'JSON'
+{"schema":"rh-worker-input/1","capacity":1,"now":5000,"sources":[{"source_id":1,"interval_secs":10000,"last_full_reconcile":0},{"source_id":2,"interval_secs":10000,"last_full_reconcile":0},{"source_id":3,"interval_secs":10000,"last_full_reconcile":0}]}
+JSON
+"$ROOT/tools/worker-daemon.sh" --input "$T/round-a.json" --out "$T/round-plan.json" --interval-secs 0 --max-cycles 1 >/dev/null
+sed 's/10000/9999/g' "$T/round-a.json" > "$T/round-b.json"
+"$ROOT/tools/worker-daemon.sh" --input "$T/round-b.json" --out "$T/round-plan.json" --interval-secs 0 --max-cycles 1 >/dev/null
+python3 - "$T/round-plan.json" <<'PY'
+import json, sys
+plan = json.load(open(sys.argv[1]))
+served = [row["source_id"] for row in plan["decisions"] if row["mode"] != "skipped"]
+assert served == [1], plan
+print("[worker-daemon] prior plan cursor advanced service despite identical time")
+PY
+
 echo "[worker-daemon] invalid wrapper arguments fail closed"
 set +e
 "$ROOT/tools/worker-daemon.sh" --input "$T/in.json" --out "$T/x" --interval-secs nope --max-cycles 1 >/dev/null 2>&1; rc=$?

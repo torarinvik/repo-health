@@ -39,11 +39,34 @@ trap 'running=0' INT TERM
 last_digest=""
 cycles=0
 runs=0
+state_dir="$(mktemp -d "${TMPDIR:-/tmp}/rh-worker-daemon.XXXXXX")"
+trap 'rm -rf "$state_dir"' EXIT
 
 while ((running)); do
   digest="$(cksum < "$INPUT")"
   if [[ "$digest" != "$last_digest" ]]; then
-    "$CLI" worker tick --input "$INPUT" --out "$OUTPUT"
+    # Carry the previous plan's cursor unless the producer explicitly owns it.
+    # Invalid input is copied unchanged so the CLI remains the validation gate.
+    python3 - "$INPUT" "$OUTPUT" "$state_dir/input.json" <<'PY'
+import json, pathlib, sys
+source, previous, target = map(pathlib.Path, sys.argv[1:])
+raw = source.read_bytes()
+try:
+    document = json.loads(raw)
+except (UnicodeDecodeError, json.JSONDecodeError):
+    target.write_bytes(raw)
+    raise SystemExit(0)
+if isinstance(document, dict) and "rotation_cursor" not in document:
+    try:
+        plan = json.loads(previous.read_bytes())
+        cursor = plan.get("next_rotation_cursor") if isinstance(plan, dict) else None
+        if isinstance(cursor, int) and not isinstance(cursor, bool) and cursor >= 0:
+            document["rotation_cursor"] = cursor
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+target.write_text(json.dumps(document, separators=(",", ":")) + "\n")
+PY
+    "$CLI" worker tick --input "$state_dir/input.json" --out "$OUTPUT"
     last_digest="$digest"
     runs=$((runs + 1))
   fi
