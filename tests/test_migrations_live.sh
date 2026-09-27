@@ -1020,6 +1020,10 @@ INSERT INTO graph_projection
     (id, projection_kind, visibility_scope, input_cutoff, as_of, identity_revision, mapping_revision, completeness, manifest_digest)
 VALUES ('00000000-0000-0000-0000-000000009001', 'dependency', 'public',
         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'identity-1', 'mapping-1', 'complete', 'fixture');
+INSERT INTO graph_projection
+    (id, projection_kind, visibility_scope, input_cutoff, as_of, identity_revision, mapping_revision, completeness, manifest_digest)
+VALUES ('00000000-0000-0000-0000-000000009002', 'dependency', 'public',
+        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'identity-1', 'mapping-1', 'partial', 'partial-fixture');
 INSERT INTO projection_membership (projection_id, from_entity_id, to_entity_id, edge_kind, known_at)
 SELECT '00000000-0000-0000-0000-000000009001',
        '00000000-0000-0000-0000-000001000001',
@@ -1038,6 +1042,11 @@ SELECT '00000000-0000-0000-0000-000000009001',
        ('00000000-0000-0000-0000-' || lpad((1004972 + n % 30)::text, 12, '0'))::uuid,
        'depends_on', '2026-01-01T00:00:00Z'
 FROM generate_series(0, 149999) AS n;
+INSERT INTO projection_membership (projection_id, from_entity_id, to_entity_id, edge_kind, known_at)
+VALUES ('00000000-0000-0000-0000-000000009002',
+        '00000000-0000-0000-0000-000001000001',
+        '00000000-0000-0000-0000-000001000002',
+        'depends_on', '2026-01-01T00:00:00Z');
 ANALYZE projection_membership;
 DO $$
 DECLARE
@@ -1161,6 +1170,15 @@ BEGIN
   IF wrong_scope_count <> 0 OR result_truncated THEN
     RAISE EXCEPTION 'batched adjacency crossed projection visibility scope';
   END IF;
+  BEGIN
+    PERFORM * FROM rh_projection_adjacency_batch(
+      '00000000-0000-0000-0000-000000009002', 'public', 'depends_on', 'outgoing',
+      ARRAY['00000000-0000-0000-0000-000001000001'::uuid], 10000
+    );
+    RAISE EXCEPTION 'incomplete projection was available for adjacency reads';
+  EXCEPTION WHEN SQLSTATE '55000' THEN
+    NULL;
+  END;
   BEGIN
     PERFORM * FROM rh_projection_adjacency_batch(
       '00000000-0000-0000-0000-000000009001', 'public', 'depends_on', 'sideways',

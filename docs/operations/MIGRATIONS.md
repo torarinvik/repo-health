@@ -42,7 +42,9 @@ records retain `valid_from`, `valid_to`, and `known_at`; the PostgreSQL CLI
 contract and live migration test assert these values for outgoing and incoming
 reads. It filters memberships against the projection's fixed `as_of` and
 `input_cutoff`, excluding edges outside the selected valid-time interval or
-learned after the evidence cutoff.
+learned after the evidence cutoff. It also fails with an explicit unavailable
+state for projections whose completeness is not `complete`, even if staged
+membership rows exist.
 The live migration rehearsal checks both directions, temporal metadata,
 visibility mismatch, and truncation. The non-live CLI test checks the returned
 JSON contract; a PostgreSQL 16 run is required for the migration behavior.

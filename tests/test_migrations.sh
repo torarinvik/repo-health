@@ -147,6 +147,8 @@ for field in ("valid_from", "valid_to", "known_at"):
 assert "pm.known_at <= v_input_cutoff" in temporal_sql
 assert "pm.valid_from <= v_as_of" in temporal_sql
 assert "pm.valid_to > v_as_of" in temporal_sql
+assert "v_completeness <> 'complete'" in temporal_sql
+assert "incomplete and unavailable for adjacency reads" in temporal_sql
 assert "batched outgoing adjacency lost edge temporal metadata" in live_plan
 assert "batched incoming adjacency lost known-at metadata" in live_plan
 print(f"[migrations] target contract OK: {len(tables)} tables, {len(functions)} functions")

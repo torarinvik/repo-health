@@ -18,6 +18,7 @@ AS $$
 DECLARE
     v_as_of timestamptz;
     v_input_cutoff timestamptz;
+    v_completeness text;
 BEGIN
     IF p_projection_id IS NULL
        OR p_visibility_scope IS NULL
@@ -33,14 +34,18 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
-    SELECT gp.as_of, gp.input_cutoff
-      INTO v_as_of, v_input_cutoff
+    SELECT gp.as_of, gp.input_cutoff, gp.completeness
+      INTO v_as_of, v_input_cutoff, v_completeness
     FROM graph_projection AS gp
     WHERE gp.id = p_projection_id
       AND gp.visibility_scope = p_visibility_scope;
     IF NOT FOUND THEN
         RETURN QUERY SELECT '[]'::jsonb, false;
         RETURN;
+    END IF;
+    IF v_completeness <> 'complete' THEN
+        RAISE EXCEPTION 'graph projection is incomplete and unavailable for adjacency reads'
+            USING ERRCODE = '55000';
     END IF;
 
     IF p_direction = 'outgoing' THEN
