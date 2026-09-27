@@ -40,7 +40,9 @@ The additive
 replaces the batch function without changing migration 003. Its ordered edge
 records retain `valid_from`, `valid_to`, and `known_at`; the PostgreSQL CLI
 contract and live migration test assert these values for outgoing and incoming
-reads.
+reads. It filters memberships against the projection's fixed `as_of` and
+`input_cutoff`, excluding edges outside the selected valid-time interval or
+learned after the evidence cutoff.
 The live migration rehearsal checks both directions, temporal metadata,
 visibility mismatch, and truncation. The non-live CLI test checks the returned
 JSON contract; a PostgreSQL 16 run is required for the migration behavior.

@@ -144,6 +144,9 @@ temporal_sql = re.sub(r"--[^\n]*", "", temporal_upgrade.read_text(encoding="utf-
 assert "CREATE OR REPLACE FUNCTION rh_projection_adjacency_batch" in temporal_sql
 for field in ("valid_from", "valid_to", "known_at"):
     assert f"'{field}'" in temporal_sql
+assert "pm.known_at <= v_input_cutoff" in temporal_sql
+assert "pm.valid_from <= v_as_of" in temporal_sql
+assert "pm.valid_to > v_as_of" in temporal_sql
 assert "batched outgoing adjacency lost edge temporal metadata" in live_plan
 assert "batched incoming adjacency lost known-at metadata" in live_plan
 print(f"[migrations] target contract OK: {len(tables)} tables, {len(functions)} functions")

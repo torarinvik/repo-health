@@ -1064,10 +1064,10 @@ BEGIN
         AND edge_kind = 'depends_on') <> 4000 THEN
     RAISE EXCEPTION 'high-degree incoming fixture is incomplete';
   END IF;
-  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT to_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND from_entity_id = ''00000000-0000-0000-0000-000001000001'' AND edge_kind = ''depends_on''' INTO outgoing_plan;
-  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT from_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND to_entity_id = ''00000000-0000-0000-0000-000001005002'' AND edge_kind = ''depends_on''' INTO incoming_plan;
-  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) WITH candidates AS MATERIALIZED (SELECT pm.from_entity_id, pm.to_entity_id FROM projection_membership AS pm WHERE pm.projection_id = ''00000000-0000-0000-0000-000000009001'' AND pm.edge_kind = ''depends_on'' AND pm.from_entity_id = ANY (ARRAY[''00000000-0000-0000-0000-000001000001''::uuid, ''00000000-0000-0000-0000-000001000002''::uuid]) ORDER BY pm.from_entity_id, pm.to_entity_id LIMIT 10001) SELECT from_entity_id, to_entity_id FROM candidates ORDER BY from_entity_id, to_entity_id LIMIT 10000' INTO batch_outgoing_plan;
-  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) WITH candidates AS MATERIALIZED (SELECT pm.from_entity_id, pm.to_entity_id FROM projection_membership AS pm WHERE pm.projection_id = ''00000000-0000-0000-0000-000000009001'' AND pm.edge_kind = ''depends_on'' AND pm.to_entity_id = ANY (ARRAY[''00000000-0000-0000-0000-000001005002''::uuid]) ORDER BY pm.to_entity_id, pm.from_entity_id LIMIT 10001) SELECT from_entity_id, to_entity_id FROM candidates ORDER BY to_entity_id, from_entity_id LIMIT 10000' INTO batch_incoming_plan;
+  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT to_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND from_entity_id = ''00000000-0000-0000-0000-000001000001'' AND edge_kind = ''depends_on'' AND known_at <= ''2026-01-01T00:00:00Z''::timestamptz AND (valid_from IS NULL OR valid_from <= ''2026-01-01T00:00:00Z''::timestamptz) AND (valid_to IS NULL OR valid_to > ''2026-01-01T00:00:00Z''::timestamptz)' INTO outgoing_plan;
+  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT from_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND to_entity_id = ''00000000-0000-0000-0000-000001005002'' AND edge_kind = ''depends_on'' AND known_at <= ''2026-01-01T00:00:00Z''::timestamptz AND (valid_from IS NULL OR valid_from <= ''2026-01-01T00:00:00Z''::timestamptz) AND (valid_to IS NULL OR valid_to > ''2026-01-01T00:00:00Z''::timestamptz)' INTO incoming_plan;
+  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) WITH candidates AS MATERIALIZED (SELECT pm.from_entity_id, pm.to_entity_id FROM projection_membership AS pm WHERE pm.projection_id = ''00000000-0000-0000-0000-000000009001'' AND pm.edge_kind = ''depends_on'' AND pm.from_entity_id = ANY (ARRAY[''00000000-0000-0000-0000-000001000001''::uuid, ''00000000-0000-0000-0000-000001000002''::uuid]) AND pm.known_at <= ''2026-01-01T00:00:00Z''::timestamptz AND (pm.valid_from IS NULL OR pm.valid_from <= ''2026-01-01T00:00:00Z''::timestamptz) AND (pm.valid_to IS NULL OR pm.valid_to > ''2026-01-01T00:00:00Z''::timestamptz) ORDER BY pm.from_entity_id, pm.to_entity_id LIMIT 10001) SELECT from_entity_id, to_entity_id FROM candidates ORDER BY from_entity_id, to_entity_id LIMIT 10000' INTO batch_outgoing_plan;
+  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) WITH candidates AS MATERIALIZED (SELECT pm.from_entity_id, pm.to_entity_id FROM projection_membership AS pm WHERE pm.projection_id = ''00000000-0000-0000-0000-000000009001'' AND pm.edge_kind = ''depends_on'' AND pm.to_entity_id = ANY (ARRAY[''00000000-0000-0000-0000-000001005002''::uuid]) AND pm.known_at <= ''2026-01-01T00:00:00Z''::timestamptz AND (pm.valid_from IS NULL OR pm.valid_from <= ''2026-01-01T00:00:00Z''::timestamptz) AND (pm.valid_to IS NULL OR pm.valid_to > ''2026-01-01T00:00:00Z''::timestamptz) ORDER BY pm.to_entity_id, pm.from_entity_id LIMIT 10001) SELECT from_entity_id, to_entity_id FROM candidates ORDER BY to_entity_id, from_entity_id LIMIT 10000' INTO batch_incoming_plan;
   IF outgoing_plan::text LIKE '%"Node Type": "Seq Scan"%'
      OR outgoing_plan::text NOT LIKE '%dependency_outgoing%'
         AND outgoing_plan::text NOT LIKE '%projection_membership_pkey%' THEN
@@ -1106,21 +1106,38 @@ BEGIN
     RAISE EXCEPTION 'batched adjacency limit returned % rows (truncated=%), expected 37 and truncated', limited_count, result_truncated;
   END IF;
   UPDATE projection_membership
-  SET valid_from = '2026-01-02T00:00:00Z',
+  SET valid_from = '2025-12-01T00:00:00Z',
       valid_to = '2026-02-02T00:00:00Z',
-      known_at = '2026-01-03T00:00:00Z'
+      known_at = '2025-12-31T00:00:00Z'
   WHERE projection_id = '00000000-0000-0000-0000-000000009001'
     AND from_entity_id = '00000000-0000-0000-0000-000001000001'
     AND to_entity_id = '00000000-0000-0000-0000-000001000002'
+    AND edge_kind = 'depends_on';
+  UPDATE projection_membership
+  SET valid_from = '2026-01-02T00:00:00Z'
+  WHERE projection_id = '00000000-0000-0000-0000-000000009001'
+    AND from_entity_id = '00000000-0000-0000-0000-000001000001'
+    AND to_entity_id = '00000000-0000-0000-0000-000001000003'
+    AND edge_kind = 'depends_on';
+  UPDATE projection_membership
+  SET known_at = '2026-01-02T00:00:00Z'
+  WHERE projection_id = '00000000-0000-0000-0000-000000009001'
+    AND from_entity_id = '00000000-0000-0000-0000-000001000001'
+    AND to_entity_id = '00000000-0000-0000-0000-000001000004'
     AND edge_kind = 'depends_on';
   SELECT edges, truncated INTO result_edges, result_truncated
   FROM rh_projection_adjacency_batch(
     '00000000-0000-0000-0000-000000009001', 'public', 'depends_on', 'outgoing',
     ARRAY['00000000-0000-0000-0000-000001000001'::uuid], 10000
   );
-  IF result_edges->0->>'valid_from' IS DISTINCT FROM '2026-01-02T00:00:00+00:00'
+  IF jsonb_array_length(result_edges) <> 3998
+     OR result_edges @> '[{"to":"00000000-0000-0000-0000-000001000003"}]'::jsonb
+     OR result_edges @> '[{"to":"00000000-0000-0000-0000-000001000004"}]'::jsonb THEN
+    RAISE EXCEPTION 'batched adjacency did not enforce projection time axes: % edges', jsonb_array_length(result_edges);
+  END IF;
+  IF result_edges->0->>'valid_from' IS DISTINCT FROM '2025-12-01T00:00:00+00:00'
      OR result_edges->0->>'valid_to' IS DISTINCT FROM '2026-02-02T00:00:00+00:00'
-     OR result_edges->0->>'known_at' IS DISTINCT FROM '2026-01-03T00:00:00+00:00' THEN
+     OR result_edges->0->>'known_at' IS DISTINCT FROM '2025-12-31T00:00:00+00:00' THEN
     RAISE EXCEPTION 'batched outgoing adjacency lost edge temporal metadata: %', result_edges->0;
   END IF;
   SELECT edges, truncated INTO result_edges, result_truncated

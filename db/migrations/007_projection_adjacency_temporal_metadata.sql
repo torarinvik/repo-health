@@ -15,6 +15,9 @@ RETURNS TABLE (edges jsonb, truncated boolean)
 LANGUAGE plpgsql
 STABLE
 AS $$
+DECLARE
+    v_as_of timestamptz;
+    v_input_cutoff timestamptz;
 BEGIN
     IF p_projection_id IS NULL
        OR p_visibility_scope IS NULL
@@ -30,12 +33,12 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1
-        FROM graph_projection AS gp
-        WHERE gp.id = p_projection_id
-          AND gp.visibility_scope = p_visibility_scope
-    ) THEN
+    SELECT gp.as_of, gp.input_cutoff
+      INTO v_as_of, v_input_cutoff
+    FROM graph_projection AS gp
+    WHERE gp.id = p_projection_id
+      AND gp.visibility_scope = p_visibility_scope;
+    IF NOT FOUND THEN
         RETURN QUERY SELECT '[]'::jsonb, false;
         RETURN;
     END IF;
@@ -49,6 +52,9 @@ BEGIN
             WHERE pm.projection_id = p_projection_id
               AND pm.edge_kind = p_edge_kind
               AND pm.from_entity_id = ANY (p_entity_ids)
+              AND pm.known_at <= v_input_cutoff
+              AND (pm.valid_from IS NULL OR pm.valid_from <= v_as_of)
+              AND (pm.valid_to IS NULL OR pm.valid_to > v_as_of)
             ORDER BY pm.from_entity_id, pm.to_entity_id
             LIMIT p_edge_limit + 1
         ), bounded AS (
@@ -80,6 +86,9 @@ BEGIN
             WHERE pm.projection_id = p_projection_id
               AND pm.edge_kind = p_edge_kind
               AND pm.to_entity_id = ANY (p_entity_ids)
+              AND pm.known_at <= v_input_cutoff
+              AND (pm.valid_from IS NULL OR pm.valid_from <= v_as_of)
+              AND (pm.valid_to IS NULL OR pm.valid_to > v_as_of)
             ORDER BY pm.to_entity_id, pm.from_entity_id
             LIMIT p_edge_limit + 1
         ), bounded AS (
