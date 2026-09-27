@@ -42,6 +42,21 @@ measure database persistence or browser rendering. `tests/test_render_bench.sh`
 checks digest stability and profile structure without imposing machine-specific
 performance thresholds.
 
+`RH_PG_WRITE_BENCH=1 tools/bench-pg-writes.sh [out_dir]` starts an isolated
+PostgreSQL 16 container and writes `rh-pg-write-bench/1`. It exercises the
+parameterized `rh_cli postgres page_commit_events` adapter transaction at 10,
+100, and 1,000 events per page, with one warmup and five measured fresh CLI
+processes by default (`RH_PG_WRITE_BENCH_REPS` changes the repetition count).
+PostgreSQL startup, migration, fixture seeding, and input generation are outside
+the measured child-process interval. The profile includes CLI startup, command
+parsing, libpq connection, the transaction, and result writing. Each command
+uses unique event identities; the script verifies the total committed rows and
+keeps each events argument below the adapter's 1 MiB limit. It records input
+digests, serialized sizes, latency samples, process peak RSS, PostgreSQL image
+and version, and environment metadata. This is a local synthetic measurement,
+not deployment capacity evidence. `tests/test_pg_write_bench.sh` is skipped in
+the ordinary suite and runs the live profile when `RH_PG_WRITE_BENCH=1`.
+
 A clean run at revision `ef45ca0805f7b545bf63c7e2e18fbe08696118dd` on macOS
 27 / arm64 (10 logical CPUs, 24 GiB RAM), with ten repetitions after one
 warmup, measured 6.20 ms median / 7.01 ms p95 and 2.05 MiB peak RSS for 10

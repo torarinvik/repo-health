@@ -245,7 +245,7 @@ def environment_metadata(root: str, binary_path: str, compiler: str, concurrent_
     revision = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip()
     working_tree = subprocess.check_output(["git", "-C", root, "status", "--porcelain"], text=True)
     harness_hash = hashlib.sha256()
-    for relative_path in ("tools/bench.sh", "tools/profile.sh", "tools/bench-render.sh", "tools/bench_support.py"):
+    for relative_path in ("tools/bench.sh", "tools/profile.sh", "tools/bench-render.sh", "tools/bench-pg-writes.sh", "tools/bench_pg_writes.py", "tools/bench_support.py"):
         path = os.path.join(root, relative_path)
         harness_hash.update(relative_path.encode("utf-8"))
         with open(path, "rb") as stream:
