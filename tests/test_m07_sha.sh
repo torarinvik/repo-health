@@ -26,6 +26,11 @@ printf '{"release":"1.0.0","packet":true}\n' > "$T/packet.json"
 echo "[m07-sha] CLI sign/verify round-trip"
 "$ROOT/build/rh_cli" sign --key "$T/key" --subject "$T/packet.json" --sig "$T/packet.sig" >/dev/null \
   || fail "sign failed"
+python3 - "$T/key" <<'PY'
+import os, stat, sys
+assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == 0o600, oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))
+PY
+echo "[m07-sha] signing key is restricted to its owner"
 grep -q '"algorithm":"hmac-sha256"' "$T/packet.sig" || fail "signature missing algorithm"
 vout="$("$ROOT/build/rh_cli" verify --key "$T/key" --subject "$T/packet.json" --sig "$T/packet.sig")" \
   || fail "verify failed: $vout"
