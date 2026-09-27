@@ -9,7 +9,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATIONS="$ROOT/db/migrations"
 
 fail() { echo "[migrations] FAIL: $1" >&2; exit 1; }
-[[ -f "$MIGRATIONS/001_initial.sql" && -f "$MIGRATIONS/002_current_state_reconciliation.sql" ]] || fail "expected migration is missing"
+[[ -f "$MIGRATIONS/001_initial.sql" && -f "$MIGRATIONS/002_current_state_reconciliation.sql" && -f "$MIGRATIONS/003_projection_adjacency_batch.sql" ]] || fail "expected migration is missing"
 
 python3 - "$MIGRATIONS" <<'PY'
 import re
@@ -47,7 +47,7 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_request_source_stop", "rh_resolve_source_stop", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_claim_graph_query_job", "rh_read_graph_query_request", "rh_get_graph_query_job", "rh_publish_graph_query_result", "rh_retry_graph_query_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events", "rh_reconcile_source_objects"} <= functions
+assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_request_source_stop", "rh_resolve_source_stop", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_claim_graph_query_job", "rh_read_graph_query_request", "rh_get_graph_query_job", "rh_publish_graph_query_result", "rh_retry_graph_query_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events", "rh_reconcile_source_objects", "rh_projection_adjacency_batch"} <= functions
 assert all(
     re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).lstrip().startswith("BEGIN;") and
     re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).rstrip().endswith("COMMIT;")
@@ -117,6 +117,9 @@ for fragment in (
     "UNIQUE (visibility_scope, digest_algorithm, digest_value)",
     "CREATE INDEX dependency_incoming",
     "CREATE INDEX dependency_outgoing",
+    "cardinality(p_entity_ids) NOT BETWEEN 1 AND 256",
+    "p_edge_limit NOT BETWEEN 1 AND 10000",
+    "gp.visibility_scope = p_visibility_scope",
     "CREATE INDEX evidence_digest_lookup",
     "CREATE INDEX metric_subject_lookup",
     "CREATE INDEX job_source_active_collection",
@@ -129,9 +132,13 @@ assert "secret_value" not in clean.lower()
 assert "secret_locator" in clean
 live_plan_test = Path(sys.argv[1]).parent.parent / "tests" / "test_migrations_live.sh"
 live_plan = live_plan_test.read_text(encoding="utf-8")
+assert "003_projection_adjacency_batch.sql" in live_plan
 assert "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)" in live_plan
 assert "outgoing high-degree query did not use an adjacency index" in live_plan
 assert "incoming high-degree query did not use its adjacency index" in live_plan
+assert "batched outgoing adjacency returned" in live_plan
+assert "batched incoming adjacency returned" in live_plan
+assert "batched adjacency crossed projection visibility scope" in live_plan
 print(f"[migrations] target contract OK: {len(tables)} tables, {len(functions)} functions")
 PY
 

@@ -41,6 +41,8 @@ docker cp "$ROOT/db/migrations/001_initial.sql" "$CONTAINER:/tmp/001_initial.sql
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/001_initial.sql >/dev/null || fail "apply migration"
 docker cp "$ROOT/db/migrations/002_current_state_reconciliation.sql" "$CONTAINER:/tmp/002_current_state_reconciliation.sql" || fail "copy current-state migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/002_current_state_reconciliation.sql >/dev/null || fail "apply current-state migration"
+docker cp "$ROOT/db/migrations/003_projection_adjacency_batch.sql" "$CONTAINER:/tmp/003_projection_adjacency_batch.sql" || fail "copy projection-adjacency migration"
+docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/003_projection_adjacency_batch.sql >/dev/null || fail "apply projection-adjacency migration"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
 DO $$
@@ -1031,6 +1033,12 @@ DO $$
 DECLARE
   outgoing_plan json;
   incoming_plan json;
+  outgoing_count integer;
+  limited_count integer;
+  incoming_count integer;
+  wrong_scope_count integer;
+  result_edges jsonb;
+  result_truncated boolean;
 BEGIN
   IF (SELECT count(*) FROM projection_membership
       WHERE projection_id = '00000000-0000-0000-0000-000000009001'
@@ -1055,9 +1063,55 @@ BEGIN
      OR incoming_plan::text NOT LIKE '%dependency_incoming%' THEN
     RAISE EXCEPTION 'incoming high-degree query did not use its adjacency index: %', incoming_plan;
   END IF;
+  SELECT edges, truncated INTO result_edges, result_truncated
+  FROM rh_projection_adjacency_batch(
+    '00000000-0000-0000-0000-000000009001', 'public', 'depends_on', 'outgoing',
+    ARRAY['00000000-0000-0000-0000-000001000001'::uuid,
+          '00000000-0000-0000-0000-000001000002'::uuid], 10000
+  );
+  outgoing_count := jsonb_array_length(result_edges);
+  IF outgoing_count <> 4030 OR result_truncated THEN
+    RAISE EXCEPTION 'batched outgoing adjacency returned % rows (truncated=%), expected 4030 complete rows', outgoing_count, result_truncated;
+  END IF;
+  SELECT edges, truncated INTO result_edges, result_truncated
+  FROM rh_projection_adjacency_batch(
+    '00000000-0000-0000-0000-000000009001', 'public', 'depends_on', 'outgoing',
+    ARRAY['00000000-0000-0000-0000-000001000001'::uuid], 37
+  );
+  limited_count := jsonb_array_length(result_edges);
+  IF limited_count <> 37 OR NOT result_truncated THEN
+    RAISE EXCEPTION 'batched adjacency limit returned % rows (truncated=%), expected 37 and truncated', limited_count, result_truncated;
+  END IF;
+  SELECT edges, truncated INTO result_edges, result_truncated
+  FROM rh_projection_adjacency_batch(
+    '00000000-0000-0000-0000-000000009001', 'public', 'depends_on', 'incoming',
+    ARRAY['00000000-0000-0000-0000-000001005002'::uuid], 10000
+  );
+  incoming_count := jsonb_array_length(result_edges);
+  IF incoming_count <> 4000 OR result_truncated THEN
+    RAISE EXCEPTION 'batched incoming adjacency returned % rows (truncated=%), expected 4000 complete rows', incoming_count, result_truncated;
+  END IF;
+  SELECT edges, truncated INTO result_edges, result_truncated
+  FROM rh_projection_adjacency_batch(
+    '00000000-0000-0000-0000-000000009001', 'tenant-private', 'depends_on', 'outgoing',
+    ARRAY['00000000-0000-0000-0000-000001000001'::uuid], 10000
+  );
+  wrong_scope_count := jsonb_array_length(result_edges);
+  IF wrong_scope_count <> 0 OR result_truncated THEN
+    RAISE EXCEPTION 'batched adjacency crossed projection visibility scope';
+  END IF;
+  BEGIN
+    PERFORM * FROM rh_projection_adjacency_batch(
+      '00000000-0000-0000-0000-000000009001', 'public', 'depends_on', 'sideways',
+      ARRAY['00000000-0000-0000-0000-000001000001'::uuid], 10000
+    );
+    RAISE EXCEPTION 'invalid adjacency direction was accepted';
+  EXCEPTION WHEN invalid_parameter_value THEN
+    NULL;
+  END;
 END $$;
 SQL
-echo "[migrations-live] EXPLAIN ANALYZE confirms indexed high-degree incoming/outgoing adjacency"
+echo "[migrations-live] indexed high-degree plans and bounded visibility-scoped batch adjacency pass"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "durable operator source stop lifecycle"
 DO $$
