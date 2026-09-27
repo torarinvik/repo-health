@@ -3323,6 +3323,29 @@ def rh_do_pylock_observation(audit_path: cstr, artifact_id: i64, artifact_path: 
 # simply not collected (never fabricated). `--osv-url` is an explicit,
 # bounded fetch path: the response and a source-status envelope are retained
 # in the output directory before parsing, and non-2xx responses fail closed.
+def rh_deps_poetry_preflight(repo: cstr, poetry_lock_ptr: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    pyproject_path: mutable darray[u8] = []
+    requirements_path: mutable darray[u8] = []
+    return -1 if not rh_out_path(repo, "pyproject.toml", pyproject_path) or not rh_out_path(repo, "requirements.txt", requirements_path)
+    pyproject_ptr: cstr = (&pyproject_path[0]).cast[cstr] can Unsafe.PointerCast
+    requirements_ptr: cstr = (&requirements_path[0]).cast[cstr] can Unsafe.PointerCast
+    return -1 if not file_exists(pyproject_ptr) or file_exists(requirements_ptr)
+    manifest_bytes: mutable darray[u8] = []
+    lock_bytes: mutable darray[u8] = []
+    return -1 if Base::rh_io_read(pyproject_ptr, manifest_bytes) < 0 or Base::rh_io_read(poetry_lock_ptr, lock_bytes) < 0
+    check_pkgs: mutable darray[Package::RhPkgNode] = []
+    check_pool: mutable darray[u8] = []
+    check_reqs: mutable darray[Package::RhRequire] = []
+    check_artifacts: mutable darray[Package::RhArtifact] = []
+    check_edges: mutable darray[Package::RhDepEdge] = []
+    check_unresolved: mutable darray[Package::RhUnresolved] = []
+    check_unknown: mutable i64 = 0
+    return -1 if Package::rh_pypi_parse_pep621(manifest_bytes, check_pkgs, check_pool, check_reqs, check_edges, check_unresolved, &check_unknown) < 0
+    check_unresolved <- []
+    return -1 if Package::rh_pypi_poetry_lock_parse(lock_bytes, check_pkgs, check_pool, check_reqs, check_artifacts, &check_unknown) < 0
+    _ = Package::rh_pypi_resolve_locked(check_pkgs, check_pool, check_reqs, check_edges, check_unresolved)
+    0
+
 def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cstr, has_osv_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(repo) or not Git::rh_arg_safe(out):
         rh_cli_err("rejected deps argument (allowlist)")
@@ -3345,8 +3368,9 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         return 3
     poetry_lock_ptr: cstr = (&poetry_lock_path[0]).cast[cstr] can Unsafe.PointerCast
     if file_exists(poetry_lock_ptr):
-        rh_cli_err("deps: poetry.lock is present but no Poetry lock adapter is admitted; refusing partial dependency graphs")
-        return 4
+        if rh_deps_poetry_preflight(repo, poetry_lock_ptr) < 0:
+            rh_cli_err("deps: malformed or unsupported Poetry manifest/lock subset; refusing partial dependency graphs")
+            return 4
     resolved_osv_path: mutable cstr = osv_path
     resolved_has_osv: mutable bool = has_osv
     if has_osv_url:
@@ -3755,6 +3779,7 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         yreqs: mutable darray[Package::RhRequire] = []
         yedges: mutable darray[Package::RhDepEdge] = []
         yunres: mutable darray[Package::RhUnresolved] = []
+        yartifacts: mutable darray[Package::RhArtifact] = []
         yroot: i64 = |pyb, ypkgs, ypool, yreqs, yedges, yunres|
             yunk: mutable i64 = 0
             block_result: i64 = Package::rh_pypi_parse_pep621(pyb, ypkgs, ypool, yreqs, yedges, yunres, &yunk)
@@ -3762,13 +3787,23 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         if yroot < 0:
             rh_cli_err("deps: malformed pyproject.toml PEP 621 subset (structured failure, no partial graph)")
             return 4
+        if file_exists(poetry_lock_ptr):
+            poetry_lock_bytes: mutable darray[u8] = []
+            if Base::rh_io_read(poetry_lock_ptr, poetry_lock_bytes) < 0:
+                rh_cli_err("deps: cannot read poetry.lock")
+                return 4
+            yunres <- []
+            poetry_unknown: mutable i64 = 0
+            if Package::rh_pypi_poetry_lock_parse(poetry_lock_bytes, ypkgs, ypool, yreqs, yartifacts, &poetry_unknown) < 0:
+                rh_cli_err("deps: malformed or unsupported poetry.lock subset (structured failure, no partial graph)")
+                return 4
+            _ = Package::rh_pypi_resolve_locked(ypkgs, ypool, yreqs, yedges, yunres)
         yunsup: i64 = Package::rh_unsupported_range_count(yreqs, ypool)
         yfind: mutable darray[Package::RhAdvisory] = []
         ywd: mutable i64 = 0
         ysk: mutable i64 = 0
         if resolved_has_osv:
             _ = Package::rh_osv_match(ypkgs, ypool, osv_nodes, osv_texts, osv_root, yfind, &ywd, &ysk)
-        yartifacts: mutable darray[Package::RhArtifact] = []
         _ = Package::rh_artifacts_from_packages(ypkgs, yartifacts)
         yg: mutable darray[u8] = []
         Package::rh_graph_write_json(yg, 2, ypkgs, ypool, yartifacts, yedges, yunres, yfind, osv_texts, yroot)

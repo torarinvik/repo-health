@@ -444,6 +444,29 @@ def pmain(workdir: cstr, dump: bool) -> i32 can[Memory.Allocate, Abort.Panic, Co
         block_result: i64 = Package::rh_pypi_constraint_satisfies(comparator_pool, version_start, version_start + 5, version_start + 5, comparator_pool.count)
         block_result
     fails <- fails + pcheck(tilde_upper == 0, "pypi-tilde-upper-bound")
+    poetry_manifest: mutable darray[u8] = []
+    Base::rh_push_text(poetry_manifest, "[tool.poetry.dependencies]\npython = \"^3.11\"\nrequests = \">=2.31,<3.0\"\nconditional = \"^1.0\"\n[tool.poetry.group.dev.dependencies]\npytest = \"^8.0\"\n")
+    poetry_nodes: mutable darray[Package::RhPkgNode] = []
+    poetry_pool: mutable darray[u8] = []
+    poetry_reqs: mutable darray[Package::RhRequire] = []
+    poetry_artifacts: mutable darray[Package::RhArtifact] = []
+    poetry_edges: mutable darray[Package::RhDepEdge] = []
+    poetry_unresolved: mutable darray[Package::RhUnresolved] = []
+    poetry_unknown: mutable i64 = 0
+    poetry_manifest_result: i64 = |poetry_manifest, poetry_nodes, poetry_pool, poetry_reqs, poetry_edges, poetry_unresolved|
+        block_result: i64 = Package::rh_pypi_parse_pep621(poetry_manifest, poetry_nodes, poetry_pool, poetry_reqs, poetry_edges, poetry_unresolved, &poetry_unknown)
+        block_result
+    fails <- fails + pcheck(poetry_manifest_result == 0 and poetry_reqs.count == 3, "poetry-manifest-lock-input")
+    poetry_unresolved <- []
+    poetry_lock: mutable darray[u8] = []
+    Base::rh_push_text(poetry_lock, "[metadata]\nlock-version = \"2.1\"\npython-versions = \"*\"\ncontent-hash = \"digest\"\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\noptional = false\npython-versions = \"*\"\ngroups = [\"main\"]\nfiles = [\n {file = \"requests-2.31.0.whl\", hash = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"},\n]\n[package.dependencies]\nurllib3 = \">=1.21,<3.0\"\n\n[[package]]\nname = \"urllib3\"\nversion = \"2.2.0\"\noptional = false\npython-versions = \"*\"\ngroups = [\"main\"]\nfiles = []\n\n[[package]]\nname = \"pytest\"\nversion = \"8.2.0\"\noptional = false\npython-versions = \"*\"\ngroups = [\"dev\"]\nfiles = []\n\n[[package]]\nname = \"conditional\"\nversion = \"1.2.0\"\noptional = false\npython-versions = \">=3.10\"\ngroups = [\"main\"]\nfiles = []\n")
+    poetry_lock_result: i64 = Package::rh_pypi_poetry_lock_parse(poetry_lock, poetry_nodes, poetry_pool, poetry_reqs, poetry_artifacts, &poetry_unknown)
+    fails <- fails + pcheck(poetry_lock_result == 4, "poetry-lock-package-parse")
+    fails <- fails + pcheck(poetry_artifacts.count == 1 and poetry_artifacts[0].package_node == 1, "poetry-lock-file-hash-preserved")
+    poetry_resolved: i64 = Package::rh_pypi_resolve_locked(poetry_nodes, poetry_pool, poetry_reqs, poetry_edges, poetry_unresolved)
+    fails <- fails + pcheck(poetry_resolved == 3 and poetry_edges.count == 3, "poetry-lock-edges-resolved")
+    fails <- fails + pcheck(poetry_edges[0].from == 0 and poetry_edges[0].depctx == Package::RH_SCOPE_NORMAL and poetry_edges[1].from == 0 and poetry_edges[1].depctx == Package::RH_SCOPE_DEV and poetry_edges[2].from == 1, "poetry-lock-scopes-and-transitive-edge")
+    fails <- fails + pcheck(poetry_unresolved.count == 1 and poetry_unresolved[0].reason == Package::RH_UNRES_CONTEXT and poetry_nodes[4].requires_python_s >= 0, "poetry-python-context-preserved")
 
     # --- Go go.mod (declared requirements) ---
     gmod: mutable darray[u8] = []

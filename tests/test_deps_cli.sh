@@ -310,6 +310,74 @@ assert metrics["dependency.development_requirements"]["value"] == 1, metrics
 print("[deps] Poetry runtime/dev declarations preserved as unresolved ranges")
 PY
 
+echo "[deps] Poetry lock resolves direct and transitive packages with context retention"
+mkdir -p "$T/poetry-lock"
+cat > "$T/poetry-lock/pyproject.toml" <<'EOF'
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = ">=2.31,<3.0"
+conditional = "^1.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+EOF
+cat > "$T/poetry-lock/poetry.lock" <<'EOF'
+[metadata]
+lock-version = "2.1"
+python-versions = "*"
+content-hash = "fixture"
+
+[[package]]
+name = "requests"
+version = "2.31.0"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+ {file = "requests-2.31.0.whl", hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+]
+
+[package.dependencies]
+urllib3 = ">=1.21,<3.0"
+
+[[package]]
+name = "urllib3"
+version = "2.2.0"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = []
+
+[[package]]
+name = "pytest"
+version = "8.2.0"
+optional = false
+python-versions = "*"
+groups = ["dev"]
+files = []
+
+[[package]]
+name = "conditional"
+version = "1.2.0"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = []
+EOF
+"$ROOT/build/rh_cli" deps --repo "$T/poetry-lock" --out "$T/poetry-lock-out" \
+  | grep -q "ecosystems=1 pypi=3/4 unresolved=1 unsupported=0" || fail "Poetry lock summary"
+python3 - "$T/poetry-lock-out/deps-pypi-graph.json" <<'PY'
+import json, sys
+graph = json.load(open(sys.argv[1]))
+nodes = graph["nodes"]
+assert [n["name"] for n in nodes] == ["root", "requests", "urllib3", "pytest", "conditional"], nodes
+assert {(e["from"], e["to"], e["scope"]) for e in graph["edges"]} == {(0, 1, "normal"), (1, 2, "normal"), (0, 3, "dev")}, graph["edges"]
+assert nodes[4]["requires_python"] == ">=3.10", nodes[4]
+assert graph["artifacts"][0]["expected_digest"] == "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", graph["artifacts"]
+assert graph["unresolved"] == [{"from": 0, "name": "conditional", "requirement": "^1.0", "reason": "context"}], graph["unresolved"]
+print("[deps] Poetry lock graph, scopes, and Python condition retention OK")
+PY
+
 echo "[deps] duplicate PyPI declaration sources fail closed"
 cp "$T/pysrc/requirements.txt" "$T/pep621src/requirements.txt"
 set +e
@@ -934,16 +1002,17 @@ assert g["nodes"][3]["source_identity_sha256"] == hashlib.sha256(b"https://regis
 print("[deps] npm resolved source locators remain distinct and private")
 PY
 
-echo "[deps] unsupported declared lockfile revisions fail closed"
+echo "[deps] malformed Poetry lock fails before publishing other ecosystem graphs"
 mkdir -p "$T/unsupported-poetry"
 cp "$ROOT/fixtures/packages/cargo-diamond.lock" "$T/unsupported-poetry/Cargo.lock"
-printf '# Poetry format is not yet admitted\n' > "$T/unsupported-poetry/poetry.lock"
+printf '[tool.poetry.dependencies]\nrequests = "^2.0"\n' > "$T/unsupported-poetry/pyproject.toml"
+printf '[metadata]\nlock-version = "99.0"\n' > "$T/unsupported-poetry/poetry.lock"
 set +e
 "$ROOT/build/rh_cli" deps --repo "$T/unsupported-poetry" --out "$T/unsupported-poetry-out" >/dev/null 2>&1
-rc_unsupported_poetry=$?
+rc_bad_poetry_version=$?
 set -e
-[[ "$rc_unsupported_poetry" -eq 4 ]] || fail "unadmitted Poetry lock must fail closed (got $rc_unsupported_poetry)"
-[[ ! -f "$T/unsupported-poetry-out/deps-cargo-graph.json" ]] || fail "partial graph written when Poetry lock is unadmitted"
+[[ "$rc_bad_poetry_version" -eq 4 ]] || fail "unsupported Poetry lock version must fail closed (got $rc_bad_poetry_version)"
+[[ ! -f "$T/unsupported-poetry-out/deps-cargo-graph.json" ]] || fail "partial graph written when Poetry lock version is unsupported"
 
 mkdir -p "$T/bad-cargo-revision"
 cat > "$T/bad-cargo-revision/Cargo.lock" <<'EOF'

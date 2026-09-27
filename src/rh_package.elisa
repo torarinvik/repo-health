@@ -372,6 +372,8 @@ module Package:
             dig_e: mutable i64
             framework_s: mutable i64
             framework_e: mutable i64
+            requires_python_s: mutable i64
+            requires_python_e: mutable i64
             dev: mutable u8
             optional: mutable u8
 
@@ -431,7 +433,7 @@ module Package:
 
         def rh_node_add(pkgs: mutable darray[RhPkgNode]&, eco: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if pkgs.count.i64() > 100000
-            pkgs.push(RhPkgNode{eco: eco, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, origin_s: -1, origin_e: -1, src_kind: 3, has_digest: 0, dig_s: -1, dig_e: -1, framework_s: -1, framework_e: -1, dev: 0, optional: 0})
+            pkgs.push(RhPkgNode{eco: eco, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, origin_s: -1, origin_e: -1, src_kind: 3, has_digest: 0, dig_s: -1, dig_e: -1, framework_s: -1, framework_e: -1, requires_python_s: -1, requires_python_e: -1, dev: 0, optional: 0})
             pkgs.count.i64() - 1
 
         def rh_artifact_add_expected(artifacts: mutable darray[RhArtifact]&, package_node: i64, kind: u8, expected_s: i64, expected_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -3587,6 +3589,281 @@ module Package:
             return -1 if (saw_project == 0 and saw_poetry == 0) or active == 1
             0
 
+    private:
+        def rh_pypi_lock_seen(seen: darray[i64]&, node: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < seen.count |i: usize = 0, seen, node|:
+                return true if seen[i] == node
+                i <- i + 1
+            false
+
+        # Poetry lock parser for the 1.1/2.x package-table subset. Package
+        # versions and requirements are retained independently; conditional
+        # Python-version packages remain annotated and are not guessed as active
+        # candidates. Inline dependency tables remain requirements that the
+        # resolver will report as context-unresolved.
+    public:
+        def rh_pypi_poetry_lock_parse(lock: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, artifacts: mutable darray[RhArtifact]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            mode: mutable u8 = 0
+            current: mutable i64 = -1
+            package_name_s: mutable i64 = -1
+            package_name_e: mutable i64 = -1
+            package_version_s: mutable i64 = -1
+            package_version_e: mutable i64 = -1
+            seen: mutable darray[i64] = []
+            package_count: mutable i64 = 0
+            lock_version_seen: mutable bool = false
+            skip_array: mutable bool = false
+            skip_depth: mutable i64 = 0
+            while line_start < lock.count |line_start: usize = 0, lock, pkgs, pool, reqs, artifacts, unknown_out, mode, current, package_name_s, package_name_e, package_version_s, package_version_e, seen, package_count, lock_version_seen, skip_array, skip_depth|:
+                line_end: usize =
+                    while j < lock.count and lock[j] != 10 |j: usize = line_start| -> j:
+                        j <- j + 1
+                s: mutable usize = line_start
+                e: mutable usize = line_end
+                while s < e and (lock[s] == 32 or lock[s] == 9 or lock[s] == 13) |s, e, lock|:
+                    s <- s + 1
+                while e > s and (lock[e - 1] == 32 or lock[e - 1] == 9 or lock[e - 1] == 13) |s, e, lock|:
+                    e <- e - 1
+                if skip_array:
+                    while i < e |i: usize = s, e, lock, skip_depth, skip_array, mode, current, artifacts, pool|:
+                        if mode == 1 and current >= 0 and i + 71 <= e and lock[i] == 115 and lock[i + 1] == 104 and lock[i + 2] == 97 and lock[i + 3] == 50 and lock[i + 4] == 53 and lock[i + 5] == 54 and lock[i + 6] == 58:
+                            digest_ok: mutable bool = true
+                            while h < 64 |h: usize = 0, i, e, lock, digest_ok|:
+                                b: u8 = lock[i + 7 + h]
+                                digit: bool = b >= 48 and b <= 57
+                                lower: bool = b >= 97 and b <= 102
+                                upper: bool = b >= 65 and b <= 70
+                                digest_ok <- false if not digit and not lower and not upper
+                                h <- h + 1
+                            return -1 if not digest_ok or (i + 71 < e and ((lock[i + 71] >= 48 and lock[i + 71] <= 57) or (lock[i + 71] >= 65 and lock[i + 71] <= 90) or (lock[i + 71] >= 97 and lock[i + 71] <= 122)))
+                            digest_s: i64 = rh_pool_copy(pool, lock, i, i + 71)
+                            return -1 if rh_artifact_add_expected(artifacts, current, RH_ART_KIND_ARCHIVE, digest_s, digest_s + 71) < 0
+                        skip_depth <- skip_depth + 1 if lock[i] == 91
+                        skip_depth <- skip_depth - 1 if lock[i] == 93
+                        skip_array <- false if skip_depth <= 0
+                        i <- i + 1
+                    line_start <- line_end + 1
+                    continue
+                if s < e and lock[s] == 35:
+                    line_start <- line_end + 1
+                    continue
+                if s < e and lock[s] == 91:
+                    if Base::rh_bytes_equal_literal(lock, s.i64(), e.i64(), "[[package]]"):
+                        return -1 if current < 0 and package_count > 0
+                        current <- -1
+                        package_name_s <- -1
+                        package_name_e <- -1
+                        package_version_s <- -1
+                        package_version_e <- -1
+                        mode <- 1
+                        package_count <- package_count + 1
+                    elif Base::rh_bytes_equal_literal(lock, s.i64(), e.i64(), "[package.dependencies]"):
+                        return -1 if current < 0
+                        mode <- 2
+                    elif Base::rh_bytes_equal_literal(lock, s.i64(), e.i64(), "[package.extras]"):
+                        return -1 if current < 0
+                        mode <- 3
+                    elif Base::rh_bytes_equal_literal(lock, s.i64(), e.i64(), "[package.source]"):
+                        return -1 if current < 0
+                        node: mutable RhPkgNode = pkgs[current.usize()]
+                        node.src_kind <- RH_PSRC_UNKNOWN
+                        pkgs[current.usize()] <- node
+                        mode <- 4
+                    elif Base::rh_bytes_equal_literal(lock, s.i64(), e.i64(), "[metadata]"):
+                        mode <- 5
+                    elif Base::rh_bytes_equal_literal(lock, s.i64(), e.i64(), "[metadata.files]"):
+                        mode <- 6
+                    else:
+                        return -1
+                    line_start <- line_end + 1
+                    continue
+                if s >= e:
+                    line_start <- line_end + 1
+                    continue
+                if mode == 3 or mode == 4:
+                    line_start <- line_end + 1
+                    continue
+                ks: mutable i64 = 0
+                ke: mutable i64 = 0
+                return -1 if not rh_toml_key(lock, s, e, &ks, &ke)
+                key_is: bool = |lock, ks, ke|
+                    Base::rh_bytes_equal_literal(lock, ks, ke, "name")
+                if mode == 2:
+                    key_end: mutable i64 = ke
+                    while key_end > ks and (lock[(key_end - 1).usize()] == 32 or lock[(key_end - 1).usize()] == 9) |key_end, ks, lock|:
+                        key_end <- key_end - 1
+                    dep_name_end: mutable i64 = -1
+                    dep_name_s: i64 = rh_pypi_extra_name_copy(lock, pool, ks.usize(), key_end.usize(), &dep_name_end)
+                    return -1 if dep_name_s < 0
+                    value_start: mutable usize = ke.usize()
+                    while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                        value_start <- value_start + 1
+                    return -1 if value_start >= e
+                    dep_req_s: mutable i64 = -1
+                    dep_req_e: mutable i64 = -1
+                    if lock[value_start] == 34:
+                        return -1 if rh_toml_qstring(lock, ke.usize(), e, pool, &dep_req_s, &dep_req_e) < 0
+                    elif lock[value_start] == 123:
+                        dep_req_s <- rh_pool_copy(pool, lock, value_start, e)
+                        dep_req_e <- pool.count.i64()
+                    else:
+                        return -1
+                    node_for_dep: RhPkgNode = pkgs[current.usize()]
+                    declared_s: i64 = rh_pool_copy(pool, lock, s, e)
+                    reqs.push(RhRequire{from: current, name_s: dep_name_s, name_e: dep_name_end, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: dep_req_s, req_e: dep_req_e, declared_s: declared_s, declared_e: pool.count.i64(), scope_name_s: -1, scope_name_e: -1, depctx: RH_SCOPE_DEV if node_for_dep.dev != 0 else RH_SCOPE_NORMAL, optional: 0})
+                elif mode == 5:
+                    if key_is:
+                        return -1
+                    if Base::rh_bytes_equal_literal(lock, ks, ke, "lock-version"):
+                        ver_s: mutable i64 = -1
+                        ver_e: mutable i64 = -1
+                        return -1 if rh_toml_qstring(lock, ke.usize(), e, pool, &ver_s, &ver_e) < 0
+                        valid_lock: bool = rh_span_lit(pool, ver_s.usize(), ver_e.usize(), "1.1") or rh_span_lit(pool, ver_s.usize(), ver_e.usize(), "2.0") or rh_span_lit(pool, ver_s.usize(), ver_e.usize(), "2.1") or rh_span_lit(pool, ver_s.usize(), ver_e.usize(), "2.2")
+                        return -1 if not valid_lock or lock_version_seen
+                        lock_version_seen <- true
+                elif mode == 1:
+                    if Base::rh_bytes_equal_literal(lock, ks, ke, "name"):
+                        return -1 if package_name_s >= 0
+                        return -1 if rh_toml_qstring(lock, ke.usize(), e, pool, &package_name_s, &package_name_e) < 0
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "version"):
+                        return -1 if package_version_s >= 0
+                        return -1 if rh_toml_qstring(lock, ke.usize(), e, pool, &package_version_s, &package_version_e) < 0
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "category"):
+                        value_s: mutable i64 = -1
+                        value_e: mutable i64 = -1
+                        return -1 if rh_toml_qstring(lock, ke.usize(), e, pool, &value_s, &value_e) < 0
+                        node: mutable RhPkgNode = pkgs[current.usize()]
+                        node.dev <- 1 if rh_span_lit(pool, value_s.usize(), value_e.usize(), "dev") else 0
+                        return -1 if not rh_span_lit(pool, value_s.usize(), value_e.usize(), "dev") and not rh_span_lit(pool, value_s.usize(), value_e.usize(), "main")
+                        pkgs[current.usize()] <- node
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "groups"):
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if value_start >= e or lock[value_start] != 91
+                        has_main: mutable bool = false
+                        while i < e |i: usize = value_start + 1, e, lock, pool, has_main|:
+                            if lock[i] == 34:
+                                gs: mutable i64 = -1
+                                ge: mutable i64 = -1
+                                i <- rh_quoted_span(lock, i, e, pool, &gs, &ge).usize()
+                                has_main <- true if rh_span_lit(pool, gs.usize(), ge.usize(), "main")
+                            elif lock[i] == 93:
+                                break
+                            elif lock[i] != 32 and lock[i] != 9 and lock[i] != 44:
+                                return -1
+                            i <- i + 1
+                        node: mutable RhPkgNode = pkgs[current.usize()]
+                        node.dev <- 0 if has_main else 1
+                        pkgs[current.usize()] <- node
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "optional"):
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if value_start >= e or (not rh_span_lit(lock, value_start, e, "true") and not rh_span_lit(lock, value_start, e, "false"))
+                        node: mutable RhPkgNode = pkgs[current.usize()]
+                        node.optional <- 1 if rh_span_lit(lock, value_start, e, "true") else 0
+                        pkgs[current.usize()] <- node
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "python-versions"):
+                        py_s: mutable i64 = -1
+                        py_e: mutable i64 = -1
+                        return -1 if rh_toml_qstring(lock, ke.usize(), e, pool, &py_s, &py_e) < 0
+                        if not rh_span_lit(pool, py_s.usize(), py_e.usize(), "*"):
+                            node: mutable RhPkgNode = pkgs[current.usize()]
+                            node.requires_python_s <- py_s
+                            node.requires_python_e <- py_e
+                            pkgs[current.usize()] <- node
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "files"):
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if value_start >= e or lock[value_start] != 91
+                        skip_array <- true
+                        skip_depth <- 0
+                        while i < e and skip_array |i: usize = value_start, e, lock, skip_array, skip_depth, mode, current, artifacts, pool|:
+                            skip_depth <- skip_depth + 1 if lock[i] == 91
+                            skip_depth <- skip_depth - 1 if lock[i] == 93
+                            skip_array <- false if skip_depth <= 0
+                            i <- i + 1
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "description") or Base::rh_bytes_equal_literal(lock, ks, ke, "develop"):
+                        pass
+                    else:
+                        return -1
+                    if package_name_s >= 0 and package_version_s >= 0 and current < 0:
+                        current <- rh_pypi_find(pkgs, pool, package_name_s.usize(), package_name_e.usize(), package_version_s.usize(), package_version_e.usize())
+                        if current < 0:
+                            current <- rh_node_add(pkgs, RH_ECO_PYPI)
+                            return -1 if current < 0
+                            node_new: mutable RhPkgNode = pkgs[current.usize()]
+                            node_new.name_s <- package_name_s
+                            node_new.name_e <- package_name_e
+                            node_new.ver_s <- package_version_s
+                            node_new.ver_e <- package_version_e
+                            node_new.src_kind <- RH_PSRC_REGISTRY
+                            pkgs[current.usize()] <- node_new
+                        return -1 if rh_pypi_lock_seen(seen, current)
+                        seen.push(current)
+                elif mode == 6:
+                    value_start: mutable usize = ke.usize()
+                    while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                        value_start <- value_start + 1
+                    if value_start < e and lock[value_start] == 91:
+                        skip_array <- true
+                        skip_depth <- 0
+                        unknown_out[0] <- unknown_out[0] + 1
+                        while i < e and skip_array |i: usize = value_start, e, lock, skip_array, skip_depth|:
+                            skip_depth <- skip_depth + 1 if lock[i] == 91
+                            skip_depth <- skip_depth - 1 if lock[i] == 93
+                            skip_array <- false if skip_depth <= 0
+                            i <- i + 1
+                    else:
+                        return -1
+                else:
+                    return -1
+                line_start <- line_end + 1
+            return -1 if not lock_version_seen or package_count <= 0 or seen.count != package_count
+            package_count
+    public:
+        def rh_pypi_resolve_locked(pkgs: mutable darray[RhPkgNode]&, pool: darray[u8]&, reqs: darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            before_edges: usize = edges.count
+            while r < reqs.count |r: usize = 0, pkgs, pool, reqs, edges, unresolved|:
+                q: RhRequire = reqs[r]
+                if q.from >= 0 and q.from < pkgs.count.i64() and pkgs[q.from.usize()].requires_python_s >= 0:
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: RH_UNRES_CONTEXT, depctx: q.depctx, optional: q.optional})
+                    r <- r + 1
+                    continue
+                first: mutable i64 = -1
+                matches: mutable i64 = 0
+                saw_context: mutable bool = false
+                comparison_unsupported: mutable bool = false
+                while n < pkgs.count.i64() |n: i64 = 0, q, pkgs, pool, first, matches, saw_context, comparison_unsupported|:
+                    candidate: RhPkgNode = pkgs[n.usize()]
+                    if candidate.eco == RH_ECO_PYPI and candidate.ver_s >= 0 and rh_name_eq(RH_ECO_PYPI, pool, candidate.name_s.usize(), candidate.name_e.usize(), q.name_s.usize(), q.name_e.usize()):
+                        if candidate.src_kind != RH_PSRC_REGISTRY or candidate.optional != 0 or candidate.requires_python_s >= 0:
+                            saw_context <- true
+                        else:
+                            satisfies: mutable i64 = 1
+                            if q.ver_s >= 0:
+                                satisfies <- 1 if rh_span_eq2(pool, candidate.ver_s.usize(), candidate.ver_e.usize(), pool, q.ver_s.usize(), q.ver_e.usize()) else 0
+                            elif q.req_s >= 0:
+                                satisfies <- rh_pypi_constraint_satisfies(pool, candidate.ver_s.usize(), candidate.ver_e.usize(), q.req_s.usize(), q.req_e.usize())
+                            if satisfies < 0:
+                                comparison_unsupported <- true
+                            elif satisfies == 1:
+                                first <- n if first < 0
+                                matches <- matches + 1
+                    n <- n + 1
+                if comparison_unsupported:
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: RH_UNRES_CONTEXT, depctx: q.depctx, optional: q.optional})
+                elif matches == 0:
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: RH_UNRES_CONTEXT if saw_context else RH_UNRES_MISSING, depctx: q.depctx, optional: q.optional})
+                elif matches > 1:
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: RH_UNRES_AMBIGUOUS, depctx: q.depctx, optional: q.optional})
+                else:
+                    _ = rh_edge_add(edges, q.from, first, q.depctx, q.optional)
+                r <- r + 1
+            edges.count.i64() - before_edges.i64()
+
         # --- Go modules (go.mod; M08 ecosystems lane) --------------------------
         # Declared requirements are NEVER silently treated as resolved edges (R009):
         # only a `require <module/path> vX.Y.Z` directive whose version is a plain
@@ -4534,6 +4811,10 @@ module Package:
                 if n.framework_s >= 0:
                     Base::rh_push_text(out, ",\"target_framework\":\"")
                     Base::rh_json_escape(out, pool, n.framework_s.usize(), n.framework_e.usize())
+                    out.push(34)
+                if n.requires_python_s >= 0:
+                    Base::rh_push_text(out, ",\"requires_python\":\"")
+                    Base::rh_json_escape(out, pool, n.requires_python_s.usize(), n.requires_python_e.usize())
                     out.push(34)
                 Base::rh_push_text(out, "}")
                 i <- i + 1
