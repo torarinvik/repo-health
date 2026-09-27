@@ -193,6 +193,18 @@ assert url == "https://api.github.com/repos/example/project/collaborators?affili
 assert (t / "github-live.json.github-collaborators-page-1.status").read_text() == "200"
 print("[roles-provider] authenticated GitHub scope, roles, and complete inventory OK")
 PY
+python3 - "$T/github-live.json.transformations.json" "$T/github-live.json" <<'PY'
+import hashlib, json, pathlib, sys
+sidecar, output = map(pathlib.Path, sys.argv[1:])
+report = json.loads(sidecar.read_bytes())
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "github-collaborator-permissions", report
+assert report["output_schema"] == "rh-roles-input/1", report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/github-collaborator-roles/1;repository=example/project;max-pages=2;resume=false").hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), report
+assert len(report["source_input_sha256"]) == 64, report
+assert "ghp_roles_fixture" not in sidecar.read_text(), report
+PY
 grep -Fxq 'header = "Authorization: Bearer ghp_roles_fixture"' "$T/roles-curl.config" || fail "permission token header absent from curl stdin config"
 ! grep -Fq 'ghp_roles_fixture' "$T/roles-curl.args" || fail "permission token leaked into curl arguments"
 ! grep -Fq 'ghp_roles_fixture' "$T/github-live.json.github-collaborators-page-1.json" || fail "permission token leaked into raw evidence"
@@ -221,6 +233,18 @@ assert url == "https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/mem
 assert "person-0" not in open(sys.argv[1]).read()
 print("[roles-provider] GitLab partial inventory and nested project scope OK")
 PY
+python3 - "$T/gitlab-partial.json.transformations.json" "$T/gitlab-partial.json" <<'PY'
+import hashlib, json, pathlib, sys
+sidecar, output = map(pathlib.Path, sys.argv[1:])
+report = json.loads(sidecar.read_bytes())
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "gitlab-project-member-permissions", report
+assert report["output_schema"] == "rh-roles-input/1", report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/gitlab-project-member-roles/1;project=group/subgroup/project;max-pages=1;resume=false").hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), report
+assert len(report["source_input_sha256"]) == 64, report
+assert "glpat_roles_fixture" not in sidecar.read_text(), report
+PY
 grep -Fxq 'header = "PRIVATE-TOKEN: glpat_roles_fixture"' "$T/gitlab-roles-curl.config" || fail "GitLab token header absent from curl stdin config"
 ! grep -Fq 'glpat_roles_fixture' "$T/gitlab-roles-curl.args" || fail "GitLab token leaked into curl arguments"
 python3 - "$T/gitlab-partial.json" "$T/gitlab-wrong-scope.json" "$T/gitlab-skipped-cursor.json" <<'PY'
@@ -247,6 +271,15 @@ rm -f "$T/gitlab-complete.json" "$T/gitlab-complete.json.gitlab-members-page-"* 
 PATH="$T/bin:$PATH" RH_GITLAB_TOKEN="glpat_roles_fixture" RH_CURL_GITLAB_PAGE1="$T/gitlab-page-full.json" RH_CURL_GITLAB_PAGE2="$T/gitlab-page-short.json" \
   RH_CURL_LOG="$T/gitlab-resume-curl.args" RH_CURL_CONFIG_LOG="$T/gitlab-resume-curl.config" \
   "$ROOT/build/rh_cli" roles-import --gitlab-project group/subgroup/project --resume-from "$T/gitlab-partial.json" --max-pages 1 --out "$T/gitlab-complete.json" >/dev/null || fail "resume GitLab project-member inventory"
+python3 - "$T/gitlab-complete.json.transformations.json" "$T/gitlab-complete.json" <<'PY'
+import hashlib, json, pathlib, sys
+sidecar, output = map(pathlib.Path, sys.argv[1:])
+report = json.loads(sidecar.read_bytes())
+assert report["adapter"] == "gitlab-project-member-permissions", report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/gitlab-project-member-roles/1;project=group/subgroup/project;max-pages=1;resume=true").hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), report
+assert len(report["source_input_sha256"]) == 64, report
+PY
 python3 - "$T/gitlab-complete.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -350,6 +383,16 @@ rm -f "$T/github-resume-page-2.json" "$T/github-resume-page-2.json.github-collab
 PATH="$T/bin:$PATH" RH_GITHUB_TOKEN="ghp_roles_fixture" RH_CURL_COLLABORATORS_PAGE1="$T/collaborators-short.json" RH_CURL_COLLABORATORS_PAGE2="$T/collaborators-page-2.json" RH_CURL_COLLABORATORS_PAGE3="$T/collaborators-page-3.json" \
   RH_CURL_LOG="$T/roles-resume-page-2-curl.args" RH_CURL_CONFIG_LOG="$T/roles-resume-page-2-curl.config" \
   "$ROOT/build/rh_cli" roles-import --github-repo example/project --resume-from "$T/github-partial.json" --max-pages 1 --out "$T/github-resume-page-2.json" >/dev/null || fail "resume GitHub collaborator page 2"
+python3 - "$T/github-resume-page-2.json.transformations.json" "$T/github-resume-page-2.json" "$T/github-live.json.transformations.json" <<'PY'
+import hashlib, json, pathlib, sys
+sidecar, output, initial_sidecar = map(pathlib.Path, sys.argv[1:])
+report = json.loads(sidecar.read_bytes())
+initial = json.loads(initial_sidecar.read_bytes())
+assert report["adapter"] == "github-collaborator-permissions", report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/github-collaborator-roles/1;repository=example/project;max-pages=1;resume=true").hexdigest(), report
+assert report["source_input_sha256"] != initial["source_input_sha256"], report
+assert report["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), report
+PY
 python3 - "$T/github-partial.json" "$T/github-resume-page-2.json" <<'PY'
 import json, sys
 previous = json.load(open(sys.argv[1]))
