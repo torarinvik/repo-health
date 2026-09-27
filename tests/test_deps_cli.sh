@@ -332,7 +332,7 @@ name = "requests"
 version = "2.31.0"
 optional = false
 python-versions = "*"
-groups = ["main"]
+groups = ["main", "dev"]
 files = [
  {file = "requests-2.31.0.whl", hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
 ]
@@ -365,13 +365,13 @@ groups = ["main"]
 files = []
 EOF
 "$ROOT/build/rh_cli" deps --repo "$T/poetry-lock" --out "$T/poetry-lock-out" \
-  | grep -q "ecosystems=1 pypi=3/4 unresolved=1 unsupported=0" || fail "Poetry lock summary"
+  | grep -q "ecosystems=1 pypi=4/5 unresolved=1 unsupported=0" || fail "Poetry lock summary"
 python3 - "$T/poetry-lock-out/deps-pypi-graph.json" <<'PY'
 import json, sys
 graph = json.load(open(sys.argv[1]))
 nodes = graph["nodes"]
 assert [n["name"] for n in nodes] == ["root", "requests", "urllib3", "pytest", "conditional"], nodes
-assert {(e["from"], e["to"], e["scope"]) for e in graph["edges"]} == {(0, 1, "normal"), (1, 2, "normal"), (0, 3, "dev")}, graph["edges"]
+assert {(e["from"], e["to"], e["scope"]) for e in graph["edges"]} == {(0, 1, "normal"), (1, 2, "normal"), (1, 2, "dev"), (0, 3, "dev")}, graph["edges"]
 assert nodes[4]["requires_python"] == ">=3.10", nodes[4]
 assert graph["artifacts"][0]["expected_digest"] == "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", graph["artifacts"]
 assert graph["unresolved"] == [{"from": 0, "name": "conditional", "requirement": "^1.0", "reason": "context"}], graph["unresolved"]

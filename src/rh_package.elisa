@@ -374,6 +374,7 @@ module Package:
             framework_e: mutable i64
             requires_python_s: mutable i64
             requires_python_e: mutable i64
+            scope_mask: mutable u8
             dev: mutable u8
             optional: mutable u8
 
@@ -433,7 +434,7 @@ module Package:
 
         def rh_node_add(pkgs: mutable darray[RhPkgNode]&, eco: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if pkgs.count.i64() > 100000
-            pkgs.push(RhPkgNode{eco: eco, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, origin_s: -1, origin_e: -1, src_kind: 3, has_digest: 0, dig_s: -1, dig_e: -1, framework_s: -1, framework_e: -1, requires_python_s: -1, requires_python_e: -1, dev: 0, optional: 0})
+            pkgs.push(RhPkgNode{eco: eco, name_s: -1, name_e: -1, ver_s: -1, ver_e: -1, origin_s: -1, origin_e: -1, src_kind: 3, has_digest: 0, dig_s: -1, dig_e: -1, framework_s: -1, framework_e: -1, requires_python_s: -1, requires_python_e: -1, scope_mask: 0, dev: 0, optional: 0})
             pkgs.count.i64() - 1
 
         def rh_artifact_add_expected(artifacts: mutable darray[RhArtifact]&, package_node: i64, kind: u8, expected_s: i64, expected_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -3730,7 +3731,13 @@ module Package:
                         return -1
                     node_for_dep: RhPkgNode = pkgs[current.usize()]
                     declared_s: i64 = rh_pool_copy(pool, lock, s, e)
-                    reqs.push(RhRequire{from: current, name_s: dep_name_s, name_e: dep_name_end, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: dep_req_s, req_e: dep_req_e, declared_s: declared_s, declared_e: pool.count.i64(), scope_name_s: -1, scope_name_e: -1, depctx: RH_SCOPE_DEV if node_for_dep.dev != 0 else RH_SCOPE_NORMAL, optional: 0})
+                    scope_mask: mutable u8 = node_for_dep.scope_mask
+                    scope_mask <- 2 if scope_mask == 0 and node_for_dep.dev != 0
+                    scope_mask <- 1 if scope_mask == 0 and node_for_dep.dev == 0
+                    if scope_mask == 1 or scope_mask == 3:
+                        reqs.push(RhRequire{from: current, name_s: dep_name_s, name_e: dep_name_end, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: dep_req_s, req_e: dep_req_e, declared_s: declared_s, declared_e: pool.count.i64(), scope_name_s: -1, scope_name_e: -1, depctx: RH_SCOPE_NORMAL, optional: 0})
+                    if scope_mask == 2 or scope_mask == 3:
+                        reqs.push(RhRequire{from: current, name_s: dep_name_s, name_e: dep_name_end, ver_s: -1, ver_e: -1, src_s: -1, src_e: -1, req_s: dep_req_s, req_e: dep_req_e, declared_s: declared_s, declared_e: pool.count.i64(), scope_name_s: -1, scope_name_e: -1, depctx: RH_SCOPE_DEV, optional: 0})
                 elif mode == 5:
                     if key_is:
                         return -1
@@ -3757,6 +3764,7 @@ module Package:
                         return -1 if rh_toml_qstring(lock, ke.usize(), e, pool, &value_s, &value_e) < 0
                         node: mutable RhPkgNode = pkgs[current.usize()]
                         node.dev <- 1 if rh_span_lit(pool, value_s.usize(), value_e.usize(), "dev") else 0
+                        node.scope_mask <- 2 if node.dev != 0 else 1
                         return -1 if not rh_span_lit(pool, value_s.usize(), value_e.usize(), "dev") and not rh_span_lit(pool, value_s.usize(), value_e.usize(), "main")
                         pkgs[current.usize()] <- node
                     elif Base::rh_bytes_equal_literal(lock, ks, ke, "groups"):
@@ -3765,7 +3773,9 @@ module Package:
                             value_start <- value_start + 1
                         return -1 if value_start >= e or lock[value_start] != 91
                         has_main: mutable bool = false
-                        while i < e |i: usize = value_start + 1, e, lock, pool, has_main|:
+                        has_dev: mutable bool = false
+                        saw_group: mutable bool = false
+                        while i < e |i: usize = value_start + 1, e, lock, pool, has_main, has_dev, saw_group|:
                             if lock[i] == 34:
                                 gs: mutable i64 = -1
                                 ge: mutable i64 = -1
@@ -3773,13 +3783,18 @@ module Package:
                                 return -1 if quoted_end < 0
                                 i <- quoted_end.usize()
                                 has_main <- true if rh_span_lit(pool, gs.usize(), ge.usize(), "main")
+                                has_dev <- true if not rh_span_lit(pool, gs.usize(), ge.usize(), "main")
+                                saw_group <- true
                             elif lock[i] == 93:
                                 break
                             elif lock[i] != 32 and lock[i] != 9 and lock[i] != 44:
                                 return -1
                             i <- i + 1
                         node: mutable RhPkgNode = pkgs[current.usize()]
-                        node.dev <- 0 if has_main else 1
+                        return -1 if not saw_group
+                        node.dev <- 1 if has_dev and not has_main else 0
+                        node.scope_mask <- 1 if has_main else 0
+                        node.scope_mask <- node.scope_mask + 2 if has_dev
                         pkgs[current.usize()] <- node
                     elif Base::rh_bytes_equal_literal(lock, ks, ke, "optional"):
                         value_start: mutable usize = ke.usize()
