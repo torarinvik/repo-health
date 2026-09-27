@@ -281,6 +281,40 @@ RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
 bad_graph_rc=$?
 set -e
 [[ "$bad_graph_rc" -eq 4 && ! -e "$T/invalid-graph-connect" ]] || fail "invalid graph requests must fail before database access"
+python3 - "$T/enqueue-graph-query-job-command.json" "$T" <<'PY'
+import json, pathlib, sys
+base = json.load(open(sys.argv[1]))
+base["request"]["graph"]["entity_ids"] = [
+    "00000000-0000-0000-0000-000001000001",
+    "00000000-0000-0000-0000-000001000002",
+]
+base["request"]["graph"]["projection"] = {
+    "id": "00000000-0000-0000-0000-000000009001",
+    "subject_entity_id": "00000000-0000-0000-0000-000001000001",
+    "edge_kind": "depends_on",
+    "visibility_scope": "public",
+}
+cases = {
+    "projection-scope": lambda request: request["graph"]["projection"].update(visibility_scope="tenant-private"),
+    "projection-id": lambda request: request["graph"]["projection"].update(id="bad-id"),
+    "projection-subject": lambda request: request["graph"]["projection"].update(subject_entity_id="bad-id"),
+}
+for name, mutate in cases.items():
+    value = json.loads(json.dumps(base))
+    mutate(value["request"])
+    pathlib.Path(sys.argv[2], f"enqueue-{name}.json").write_text(json.dumps(value, separators=(",", ":")))
+PY
+for invalid_case in projection-scope projection-id projection-subject; do
+  set +e
+  RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_CONNECT_MARK="$T/enqueue-$invalid_case.connected" \
+    "$ROOT/build/rh_cli" postgres --input "$T/enqueue-$invalid_case.json" \
+      --out "$T/enqueue-$invalid_case.out" >/dev/null 2>&1
+  invalid_rc=$?
+  set -e
+  [[ "$invalid_rc" -eq 4 && ! -e "$T/enqueue-$invalid_case.connected" && ! -e "$T/enqueue-$invalid_case.out" ]] \
+    || fail "invalid projection descriptor $invalid_case reached PostgreSQL or wrote output"
+done
 run_ok page committed page-commit
 run_ok page duplicate page-commit
 run_ok page_events committed page-events
