@@ -624,7 +624,7 @@ Make downstream health a first-class product feature. A package report should ex
 
 **M05-02: Temporal relationships.** Record dependency introduction/removal evidence and distinguish it from collector first/last-seen observations. Preserve intervals where continuity is unknown because snapshots are missing.
 
-**M05-03: Project/package mappings.** Build reviewed mapping assertions, one-to-many and many-to-many relationships, repository migrations, project components, and release-line associations. Source metadata does not automatically establish canonical identity.
+**M05-03: Project/package mappings.** Build reviewed mapping assertions, one-to-many and many-to-many relationships, repository migrations, project components, and release-line associations. Source metadata does not automatically establish canonical identity. `rh_cli mapping` emits a digest-bound transformation sidecar for exact input bytes, canonical output, and the pinned mapping normalizer configuration, with field states for preserved, transformed, unknown, unsupported, and discarded assertions.
 
 **M05-04: Mirror and family handling.** Add exact shared-revision relationships, accepted mirror declarations, and optional project-family grouping. Keep independent forks distinct unless a specific deduplication projection groups them for a stated purpose.
 

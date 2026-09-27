@@ -21,8 +21,8 @@ cat > "$T/mapping.json" <<'JSON'
 {"schema":"rh-mapping-input/1","revision":7,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"mirror","source":"operator","reviewed_at":100,"evidence":["review/1"]},{"a":1,"b":2,"state":"proposed","relation":"migration","source":"file","reviewed_at":101,"evidence":["map.md"]},{"a":4,"b":2,"state":"rejected","relation":"component","source":"provider","reviewed_at":102,"evidence":[]},{"a":0,"b":1,"state":"accepted","relation":"fork","source":"provider","reviewed_at":103,"evidence":["fork/1"]},{"a":1,"b":4,"state":"accepted","relation":"issue_tracker","source":"provider","reviewed_at":104,"evidence":["issue/1"]}]}
 JSON
 "$ROOT/build/rh_cli" mapping --input "$T/mapping.json" --out "$T/mapping.out" >/dev/null || fail "mapping run"
-python3 - "$T/mapping.out" <<'PY'
-import json, sys
+python3 - "$T/mapping.out" "$T/mapping.json" "$T/mapping.out.transformations.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-mapping-result/1", d
 assert d["revision"] == 7, d
@@ -30,6 +30,12 @@ assert d["state_counts"] == {"proposed": 1, "accepted": 3, "rejected": 1, "revok
 assert d["assertions"][0]["evidence_count"] == 1, d
 assert d["assertions"][3]["relation"] == "fork" and d["assertions"][4]["relation"] == "issue_tracker", d
 assert "only accepted mirror/migration" in d["note"], d
+tr = json.load(open(sys.argv[3]))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "reviewed-mapping-assertions", tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/reviewed-mapping/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 print("[mapping] normalized reviewed assertions OK")
 PY
 
@@ -47,6 +53,7 @@ PY
 echo "[mapping] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" mapping --input "$T/mapping.json" --out "$T/mapping2.out" >/dev/null || fail "rerun"
 cmp -s "$T/mapping.out" "$T/mapping2.out" || fail "mapping output not deterministic"
+cmp -s "$T/mapping.out.transformations.json" "$T/mapping2.out.transformations.json" || fail "mapping transformation report not deterministic"
 set +e
 printf '{"schema":"rh-mapping-input/2","revision":1,"assertions":[]}' > "$T/bad-schema.json"
 "$ROOT/build/rh_cli" mapping --input "$T/bad-schema.json" --out "$T/x" >/dev/null 2>&1; rc_schema=$?
