@@ -256,6 +256,36 @@ assert base["coverage"] == spaced["coverage"], (base["coverage"], spaced["covera
 assert base["input_sha256"] != spaced["input_sha256"]
 print("[pylock] TOML whitespace around PEP 751 table headers preserves package and artifact semantics")
 PY
+python3 - "$T/pylock.toml" "$T/quoted-table-headers.toml" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text()
+headers = (
+    "[[packages]]", "[[packages.wheels]]", "[packages.sdist]", "[packages.archive]",
+    "[packages.vcs]", "[packages.directory]", "[[packages.attestation-identities]]",
+    "[packages.wheels.hashes]", "[packages.sdist.hashes]", "[packages.archive.hashes]",
+    "[[packages.dependencies]]", "[packages.dependencies.vcs]",
+    "[packages.dependencies.directory]", "[packages.dependencies.archive]",
+)
+for header in headers:
+    array_table = header.startswith("[[")
+    path = header[2:-2] if array_table else header[1:-1]
+    parts = path.split(".")
+    quoted = " . ".join(("\"" if index % 2 == 0 else "'") + part + ("\"" if index % 2 == 0 else "'") for index, part in enumerate(parts))
+    replacement = "[[ " + quoted + " ]]" if array_table else "[ " + quoted + " ]"
+    source = source.replace(header, replacement)
+Path(sys.argv[2]).write_text(source)
+PY
+"$ROOT/build/rh_cli" pylock --input "$T/quoted-table-headers.toml" --out "$T/quoted-table-headers.json" >/dev/null || fail "TOML quoted table-path segments were rejected"
+python3 - "$T/result.json" "$T/quoted-table-headers.json" <<'PY'
+import json, sys
+base, quoted = (json.load(open(path)) for path in sys.argv[1:])
+assert base["packages"] == quoted["packages"], (base["packages"], quoted["packages"])
+for field in ("created_by", "requires_python", "environments", "extras", "dependency_groups", "default_groups", "coverage"):
+    assert base[field] == quoted[field], (field, base[field], quoted[field])
+assert base["input_sha256"] != quoted["input_sha256"]
+print("[pylock] quoted TOML path segments preserve package and artifact semantics")
+PY
 python3 - "$T/result.json" "$T/pylock.toml" <<'PY'
 import hashlib, json, sys
 report = json.load(open(sys.argv[1]))

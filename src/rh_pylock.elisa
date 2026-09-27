@@ -1013,8 +1013,8 @@ module Pylock:
                 cursor <- cursor + 1
             square_depth == 0 and quote == 0
 
-        # TOML permits horizontal whitespace around a table path and its
-        # separators. Compare known PEP 751 headers without allocating a
+        # TOML permits whitespace and quoted key segments in a table path.
+        # Match only the known PEP 751 headers without allocating a
         # normalized copy; key and value syntax remains untouched.
         def rh_pylock_table_eq(data: darray[u8]&, start: usize, end: usize, expected: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             expected_length: mutable usize = 0
@@ -1030,17 +1030,35 @@ module Pylock:
             input_body_end: usize = end - closing
             return false if data[input_body_end] != 93 or (array_table and data[input_body_end + 1] != 93)
             expected_cursor: mutable usize = opening
-            while cursor < input_body_end |cursor, input_body_end, data, expected, expected_cursor, expected_body_end|:
-                if data[cursor] == 32 or data[cursor] == 9:
-                    return false if expected_cursor != opening and expected_cursor != expected_body_end and expected[expected_cursor] != 46 and expected[expected_cursor - 1] != 46
+            while expected_cursor < expected_body_end |cursor, input_body_end, data, expected, expected_cursor, expected_body_end|:
+                while cursor < input_body_end and (data[cursor] == 32 or data[cursor] == 9) |cursor, input_body_end, data|:
+                    cursor <- cursor + 1
+                segment_end: usize =
+                    while segment < expected_body_end and expected[segment] != 46 |segment: usize = expected_cursor, expected, expected_body_end| -> segment:
+                        segment <- segment + 1
+                if cursor < input_body_end and (data[cursor] == 34 or data[cursor] == 39):
+                    quote: u8 = data[cursor]
+                    cursor <- cursor + 1
+                    while expected_cursor < segment_end |cursor, input_body_end, data, expected, expected_cursor, segment_end|:
+                        return false if cursor >= input_body_end or data[cursor] != expected[expected_cursor]
+                        cursor <- cursor + 1
+                        expected_cursor <- expected_cursor + 1
+                    return false if cursor >= input_body_end or data[cursor] != quote
                     cursor <- cursor + 1
                 else:
-                    return false if expected_cursor >= expected_body_end or data[cursor] != expected[expected_cursor]
+                    while expected_cursor < segment_end |cursor, input_body_end, data, expected, expected_cursor, segment_end|:
+                        return false if cursor >= input_body_end or data[cursor] != expected[expected_cursor]
+                        cursor <- cursor + 1
+                        expected_cursor <- expected_cursor + 1
+                while cursor < input_body_end and (data[cursor] == 32 or data[cursor] == 9) |cursor, input_body_end, data|:
+                    cursor <- cursor + 1
+                if expected_cursor < expected_body_end:
+                    return false if expected[expected_cursor] != 46 or cursor >= input_body_end or data[cursor] != 46
                     cursor <- cursor + 1
                     expected_cursor <- expected_cursor + 1
             while cursor < input_body_end and (data[cursor] == 32 or data[cursor] == 9) |cursor, input_body_end, data|:
                 cursor <- cursor + 1
-            cursor == input_body_end and expected_cursor == expected_body_end
+            cursor == input_body_end
 
         def rh_pylock_parse(data: mutable darray[u8]&, pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, refs: mutable darray[RhPylockReference]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, identities: mutable darray[RhPylockAttestationIdentity]&, identity_fields: mutable darray[RhPylockAttestationField]&, identity_claims: mutable darray[RhPylockAttestationClaim]&, metadata: mutable RhPylockMetadata&, created_s: mutable i64&, created_e: mutable i64&, python_s: mutable i64&, python_e: mutable i64&, unknown_top: mutable i64&, unknown_package: mutable i64&, unknown_dependency: mutable i64&, unknown_artifact: mutable i64&, unknown_tables: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if data.count == 0 or data.count > RH_PYLOCK_MAX_BYTES
