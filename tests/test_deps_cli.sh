@@ -335,6 +335,7 @@ python-versions = "*"
 groups = ["main", "dev"]
 files = [
  {file = "requests-2.31.0.whl", hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+ {file = "requests-2.31.0.tar.gz", hash = "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"},
 ]
 
 [package.dependencies]
@@ -373,7 +374,9 @@ nodes = graph["nodes"]
 assert [n["name"] for n in nodes] == ["root", "requests", "urllib3", "pytest", "conditional"], nodes
 assert {(e["from"], e["to"], e["scope"]) for e in graph["edges"]} == {(0, 1, "normal"), (1, 2, "normal"), (1, 2, "dev"), (0, 3, "dev")}, graph["edges"]
 assert nodes[4]["requires_python"] == ">=3.10", nodes[4]
-assert graph["artifacts"][0]["expected_digest"] == "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", graph["artifacts"]
+assert len(graph["artifacts"]) == 2, graph["artifacts"]
+assert {a["expected_digest"] for a in graph["artifacts"]} == {"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"}, graph["artifacts"]
+assert {a["package_node"] for a in graph["artifacts"]} == {1}, graph["artifacts"]
 assert graph["unresolved"] == [{"from": 0, "name": "conditional", "requirement": "^1.0", "reason": "context"}], graph["unresolved"]
 print("[deps] Poetry lock graph, scopes, and Python condition retention OK")
 PY
