@@ -316,6 +316,7 @@ coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "co
 v1 = coverage[("coverage.window_completeness", "1.0.0")]
 v2 = coverage[("coverage.window_completeness", "2.0.0")]
 assert v1["reason"] == v2["reason"] == "history-coverage-incomplete", (v1, v2)
+assert v1["evidence"] == v2["evidence"] == ["evidence/git-log.bin", "evidence/git-shallow.txt"], (v1, v2)
 assert v1["value"]["num"] == v1["value"]["den"], (v1, v2)
 assert v2["value"]["num"] == v1["value"]["num"] and v2["value"]["den"] > v1["value"]["den"], (v1, v2)
 print("[m01] shallow OK")
