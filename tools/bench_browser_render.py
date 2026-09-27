@@ -38,10 +38,11 @@ TIMING_EXPRESSION = """JSON.stringify((() => {
   user_agent: navigator.userAgent
  };
 })())"""
+playwright_workdir: str | None = None
 
 
 def run_cli(*args: str) -> str:
-    result = subprocess.run([playwright_cli, *args], capture_output=True, text=True)
+    result = subprocess.run([playwright_cli, *args], capture_output=True, text=True, cwd=playwright_workdir)
     if result.returncode:
         raise RuntimeError("playwright-cli %s failed: %s" % (args[0], result.stderr.strip() or result.stdout.strip()))
     return result.stdout.strip()
@@ -99,6 +100,7 @@ def build_report(row_count: int, work: Path) -> tuple[Path, bytes, bytes]:
 
 with tempfile.TemporaryDirectory(prefix="rh-browser-render-bench-", dir="/tmp") as temporary:
     work = Path(temporary)
+    playwright_workdir = str(work)
     requests: list[str] = []
     handler = lambda *args, **kwargs: LocalHandler(*args, directory=str(work), requests=requests, **kwargs)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
