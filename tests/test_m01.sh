@@ -130,10 +130,47 @@ assert coverage[("coverage.window_completeness", "2.0.0")]["value"]["num"] == co
 for metric in coverage.values():
     assert metric["evidence"] == ["evidence/git-log.bin", "evidence/git-shallow.txt"], metric
 valid = {"observed","not_observed","unavailable","unauthorized","partial","stale","not_applicable","error","conflicted","suppressed","unsupported"}
+completeness = {"complete","partial","unknown"}
+freshness = {"fresh","stale","unknown"}
+validity = {"valid","invalid","unknown"}
+provenance = {"evidence_backed","derived","unverified","unknown"}
+evidence_objects = {
+    "evidence/git-log.bin", "evidence/git-shallow.txt",
+    "evidence/git-files.txt", "evidence/git-default-count.txt",
+    "bundle.manifest",
+}
 for x in d["metrics"]:
     assert x["status"] in valid, x
+    quality = x["quality_dimensions"]
+    assert quality["completeness"] in completeness, (x, quality)
+    assert quality["freshness"] in freshness, (x, quality)
+    assert quality["validity"] in validity, (x, quality)
+    assert quality["provenance"] in provenance, (x, quality)
+    assert (x["status"] == "partial") == (quality["completeness"] == "partial"), (x, quality)
+    assert (x["status"] == "stale") == (quality["freshness"] == "stale"), (x, quality)
+    assert x["status"] != "observed" or quality["validity"] != "invalid", (x, quality)
+    evidence = x["evidence"]
+    assert all(link in evidence_objects for link in evidence), x
+    assert len(evidence) == len(set(evidence)), x
+    assert quality["provenance"] != "evidence_backed" or evidence, x
     if x["status"] not in ("observed","partial","stale"):
         assert "value" not in x, ("unknown carries value", x)
+    if x["status"] in ("partial","stale"):
+        assert x.get("reason"), x
+    if "value" in x:
+        value = x["value"]
+        if isinstance(value, bool):
+            pass
+        elif isinstance(value, int):
+            assert value >= 0, x
+        elif isinstance(value, dict) and set(value) == {"num", "den"}:
+            assert isinstance(value["num"], int) and value["den"] > 0, x
+        elif isinstance(value, dict) and set(value) == {"code", "label"}:
+            assert value["code"] >= 0 and isinstance(value["label"], str), x
+        elif isinstance(value, dict) and set(value) == {"complete", "requested"}:
+            assert 0 <= value["complete"] <= value["requested"], x
+        else:
+            raise AssertionError(("unclassified metric value", x))
 print("[m01] F002 exact OK")
 EOF
 
