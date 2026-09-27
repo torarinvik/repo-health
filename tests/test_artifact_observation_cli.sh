@@ -258,6 +258,20 @@ echo "[artifact-observe] Go ZIP h1 verification emits rh-go-zip-observation-resu
   --file "$ROOT/fixtures/packages/go-module-observation.zip" \
   --out "$T/go-zip-observation.json" >/dev/null
 cmp "$T/go-zip-observation.json" "$ROOT/fixtures/packages/go-zip-observation-result.json"
+python3 - "$T/go-zip-observation.json.transformations.json" "$T/go-zip-observation.json" "$ROOT/fixtures/packages/go-zip-observation-graph.json" "$ROOT/fixtures/packages/go-module-observation.zip" <<'PY'
+import hashlib, json, pathlib, sys
+report_path, output_path, graph_path, artifact_path = map(pathlib.Path, sys.argv[1:])
+report = json.loads(report_path.read_bytes())
+output = json.loads(output_path.read_bytes())
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "local-artifact-byte-observation", report
+assert report["output_schema"] == "rh-go-zip-observation-result/1", report
+assert report["source_input_sha256"] == hashlib.sha256(graph_path.read_bytes()).hexdigest(), report
+assert report["source_artifact_sha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(output_path.read_bytes()).hexdigest(), report
+assert output["verification_basis"] == "go_h1_zip_contents", output
+assert {field["state"] for field in report["fields"]} >= {"preserved", "transformed", "discarded", "unsupported"}, report
+PY
 python3 - "$T" <<'PY'
 import base64, hashlib, pathlib, struct, warnings, zipfile, sys
 t = pathlib.Path(sys.argv[1])
