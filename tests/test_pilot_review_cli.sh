@@ -18,9 +18,13 @@ JSON
 
 echo "[pilot-review] review evidence is retained"
 "$ROOT/build/rh_cli" pilot-review --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "pilot review run"
-python3 - "$T/out.json" <<'PY'
+python3 - "$T/in.json" "$T/out.json" "$T/out.json.transformations.json" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1]))
+import hashlib
+from pathlib import Path
+raw = Path(sys.argv[1]).read_bytes()
+normalized = Path(sys.argv[2]).read_bytes()
+d = json.loads(normalized)
 assert d["schema"] == "rh-pilot-review-result/1", d
 assert d["review"] == {"id":"pilot-20260919","reviewer":"qa-1","reviewed_at":1758240000,"scope":"offline-fixture"}, d
 assert d["mapping_review"] == {"sampled":8,"accepted":6,"needs_review":2}, d
@@ -29,6 +33,14 @@ assert d["decision_usefulness"]["understood"] is True, d
 assert d["provider_outage"] == {"capability":"reviews","status":"stale_unknown","other_capabilities_usable":True}, d
 assert d["costs"] == {"events":1200,"bytes":64000,"elapsed_ms":850}, d
 assert "not an independent audit" in d["note"], d
+sidecar = json.load(open(sys.argv[3]))
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "pilot-review-record", sidecar
+assert sidecar["output_schema"] == "rh-pilot-review-result/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/pilot-review/1").hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["preserved", "preserved", "transformed"], sidecar
 print("[pilot-review] mapping/correction/outage/cost record OK")
 PY
 
