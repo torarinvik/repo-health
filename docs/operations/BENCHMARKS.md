@@ -85,6 +85,24 @@ These wall-clock samples include process startup, parsing, rendering, and file
 write; they profile the CLI renderer only and do not measure browser work or
 deployment capacity.
 
+`RH_BROWSER_BENCH=1 RH_PLAYWRIGHT_CLI=/path/to/playwright-cli
+tools/bench-browser-render.sh [out_dir]` writes `rh-browser-render-bench/1` for
+the same 10-, 1,000-, and 10,000-row reports in a real headless Chromium page.
+It reports browser `DOMContentLoaded`, `domInteractive`, `load`, and first
+contentful paint timings, checks rendered metric-row counts, and records input
+and output digests plus the browser user-agent. One page load warms each size;
+five measured navigations follow by default. Report generation and browser
+startup are outside the browser-reported page interval. Pages are served from
+loopback with cache disabled and a restrictive content-security policy; the
+synthetic HTML is checked for active or absolute external resources. To
+prepare a local environment, install the Playwright CLI and Chromium headless
+shell (`npm install -g @playwright/cli@latest` followed by
+`playwright-cli install-browser chromium --only-shell`), then set
+`RH_PLAYWRIGHT_CLI` to the CLI executable. `tests/test_browser_render_bench.sh`
+is skipped by default and checks manifest shape when `RH_BROWSER_BENCH=1`.
+The profile measures one local headless browser and does not establish end-user
+device performance, deployment rendering capacity, or provider rate limits.
+
 Set `RH_PROFILE_REPO` to opt into a full-history scan of a local Git repository
 through `rh_cli scan`. The profile records its revision, dirty state, commit and
 identity counts, history digest, latency, and memory samples. Every repetition
