@@ -32,11 +32,12 @@ for f in deps-cargo-graph.json deps-npm-graph.json deps-metrics.json; do
   [[ -f "$T/out/$f" ]] || fail "missing $f"
 done
 
-python3 - "$T/out" "$T/src/Cargo.lock" "$T/src/osv-response.json" <<'PY'
+python3 - "$T/out" "$T/src/Cargo.lock" "$T/src/package-lock.json" "$T/src/package.json" "$T/src/osv-response.json" <<'PY'
 import hashlib, json, sys
 out = sys.argv[1]
-lock, osv = (open(path, "rb").read() for path in sys.argv[2:])
+lock, node_lock, package_json, osv = (open(path, "rb").read() for path in sys.argv[2:])
 framed = b"".join(str(len(value)).encode() + b":" + value for value in (lock, osv))
+node_framed = b"".join(str(len(value)).encode() + b":" + value for value in (node_lock, package_json, osv))
 cg = json.load(open(out + "/deps-cargo-graph.json"))
 ng = json.load(open(out + "/deps-npm-graph.json"))
 m = json.load(open(out + "/deps-metrics.json"))
@@ -46,6 +47,12 @@ assert cargo_transform["source_input_sha256"] == hashlib.sha256(framed).hexdiges
 assert cargo_transform["normalized_output_sha256"] == hashlib.sha256(open(out + "/deps-cargo-graph.json", "rb").read()).hexdigest(), cargo_transform
 assert cargo_transform["configuration_sha256"] == hashlib.sha256(b"repo-health/cargo-lock/1;osv=file").hexdigest(), cargo_transform
 assert {field["state"] for field in cargo_transform["fields"]} >= {"preserved", "transformed", "unknown", "unsupported", "discarded"}, cargo_transform
+node_transform = json.load(open(out + "/deps-npm-graph.json.transformations.json"))
+assert node_transform["adapter"] == "node-lock-graph", node_transform
+assert node_transform["source_input_sha256"] == hashlib.sha256(node_framed).hexdigest(), node_transform
+assert node_transform["normalized_output_sha256"] == hashlib.sha256(open(out + "/deps-npm-graph.json", "rb").read()).hexdigest(), node_transform
+assert node_transform["configuration_sha256"] == hashlib.sha256(b"repo-health/node-lock/1;parser=npm-package-lock;package-json=present;osv=file").hexdigest(), node_transform
+assert {field["state"] for field in node_transform["fields"]} >= {"preserved", "transformed", "unknown", "unsupported", "discarded"}, node_transform
 assert cg["schema"] == "rh-dep-graph/1" and cg["ecosystem"] == "cargo"
 assert ng["schema"] == "rh-dep-graph/1" and ng["ecosystem"] == "npm"
 assert len(cg["nodes"]) == 7, cg["nodes"]
