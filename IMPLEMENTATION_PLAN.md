@@ -366,6 +366,8 @@ Create the smallest foundation that prevents later modules from inventing incomp
 
 The same audit now makes enum provenance explicit: `history.coverage_state` cites Git log plus shallow state, while `source.manifest_presence` cites the retained file list used to probe package manifests. M01 checks both emitted references. Enum serialization takes typed evidence at the call site instead of assigning a default source pair.
 
+`history.shallow_boundary_count` now cites `git-shallow.txt`, the retained source for its value, instead of inheriting the generic Git-log reference. M01 asserts this mapping alongside the ratio and enum attribution cases.
+
 **M00-08 synthetic-fixture increment:** `tools/generate_synthetic_fixtures.py --out <dir>` reproducibly creates a real three-commit/two-author Git history, a five-node cyclic diamond dependency graph, role declarations, and release/review events. `expected.json` contains literal hand-computed outcomes independent of the production analyzers. The role timeline includes exact activation and revocation boundaries (effective at `declared_at`, inactive at `revoked_at`). `tests/test_synthetic_fixtures.sh` regenerates twice, checks byte/commit-ID determinism, runs the history, graph, and role events through `rh_cli scan`, `snapshot`, `index`, and `roles`, and checks history counts, diamond/cycle degrees, action counts, and boundary queries against those expectations. Parameterized scenario families and broader temporal/identity edge cases remain open.
 
 ### 5.3 Essential invariants

@@ -85,6 +85,7 @@ assert m["history.revisions_reachable_default"]["quality_dimensions"] == {
     "completeness":"complete", "freshness":"unknown",
     "validity":"valid", "provenance":"evidence_backed",
 }, m["history.revisions_reachable_default"]
+assert m["history.shallow_boundary_count"]["evidence"] == ["evidence/git-shallow.txt"], m
 assert m["history.collection_complete_windows"]["value"] == {"complete": 1, "requested": 1}, m
 assert m["history.collection_complete_windows"]["quality_dimensions"] == {
     "completeness":"complete", "freshness":"unknown",
