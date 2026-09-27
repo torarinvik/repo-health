@@ -36,6 +36,61 @@ assert "never rewrite raw events" in d["note"], d
 print("[aggregate] daily/weekly counts + correction invalidation OK")
 PY
 
+python3 - "$T/oracle-in.json" "$T/oracle-expected.json" <<'PY'
+import json, random, sys
+rng = random.Random(731)
+events = [
+    {"id": f"event-{i:04}", "actor": f"actor-{rng.randrange(37):02}",
+     "kind": ("commit", "review", "release")[rng.randrange(3)],
+     "role": ("author", "reviewer", "maintainer", "releaser")[rng.randrange(4)],
+     "at": 1_700_000_000 + rng.randrange(0, 2_000_000)}
+    for i in range(240)
+]
+corrections = [
+    {"id": event["id"], "action": "replace" if i % 2 == 0 else "retract",
+     "reason": "partition oracle correction"}
+    for i, event in enumerate(events[::7])
+]
+def aggregate(seconds):
+    rows = {}
+    for event in events:
+        bucket = event["at"] // seconds
+        row = rows.setdefault(bucket, {"bucket": bucket, "event_count": 0,
+                                       "actors": set(), "role_counts": {}})
+        row["event_count"] += 1
+        row["actors"].add(event["actor"])
+        row["role_counts"][event["role"]] = row["role_counts"].get(event["role"], 0) + 1
+    return [{"bucket": row["bucket"], "event_count": row["event_count"],
+             "distinct_actor_count": len(row["actors"]), "role_counts": row["role_counts"]}
+            for row in rows.values()]
+def invalidated(seconds):
+    result = []
+    by_id = {event["id"]: event for event in events}
+    for correction in corrections:
+        bucket = by_id[correction["id"]]["at"] // seconds
+        if bucket not in result:
+            result.append(bucket)
+    return result
+with open(sys.argv[1], "w") as stream:
+    json.dump({"schema": "rh-aggregate-input/1", "events": events,
+               "corrections": corrections}, stream, separators=(",", ":"))
+with open(sys.argv[2], "w") as stream:
+    json.dump({"daily": aggregate(86400), "weekly": aggregate(604800),
+               "corrections": {"count": len(corrections),
+                               "invalidated_daily": invalidated(86400),
+                               "invalidated_weekly": invalidated(604800)}},
+              stream, separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" aggregate --input "$T/oracle-in.json" --out "$T/oracle-out.json" >/dev/null || fail "aggregate oracle run"
+python3 - "$T/oracle-out.json" "$T/oracle-expected.json" <<'PY'
+import json, sys
+actual, expected = [json.load(open(path)) for path in sys.argv[1:]]
+for key in ("daily", "weekly", "corrections"):
+    assert actual[key] == expected[key], (key, actual[key], expected[key])
+assert actual["validation"]["full_recompute_equivalent"] is True, actual
+print("[aggregate] seeded 240-event daily/weekly/role oracle matches full recomputation")
+PY
+
 echo "[aggregate] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "aggregate output not deterministic"
