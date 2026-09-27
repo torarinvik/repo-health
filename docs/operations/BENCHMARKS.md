@@ -31,6 +31,17 @@ cache state and other host processes remain
 uncontrolled; `disk_context` describes the host, while `disk_workload` reports
 the temporary store corpus footprint described below.
 
+`tools/bench-render.sh [out_dir]` writes `rh-render-bench/1` for the real
+`rh_cli render` parse, HTML-generation, and file-write path. It uses
+deterministic reports with 10, 1,000, and 10,000 metric rows, verifies stable
+input/output SHA-256 digests across every warmup and measured process, and
+records latency and per-process/concurrent RSS using the same warmup,
+repetition, and concurrency controls. Set `RH_RENDER_BENCH_REPS` to override
+the default `RH_BENCH_REPS` count. It makes no network requests and does not
+measure database persistence or browser rendering. `tests/test_render_bench.sh`
+checks digest stability and profile structure without imposing machine-specific
+performance thresholds.
+
 Set `RH_PROFILE_REPO` to opt into a full-history scan of a local Git repository
 through `rh_cli scan`. The profile records its revision, dirty state, commit and
 identity counts, history digest, latency, and memory samples. Every repetition
