@@ -199,6 +199,14 @@ assert len(d["entries"]) == 1, d
 assert d["entries"][0]["has_date"] is False and d["entries"][0]["utc"] == -1, d["entries"][0]
 print("[vcs] fossil bad date not guessed OK")
 PY
+printf 'aa3f1e2d4c5b6a79887766554433221100ffee11|bob|2025-02-30T08:30:00|trunk|*LEAF*||z\n' > "$T/fossil-invalid-calendar-date.txt"
+"$ROOT/build/rh_cli" vcs --format fossil --input "$T/fossil-invalid-calendar-date.txt" --out "$T/fossil-invalid-calendar-date.out" >/dev/null || fail "fossil invalid calendar date run"
+python3 - "$T/fossil-invalid-calendar-date.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert len(d["entries"]) == 1 and d["entries"][0]["has_date"] is False and d["entries"][0]["utc"] == -1, d
+print("[vcs] fossil impossible calendar date remains unknown")
+PY
 
 echo "[vcs] native --repo collection retains source and stderr evidence"
 mkdir -p "$T/bin" "$T/repo"
