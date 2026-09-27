@@ -19,10 +19,9 @@ bash "$ROOT/tools/build.sh" >/dev/null
 [[ -x "$ROOT/build/rh_cli" ]] || fail "rh_cli not built"
 
 rm -rf "$T"; mkdir -p "$T"
-cat > "$T/in.json" <<'JSON'
-{"schema":"rh-privacy-input/1","cells":[{"id":"history.commit_count","public_count":12,"threshold":5},{"id":"dependents","public_count":1,"threshold":5},{"id":"private_dep","public_count":10,"private_count":1,"threshold":5},{"id":"unknown_dep","public_count":10,"unknown_count":1,"threshold":5},{"id":"empty","threshold":5},{"id":"auth_only","public_count":2,"authorized_count":10,"threshold":5},{"id":"priv_and_unknown","public_count":10,"private_count":1,"unknown_count":1,"threshold":5}]}
-JSON
+cp "$ROOT/fixtures/m07/privacy-contract-input.json" "$T/in.json"
 "$ROOT/build/rh_cli" privacy --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
+cmp -s "$T/out.json" "$ROOT/fixtures/m07/privacy-contract-result.json" || fail "privacy output differs from the public contract fixture"
 python3 - "$T/out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))

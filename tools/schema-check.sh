@@ -26,6 +26,8 @@ def type_ok(val, t):
         return isinstance(val, list)
     if t == "dict":
         return isinstance(val, dict)
+    if t == "dict_or_null":
+        return val is None or isinstance(val, dict)
     if t == "bool":
         return isinstance(val, bool)
     if t == "bool_or_null":

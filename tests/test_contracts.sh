@@ -43,7 +43,7 @@ for want in ("dep-graph", "canonical-repo", "adapter-transformation-report", "ag
              "query-result", "identity-result", "release-feed-result", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result",
              "identity-publication-result", "role-publication-result", "distribution-result", "rpm-spec-result", "archive-result", "homebrew-result",
              "registry-meta-result", "depsdev-enrichment", "findings-input", "findings-result", "resolution-instance", "parser-diff", "pep440-result",
-             "monitor-result", "quota-result", "privacy-result",
+             "monitor-result", "quota-result", "privacy-input", "privacy-result",
              "privacy-history",
              "roles-result", "roles-fetch", "experimental-result", "report-html", "explain-markdown", "benchmark-manifest", "profile-manifest", "proof-result", "forecast-input", "forecast-result", "intervention-result", "mapping-result", "coverage-result", "columnar-snapshot", "aggregate-result", "index-manifest", "adoption-result", "lineage-result", "population-result", "ingest-conformance-result", "evidence-drilldown", "evidence-transfer", "role-grain-result", "maintenance-exposure-input", "maintenance-exposure-result", "arch-pkgbuild-result", "identity-review-notices",
              "notify-state", "store-lease-result", "policy-state",
