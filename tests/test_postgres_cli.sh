@@ -44,6 +44,8 @@ run_ok run_graph_query malformed run-graph-query-job
 run_ok projection_batch ok read-projection-adjacency-batch
 run_ok store_projection stored store-graph-projection
 run_ok store_projection duplicate store-graph-projection
+run_ok stage_projection_chunk committed stage-graph-projection-chunk
+run_ok stage_projection_chunk duplicate stage-graph-projection-chunk
 run_ok publish_graph committed publish-graph-query-result
 run_ok publish_graph duplicate publish-graph-query-result
 run_ok retry_graph committed retry-graph-query-job
@@ -119,6 +121,11 @@ python3 - "$T/store-graph-projection-stored.json" "$T/store-graph-projection-dup
 import json, sys
 assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"store_graph_projection","status":"stored"}
 assert json.load(open(sys.argv[2])) == {"schema":"rh-postgres-result/1","operation":"store_graph_projection","status":"replay"}
+PY
+python3 - "$T/stage-graph-projection-chunk-committed.json" "$T/stage-graph-projection-chunk-duplicate.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"stage_graph_projection_chunk","status":"staged"}
+assert json.load(open(sys.argv[2])) == {"schema":"rh-postgres-result/1","operation":"stage_graph_projection_chunk","status":"replay"}
 PY
 python3 - "$ROOT/fixtures/postgres/read-projection-adjacency-batch-command.json" "$T" <<'PY'
 import json, pathlib, sys

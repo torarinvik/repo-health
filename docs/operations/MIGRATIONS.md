@@ -53,8 +53,16 @@ compares exact edges on replay. The `store_graph_projection` command validates
 up to 10,000 edges before connecting; its result distinguishes first storage
 from exact replay. The live migration rehearsal writes a projection, replays
 it, rejects altered replay, and reads the stored edge through the batch API.
-Larger projection ingestion still needs bounded chunking before the worker can
-load a full production projection through this path.
+Migration
+[`db/migrations/006_stage_graph_projection_chunks.sql`](../../db/migrations/006_stage_graph_projection_chunks.sql)
+adds private staging tables and `rh_stage_graph_projection_chunk`. The
+`stage_graph_projection_chunk` command submits one chunk of at most 10,000
+edges from a declared projection of at most 200,000 edges. Retries with the
+same metadata and chunk are idempotent; incomplete chunks remain invisible,
+and the transaction publishes the immutable projection only when every chunk
+and edge count reconciles. The CLI contract test covers the chunk command;
+live PostgreSQL validation of the staging path remains open. The persisted-
+snapshot worker does not yet load projections through this path.
 
 Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa),
 with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).

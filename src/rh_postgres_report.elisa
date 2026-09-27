@@ -377,7 +377,7 @@ module PostgresReport:
             return -1 if raw.count == 0 or raw.count > RH_PG_REPORT_MAX_NORMALIZATION_BYTES or Base::rh_cstr_len_c(conninfo) == 0 or Base::rh_cstr_len_c(conninfo) > 4096
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
-            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            root: i64 = Json::rh_json_parse_large_bounded(raw, nodes, texts, 2000000) if raw.count > RH_PG_REPORT_MAX_BYTES else Json::rh_json_parse(raw, nodes, texts)
             return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
 
             schema_s: mutable i64 = 0
@@ -390,8 +390,10 @@ module PostgresReport:
 
             normalization_operation: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "commit_staged_normalization")
             projection_operation: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "store_graph_projection")
-            return -1 if raw.count > RH_PG_REPORT_MAX_BYTES and not normalization_operation and not projection_operation
+            projection_chunk_operation: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "stage_graph_projection_chunk")
+            return -1 if raw.count > RH_PG_REPORT_MAX_BYTES and not normalization_operation and not projection_operation and not projection_chunk_operation
             return -1 if projection_operation and raw.count > 4194304
+            return -1 if projection_chunk_operation and raw.count > 4194304
 
             if normalization_operation:
                 normalization_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "normalization")
@@ -494,6 +496,24 @@ module PostgresReport:
                 while sha_index < 64 |sha_index: usize = 0, output_sha, out|:
                     out.push(output_sha[sha_index])
                     sha_index <- sha_index + 1
+                Base::rh_push_text(out, "\"}")
+                return 0
+
+            if projection_chunk_operation:
+                chunk_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "chunk")
+                return -1 if chunk_idx < 0 or nodes[chunk_idx.usize()].kind != Json::RH_JSON_OBJ
+                chunk_node: Json::RhJsonNode = nodes[chunk_idx.usize()]
+                return -1 if chunk_node.text_start < 0 or chunk_node.text_end <= chunk_node.text_start or chunk_node.text_end - chunk_node.text_start > 4194304
+                chunk_json: mutable darray[u8] = []
+                while raw_offset < chunk_node.text_end |raw_offset: i64 = chunk_node.text_start, raw, chunk_node, chunk_json|:
+                    chunk_json.push(raw[raw_offset.usize()])
+                    raw_offset <- raw_offset + 1
+                chunk_json.push(0)
+                chunk_ptr: cstr = (&chunk_json[0]).cast[cstr] can Unsafe.PointerCast
+                staged_status: mutable darray[u8] = []
+                return -1 if Postgres::rh_pg_stage_graph_projection_chunk(conninfo, chunk_ptr, staged_status) <= 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"stage_graph_projection_chunk\",\"status\":\"")
+                out.extend(bytes_view(staged_status))
                 Base::rh_push_text(out, "\"}")
                 return 0
 

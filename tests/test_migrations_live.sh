@@ -47,6 +47,8 @@ docker cp "$ROOT/db/migrations/004_graph_query_claim_attempt.sql" "$CONTAINER:/t
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/004_graph_query_claim_attempt.sql >/dev/null || fail "apply graph-query worker migration"
 docker cp "$ROOT/db/migrations/005_store_graph_projection.sql" "$CONTAINER:/tmp/005_store_graph_projection.sql" || fail "copy graph-projection storage migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/005_store_graph_projection.sql >/dev/null || fail "apply graph-projection storage migration"
+docker cp "$ROOT/db/migrations/006_stage_graph_projection_chunks.sql" "$CONTAINER:/tmp/006_stage_graph_projection_chunks.sql" || fail "copy projection-chunk migration"
+docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/006_stage_graph_projection_chunks.sql >/dev/null || fail "apply projection-chunk migration"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
 DO $$
@@ -1192,6 +1194,46 @@ BEGIN
 END $$;
 SQL
 echo "[migrations-live] immutable projection storage replays exactly, fences visibility, and feeds bounded adjacency reads"
+
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "stage immutable graph projection chunk"
+DO $$
+DECLARE
+  chunk_input jsonb;
+  stage_status text;
+BEGIN
+  chunk_input := jsonb_build_object(
+    'schema', 'rh-postgres-projection-chunk/1',
+    'projection', jsonb_build_object(
+      'id', '00000000-0000-0000-0000-000000009004',
+      'projection_kind', 'dependency',
+      'visibility_scope', 'public',
+      'input_cutoff', '2026-01-01T00:00:00Z',
+      'as_of', '2026-01-01T00:00:00Z',
+      'identity_revision', 'identity-1',
+      'mapping_revision', 'mapping-1',
+      'completeness', 'complete',
+      'manifest_digest', repeat('b', 64)
+    ),
+    'expected_edge_count', 1,
+    'chunk_index', 0,
+    'chunk_count', 1,
+    'edges', jsonb_build_array(jsonb_build_object(
+      'from_entity_id', '00000000-0000-0000-0000-000001000001',
+      'to_entity_id', '00000000-0000-0000-0000-000001000002',
+      'edge_kind', 'depends_on',
+      'known_at', '2026-01-01T00:00:00Z'
+    ))
+  );
+  stage_status := rh_stage_graph_projection_chunk(chunk_input);
+  IF stage_status <> 'stored' OR rh_stage_graph_projection_chunk(chunk_input) <> 'replay' THEN
+    RAISE EXCEPTION 'single-chunk projection did not publish and replay: %', stage_status;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM projection_membership WHERE projection_id = '00000000-0000-0000-0000-000000009004') THEN
+    RAISE EXCEPTION 'published chunk projection is missing membership';
+  END IF;
+END $$;
+SQL
+echo "[migrations-live] single-chunk staging publishes atomically and exact replay is a no-op"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "durable operator source stop lifecycle"
 DO $$
