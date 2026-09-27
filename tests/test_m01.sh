@@ -104,6 +104,7 @@ assert m["activity.accepted_changes"]["value"] == 3, m
 assert m["activity.active_months"]["value"] == 3, m
 assert m["contributor.source_accounts"]["value"] == 2, m
 assert m["coverage.lineage_complete_share"]["value"] == {"num": 1, "den": 1}, m
+assert m["coverage.lineage_complete_share"]["evidence"] == ["bundle.manifest", "evidence/git-log.bin"], m
 assert m["documentation.readme_present"]["value"] is False, m
 assert m["documentation.readme_present"]["evidence"] == ["evidence/git-files.txt"], m
 assert m["source.manifest_presence"]["evidence"] == ["evidence/git-files.txt"], m
