@@ -70,6 +70,7 @@ JSON
 replay_name="$("$ROOT/build/rh_cli" store put --root "$T/replay-source" --file "$T/replay-input.json" | awk '{print $3}')"
 printf '%s\n' "$replay_name" > "$T/replay-names.txt"
 "$ROOT/build/rh_cli" ops backup --root "$T/replay-source" --manifest "$T/replay.manifest" --names "$T/replay-names.txt" >/dev/null || fail "replay backup"
+"$ROOT/build/rh_cli" ops verify --root "$T/replay-source" --manifest "$T/replay.manifest" | grep -q "verified=1 missing=0 corrupt=0" || fail "replay backup verification"
 "$ROOT/build/rh_cli" ops restore --root "$T/replay-source" --dest "$T/replay-restored" --manifest "$T/replay.manifest" >/dev/null || fail "replay restore"
 "$ROOT/build/rh_cli" identity --input "$T/replay-input.json" --out "$T/replay-original.out" >/dev/null || fail "original replay report"
 "$ROOT/build/rh_cli" identity --input "$T/replay-restored/$replay_name" --out "$T/replay-restored.out" >/dev/null || fail "restored replay report"
