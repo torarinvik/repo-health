@@ -158,6 +158,22 @@ INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority
 VALUES ('00000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'running', 1, '2026-01-01T00:00:00Z', 1, 1, 'worker-page', '2026-09-22T00:00:00Z', '2026-01-01T00:00:00Z', '{"collection_run_id":"00000000-0000-0000-0000-000000000003"}');
 INSERT INTO job (id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at, created_at, input_manifest)
 VALUES ('00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000001', 'collection', 'public', 'queued', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '{"collection_run_id":"00000000-0000-0000-0000-000000000003"}');
+INSERT INTO collection_run (
+    id, source_instance_id, capability, connector_name, connector_version,
+    started_at, status, completeness, coverage_details
+) VALUES (
+    '00000000-0000-0000-0000-00000000000b', '00000000-0000-0000-0000-000000000001',
+    'issues', 'github', '1.0.0', '2026-09-21T00:00:00Z', 'running', 'unknown', '{}'
+);
+INSERT INTO job (
+    id, source_instance_id, kind, visibility_scope, state, priority, next_attempt_at,
+    attempt_count, fencing_token, worker_id, lease_expires_at, created_at, input_manifest
+) VALUES (
+    '00000000-0000-0000-0000-00000000000c', '00000000-0000-0000-0000-000000000001',
+    'collection', 'public', 'running', 1, '2026-09-21T00:00:00Z', 1, 1,
+    'worker-event-page', '2026-09-21T00:10:00Z', '2026-09-21T00:00:00Z',
+    '{"collection_run_id":"00000000-0000-0000-0000-00000000000b"}'
+);
 SQL
 if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
   RH_TEST_PG_CONNINFO="host=127.0.0.1 port=$PORT dbname=repo_health user=postgres password=repo-health-test sslmode=disable" RH_LIBPQ_PATH="$RH_LIBPQ_PATH" "$ROOT/build/test_postgres_live" || fail "parameterized page commit and duplicate replay"
@@ -184,8 +200,15 @@ INSERT INTO evidence_object (
 );
 SQL
 run_cli "$ROOT/fixtures/postgres/evidence-references-command.json" "$TMP_DIR/evidence-references-invalid.json" || fail "CLI malformed-key reference discovery"
-run_cli "$ROOT/fixtures/postgres/page-events-evidence-command.json" "$TMP_DIR/events-committed.json" || fail "CLI event page with registered evidence"
-run_cli "$ROOT/fixtures/postgres/page-events-evidence-command.json" "$TMP_DIR/events-duplicate.json" || fail "CLI event page replay"
+python3 - "$ROOT/fixtures/postgres/page-events-evidence-command.json" "$TMP_DIR/page-events-live-input.json" <<'PY'
+import json, sys
+command = json.load(open(sys.argv[1]))
+command["run_id"] = "00000000-0000-0000-0000-00000000000b"
+command["job_id"] = "00000000-0000-0000-0000-00000000000c"
+json.dump(command, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+run_cli "$TMP_DIR/page-events-live-input.json" "$TMP_DIR/events-committed.json" || fail "CLI event page with registered evidence"
+run_cli "$TMP_DIR/page-events-live-input.json" "$TMP_DIR/events-duplicate.json" || fail "CLI event page replay"
 python3 - "$TMP_DIR" <<'PY'
 import json, os, sys
 root = sys.argv[1]
