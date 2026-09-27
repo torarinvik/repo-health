@@ -59,6 +59,14 @@ live rehearsal covers matching scope, cross-scope rejection, and malformed
 projection identifiers.
 
 The additive
+[`db/migrations/009_projection_adjacency_walk.sql`](../../db/migrations/009_projection_adjacency_walk.sql)
+adds `rh_projection_adjacency_walk`, which expands a bounded neighborhood
+inside PostgreSQL and returns it in one adapter round trip. It applies node,
+depth, and edge limits, retains a boundary probe for accurate truncation, and
+returns an explicit availability bit. The live rehearsal checks a full chain,
+node-cap truncation, and depth-boundary edges.
+
+The additive
 [`db/migrations/004_graph_query_claim_attempt.sql`](../../db/migrations/004_graph_query_claim_attempt.sql)
 adds a claim wrapper that returns the durable attempt count together with the
 lease. The worker uses that count when dead-lettering malformed persisted
@@ -85,11 +93,13 @@ projections up to 200,000 edges. Retries with the same metadata and chunk are id
 incomplete chunks remain invisible, and publication occurs only after all
 chunks and edge counts reconcile. CLI tests cover a 10,001-edge write split
 across two calls and exact replay. Live PostgreSQL validation of the staging
-path remains open. The projection-backed graph-query worker now loads
-bounded neighborhoods through the adjacency batch API, preserving entity UUIDs
-and source truncation before publishing the result. The adapter includes an
-explicit projection-availability bit so a missing or cross-scope projection
-cannot become a false complete-empty graph.
+path remains open. The projection-backed graph-query worker now loads each
+bounded neighborhood through `rh_projection_adjacency_walk` in one adapter
+round trip. PostgreSQL expands frontiers using the indexed batch primitive,
+preserving entity UUIDs, depth/node/edge limits, and source truncation before
+publishing the result. The adapter includes an explicit projection-availability
+bit so a missing or cross-scope projection cannot become a false complete-empty
+graph.
 
 Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa),
 with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).

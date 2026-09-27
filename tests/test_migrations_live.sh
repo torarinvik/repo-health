@@ -53,6 +53,8 @@ docker cp "$ROOT/db/migrations/007_projection_adjacency_temporal_metadata.sql" "
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/007_projection_adjacency_temporal_metadata.sql >/dev/null || fail "apply projection-adjacency temporal metadata migration"
 docker cp "$ROOT/db/migrations/008_bind_projection_query_scope.sql" "$CONTAINER:/tmp/008_bind_projection_query_scope.sql" || fail "copy projection-query scope migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/008_bind_projection_query_scope.sql >/dev/null || fail "apply projection-query scope migration"
+docker cp "$ROOT/db/migrations/009_projection_adjacency_walk.sql" "$CONTAINER:/tmp/009_projection_adjacency_walk.sql" || fail "copy projection-adjacency walk migration"
+docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/009_projection_adjacency_walk.sql >/dev/null || fail "apply projection-adjacency walk migration"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
 DO $$
@@ -1235,6 +1237,7 @@ DECLARE
   stored boolean;
   replay_rejected boolean;
   visibility_rejected boolean;
+  walk_result jsonb;
   result_edges jsonb;
   result_truncated boolean;
 BEGIN
@@ -1259,6 +1262,29 @@ BEGIN
   stored := rh_store_graph_projection(projection_input);
   IF NOT stored OR rh_store_graph_projection(projection_input) THEN
     RAISE EXCEPTION 'graph projection store did not distinguish first write from exact replay';
+  END IF;
+  walk_result := rh_projection_adjacency_walk(
+    '00000000-0000-0000-0000-000000009002', 'public', 'depends_on', 'outgoing',
+    '00000000-0000-0000-0000-000001000001', 10, 5, 10
+  );
+  IF walk_result->>'projection_available' <> 'true'
+     OR walk_result->>'truncated' <> 'false'
+     OR jsonb_array_length(walk_result->'edges') <> 2 THEN
+    RAISE EXCEPTION 'one-call projection walk did not return the full two-edge chain: %', walk_result;
+  END IF;
+  walk_result := rh_projection_adjacency_walk(
+    '00000000-0000-0000-0000-000000009002', 'public', 'depends_on', 'outgoing',
+    '00000000-0000-0000-0000-000001000001', 1, 5, 10
+  );
+  IF walk_result->>'truncated' <> 'true' OR jsonb_array_length(walk_result->'edges') <> 2 THEN
+    RAISE EXCEPTION 'node-capped projection walk lost its boundary probe: %', walk_result;
+  END IF;
+  walk_result := rh_projection_adjacency_walk(
+    '00000000-0000-0000-0000-000000009002', 'public', 'depends_on', 'outgoing',
+    '00000000-0000-0000-0000-000001000001', 10, 1, 10
+  );
+  IF walk_result->>'truncated' <> 'false' OR jsonb_array_length(walk_result->'edges') <> 2 THEN
+    RAISE EXCEPTION 'depth-limited projection walk lost its boundary edge: %', walk_result;
   END IF;
   SELECT edges, truncated INTO result_edges, result_truncated
   FROM rh_projection_adjacency_batch(

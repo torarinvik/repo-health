@@ -8,7 +8,6 @@ typedef struct { int status; int rows; int columns; const char *value; } FakeRes
 static FakeConnection connection = { 1 };
 static FakeResult result = { 2, 1, 1, "t" };
 static int run_graph_query_transition = 0;
-static int run_graph_projection_adjacency_round = -1;
 static int bulk_projection_chunk_index = -1;
 static const char *claim_cells[3] = {
     "00000000-0000-0000-0000-000000000004", "5", "2026-01-01 00:02:00+00"
@@ -297,19 +296,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         prefix = run_graph_query_transition == 1 ? "SELECT public.rh_publish_graph_query_result(" :
             run_graph_query_transition == 2 ? "SELECT public.rh_retry_graph_query_job(" : "SELECT public.rh_claim_graph_query_job_with_attempt(";
     } else if (operation != NULL && strcmp(operation, "run_graph_projection") == 0) {
-        static const char *projection_batch_root[6] = {
+        static const char *projection_walk_values[8] = {
             "00000000-0000-0000-0000-000000009001", "public", "depends_on", "incoming",
-            "[\"00000000-0000-0000-0000-000001000001\"]", "10000"
+            "00000000-0000-0000-0000-000001000001", "10", "5", "10000"
         };
-        static const char *projection_batch_middle[6] = {
-            "00000000-0000-0000-0000-000000009001", "public", "depends_on", "incoming",
-            "[\"00000000-0000-0000-0000-000001000002\"]", "9999"
-        };
-        static const char *projection_batch_leaf[6] = {
-            "00000000-0000-0000-0000-000000009001", "public", "depends_on", "incoming",
-            "[\"00000000-0000-0000-0000-000001000003\"]", "9998"
-        };
-        run_graph_projection_adjacency_round = -1;
         if (query != NULL && strncmp(query, "SELECT public.rh_publish_graph_query_result(", strlen("SELECT public.rh_publish_graph_query_result(")) == 0) {
             run_graph_query_transition = 1;
             expected = run_graph_publish_values;
@@ -320,20 +310,11 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             expected = run_graph_retry_values;
             expected_count = 8;
             prefix = "SELECT public.rh_retry_graph_query_job(";
-        } else if (query != NULL && strncmp(query, "SELECT jsonb_build_object('edges', adjacency.edges", strlen("SELECT jsonb_build_object('edges', adjacency.edges")) == 0) {
+        } else if (query != NULL && strncmp(query, "SELECT public.rh_projection_adjacency_walk(", strlen("SELECT public.rh_projection_adjacency_walk(")) == 0) {
             run_graph_query_transition = 3;
-            expected_count = 6;
-            prefix = "SELECT jsonb_build_object('edges', adjacency.edges";
-            if (values != NULL && count == 6 && values[4] != NULL && strstr(values[4], "00000000-0000-0000-0000-000001000001") != NULL) {
-                expected = projection_batch_root;
-                run_graph_projection_adjacency_round = 0;
-            } else if (values != NULL && count == 6 && values[4] != NULL && strstr(values[4], "00000000-0000-0000-0000-000001000002") != NULL) {
-                expected = projection_batch_middle;
-                run_graph_projection_adjacency_round = 1;
-            } else {
-                expected = projection_batch_leaf;
-                run_graph_projection_adjacency_round = 2;
-            }
+            expected = projection_walk_values;
+            expected_count = 8;
+            prefix = "SELECT public.rh_projection_adjacency_walk(";
         } else {
             run_graph_query_transition = 0;
             expected = claim_graph_values;
@@ -512,15 +493,11 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.rows = 1;
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
         if (run_graph_query_transition == 3) {
-            result.value = run_graph_projection_adjacency_round == 0 ?
-                (mode != NULL && strcmp(mode, "truncated") == 0 ?
-                    "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000002\",\"to\":\"00000000-0000-0000-0000-000001000001\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":true,\"projection_available\":true}" :
-                    (mode != NULL && strcmp(mode, "unavailable") == 0 ?
-                        "{\"edges\":[],\"truncated\":false,\"projection_available\":false}" :
-                        "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000002\",\"to\":\"00000000-0000-0000-0000-000001000001\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":false,\"projection_available\":true}")) :
-                run_graph_projection_adjacency_round == 1 ?
-                "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000003\",\"to\":\"00000000-0000-0000-0000-000001000002\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":false,\"projection_available\":true}" :
-                "{\"edges\":[],\"truncated\":false,\"projection_available\":true}";
+            result.value = mode != NULL && strcmp(mode, "unavailable") == 0 ?
+                "{\"edges\":[],\"truncated\":false,\"projection_available\":false}" :
+                mode != NULL && strcmp(mode, "truncated") == 0 ?
+                "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000002\",\"to\":\"00000000-0000-0000-0000-000001000001\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":true,\"projection_available\":true}" :
+                "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000002\",\"to\":\"00000000-0000-0000-0000-000001000001\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"},{\"from\":\"00000000-0000-0000-0000-000001000003\",\"to\":\"00000000-0000-0000-0000-000001000002\",\"valid_from\":null,\"valid_to\":null,\"known_at\":\"2026-01-01T00:00:00Z\"}],\"truncated\":false,\"projection_available\":true}";
         } else if (run_graph_query_transition == 1 || run_graph_query_transition == 2) {
             result.value = "t";
         } else {
