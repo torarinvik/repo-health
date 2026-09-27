@@ -1060,8 +1060,40 @@ module Pylock:
                 cursor <- cursor + 1
             cursor == input_body_end
 
+        def rh_pylock_utf8_continuation(byte: u8) -> bool:
+            byte >= 128 and byte <= 191
+
+        # TOML documents are UTF-8. Validate the whole byte stream, including
+        # comments and unknown fields, before the projection parser can skip
+        # any source text.
+        def rh_pylock_utf8_valid(data: darray[u8]&) -> bool can[Abort.Panic]:
+            cursor: mutable usize = 0
+            while cursor < data.count |cursor, data|:
+                lead: u8 = data[cursor]
+                if lead <= 127:
+                    cursor <- cursor + 1
+                elif lead >= 194 and lead <= 223:
+                    return false if cursor + 1 >= data.count or not rh_pylock_utf8_continuation(data[cursor + 1])
+                    cursor <- cursor + 2
+                elif lead >= 224 and lead <= 239:
+                    return false if cursor + 2 >= data.count
+                    second: u8 = data[cursor + 1]
+                    return false if not rh_pylock_utf8_continuation(second) or not rh_pylock_utf8_continuation(data[cursor + 2])
+                    return false if (lead == 224 and second < 160) or (lead == 237 and second > 159)
+                    cursor <- cursor + 3
+                elif lead >= 240 and lead <= 244:
+                    return false if cursor + 3 >= data.count
+                    second: u8 = data[cursor + 1]
+                    return false if not rh_pylock_utf8_continuation(second) or not rh_pylock_utf8_continuation(data[cursor + 2]) or not rh_pylock_utf8_continuation(data[cursor + 3])
+                    return false if (lead == 240 and second < 144) or (lead == 244 and second > 143)
+                    cursor <- cursor + 4
+                else:
+                    return false
+            true
+
         def rh_pylock_parse(data: mutable darray[u8]&, pool: mutable darray[u8]&, packages: mutable darray[RhPylockPackage]&, refs: mutable darray[RhPylockReference]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, identities: mutable darray[RhPylockAttestationIdentity]&, identity_fields: mutable darray[RhPylockAttestationField]&, identity_claims: mutable darray[RhPylockAttestationClaim]&, metadata: mutable RhPylockMetadata&, created_s: mutable i64&, created_e: mutable i64&, python_s: mutable i64&, python_e: mutable i64&, unknown_top: mutable i64&, unknown_package: mutable i64&, unknown_dependency: mutable i64&, unknown_artifact: mutable i64&, unknown_tables: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if data.count == 0 or data.count > RH_PYLOCK_MAX_BYTES
+            return -1 if not rh_pylock_utf8_valid(data)
             section: mutable i64 = 0
             package_index: mutable i64 = -1
             reference_index: mutable i64 = -1

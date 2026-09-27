@@ -286,6 +286,28 @@ for field in ("created_by", "requires_python", "environments", "extras", "depend
 assert base["input_sha256"] != quoted["input_sha256"]
 print("[pylock] quoted TOML path segments preserve package and artifact semantics")
 PY
+python3 - "$T/pylock.toml" "$T" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_bytes()
+cases = {
+    "continuation": b"\x80",
+    "overlong": b"\xc0\xaf",
+    "surrogate": b"\xed\xa0\x80",
+    "too-large": b"\xf4\x90\x80\x80",
+    "truncated": b"\xe2\x82",
+    "bad-continuation": b"\xe2(\xa1",
+}
+root = Path(sys.argv[2])
+for name, invalid in cases.items():
+    (root / f"invalid-utf8-{name}.toml").write_bytes(b"# byte check: " + invalid + b"\n" + source)
+PY
+for input in "$T"/invalid-utf8-*.toml; do
+  if "$ROOT/build/rh_cli" pylock --input "$input" --out "$T/invalid-utf8.json" >/dev/null 2>&1; then
+    fail "invalid UTF-8 source bytes were accepted: $input"
+  fi
+done
+echo "[pylock] invalid UTF-8 is rejected across comments and source text"
 python3 - "$T/result.json" "$T/pylock.toml" <<'PY'
 import hashlib, json, sys
 report = json.load(open(sys.argv[1]))
