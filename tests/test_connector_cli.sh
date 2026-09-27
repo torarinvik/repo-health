@@ -75,9 +75,13 @@ echo "[connector] arbitrary approved self-hosted base URL is usable"
 "$ROOT/build/rh_cli" connector check \
   --instance "$T/instance-gitea-selfhosted.json" --out "$T/gt.out" | grep -q "verdict=usable" \
   || fail "approved self-hosted gitea instance must be usable"
-python3 - "$T/gt.out" <<'PY'
+python3 - "$T/instance-gitea-selfhosted.json" "$T/gt.out" "$T/gt.out.transformations.json" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1]))
+import hashlib
+from pathlib import Path
+raw = Path(sys.argv[1]).read_bytes()
+normalized = Path(sys.argv[2]).read_bytes()
+d = json.loads(normalized)
 assert d["schema"] == "rh-connector-instance-result/1", d
 assert d["connector_id"] == "gitea", d
 assert d["base_url"] == "https://codeberg.example.org", d
@@ -90,6 +94,14 @@ assert d["capabilities"]["permissions"] == "unsupported", d
 assert d["capabilities"]["traffic"] == "unsupported", d
 assert set(d["declared_capabilities"]) == {"history", "issues", "reviews", "releases"}, d
 assert "approval never overrides transport" in d["note"], d
+sidecar = json.load(open(sys.argv[3]))
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "connector-instance-check", sidecar
+assert sidecar["output_schema"] == "rh-connector-instance-result/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/connector-instance-check/1").hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["preserved", "transformed", "transformed", "inferred"], sidecar
 print("[connector] self-hosted usable OK")
 PY
 
