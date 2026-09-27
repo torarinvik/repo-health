@@ -210,3 +210,32 @@ or a provider result disagrees with the local version/range evaluation.
    response and transformation digests, query completeness, stage/root cause,
    fixture and parser version, superseding report/policy IDs, and remaining
    unknowns.
+
+## 10. Privacy release and overlap history
+
+Trigger: publishing repeated aggregate cells, changing the cohort definition,
+or enabling `public_member_tokens` for a history that previously had no tokens.
+
+1. Keep the `--history` file in an owner-only location and use the same
+   deployment secret for every publication scope whose populations must be
+   compared. Generate each token as lowercase HMAC-SHA256 over a domain-separated
+   stable internal contributor ID. Do not use raw IDs or unkeyed hashes; tokens
+   are still linkable pseudonymous data.
+2. Provide one token for every public contributor in that cell, sorted
+   lexicographically, and ensure the number of tokens equals `public_count`.
+   Never include authorized, private, or unknown-visibility subjects in this
+   field; those cells are withheld independently.
+3. Review `overlap_check` on every published result. `checked_no_overlap` means
+   the supplied tokens had no intersection with comparable prior populations;
+   `same_population` means the stable cell ID and exact token set match;
+   `overlap_suppressed` and `incomplete_history` withhold the count. A
+   `not_provided` or `history_disabled` state does not establish overlap
+   protection.
+4. Do not rotate the token key while reusing the same history. A key change
+   makes existing members appear unrelated. Stop publication and create a new,
+   separately reviewed history epoch if the key must change; resetting history
+   can enable differencing and does not make earlier releases disappear.
+5. Record the history path/epoch, key identifier (never the key), input and
+   output digests, release decisions, and any suppressed cells. Suppression is
+   not formal anonymity, and overlap checking does not replace a broader
+   disclosure review.

@@ -15,6 +15,9 @@ include "./rh_privacy.elisa"
 
 module PrivacyReport:
     private:
+        const RH_PV_MAX_MEMBER_TOKENS: i64 = 100000
+        const RH_PV_MAX_OVERLAP_COMPARISONS: i64 = 1000000
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_pv_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, lit)
@@ -34,6 +37,101 @@ module PrivacyReport:
             return -1 if ok == 0
             v
 
+        def rh_pv_token_order(a: darray[u8]&, a_start: i64, a_end: i64, b: darray[u8]&, b_start: i64, b_end: i64) -> i64:
+            while i < a_end - a_start |i: i64 = 0|:
+                av: u8 = a[(a_start + i).usize()]
+                bv: u8 = b[(b_start + i).usize()]
+                return -1 if av < bv
+                return 1 if av > bv
+                i <- i + 1
+            0
+
+        def rh_pv_token_valid(texts: darray[u8]&, start: i64, end: i64) -> bool:
+            return false if start < 0 or end - start != 64
+            while i < end |i: i64 = start, texts|:
+                b: u8 = texts[i.usize()]
+                return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
+                i <- i + 1
+            true
+
+        # Public member tokens must be deployment-keyed HMAC-SHA256 hex values,
+        # unique and sorted by the producer. Raw identities never enter history.
+        def rh_pv_member_tokens(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, expected_count: i64, total: mutable i64&, array_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            array_idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, "public_member_tokens")
+            array_out[0] <- array_idx
+            return true if array_idx < 0
+            return false if nodes[array_idx.usize()].kind != Json::RH_JSON_ARR or expected_count < 0 or nodes[array_idx.usize()].child_count.i64() != expected_count or expected_count > 10000
+            total[0] <- total[0] + expected_count
+            return false if total[0] > RH_PV_MAX_MEMBER_TOKENS
+            previous_start: mutable i64 = -1
+            previous_end: mutable i64 = -1
+            while child >= 0 |child: i64 = nodes[array_idx.usize()].first_child, nodes, texts, previous_start, previous_end|:
+                token_start: mutable i64 = -1
+                token_end: mutable i64 = -1
+                return false if not Json::rh_json_str_span(nodes, child, &token_start, &token_end) or not rh_pv_token_valid(texts, token_start, token_end)
+                return false if previous_start >= 0 and rh_pv_token_order(texts, previous_start, previous_end, texts, token_start, token_end) >= 0
+                previous_start <- token_start
+                previous_end <- token_end
+                child <- nodes[child.usize()].next_sibling
+            true
+
+        # Both arrays are validated, sorted token lists. The merge walk is
+        # linear and bounded across the full report by the caller's budget.
+        def rh_pv_member_overlap(left_nodes: darray[Json::RhJsonNode]&, left_texts: darray[u8]&, left_idx: i64, right_nodes: darray[Json::RhJsonNode]&, right_texts: darray[u8]&, right_idx: i64, comparisons: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            li: mutable i64 = 0
+            ri: mutable i64 = 0
+            left_count: i64 = left_nodes[left_idx.usize()].child_count.i64()
+            right_count: i64 = right_nodes[right_idx.usize()].child_count.i64()
+            while li < left_count and ri < right_count |li, ri, left_count, right_count, left_nodes, left_texts, left_idx, right_nodes, right_texts, right_idx, comparisons|:
+                comparisons[0] <- comparisons[0] + 1
+                return -1 if comparisons[0] > RH_PV_MAX_OVERLAP_COMPARISONS
+                left_token: i64 = Json::rh_json_arr_get(left_nodes, left_idx, li)
+                right_token: i64 = Json::rh_json_arr_get(right_nodes, right_idx, ri)
+                ls: mutable i64 = -1
+                le: mutable i64 = -1
+                rs: mutable i64 = -1
+                re: mutable i64 = -1
+                return -1 if not Json::rh_json_str_span(left_nodes, left_token, &ls, &le) or not Json::rh_json_str_span(right_nodes, right_token, &rs, &re)
+                order: i64 = rh_pv_token_order(left_texts, ls, le, right_texts, rs, re)
+                return 1 if order == 0
+                li <- li + 1 if order < 0
+                ri <- ri + 1 if order > 0
+            0
+
+        def rh_pv_member_arrays_equal(left_nodes: darray[Json::RhJsonNode]&, left_texts: darray[u8]&, left_idx: i64, right_nodes: darray[Json::RhJsonNode]&, right_texts: darray[u8]&, right_idx: i64, comparisons: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            left_count: i64 = left_nodes[left_idx.usize()].child_count.i64()
+            right_count: i64 = right_nodes[right_idx.usize()].child_count.i64()
+            return 0 if left_count != right_count
+            while i < left_count |i: i64 = 0, left_count, left_nodes, left_texts, left_idx, right_nodes, right_texts, right_idx, comparisons|:
+                comparisons[0] <- comparisons[0] + 1
+                return -1 if comparisons[0] > RH_PV_MAX_OVERLAP_COMPARISONS
+                left_token: i64 = Json::rh_json_arr_get(left_nodes, left_idx, i)
+                right_token: i64 = Json::rh_json_arr_get(right_nodes, right_idx, i)
+                ls: mutable i64 = -1
+                le: mutable i64 = -1
+                rs: mutable i64 = -1
+                re: mutable i64 = -1
+                return -1 if not Json::rh_json_str_span(left_nodes, left_token, &ls, &le) or not Json::rh_json_str_span(right_nodes, right_token, &rs, &re)
+                return 0 if rh_pv_token_order(left_texts, ls, le, right_texts, rs, re) != 0
+                i <- i + 1
+            1
+
+        def rh_pv_emit_member_tokens(out: mutable darray[u8]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, array_idx: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            return if array_idx < 0
+            Base::rh_push_text(out, ",\"public_member_tokens\":[")
+            while i < nodes[array_idx.usize()].child_count |i: i64 = 0, nodes, texts, array_idx, out|:
+                if i > 0:
+                    out.push(44)
+                token: i64 = Json::rh_json_arr_get(nodes, array_idx, i)
+                start: mutable i64 = -1
+                end: mutable i64 = -1
+                _ = Json::rh_json_str_span(nodes, token, &start, &end)
+                out.push(34)
+                Base::rh_json_escape(out, texts, start, end)
+                out.push(34)
+                i <- i + 1
+            out.push(93)
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_pv_label(d: i64) -> u8&:
             return "publish" if d == Privacy::RH_PUB_PUBLISH
@@ -42,7 +140,17 @@ module PrivacyReport:
             return "withhold_unknown_visibility" if d == Privacy::RH_PUB_WITHHOLD_UNKNOWN
             return "withhold_authorized_member" if d == Privacy::RH_PUB_WITHHOLD_AUTHORIZED
             return "suppress_repeated_release_difference" if d == Privacy::RH_PUB_SUPPRESS_DIFFERENCE
+            return "suppress_overlapping_population" if d == Privacy::RH_PUB_SUPPRESS_OVERLAP
+            return "suppress_incomplete_overlap_history" if d == Privacy::RH_PUB_SUPPRESS_OVERLAP_UNKNOWN
             "unavailable"
+
+        def rh_pv_overlap_label(state: i64) -> u8&:
+            return "checked_no_overlap" if state == 1
+            return "overlap_suppressed" if state == 2
+            return "incomplete_history" if state == 3
+            return "history_disabled" if state == 4
+            return "same_population" if state == 5
+            "not_provided"
 
     public:
         def rh_privacy_report(raw: darray[u8]&, history_raw: darray[u8]&, use_history: bool, out: mutable darray[u8]&, history_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -51,6 +159,9 @@ module PrivacyReport:
             history_nodes: mutable darray[Json::RhJsonNode] = []
             history_texts: mutable darray[u8] = []
             history_cells_idx: mutable i64 = -1
+            history_member_total: mutable i64 = 0
+            input_member_total: mutable i64 = 0
+            overlap_comparisons: mutable i64 = 0
             if use_history:
                 history_root: i64 = Json::rh_json_parse(history_raw, history_nodes, history_texts)
                 return -1 if history_root < 0 or history_nodes[history_root.usize()].kind != Json::RH_JSON_OBJ
@@ -77,6 +188,8 @@ module PrivacyReport:
                     old_count: i64 = rh_pv_int(history_nodes, history_raw, history_texts, old_cell, "public_count", -1)
                     old_threshold: i64 = rh_pv_int(history_nodes, history_raw, history_texts, old_cell, "threshold", -1)
                     return -1 if old_count < 0 or old_threshold < Privacy::RH_PUB_MIN_THRESHOLD
+                    old_tokens_idx: mutable i64 = -1
+                    return -1 if not rh_pv_member_tokens(history_nodes, history_texts, old_cell, old_count, &history_member_total, &old_tokens_idx)
                     old_cell <- history_nodes[old_cell.usize()].next_sibling
             cells_idx: i64 = |nodes, texts|
                 root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -98,7 +211,8 @@ module PrivacyReport:
             publish_ids_end: mutable darray[i64] = []
             publish_counts: mutable darray[i64] = []
             publish_thresholds: mutable darray[i64] = []
-            while child >= 0 |child: i64 = arr.first_child, i: i64 = 0, nodes, texts, raw, out, cell_ids_start, cell_ids_end, history_nodes, history_texts, history_cells_idx, history_raw, use_history, publish_ids_start, publish_ids_end, publish_counts, publish_thresholds|:
+            publish_token_arrays: mutable darray[i64] = []
+            while child >= 0 |child: i64 = arr.first_child, i: i64 = 0, nodes, texts, raw, out, cell_ids_start, cell_ids_end, history_nodes, history_texts, history_cells_idx, history_raw, use_history, input_member_total, overlap_comparisons, publish_ids_start, publish_ids_end, publish_counts, publish_thresholds, publish_token_arrays|:
                 return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
                 ids: mutable i64 = 0
                 ide: mutable i64 = 0
@@ -117,7 +231,42 @@ module PrivacyReport:
                 unk: i64 = rh_pv_int(nodes, raw, texts, child, "unknown_count", 0)
                 thr: i64 = rh_pv_int(nodes, raw, texts, child, "threshold", 1)
                 return -1 if pub < 0 or aut < 0 or priv < 0 or unk < 0 or thr < Privacy::RH_PUB_MIN_THRESHOLD
+                member_array_idx: mutable i64 = -1
+                return -1 if not rh_pv_member_tokens(nodes, texts, child, pub, &input_member_total, &member_array_idx)
                 decision: mutable i64 = Privacy::rh_pub_decide(pub, aut, priv, unk, thr)
+                overlap_state: mutable i64 = 0
+                if use_history and decision == Privacy::RH_PUB_PUBLISH:
+                    if member_array_idx >= 0:
+                        overlap_state <- 1
+                        while old_cell >= 0 and decision == Privacy::RH_PUB_PUBLISH |old_cell: i64 = history_nodes[history_cells_idx.usize()].first_child, history_nodes, history_texts, texts, nodes, member_array_idx, ids, ide, decision, overlap_state, overlap_comparisons|:
+                            old_id_start: mutable i64 = 0
+                            old_id_end: mutable i64 = 0
+                            _ = rh_pv_str(history_nodes, history_texts, old_cell, "id", &old_id_start, &old_id_end)
+                            same_id: bool = Base::rh_bytes_equal_span(texts, ids, ide, history_texts, old_id_start, old_id_end)
+                            old_tokens_idx: i64 = Json::rh_json_obj_get(history_nodes, history_texts, old_cell, "public_member_tokens")
+                            if old_tokens_idx < 0:
+                                decision <- Privacy::RH_PUB_SUPPRESS_OVERLAP_UNKNOWN
+                                overlap_state <- 3
+                            elif same_id:
+                                equal_members: i64 = rh_pv_member_arrays_equal(nodes, texts, member_array_idx, history_nodes, history_texts, old_tokens_idx, &overlap_comparisons)
+                                return -1 if equal_members < 0
+                                if equal_members > 0:
+                                    overlap_state <- 5
+                                else:
+                                    overlaps: i64 = rh_pv_member_overlap(nodes, texts, member_array_idx, history_nodes, history_texts, old_tokens_idx, &overlap_comparisons)
+                                    return -1 if overlaps < 0
+                                    if overlaps > 0:
+                                        decision <- Privacy::RH_PUB_SUPPRESS_OVERLAP
+                                        overlap_state <- 2
+                            else:
+                                overlaps: i64 = rh_pv_member_overlap(nodes, texts, member_array_idx, history_nodes, history_texts, old_tokens_idx, &overlap_comparisons)
+                                return -1 if overlaps < 0
+                                if overlaps > 0:
+                                    decision <- Privacy::RH_PUB_SUPPRESS_OVERLAP
+                                    overlap_state <- 2
+                            old_cell <- history_nodes[old_cell.usize()].next_sibling
+                    if member_array_idx >= 0 and not use_history:
+                        overlap_state <- 4
                 if use_history and decision == Privacy::RH_PUB_PUBLISH:
                     while old_cell >= 0 |old_cell: i64 = history_nodes[history_cells_idx.usize()].first_child, history_nodes, history_texts, history_raw, texts, ids, ide, pub, thr, decision|:
                         old_id_start: mutable i64 = 0
@@ -136,6 +285,7 @@ module PrivacyReport:
                     publish_ids_end.push(ide)
                     publish_counts.push(pub)
                     publish_thresholds.push(thr)
+                    publish_token_arrays.push(member_array_idx)
                 if i > 0:
                     out.push(44)
                 i <- i + 1
@@ -157,6 +307,9 @@ module PrivacyReport:
                     Base::rh_push_text(out, "null")
                 Base::rh_push_text(out, ",\"threshold\":")
                 Base::rh_push_decimal_i64(out, thr)
+                Base::rh_push_text(out, ",\"overlap_check\":\"")
+                Base::rh_push_text(out, rh_pv_overlap_label(overlap_state))
+                out.push(34)
                 Base::rh_push_text(out, ",\"explanation\":\"")
                 expl: mutable darray[u8] = []
                 Privacy::rh_pub_text(decision, pub, aut, priv, unk, thr, expl)
@@ -167,7 +320,7 @@ module PrivacyReport:
                 Base::rh_json_escape(out, expl, 0, expl_end)
                 Base::rh_push_text(out, "\"}")
                 child <- nodes[child.usize()].next_sibling
-            Base::rh_push_text(out, "],\"note\":\"a cell publishes only when every contributing subject is public and the cell meets the threshold; when history is enabled, repeated stable cell IDs with count differences below either release threshold are suppressed; differently identified overlapping queries are not detected; suppression is not anonymization; no formal-anonymity claim is made without a stated method\"}")
+            Base::rh_push_text(out, "],\"note\":\"a cell publishes only when every contributing subject is public and the cell meets the threshold; when history is enabled, repeated stable cell IDs with count differences below either release threshold are suppressed; optional deployment-keyed public_member_tokens detect and suppress intersecting populations under different IDs, but missing tokens or legacy history without tokens leave the overlap check unavailable; suppression is not anonymization; no formal-anonymity claim is made without a stated method\"}")
             if use_history:
                 new_ids: mutable darray[i64] = []
                 new_ids_end: mutable darray[i64] = []
@@ -186,7 +339,7 @@ module PrivacyReport:
                     pi <- pi + 1
                 return -1 if history_nodes[history_cells_idx.usize()].child_count + new_ids.count.i64() > 10000
                 Base::rh_push_text(history_out, "{\"schema\":\"rh-privacy-history/1\",\"published_cells\":[")
-                while pi < publish_ids_start.count |pi: usize = 0, publish_ids_start, publish_ids_end, publish_counts, publish_thresholds, history_out|:
+                while pi < publish_ids_start.count |pi: usize = 0, publish_ids_start, publish_ids_end, publish_counts, publish_thresholds, publish_token_arrays, nodes, texts, history_out|:
                     if pi > 0:
                         history_out.push(44)
                     Base::rh_push_text(history_out, "{\"id\":\"")
@@ -195,6 +348,7 @@ module PrivacyReport:
                     Base::rh_push_decimal_i64(history_out, publish_counts[pi])
                     Base::rh_push_text(history_out, ",\"threshold\":")
                     Base::rh_push_decimal_i64(history_out, publish_thresholds[pi])
+                    rh_pv_emit_member_tokens(history_out, nodes, texts, publish_token_arrays[pi])
                     Base::rh_push_text(history_out, "}")
                     pi <- pi + 1
                 while oi < history_nodes[history_cells_idx.usize()].child_count |oi: usize = 0, history_nodes, history_texts, history_cells_idx, texts, publish_ids_start, publish_ids_end, history_out, history_raw|:
@@ -215,6 +369,7 @@ module PrivacyReport:
                         Base::rh_push_decimal_i64(history_out, rh_pv_int(history_nodes, history_raw, history_texts, prior, "public_count", 0))
                         Base::rh_push_text(history_out, ",\"threshold\":")
                         Base::rh_push_decimal_i64(history_out, rh_pv_int(history_nodes, history_raw, history_texts, prior, "threshold", Privacy::RH_PUB_MIN_THRESHOLD))
+                        rh_pv_emit_member_tokens(history_out, history_nodes, history_texts, Json::rh_json_obj_get(history_nodes, history_texts, prior, "public_member_tokens"))
                         Base::rh_push_text(history_out, "}")
                     oi <- oi + 1
                 Base::rh_push_text(history_out, "]}")

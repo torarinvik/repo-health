@@ -46,6 +46,64 @@ assert "no formal-anonymity claim" in d["note"], d["note"]
 print("[privacy] decisions + caveat OK")
 PY
 
+echo "[privacy] deployment-keyed member tokens detect overlapping cohorts"
+python3 - "$T/cohort-a.json" "$T/cohort-overlap.json" "$T/cohort-disjoint.json" "$T/cohort-a-changed.json" <<'PY'
+import json, sys
+tok = [format(i, "064x") for i in range(14)]
+def write(path, ident, members):
+    value = {"schema":"rh-privacy-input/1", "cells":[{"id":ident, "public_count":len(members), "threshold":5, "public_member_tokens":[tok[i] for i in members]}]}
+    with open(path,"w") as f: json.dump(value,f,separators=(",",":"))
+write(sys.argv[1], "cohort-a", [0,1,2,3,4])
+write(sys.argv[2], "cohort-overlap", [3,4,5,6,7])
+write(sys.argv[3], "cohort-disjoint", [5,6,7,8,9])
+write(sys.argv[4], "cohort-a", [4,10,11,12,13])
+PY
+"$ROOT/build/rh_cli" privacy --input "$T/cohort-a.json" --out "$T/cohort-a.out" --history "$T/cohort-history.json" >/dev/null || fail "initial member-token release"
+python3 - "$T/cohort-history.json" <<'PY'
+import json, sys
+h=json.load(open(sys.argv[1]))
+assert len(h["published_cells"]) == 1 and len(h["published_cells"][0]["public_member_tokens"]) == 5, h
+print("[privacy] history retains only keyed member tokens for overlap review")
+PY
+"$ROOT/build/rh_cli" privacy --input "$T/cohort-a.json" --out "$T/cohort-a-replay.out" --history "$T/cohort-history.json" >/dev/null || fail "same population replay"
+python3 - "$T/cohort-a-replay.out" <<'PY'
+import json, sys
+c=json.load(open(sys.argv[1]))["cells"][0]
+assert c["decision"] == "publish" and c["overlap_check"] == "same_population", c
+print("[privacy] exact same-ID population replay remains explicit")
+PY
+"$ROOT/build/rh_cli" privacy --input "$T/cohort-overlap.json" --out "$T/cohort-overlap.out" --history "$T/cohort-history.json" >/dev/null || fail "overlap review"
+python3 - "$T/cohort-overlap.out" "$T/cohort-history.json" <<'PY'
+import json, sys
+r=json.load(open(sys.argv[1])); h=json.load(open(sys.argv[2])); c=r["cells"][0]
+assert c["decision"] == "suppress_overlapping_population" and c["counts"] is None, c
+assert c["overlap_check"] == "overlap_suppressed", c
+assert len(h["published_cells"]) == 1 and h["published_cells"][0]["id"] == "cohort-a", h
+print("[privacy] intersecting population under another ID is suppressed")
+PY
+"$ROOT/build/rh_cli" privacy --input "$T/cohort-disjoint.json" --out "$T/cohort-disjoint.out" --history "$T/cohort-history.json" >/dev/null || fail "disjoint review"
+python3 - "$T/cohort-disjoint.out" <<'PY'
+import json, sys
+c=json.load(open(sys.argv[1]))["cells"][0]
+assert c["decision"] == "publish" and c["overlap_check"] == "checked_no_overlap", c
+print("[privacy] disjoint member sets remain publishable with checked status")
+PY
+"$ROOT/build/rh_cli" privacy --input "$T/cohort-a-changed.json" --out "$T/cohort-a-changed.out" --history "$T/cohort-history.json" >/dev/null || fail "same-ID population change review"
+python3 - "$T/cohort-a-changed.out" <<'PY'
+import json, sys
+c=json.load(open(sys.argv[1]))["cells"][0]
+assert c["decision"] == "suppress_overlapping_population" and c["overlap_check"] == "overlap_suppressed", c
+print("[privacy] reused cell ID cannot bypass overlap checks when membership changes")
+PY
+printf '{"schema":"rh-privacy-history/1","published_cells":[{"id":"legacy","public_count":5,"threshold":5}]}' > "$T/cohort-legacy-history.json"
+"$ROOT/build/rh_cli" privacy --input "$T/cohort-overlap.json" --out "$T/cohort-legacy.out" --history "$T/cohort-legacy-history.json" >/dev/null || fail "legacy overlap history handling"
+python3 - "$T/cohort-legacy.out" <<'PY'
+import json, sys
+c=json.load(open(sys.argv[1]))["cells"][0]
+assert c["decision"] == "suppress_incomplete_overlap_history" and c["overlap_check"] == "incomplete_history", c
+print("[privacy] legacy history without member tokens fails closed for token-enabled publication")
+PY
+
 echo "[privacy] determinism"
 "$ROOT/build/rh_cli" privacy --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "privacy output not deterministic"
@@ -144,11 +202,20 @@ printf '{"schema":"rh-privacy-input/1","cells":[{"id":"low-threshold","public_co
 "$ROOT/build/rh_cli" privacy --input "$T/low-threshold.json" --out "$T/x" >/dev/null 2>&1; rc_threshold=$?
 printf '{"schema":"rh-privacy-input/1","cells":[{"id":"same","public_count":10,"threshold":5},{"id":"same","public_count":11,"threshold":5}]}' > "$T/duplicate.json"
 "$ROOT/build/rh_cli" privacy --input "$T/duplicate.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate=$?
+printf '{"schema":"rh-privacy-input/1","cells":[{"id":"bad-token","public_count":5,"threshold":5,"public_member_tokens":["not-a-hmac"]}]}' > "$T/bad-token.json"
+"$ROOT/build/rh_cli" privacy --input "$T/bad-token.json" --out "$T/x" >/dev/null 2>&1; rc_token=$?
+python3 - "$T/unsorted-tokens.json" <<'PY'
+import json, sys
+tokens=[format(i,"064x") for i in range(5)]
+tokens.reverse()
+json.dump({"schema":"rh-privacy-input/1","cells":[{"id":"unsorted","public_count":5,"threshold":5,"public_member_tokens":tokens}]},open(sys.argv[1],"w"))
+PY
+"$ROOT/build/rh_cli" privacy --input "$T/unsorted-tokens.json" --out "$T/x" >/dev/null 2>&1; rc_token_order=$?
 printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" privacy --input "$T/notjson.json" --out "$T/x" >/dev/null 2>&1; rc_json=$?
 "$ROOT/build/rh_cli" privacy --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_cells" "$rc_id" "$rc_negative" "$rc_threshold" "$rc_duplicate" "$rc_json" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_cells" "$rc_id" "$rc_negative" "$rc_threshold" "$rc_duplicate" "$rc_token" "$rc_token_order" "$rc_json" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed privacy input must exit 4 (got $rc)"
 done
 
