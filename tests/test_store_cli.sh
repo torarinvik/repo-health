@@ -76,6 +76,28 @@ printf '%s\n' "$replay_name" > "$T/replay-names.txt"
 "$ROOT/build/rh_cli" identity --input "$T/replay-restored/$replay_name" --out "$T/replay-restored.out" >/dev/null || fail "restored replay report"
 cmp -s "$T/replay-original.out" "$T/replay-restored.out" || fail "restored evidence changed pinned report output"
 
+echo "[store] database snapshot binds to an exact verified evidence manifest"
+printf 'postgres dump snapshot\000v1\n' > "$T/database.snapshot"
+"$ROOT/build/rh_cli" ops bind --root "$T/replay-source" --manifest "$T/replay.manifest" --database "$T/database.snapshot" --out "$T/backup-binding.json" >/dev/null || fail "create backup binding"
+"$ROOT/build/rh_cli" ops verify-binding --root "$T/replay-source" --manifest "$T/replay.manifest" --database "$T/database.snapshot" --input "$T/backup-binding.json" >/dev/null || fail "verify backup binding"
+python3 - "$T/database.snapshot" "$T/replay.manifest" "$T/backup-binding.json" <<'PY'
+import hashlib, json, sys
+database, manifest, binding = sys.argv[1:]
+d = json.load(open(binding))
+assert d == {
+    "schema": "rh-backup-binding/1",
+    "database_snapshot_sha256": hashlib.sha256(open(database, "rb").read()).hexdigest(),
+    "evidence_manifest_sha256": hashlib.sha256(open(manifest, "rb").read()).hexdigest(),
+    "evidence_object_count": 1,
+}, d
+print("[store] database/evidence pair is digest-bound")
+PY
+printf ' changed' >> "$T/database.snapshot"
+set +e
+"$ROOT/build/rh_cli" ops verify-binding --root "$T/replay-source" --manifest "$T/replay.manifest" --database "$T/database.snapshot" --input "$T/backup-binding.json" >/dev/null 2>&1; rc_binding=$?
+set -e
+[[ "$rc_binding" -eq 5 ]] || fail "changed database snapshot must fail binding verification (got $rc_binding)"
+
 printf 'preserve this file\n' > "$T/outside"
 printf 'rh-backup/1 fnv1a-64-hex\n../outside\n' > "$T/path-traversal.manifest"
 set +e

@@ -148,13 +148,22 @@ Trigger: scheduled drill, or recovery after corruption/loss.
 1. Restore into a **clean** directory (never over the live store).
 2. Verify every object digest with `rh_backup_verify`; require
    `corrupt == 0` and `missing == 0` before trusting the set.
-3. Restore with `rh_backup_restore`, which skips any object whose digest
+3. Bind the exact database dump to the verified evidence manifest with
+   `rh_cli ops bind --root <evidence-root> --manifest <evidence-manifest>
+   --database <database-dump> --out <rh-backup-binding/1>`. Before restoring,
+   run the matching `rh_cli ops verify-binding` command with `--input
+   <rh-backup-binding/1>`; it rehashes both files and verifies every evidence
+   object. Keep the database dump itself with the backup: the binding is an
+   integrity index, not a copy of the dump or a claim that it is correct.
+   Current input reads are capped at 64 MiB, so larger dumps require a
+   streaming backup path before this runbook can cover them.
+4. Restore with `rh_backup_restore`, which skips any object whose digest
    does not match.
-4. Rebuild projections from the restored evidence and replay a sample
+5. Rebuild projections from the restored evidence and replay a sample
    report; compare against the pinned expected outputs.
-5. State the restored/unavailable/unknown sets in writing. An unrestored
+6. State the restored/unavailable/unknown sets in writing. An unrestored
    backup is not evidence.
-6. Record: backup manifest, present/missing/corrupt counts, restored
+7. Record: backup manifest, binding, present/missing/corrupt counts, restored
    count, sample replay result, date and operator.
 
 ## 8. Moving evidence between hosts

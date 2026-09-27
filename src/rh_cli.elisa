@@ -185,6 +185,8 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli ops backup --root <dir> --manifest <path> --names <file>")
     rh_cli_err("       rh_cli ops verify --root <dir> --manifest <path>")
     rh_cli_err("       rh_cli ops restore --root <dir> --dest <dir> --manifest <path>")
+    rh_cli_err("       rh_cli ops bind --root <dir> --manifest <evidence-manifest> --database <dump> --out <binding>")
+    rh_cli_err("       rh_cli ops verify-binding --root <dir> --manifest <evidence-manifest> --database <dump> --input <binding>")
     rh_cli_err("       rh_cli ops export --root <dir> --manifest <path> --out <bundle> [--key <owner-only-key> --sig <signature-file>]")
     rh_cli_err("       rh_cli ops import --dest <dir> --input <bundle> [--key <owner-only-key> --sig <signature-file>]")
     rh_cli_err("       rh_cli ops delete --root <dir> --name <16-hex-object>")
@@ -1589,8 +1591,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
     if Base::rh_streq(cmd, "ops"):
         return rh_cli_usage(2) if argc < 3
         sub12: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
-        or_idx, om_idx, on_idx, od_idx, oin_idx, oo_idx, odelete_name_idx, osig_key_idx, osig_idx =
-            while oi < argc |or_idx: i64 = -1, om_idx: i64 = -1, on_idx: i64 = -1, od_idx: i64 = -1, oin_idx: i64 = -1, oo_idx: i64 = -1, odelete_name_idx: i64 = -1, osig_key_idx: i64 = -1, osig_idx: i64 = -1, oi: i64 = 3, slots| -> or_idx, om_idx, on_idx, od_idx, oin_idx, oo_idx, odelete_name_idx, osig_key_idx, osig_idx:
+        or_idx, om_idx, on_idx, od_idx, oin_idx, oo_idx, odelete_name_idx, osig_key_idx, osig_idx, odb_idx =
+            while oi < argc |or_idx: i64 = -1, om_idx: i64 = -1, on_idx: i64 = -1, od_idx: i64 = -1, oin_idx: i64 = -1, oo_idx: i64 = -1, odelete_name_idx: i64 = -1, osig_key_idx: i64 = -1, osig_idx: i64 = -1, odb_idx: i64 = -1, oi: i64 = 3, slots| -> or_idx, om_idx, on_idx, od_idx, oin_idx, oo_idx, odelete_name_idx, osig_key_idx, osig_idx, odb_idx:
                 a12: u8& = slots[oi].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(a12, "--root"):
                     if oi + 1 < argc:
@@ -1646,6 +1648,12 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         osig_idx <- oi
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(a12, "--database"):
+                    if oi + 1 < argc:
+                        oi <- oi + 1
+                        odb_idx <- oi
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 oi <- oi + 1
@@ -1666,6 +1674,12 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         if Base::rh_streq(sub12, "delete"):
             return rh_cli_usage(2) if or_idx < 0 or odelete_name_idx < 0
             return rh_do_ops_delete(slots[or_idx], slots[odelete_name_idx])
+        if Base::rh_streq(sub12, "bind"):
+            return rh_cli_usage(2) if or_idx < 0 or om_idx < 0 or odb_idx < 0 or oo_idx < 0
+            return rh_do_ops_bind(slots[or_idx], slots[om_idx], slots[odb_idx], slots[oo_idx])
+        if Base::rh_streq(sub12, "verify-binding"):
+            return rh_cli_usage(2) if or_idx < 0 or om_idx < 0 or odb_idx < 0 or oin_idx < 0
+            return rh_do_ops_verify_binding(slots[or_idx], slots[om_idx], slots[odb_idx], slots[oin_idx])
         return rh_cli_usage(2) if or_idx < 0 or om_idx < 0
         if Base::rh_streq(sub12, "backup"):
             return rh_cli_usage(2) if on_idx < 0
@@ -6799,6 +6813,71 @@ def rh_do_ops_verify(root: cstr, manifest: cstr) -> i32 can[Memory.Allocate, Abo
         done
     Base::rh_write_stdout(done)
     return 5 if m > 0 or c > 0
+    0
+
+# Bind a database dump to one verified evidence manifest. The binding is an
+# integrity index, not a database dump or a claim that the snapshot is correct.
+def rh_do_ops_bind(root: cstr, manifest: cstr, database: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(root) or not Git::rh_arg_safe(manifest) or not Git::rh_arg_safe(database) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected ops binding argument (allowlist)")
+        return 3
+    if Base::rh_streq(manifest, database) or Base::rh_streq(out_path, manifest) or Base::rh_streq(out_path, database):
+        rh_cli_err("ops: binding paths must be distinct")
+        return 3
+    present: mutable i64 = 0
+    missing: mutable i64 = 0
+    corrupt: mutable i64 = 0
+    if Ops::rh_backup_verify(root, manifest, &present, &missing, &corrupt) != 0:
+        rh_cli_err("ops: cannot read evidence manifest")
+        return 4
+    if missing > 0 or corrupt > 0:
+        rh_cli_err("ops: refusing to bind incomplete or corrupt evidence")
+        return 5
+    database_bytes: mutable darray[u8] = []
+    manifest_bytes: mutable darray[u8] = []
+    if Base::rh_io_read(database, database_bytes) < 0 or Base::rh_io_read(manifest, manifest_bytes) < 0:
+        rh_cli_err("ops: cannot read database dump or evidence manifest")
+        return 4
+    binding: mutable darray[u8] = []
+    Ops::rh_backup_binding_report(database_bytes, manifest_bytes, present, binding)
+    binding.push(10)
+    if not Base::rh_io_write(out_path, binding):
+        rh_cli_err("ops: cannot write backup binding")
+        return 4
+    rh_cli_out("ops bind: database dump linked to verified evidence manifest")
+    0
+
+# Verify both current inputs and every referenced evidence object against the
+# canonical binding bytes. Any changed dump/list or missing/corrupt blob fails.
+def rh_do_ops_verify_binding(root: cstr, manifest: cstr, database: cstr, binding_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(root) or not Git::rh_arg_safe(manifest) or not Git::rh_arg_safe(database) or not Git::rh_arg_safe(binding_path):
+        rh_cli_err("rejected ops binding argument (allowlist)")
+        return 3
+    if Base::rh_streq(manifest, database) or Base::rh_streq(binding_path, manifest) or Base::rh_streq(binding_path, database):
+        rh_cli_err("ops: binding paths must be distinct")
+        return 3
+    present: mutable i64 = 0
+    missing: mutable i64 = 0
+    corrupt: mutable i64 = 0
+    if Ops::rh_backup_verify(root, manifest, &present, &missing, &corrupt) != 0:
+        rh_cli_err("ops: cannot read evidence manifest")
+        return 4
+    if missing > 0 or corrupt > 0:
+        rh_cli_err("ops: bound evidence is incomplete or corrupt")
+        return 5
+    database_bytes: mutable darray[u8] = []
+    manifest_bytes: mutable darray[u8] = []
+    supplied: mutable darray[u8] = []
+    if Base::rh_io_read(database, database_bytes) < 0 or Base::rh_io_read(manifest, manifest_bytes) < 0 or Base::rh_io_read(binding_path, supplied) < 0:
+        rh_cli_err("ops: cannot read bound backup input")
+        return 4
+    expected: mutable darray[u8] = []
+    Ops::rh_backup_binding_report(database_bytes, manifest_bytes, present, expected)
+    expected.push(10)
+    if not Base::rh_bytes_equal_span(expected, 0, expected.count.i64(), supplied, 0, supplied.count.i64()):
+        rh_cli_err("ops: database/evidence binding mismatch")
+        return 5
+    rh_cli_out("ops verify-binding: database and evidence manifest verified")
     0
 
 # Restore only digest-verified objects; an unverified name is skipped and
