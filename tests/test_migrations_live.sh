@@ -138,33 +138,33 @@ DECLARE
   request_value jsonb := '{"schema":"rh-query-input/1","kind":"downstream","ids":[1,2],"cursor":-1,"limit":10}'::jsonb;
   result_value jsonb := '{"schema":"rh-query-result/1","kind":"downstream","graph":{"direction":"downstream","nodes":[2],"truncated":false,"complete":true}}'::jsonb;
 BEGIN
-  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000099', 'public', request_value, 3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
+  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000099', 'public', request_value, 3, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z') THEN
     RAISE EXCEPTION 'graph query job was not enqueued';
   END IF;
-  IF rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000099', 'public', request_value, 3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
+  IF rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000099', 'public', request_value, 3, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z') THEN
     RAISE EXCEPTION 'exact graph query job replay was not absorbed';
   END IF;
   c := rh_get_graph_query_job('00000000-0000-0000-0000-000000000099', 'public');
   IF c->>'status' <> 'queued' OR c ? 'result' THEN
     RAISE EXCEPTION 'queued graph job exposed a result or wrong status: %', c;
   END IF;
-  c := rh_claim_graph_query_job('graph-worker', '2026-01-01T00:00:01Z', 60, '00000000-0000-0000-0000-000000000099');
+  c := rh_claim_graph_query_job('graph-worker', '2026-01-02T00:00:01Z', 60, '00000000-0000-0000-0000-000000000099');
   token_value := (c->>'fencing_token')::bigint;
   IF c->>'status' <> 'claimed' OR c->>'job_id' <> '00000000-0000-0000-0000-000000000099' OR token_value <> 1 OR c->'request' <> request_value THEN
     RAISE EXCEPTION 'graph claim omitted its lease or immutable request: %', c;
   END IF;
-  IF rh_read_graph_query_request('00000000-0000-0000-0000-000000000099', token_value, '2026-01-01T00:00:02Z') IS DISTINCT FROM request_value THEN
+  IF rh_read_graph_query_request('00000000-0000-0000-0000-000000000099', token_value, '2026-01-02T00:00:02Z') IS DISTINCT FROM request_value THEN
     RAISE EXCEPTION 'current graph claim could not read its request';
   END IF;
-  IF rh_finish_job('00000000-0000-0000-0000-000000000099', token_value, 'succeeded', '2026-01-01T00:00:10Z') THEN
+  IF rh_finish_job('00000000-0000-0000-0000-000000000099', token_value, 'succeeded', '2026-01-02T00:00:10Z') THEN
     RAISE EXCEPTION 'generic finish bypassed graph result publication';
   END IF;
-  IF rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value - 1, '2026-01-01T00:00:10Z', result_value) THEN
+  IF rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value - 1, '2026-01-02T00:00:10Z', result_value) THEN
     RAISE EXCEPTION 'stale graph result publication was accepted';
   END IF;
   BEGIN
     PERFORM rh_publish_graph_query_result(
-      '00000000-0000-0000-0000-000000000099', token_value, '2026-01-01T00:00:10Z',
+      '00000000-0000-0000-0000-000000000099', token_value, '2026-01-02T00:00:10Z',
       jsonb_set(result_value, '{kind}', '"upstream"'::jsonb)
     );
     RAISE EXCEPTION 'mismatched graph result kind was accepted';
@@ -173,16 +173,16 @@ BEGIN
       RAISE;
     END IF;
   END;
-  IF NOT rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value, '2026-01-01T00:00:10Z', result_value) THEN
+  IF NOT rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value, '2026-01-02T00:00:10Z', result_value) THEN
     RAISE EXCEPTION 'current graph result publication was refused';
   END IF;
-  IF rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value, '2026-01-01T00:00:11Z', result_value) THEN
+  IF rh_publish_graph_query_result('00000000-0000-0000-0000-000000000099', token_value, '2026-01-02T00:00:11Z', result_value) THEN
     RAISE EXCEPTION 'completed graph result was published twice';
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM graph_query_job
     WHERE job_id = '00000000-0000-0000-0000-000000000099' AND request = request_value AND result = result_value
-      AND result_fencing_token = token_value AND completed_at = '2026-01-01T00:00:10Z'
+      AND result_fencing_token = token_value AND completed_at = '2026-01-02T00:00:10Z'
   ) OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000099') <> 'succeeded' THEN
     RAISE EXCEPTION 'graph result and terminal job state were not committed together';
   END IF;
@@ -194,7 +194,7 @@ BEGIN
   IF c->>'status' <> 'not_found' THEN
     RAISE EXCEPTION 'poll exposed a graph job across visibility scopes: %', c;
   END IF;
-  c := rh_claim_graph_query_job('graph-worker', '2026-01-01T00:00:20Z', 60, NULL);
+  c := rh_claim_graph_query_job('graph-worker', '2026-01-02T00:00:20Z', 60, NULL);
   IF c->>'status' <> 'empty' THEN
     RAISE EXCEPTION 'completed graph query was claimable again';
   END IF;
@@ -205,58 +205,60 @@ DECLARE
   c jsonb;
   first_token bigint;
   second_token bigint;
+  auth_finished boolean;
+  malformed_finished boolean;
 BEGIN
-  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000098', 'public', '{"schema":"rh-query-input/1","kind":"upstream","ids":[1],"cursor":-1,"limit":10}'::jsonb, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
+  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000098', 'public', '{"schema":"rh-query-input/1","kind":"upstream","ids":[1],"cursor":-1,"limit":10}'::jsonb, 1, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z') THEN
     RAISE EXCEPTION 'retry graph job was not enqueued';
   END IF;
-  c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:01Z', 60, '00000000-0000-0000-0000-000000000098');
+  c := rh_claim_graph_query_job('retry-worker', '2026-01-02T00:00:01Z', 60, '00000000-0000-0000-0000-000000000098');
   first_token := (c->>'fencing_token')::bigint;
   BEGIN
-    PERFORM rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 2, 'transient', 7, 'epoch', '2026-01-01T00:00:01Z');
+    PERFORM rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 2, 'transient', 7, 'epoch', '2026-01-02T00:00:01Z');
     RAISE EXCEPTION 'retryable failure was dead-lettered before its configured attempt limit';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('retry decision does not match failure classification' IN SQLERRM) = 0 THEN RAISE; END IF;
   END;
-  IF NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 2, 'transient', 6, '2026-01-01T00:00:03Z', '2026-01-01T00:00:01Z') THEN
+  IF NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 2, 'transient', 6, '2026-01-02T00:00:03Z', '2026-01-02T00:00:01Z') THEN
     RAISE EXCEPTION 'current transient failure was not requeued';
   END IF;
-  IF rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 2, 'transient', 6, '2026-01-01T00:00:03Z', '2026-01-01T00:00:01Z') THEN
+  IF rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', first_token, 1, 2, 'transient', 6, '2026-01-02T00:00:03Z', '2026-01-02T00:00:01Z') THEN
     RAISE EXCEPTION 'closed attempt retry was accepted twice';
   END IF;
   IF (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000098') <> 'queued'
      OR (SELECT outcome FROM job_attempt WHERE job_id = '00000000-0000-0000-0000-000000000098' AND attempt_number = 1) <> 'retry' THEN
     RAISE EXCEPTION 'retry transition did not preserve queued state and attempt outcome';
   END IF;
-  c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:04Z', 60, '00000000-0000-0000-0000-000000000098');
+  c := rh_claim_graph_query_job('retry-worker', '2026-01-02T00:00:04Z', 60, '00000000-0000-0000-0000-000000000098');
   second_token := (c->>'fencing_token')::bigint;
   BEGIN
-    PERFORM rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', second_token, 2, 2, 'transient', 6, '2026-01-01T00:00:07Z', '2026-01-01T00:00:05Z');
+    PERFORM rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', second_token, 2, 2, 'transient', 6, '2026-01-02T00:00:07Z', '2026-01-02T00:00:05Z');
     RAISE EXCEPTION 'exhausted retryable failure was requeued';
   EXCEPTION WHEN OTHERS THEN
     IF POSITION('retry decision does not match failure classification' IN SQLERRM) = 0 THEN RAISE; END IF;
   END;
-  IF second_token <= first_token OR NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', second_token, 2, 2, 'transient', 7, 'epoch', '2026-01-01T00:00:05Z') THEN
+  IF second_token <= first_token OR NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000098', second_token, 2, 2, 'transient', 7, 'epoch', '2026-01-02T00:00:05Z') THEN
     RAISE EXCEPTION 'exhausted retry was not dead-lettered';
   END IF;
   IF (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000098') <> 'dead_letter'
      OR (SELECT count(*) FROM job_attempt WHERE job_id = '00000000-0000-0000-0000-000000000098' AND finished_at IS NOT NULL) <> 2 THEN
     RAISE EXCEPTION 'dead-letter transition did not close both attempts';
   END IF;
-  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000097', 'public', '{"schema":"rh-query-input/1","kind":"upstream","ids":[1],"cursor":-1,"limit":10}'::jsonb, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
+  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000097', 'public', '{"schema":"rh-query-input/1","kind":"upstream","ids":[1],"cursor":-1,"limit":10}'::jsonb, 1, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z') THEN
     RAISE EXCEPTION 'terminal graph job was not enqueued';
   END IF;
-  c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:06Z', 60, '00000000-0000-0000-0000-000000000097');
-  IF NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000097', (c->>'fencing_token')::bigint, 1, 5, 'auth', 4, 'epoch', '2026-01-01T00:00:07Z')
-     OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000097') <> 'failed' THEN
-    RAISE EXCEPTION 'auth failure did not terminate the graph job';
+  c := rh_claim_graph_query_job('retry-worker', '2026-01-02T00:00:06Z', 60, '00000000-0000-0000-0000-000000000097');
+  auth_finished := rh_retry_graph_query_job('00000000-0000-0000-0000-000000000097', (c->>'fencing_token')::bigint, 1, 5, 'auth', 4, 'epoch', '2026-01-02T00:00:07Z');
+  IF NOT auth_finished OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000097') <> 'failed' THEN
+    RAISE EXCEPTION 'auth failure did not terminate the graph job: claimed=%, result=%, state=%', c, auth_finished, (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000097');
   END IF;
-  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000096', 'public', '{"schema":"rh-query-input/1","kind":"upstream","ids":[1],"cursor":-1,"limit":10}'::jsonb, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z') THEN
+  IF NOT rh_enqueue_graph_query_job('00000000-0000-0000-0000-000000000096', 'public', '{"schema":"rh-query-input/1","kind":"upstream","ids":[1],"cursor":-1,"limit":10}'::jsonb, 1, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z') THEN
     RAISE EXCEPTION 'malformed graph job was not enqueued';
   END IF;
-  c := rh_claim_graph_query_job('retry-worker', '2026-01-01T00:00:08Z', 60, '00000000-0000-0000-0000-000000000096');
-  IF NOT rh_retry_graph_query_job('00000000-0000-0000-0000-000000000096', (c->>'fencing_token')::bigint, 1, 5, 'malformed', 7, 'epoch', '2026-01-01T00:00:09Z')
-     OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000096') <> 'dead_letter' THEN
-    RAISE EXCEPTION 'malformed failure did not dead-letter the graph job';
+  c := rh_claim_graph_query_job('retry-worker', '2026-01-02T00:00:08Z', 60, '00000000-0000-0000-0000-000000000096');
+  malformed_finished := rh_retry_graph_query_job('00000000-0000-0000-0000-000000000096', (c->>'fencing_token')::bigint, 1, 5, 'malformed', 7, 'epoch', '2026-01-02T00:00:09Z');
+  IF NOT malformed_finished OR (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000096') <> 'dead_letter' THEN
+    RAISE EXCEPTION 'malformed failure did not dead-letter the graph job: claimed=%, result=%, state=%', c, malformed_finished, (SELECT state FROM job WHERE id = '00000000-0000-0000-0000-000000000096');
   END IF;
 END $$;
 
@@ -1001,27 +1003,27 @@ docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <
 INSERT INTO entity (id, entity_kind, visibility_scope, created_at)
 SELECT ('00000000-0000-0000-0000-' || lpad(n::text, 12, '0'))::uuid,
        'package_version', 'public', '2026-01-01T00:00:00Z'
-FROM generate_series(1, 5002) AS n;
+FROM generate_series(1000001, 1005002) AS n;
 INSERT INTO graph_projection
     (id, projection_kind, visibility_scope, input_cutoff, as_of, identity_revision, mapping_revision, completeness, manifest_digest)
 VALUES ('00000000-0000-0000-0000-000000009001', 'dependency', 'public',
         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'identity-1', 'mapping-1', 'complete', 'fixture');
 INSERT INTO projection_membership (projection_id, from_entity_id, to_entity_id, edge_kind, known_at)
 SELECT '00000000-0000-0000-0000-000000009001',
-       '00000000-0000-0000-0000-000000000001',
-       ('00000000-0000-0000-0000-' || lpad((n + 1)::text, 12, '0'))::uuid,
+       '00000000-0000-0000-0000-000001000001',
+       ('00000000-0000-0000-0000-' || lpad((n + 1000001)::text, 12, '0'))::uuid,
        'depends_on', '2026-01-01T00:00:00Z'
 FROM generate_series(1, 4000) AS n;
 INSERT INTO projection_membership (projection_id, from_entity_id, to_entity_id, edge_kind, known_at)
 SELECT '00000000-0000-0000-0000-000000009001',
-       ('00000000-0000-0000-0000-' || lpad((n + 1)::text, 12, '0'))::uuid,
-       '00000000-0000-0000-0000-000000005002',
+       ('00000000-0000-0000-0000-' || lpad((n + 1000001)::text, 12, '0'))::uuid,
+       '00000000-0000-0000-0000-000001005002',
        'depends_on', '2026-01-01T00:00:00Z'
 FROM generate_series(1, 4000) AS n;
 INSERT INTO projection_membership (projection_id, from_entity_id, to_entity_id, edge_kind, known_at)
 SELECT '00000000-0000-0000-0000-000000009001',
-       ('00000000-0000-0000-0000-' || lpad((n / 30 + 2)::text, 12, '0'))::uuid,
-       ('00000000-0000-0000-0000-' || lpad((4972 + n % 30)::text, 12, '0'))::uuid,
+       ('00000000-0000-0000-0000-' || lpad((n / 30 + 1000002)::text, 12, '0'))::uuid,
+       ('00000000-0000-0000-0000-' || lpad((1004972 + n % 30)::text, 12, '0'))::uuid,
        'depends_on', '2026-01-01T00:00:00Z'
 FROM generate_series(0, 149999) AS n;
 ANALYZE projection_membership;
@@ -1032,18 +1034,18 @@ DECLARE
 BEGIN
   IF (SELECT count(*) FROM projection_membership
       WHERE projection_id = '00000000-0000-0000-0000-000000009001'
-        AND from_entity_id = '00000000-0000-0000-0000-000000000001'
+        AND from_entity_id = '00000000-0000-0000-0000-000001000001'
         AND edge_kind = 'depends_on') <> 4000 THEN
     RAISE EXCEPTION 'high-degree outgoing fixture is incomplete';
   END IF;
   IF (SELECT count(*) FROM projection_membership
       WHERE projection_id = '00000000-0000-0000-0000-000000009001'
-        AND to_entity_id = '00000000-0000-0000-0000-000000005002'
+        AND to_entity_id = '00000000-0000-0000-0000-000001005002'
         AND edge_kind = 'depends_on') <> 4000 THEN
     RAISE EXCEPTION 'high-degree incoming fixture is incomplete';
   END IF;
-  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT to_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND from_entity_id = ''00000000-0000-0000-0000-000000000001'' AND edge_kind = ''depends_on''' INTO outgoing_plan;
-  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT from_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND to_entity_id = ''00000000-0000-0000-0000-000000005002'' AND edge_kind = ''depends_on''' INTO incoming_plan;
+  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT to_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND from_entity_id = ''00000000-0000-0000-0000-000001000001'' AND edge_kind = ''depends_on''' INTO outgoing_plan;
+  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT from_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND to_entity_id = ''00000000-0000-0000-0000-000001005002'' AND edge_kind = ''depends_on''' INTO incoming_plan;
   IF outgoing_plan::text LIKE '%"Node Type": "Seq Scan"%'
      OR outgoing_plan::text NOT LIKE '%dependency_outgoing%'
         AND outgoing_plan::text NOT LIKE '%projection_membership_pkey%' THEN
