@@ -544,7 +544,7 @@ cp "$ROOT/fixtures/connectors/github-traffic-views.json" "$T/traffic-response.js
   --out "$T/traffic-observation.json" >/dev/null || fail "traffic observation normalization"
 cmp "$ROOT/fixtures/connectors/github-traffic-observation.json" "$T/traffic-observation.json" \
   || fail "traffic observation golden mismatch"
-python3 - "$T/traffic-observation.json" "$T/traffic-response.json" <<'PY'
+python3 - "$T/traffic-observation.json" "$T/traffic-response.json" "$T/traffic-observation.json.transformations.json" <<'PY'
 import hashlib, json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 raw = pathlib.Path(sys.argv[2]).read_bytes()
@@ -556,7 +556,20 @@ assert [x["timestamp"] for x in d["daily_observations"]] == [
 assert d["aggregation"] == {"kind":"rolling_window_snapshot","additive_across_captures":False}, d
 assert d["response_sha256"] == hashlib.sha256(raw).hexdigest(), d
 assert "github-traffic-views.json" not in open(sys.argv[1]).read(), d
+sidecar = json.load(open(sys.argv[3]))
+normalized = pathlib.Path(sys.argv[1]).read_bytes()
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "github-traffic-observation", sidecar
+assert sidecar["output_schema"] == "rh-github-traffic-observation/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(
+    b"repo-health/github-traffic/1|example/project|1789992000").hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == [
+    "preserved", "transformed", "preserved", "transformed", "discarded"
+], sidecar
 print("[connector] traffic window snapshot and exact response digest OK")
+print("[connector] traffic transformation sidecar binds exact input, output, and scoped configuration")
 PY
 
 python3 - "$T" <<'PY'

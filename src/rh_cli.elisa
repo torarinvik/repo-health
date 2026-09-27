@@ -7586,12 +7586,23 @@ def rh_do_github_traffic_observe(repository: cstr, input_path: cstr, captured_at
         rh_cli_err("rejected connector traffic argument (allowlist)")
         return 3
     body: mutable darray[u8] = []
-    if GitHubTraffic::rh_github_traffic_observe_file(input_path, repository, captured_at, body) != 0:
+    raw: mutable darray[u8] = []
+    if GitHubTraffic::rh_github_traffic_observe_file(input_path, repository, captured_at, raw, body) != 0:
         rh_cli_err("connector: GitHub traffic response is malformed, oversized, or unreadable")
         return 4
     body.push(10)
     if not Base::rh_io_write(out_path, body):
         rh_cli_err("connector: cannot write traffic observation --out")
+        return 4
+    configuration: mutable darray[u8] = []
+    Base::rh_push_text(configuration, "repo-health/github-traffic/1|")
+    Base::rh_push_cstr(configuration, repository)
+    configuration.push(124)
+    Base::rh_push_decimal_i64(configuration, captured_at)
+    configuration.push(0)
+    configuration_ptr: cstr = (&configuration[0]).cast[cstr] can Unsafe.PointerCast
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "github-traffic-observation", "rh-github-traffic-observation/1", configuration_ptr, "[{\"source\":\"provider rolling-window view and unique counts\",\"target\":\"window views and uniques\",\"state\":\"preserved\"},{\"source\":\"provider daily bucket timestamps and counts\",\"target\":\"daily observations\",\"state\":\"transformed\"},{\"source\":\"reported buckets only\",\"target\":\"coverage boundary\",\"state\":\"preserved\"},{\"source\":\"snapshot aggregation rule\",\"target\":\"non-additive-across-captures contract\",\"state\":\"transformed\"},{\"source\":\"provider fields outside the bounded traffic contract\",\"target\":\"canonical observation\",\"state\":\"discarded\"}]", out_path):
+        rh_cli_err("connector: cannot write traffic transformation report")
         return 4
     rh_cli_out("connector: GitHub traffic window observed")
     0
