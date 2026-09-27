@@ -10,6 +10,7 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_ops.elisa"
+include "./rh_store.elisa"
 
 module OpsReport:
     private:
@@ -40,12 +41,20 @@ module OpsReport:
             value_out[0] <- Json::rh_json_int(nodes, raw, idx, &valid)
             valid == 1
 
+        def rh_or_evidence_key_valid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != 24 or not rh_or_eq(texts, start, start + 8, "fnv1a64:")
+            while i < 16 |i: i64 = 0, texts, start, end|:
+                b: u8 = texts[(start + 8 + i).usize()]
+                return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
+                i <- i + 1
+            true
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_or_load_policy(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64) -> Ops::RhHostPolicy can[Memory.Allocate, Abort.Panic]:
             Ops::RhHostPolicy{capacity: rh_or_int(nodes, raw, texts, root, "capacity", 1), refill_per_second: rh_or_int(nodes, raw, texts, root, "refill_per_second", 0), base_backoff_seconds: rh_or_int(nodes, raw, texts, root, "base_backoff_seconds", 0), max_backoff_seconds: rh_or_int(nodes, raw, texts, root, "max_backoff_seconds", 0)}
 
     public:
-        def rh_monitor_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_monitor_report_with_evidence(raw: darray[u8]&, evidence_root: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Console, Memory.Release, Unsafe.PointerCast]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -96,6 +105,34 @@ module OpsReport:
                         Ops::rh_mon_parser_rejects(m, parser_reject_count)
                 elif rh_or_eq(texts, ks, ke, "object_failure"):
                     Ops::rh_mon_object_failure(m)
+                elif rh_or_eq(texts, ks, ke, "evidence_scan"):
+                    if Base::rh_cstr_len_c(evidence_root) > 0:
+                        keys_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "keys")
+                        count: mutable i64 = 0
+                        truncated_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "truncated")
+                        return -1 if keys_idx < 0 or nodes[keys_idx.usize()].kind != Json::RH_JSON_ARR
+                        return -1 if truncated_idx < 0 or nodes[truncated_idx.usize()].kind != Json::RH_JSON_BOOL or Json::rh_json_is_true(nodes, raw, truncated_idx)
+                        return -1 if not rh_or_checked_int(nodes, raw, texts, child, "count", true, &count) or count < 0 or count > 50000
+                        keys: Json::RhJsonNode = nodes[keys_idx.usize()]
+                        return -1 if keys.child_count.i64() != count
+                        failures: mutable i64 = 0
+                        key_child: mutable i64 = keys.first_child
+                        while key_child >= 0 |key_child, nodes, texts, raw, evidence_root, failures|:
+                            key_start: mutable i64 = 0
+                            key_end: mutable i64 = 0
+                            if not Json::rh_json_str_span(nodes, key_child, &key_start, &key_end) or not rh_or_evidence_key_valid(texts, key_start, key_end):
+                                failures <- failures + 1
+                            else:
+                                blob_name: mutable darray[u8] = []
+                                while key_index < 16 |key_index: i64 = 0, key_start, texts, blob_name|:
+                                    blob_name.push(texts[(key_start + 8 + key_index).usize()])
+                                    key_index <- key_index + 1
+                                blob_name.push(0)
+                                verified: mutable i64 = 0
+                                if Store::rh_store_blob_verify(evidence_root, &blob_name[0], &verified) != 0 or verified != 1:
+                                    failures <- failures + 1
+                            key_child <- nodes[key_child.usize()].next_sibling
+                        Ops::rh_mon_object_failures(m, failures)
                 elif rh_or_eq(texts, ks, ke, "truncation"):
                     truncation_count: mutable i64 = 0
                     return -1 if not rh_or_checked_int(nodes, raw, texts, child, "count", false, &truncation_count) or truncation_count < 0
@@ -180,7 +217,10 @@ module OpsReport:
             Base::rh_push_text(out, ",\"parser_rejects\":")
             Base::rh_push_decimal_i64(out, m.parser_rejects)
             Base::rh_push_text(out, ",\"object_failures\":")
-            Base::rh_push_decimal_i64(out, m.object_failures)
+            if m.has_object_failure_sample:
+                Base::rh_push_decimal_i64(out, m.object_failures)
+            else:
+                Base::rh_push_text(out, "null")
             Base::rh_push_text(out, "},\"source_freshness\":[")
             out.extend(bytes_view(source_freshness))
             Base::rh_push_text(out, "],\"project\":{\"observed\":")
@@ -223,8 +263,11 @@ module OpsReport:
                     e <- expo.count
                 else:
                     e <- stop.usize() + 1
-            Base::rh_push_text(out, "],\"note\":\"freshness is stale only when age exceeds a positive expected_interval; missing success or interval is unknown; service and project series are separate; queue age and cursor lag are null without samples; rates with no denominator are null (unknown, not 0)\"}")
+            Base::rh_push_text(out, "],\"note\":\"freshness is stale only when age exceeds a positive expected_interval; missing success or interval is unknown; source and project series are separate; queue age and cursor lag are null without samples; evidence failures are null unless RH_EVIDENCE_ROOT enables a complete local digest scan; rates with no denominator are null (unknown, not 0)\"}")
             0
+
+        def rh_monitor_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_monitor_report_with_evidence(raw, "", out)
 
         def rh_quota_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             nodes: mutable darray[Json::RhJsonNode] = []

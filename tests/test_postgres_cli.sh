@@ -59,8 +59,10 @@ assert d["service"]["queue_age_max"] == 120, d
 assert d["service"]["cursor_lag_max"] == 3600, d
 assert d["service"]["errors"] == 4, d
 assert d["service"]["parser_rejects"] == 2, d
+assert d["service"]["object_failures"] is None, d
 assert d["project"]["truncations"] == 3, d
 assert d["service"]["freshness_state"] == "fresh", d
+assert "rh_service_object_failures_total -1" in d["exposition"], d["exposition"]
 PY
 python3 - "$T/reconcile-source-objects-applied.json" "$T/reconcile-source-objects-duplicate.json" "$ROOT/fixtures/postgres/reconcile-source-objects-projection.json" <<'PY'
 import json, sys
@@ -328,6 +330,26 @@ mkdir -p "$T/evidence"
 printf 'hello evidence\n' > "$T/evidence-source.txt"
 stored_name="$("$ROOT/build/rh_cli" store put --root "$T/evidence" --file "$T/evidence-source.txt" | awk '{print $3}')"
 [[ "$stored_name" == "f5e19178d3ff184e" ]] || fail "content-addressed evidence fixture changed"
+RH_DATABASE_URL='host=fake dbname=repo_health' RH_EVIDENCE_ROOT="$T/evidence" \
+  RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=monitor RH_FAKE_PG_EXPECT=ok \
+  "$ROOT/build/rh_cli" postgres monitor --expected-interval 3600 --out "$T/monitor-evidence-ok.json" >/dev/null \
+  || fail "PostgreSQL evidence verification monitor"
+python3 - "$T/monitor-evidence-ok.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["service"]["object_failures"] == 0, d["service"]
+PY
+printf 'corrupted evidence\n' > "$T/evidence/$stored_name"
+RH_DATABASE_URL='host=fake dbname=repo_health' RH_EVIDENCE_ROOT="$T/evidence" \
+  RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=monitor RH_FAKE_PG_EXPECT=ok \
+  "$ROOT/build/rh_cli" postgres monitor --expected-interval 3600 --out "$T/monitor-evidence-corrupt.json" >/dev/null \
+  || fail "PostgreSQL corrupt evidence monitor"
+python3 - "$T/monitor-evidence-corrupt.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["service"]["object_failures"] == 1, d["service"]
+PY
+cp "$T/evidence-source.txt" "$T/evidence/$stored_name"
 cp "$ROOT/fixtures/postgres/register-evidence-command.json" "$T/register-evidence-command.json"
 for mode in committed duplicate; do
   RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \

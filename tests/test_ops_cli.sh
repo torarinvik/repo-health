@@ -48,6 +48,7 @@ assert d["source_freshness"] == [
     {"source_instance_id": "source-b", "capability": "reviews", "last_success_epoch": 1061, "freshness_age": 0, "freshness_state": "fresh"},
 ], d["source_freshness"]
 assert d["service"]["freshness_state"] == "unknown", d["service"]
+assert d["service"]["object_failures"] is None, d["service"]
 print("[ops] source freshness attribution OK")
 PY
 
@@ -64,6 +65,7 @@ assert d["service"]["freshness_state"] == "unknown", d["service"]
 assert d["service"]["queue_age_max"] is None and d["service"]["cursor_lag_max"] is None, d["service"]
 assert "rh_service_queue_age_seconds_max -1" in d["exposition"], d["exposition"]
 assert "rh_service_cursor_lag_seconds_max -1" in d["exposition"], d["exposition"]
+assert "rh_service_object_failures_total -1" in d["exposition"], d["exposition"]
 print("[ops] unknown-not-zero OK")
 PY
 

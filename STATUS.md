@@ -752,7 +752,9 @@ now a product path (`rh_cli ops backup|verify|restore`, `tests/test_store_cli.sh
 with missing and corrupt counted separately). Monitoring and source-respect
 are also product paths: `rh_cli ops monitor --input <file> --out <file>`
 emits `rh-monitor-result/2` with service and project series **separate** and
-a per-source/capability freshness array; rates with no denominator are `null`
+a per-source/capability freshness array. `rh_cli postgres monitor` verifies
+registered evidence blobs when `RH_EVIDENCE_ROOT` is configured; without it,
+object-failure counts remain `null` (`-1` in exposition), not zero. Rates with no denominator are `null`
 (unknown, not 0). Queue-age and cursor-lag
 maxima are `null` when no corresponding sample was supplied (`-1` in
 exposition); sampled zero remains zero. `rh_cli ops quota
