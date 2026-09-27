@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tests/test_findings_cli.sh — M06-09 structured external findings adapter.
 # Assessment time, origin identity, typed outcomes and delivery paths remain
-# explicit; malformed or untyped findings never become a policy verdict.
+# explicit under rh-scorecard-findings-input/1; malformed or untyped findings
+# never become a policy verdict.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="/tmp/rh-findings"
@@ -17,6 +18,7 @@ cp "$ROOT/fixtures/packages/scorecard-findings.json" "$T/in.json"
 
 echo "[findings] preserve assessment and typed findings"
 "$ROOT/build/rh_cli" findings --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "findings run"
+cmp -s "$T/out.json" "$ROOT/fixtures/packages/scorecard-findings-result.json" || fail "findings result differs from the public contract fixture"
 python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
 import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
