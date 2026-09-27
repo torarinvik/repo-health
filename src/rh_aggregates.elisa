@@ -70,6 +70,53 @@ module Aggregates:
                         return
                 start <- (end + 1).usize()
 
+        def rh_aggregate_record_matches(data: darray[u8]&, start: usize, end: i64, kind: u8, bucket: darray[u8]&, signature: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end <= start.i64() + 2 or data[start] != kind or data[start + 1] != 124
+            bucket_end: i64 = Base::rh_find_byte(data, start.i64() + 2, 124)
+            return false if bucket_end < 0 or bucket_end > end or bucket_end - start.i64() - 2 != bucket.count.i64()
+            while i < bucket.count |i: usize = 0, data, start, bucket|:
+                return false if data[start + 2 + i] != bucket[i]
+                i <- i + 1
+            signature_end: i64 = Base::rh_find_byte(data, bucket_end + 1, 124)
+            return false if signature_end < 0 or signature_end > end or signature_end - bucket_end - 1 != signature.count.i64()
+            while i < signature.count |i: usize = 0, data, bucket_end, signature|:
+                return false if data[bucket_end.usize() + 1 + i] != signature[i]
+                i <- i + 1
+            true
+
+        def rh_aggregate_cache_has_record(cache: darray[u8]&, kind: u8, bucket: darray[u8]&, signature: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while start < cache.count |start: usize = 0, cache, kind, bucket, signature|:
+                end: mutable i64 = Base::rh_find_byte(cache, start.i64(), 10)
+                end <- cache.count.i64() if end < 0
+                return true if Aggregates::rh_aggregate_record_matches(cache, start, end, kind, bucket, signature)
+                start <- (end + 1).usize()
+            false
+
+        def rh_aggregate_preserve_history(prior: darray[u8]&, cache_out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            preserved: mutable usize = 0
+            while start < prior.count and preserved < 4096 and cache_out.count < 16777216 |start: usize = 0, prior, cache_out, preserved|:
+                end: mutable i64 = Base::rh_find_byte(prior, start.i64(), 10)
+                end <- prior.count.i64() if end < 0
+                kind: u8 = prior[start]
+                if kind == 68 or kind == 87:
+                    bucket_end: i64 = Base::rh_find_byte(prior, start.i64() + 2, 124)
+                    signature_end: i64 = Base::rh_find_byte(prior, bucket_end + 1, 124) if bucket_end >= 0 else -1
+                    if bucket_end >= 0 and signature_end >= 0 and signature_end < end:
+                        bucket: mutable darray[u8] = []
+                        signature: mutable darray[u8] = []
+                        while i < (bucket_end - start.i64() - 2).usize() |i: usize = 0, prior, start, bucket_end, bucket|:
+                            bucket.push(prior[start + 2 + i])
+                            i <- i + 1
+                        while i < (signature_end - bucket_end - 1).usize() |i: usize = 0, prior, bucket_end, signature_end, signature|:
+                            signature.push(prior[bucket_end.usize() + 1 + i])
+                            i <- i + 1
+                        if not Aggregates::rh_aggregate_cache_has_record(cache_out, kind, bucket, signature) and cache_out.count + (end - start.i64() + 1).usize() <= 16777216:
+                            while i < (end - start.i64() + 1).usize() |i: usize = 0, prior, start, end, cache_out|:
+                                cache_out.push(prior[start + i])
+                                i <- i + 1
+                            preserved <- preserved + 1
+                start <- (end + 1).usize()
+
         def rh_aggregate_sort_partitions(partitions: mutable darray[RhAggregatePartition]&) -> void can[Memory.Allocate, Abort.Panic]:
             while i < partitions.count |i: usize = 1, partitions|:
                 j: mutable usize = i
@@ -409,6 +456,7 @@ module Aggregates:
                 Base::rh_push_decimal_i64(out, invalid_weekly[j])
                 j <- j + 1
             Base::rh_push_text(out, "]},\"validation\":{\"full_recompute_equivalent\":true,\"correction_invalidation\":\"partition-scoped\"},\"note\":\"aggregate rows are derived from the authoritative event set; corrections identify partitions for invalidation and never rewrite raw events\"}")
+            Aggregates::rh_aggregate_preserve_history(prior, cache_out)
             Base::rh_push_text(cache_out, "R|")
             cache_out.extend(bytes_view(out))
             cache_out.push(10)

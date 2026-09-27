@@ -158,6 +158,10 @@ assert result["corrections"]["count"] == 1, result["corrections"]
 assert result["corrections"]["invalidated_daily"] == [19676], result["corrections"]
 print("[aggregate] correction-only changes reuse all five partitions and refresh invalidation metadata")
 PY
+"$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/state-restored.json" --state-store "$T/state-store" > "$T/state-restored.out" || fail "historical snapshot partition restore"
+grep -q 'partition-reuse=4' "$T/state-restored.out" || fail "historical snapshot should reuse its retained partitions"
+cmp -s "$T/state-first.json" "$T/state-restored.json" || fail "historical partition reuse differs from its original projection"
+echo "[aggregate] retained bounded history reuses a prior snapshot after pointer advancement"
 printf '%s\n' '{"schema":"rh-aggregate-input/1","events":[{"id":"pipe-event","actor":"a","kind":"commit","role":"role R| marker","at":1700000000}]}' > "$T/pipe-role.json"
 "$ROOT/build/rh_cli" aggregate --input "$T/pipe-role.json" --out "$T/pipe-first.json" --state-store "$T/pipe-store" >/dev/null || fail "pipe role cache seed"
 "$ROOT/build/rh_cli" aggregate --input "$T/pipe-role.json" --out "$T/pipe-replay.json" --state-store "$T/pipe-store" > "$T/pipe-replay.out" || fail "pipe role cache replay"

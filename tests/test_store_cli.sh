@@ -31,9 +31,15 @@ for worker in {1..12}; do
   "$ROOT/build/rh_cli" store put --root "$T/race" --file "$T/a.txt" >"$T/race-$worker.log" 2>&1 &
   pids+=("$!")
 done
-for pid in "${pids[@]}"; do
-  wait "$pid" || fail "concurrent put $pid"
+concurrent_failure=0
+for index in "${!pids[@]}"; do
+  if ! wait "${pids[$index]}"; then
+    echo "[store] concurrent worker ${index} failed:" >&2
+    cat "$T/race-$((index + 1)).log" >&2
+    concurrent_failure=1
+  fi
 done
+[[ "$concurrent_failure" -eq 0 ]] || fail "concurrent identical put worker failed"
 [[ "$(find "$T/race" -type f ! -name '.rh-evidence.lock' | wc -l | tr -d ' ')" -eq 1 ]] || fail "concurrent puts left multiple published objects"
 [[ -z "$(find "$T/race" -name '*.stage.*' -print -quit)" ]] || fail "concurrent puts left a staging object"
 race_name="$(basename "$(find "$T/race" -type f ! -name '.rh-evidence.lock' -print -quit)")"
