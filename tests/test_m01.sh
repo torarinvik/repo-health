@@ -116,10 +116,16 @@ for key in ("history.commit_count", "history.first_author_time", "history.covera
     assert m[key]["quality_dimensions"] == expected_quality, (key, m[key])
 assert m["activity.weekly_count_slope"]["status"] in ("observed", "not_applicable"), m
 assert m["activity.weekly_count_variance"]["status"] in ("observed", "not_applicable"), m
+for key in ("activity.weekly_count_slope", "activity.weekly_count_variance",
+            "activity.bot_event_share", "contributor.single_event_share"):
+    if m[key]["status"] == "observed":
+        assert m[key]["evidence"] == ["evidence/git-log.bin"], (key, m[key])
 assert len(d["metrics"]) == 61, d
 coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "coverage.window_completeness"}
 assert coverage[("coverage.window_completeness", "1.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "1.0.0")]["value"]["den"], coverage
 assert coverage[("coverage.window_completeness", "2.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "2.0.0")]["value"]["den"], coverage
+for metric in coverage.values():
+    assert metric["evidence"] == ["evidence/git-log.bin", "evidence/git-shallow.txt"], metric
 valid = {"observed","not_observed","unavailable","unauthorized","partial","stale","not_applicable","error","conflicted","suppressed","unsupported"}
 for x in d["metrics"]:
     assert x["status"] in valid, x
