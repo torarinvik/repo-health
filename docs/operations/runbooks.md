@@ -124,21 +124,38 @@ Trigger: an operator, project, or platform asks us to stop collecting or
 to remove their data, or a rights review changes.
 
 1. Locate the rights entry in `ops/source-review-register.json` and its
-   contact. Suspend collection for that source/subject.
-2. For one content-addressed raw object, run
+   contact. For a whole source instance, create a command based on
+   `fixtures/postgres/request-source-stop-command.json`, replacing the source
+   UUID, actor, reason, and request time, then run
+   `rh_cli postgres --input <request-command.json> --out <stop-result.json>`
+   with `RH_DATABASE_URL` configured; the command operation is
+   `request_source_stop`. The active stop cancels queued work,
+   fences leased workers, and rejects new runs, enqueues, and claims. It cannot
+   interrupt a network request already in progress; fencing rejects that
+   worker's later database writes. The named operator identity is recorded but
+   authenticated by the deployment, not by this command.
+2. After reviewing a withdrawal or resolving the request, base a resume
+   command on `fixtures/postgres/resolve-source-stop-command.json` and run it
+   through the same `rh_cli postgres --input ... --out ...` interface. Resume
+   uses the `resolve_source_stop` operation and does not revive canceled work;
+   enqueue a fresh collection run only when
+   collection is authorized again. The named reviewer identity also requires
+   deployment authentication.
+3. For one content-addressed raw object, run
    `rh_cli ops delete --root <evidence-root> --name <16-hex-object>`.
    The command serializes with writers, rejects malformed keys, and treats an
    already-absent object as success. Apply the corresponding restriction to
    projections, caches, and exports separately; this command does not discover
    or invalidate those derived objects for you.
-3. Recompute affected metrics so removed subjects disappear from public
+4. Recompute affected metrics so removed subjects disappear from public
    aggregates (publication suppression gate, `src/rh_privacy.elisa`,
    withholds unknown/private members before any aggregate is published).
-4. Record replayability limits: a report whose inputs were unretained is
+5. Record replayability limits: a report whose inputs were unretained is
    no longer replayable, and must say so.
-5. Do not reconstruct the removed data from a mirror or cache to evade the
+6. Do not reconstruct the removed data from a mirror or cache to evade the
    request.
-6. Record: request, authority, scope removed, projections recomputed,
+7. Record: request, authority, source UUID if stopped, actor/reviewer identity
+   and authentication source, stop/resume result, scope removed, projections recomputed,
    replayability labels changed.
 
 ## 7. Backup restore drill

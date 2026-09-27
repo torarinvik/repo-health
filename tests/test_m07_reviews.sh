@@ -70,4 +70,28 @@ grep -q "threat-model-review" "$ROOT/docs/operations/runbooks.md" \
   || grep -q "threat-model-review" "$ROOT/docs/THREAT_MODEL.md" \
   || fail "threat review not referenced from docs"
 
+echo "[m07rev] source-removal runbook uses the stop/resume control"
+python3 - "$ROOT" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+runbook = open(os.path.join(root, "docs", "operations", "runbooks.md"), encoding="utf-8").read()
+for token in (
+    "request-source-stop-command.json",
+    "resolve-source-stop-command.json",
+    "request_source_stop",
+    "resolve_source_stop",
+    "fences leased workers",
+    "does not revive canceled work",
+    "authenticated by the deployment",
+):
+    assert token in runbook, ("source-stop runbook missing", token)
+for name, operation in (
+    ("request-source-stop-command.json", "request_source_stop"),
+    ("resolve-source-stop-command.json", "resolve_source_stop"),
+):
+    command = json.load(open(os.path.join(root, "fixtures", "postgres", name)))
+    assert command["operation"] == operation, (name, command)
+print("[m07rev] source-stop and resume instructions match command fixtures")
+PY
+
 echo "test_m07_reviews OK"
