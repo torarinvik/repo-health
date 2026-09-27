@@ -227,6 +227,35 @@ EOF
 
 "$ROOT/build/rh_cli" pylock --input "$T/pylock.toml" --out "$T/result.json" | grep -q 'PEP 751 audit emitted' || fail "command did not emit audit"
 cmp "$ROOT/fixtures/packages/pylock-audit-result.json" "$T/result.json" || fail "audit output drifted from golden"
+python3 - "$T/pylock.toml" "$T/spaced-table-headers.toml" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text()
+for header in (
+    "[[packages]]", "[[packages.wheels]]", "[packages.sdist]", "[packages.archive]",
+    "[packages.vcs]", "[packages.directory]", "[[packages.attestation-identities]]",
+    "[packages.wheels.hashes]", "[packages.sdist.hashes]", "[packages.archive.hashes]",
+    "[[packages.dependencies]]", "[packages.dependencies.vcs]",
+    "[packages.dependencies.directory]", "[packages.dependencies.archive]",
+):
+    if header.startswith("[["):
+        spaced = "[[ " + header[2:-2].replace(".", " . ") + " ]]"
+    else:
+        spaced = "[ " + header[1:-1].replace(".", " . ") + " ]"
+    source = source.replace(header, spaced)
+Path(sys.argv[2]).write_text(source)
+PY
+"$ROOT/build/rh_cli" pylock --input "$T/spaced-table-headers.toml" --out "$T/spaced-table-headers.json" >/dev/null || fail "TOML table headers with valid whitespace were rejected"
+python3 - "$T/result.json" "$T/spaced-table-headers.json" <<'PY'
+import json, sys
+base, spaced = (json.load(open(path)) for path in sys.argv[1:])
+assert base["packages"] == spaced["packages"], (base["packages"], spaced["packages"])
+for field in ("created_by", "requires_python", "environments", "extras", "dependency_groups", "default_groups"):
+    assert base[field] == spaced[field], (field, base[field], spaced[field])
+assert base["coverage"] == spaced["coverage"], (base["coverage"], spaced["coverage"])
+assert base["input_sha256"] != spaced["input_sha256"]
+print("[pylock] TOML whitespace around PEP 751 table headers preserves package and artifact semantics")
+PY
 python3 - "$T/result.json" "$T/pylock.toml" <<'PY'
 import hashlib, json, sys
 report = json.load(open(sys.argv[1]))
