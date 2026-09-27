@@ -19,6 +19,9 @@ assert manifest["warmup_runs_per_workload"] == 1, manifest
 assert [row["events"] for row in manifest["workloads"]] == [10, 100, 1000], manifest
 for row in manifest["workloads"]:
     assert row["events_json_bytes"] <= 1_048_576, row
+    assert row["subjects_json_bytes"] <= 1_048_576, row
+    assert row["actors_json_bytes"] <= 1_048_576, row
+    assert row["typed_subjects"] == row["typed_actors"] == row["events"], row
     assert row["successful_repetitions"] == manifest["reps"] >= 2, row
     assert len(row["latency"]["samples_ms"]) == manifest["reps"], row
     assert len(row["peak_rss"]["samples_bytes"]) == manifest["reps"], row

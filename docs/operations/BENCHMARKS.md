@@ -45,8 +45,10 @@ performance thresholds.
 `RH_PG_WRITE_BENCH=1 tools/bench-pg-writes.sh [out_dir]` starts an isolated
 PostgreSQL 16 container and writes `rh-pg-write-bench/1`. It exercises the
 parameterized `rh_cli postgres page_commit_events` adapter transaction at 10,
-100, and 1,000 events per page, with one warmup and five measured fresh CLI
-processes by default (`RH_PG_WRITE_BENCH_REPS` changes the repetition count).
+100, and 1,000 events per page. Every event has a unique typed subject and
+actor, exercising all three bounded JSON arguments and the corresponding
+database writes. It uses one warmup and five measured fresh CLI processes by
+default (`RH_PG_WRITE_BENCH_REPS` changes the repetition count).
 PostgreSQL startup, migration, fixture seeding, and input generation are outside
 the measured child-process interval. The profile includes CLI startup, command
 parsing, libpq connection, the transaction, and result writing. Each command
@@ -57,18 +59,6 @@ and version, and environment metadata. This is a local synthetic measurement,
 not deployment capacity evidence. `tests/test_pg_write_bench.sh` is skipped in
 the ordinary suite and runs the live profile when `RH_PG_WRITE_BENCH=1`.
 
-A clean five-sample profile at revision `9e1c761846da123018c70ef9c2525c9860d34b2a`
-ran on macOS 27 / arm64 (10 logical CPUs, 24 GiB RAM), using PostgreSQL 16.15
-on Alpine Linux in Docker. Median / p95 CLI latency was 45.524 / 47.213 ms for
-10 events, 55.246 / 60.782 ms for 100, and 146.085 / 165.777 ms for 1,000;
-peak CLI RSS was 21.02, 21.11, and 23.19 MiB, respectively. The 1,000-event
-JSON argument was 370,781 bytes (415,209-byte command document). Its command
-input SHA-256 was
-`2c54b7632dd7371b5408740b7d590c2527182869e0d29d9fc163c831e6fe8cd4`.
-The manifest contains all five samples, the other input digests, and machine
-metadata. These measurements include one local network round trip and a fresh
-CLI process per page; they are synthetic local evidence, not service capacity
-or production PostgreSQL performance claims.
 
 A clean run at revision `ef45ca0805f7b545bf63c7e2e18fbe08696118dd` on macOS
 27 / arm64 (10 logical CPUs, 24 GiB RAM), with ten repetitions after one

@@ -93,32 +93,43 @@ VALUES ('00000000-0000-0000-0000-000000000006', 'public', 'sha256', repeat('a', 
 
         workloads = []
         page_number = 0
+        identity_ordinal = 0
         for event_count in (10, 100, 1000):
             inputs: list[bytes] = []
             latencies: list[float] = []
             rss: list[int] = []
             for sample_index in range(reps + 1):
-                events = [{
-                    "source_object_type": "issue", "source_object_id": "bench:%d:%d:%d" % (event_count, sample_index, i),
-                    "source_revision": "r1", "event_kind": "observed",
-                    "subject_id": "00000000-0000-0000-0000-000000000005",
-                    "actor_account_id": None, "occurred_at": None,
-                    "observed_at": "2026-01-01T00:00:00Z", "time_basis": "unknown",
-                    "evidence_id": "00000000-0000-0000-0000-000000000006",
-                    "parser_version": "bench/1", "payload": {"n": i},
-                } for i in range(event_count)]
+                events, subjects, actors = [], [], []
+                for i in range(event_count):
+                    identity = identity_ordinal
+                    identity_ordinal += 1
+                    subject_id = "10000000-0000-4000-8000-%012x" % identity
+                    actor_id = "20000000-0000-4000-8000-%012x" % identity
+                    subjects.append({"id": subject_id, "entity_kind": "issue", "visibility_scope": "public", "created_at": "2026-01-01T00:00:00Z"})
+                    actors.append({"id": actor_id, "source_native_id": "bench-actor:%d" % identity, "account_kind": "human", "display_name": None, "raw_identity_evidence_id": None, "visibility_scope": "public"})
+                    events.append({
+                        "source_object_type": "issue", "source_object_id": "bench:%d:%d:%d" % (event_count, sample_index, i),
+                        "source_revision": "r1", "event_kind": "observed", "subject_id": subject_id,
+                        "actor_account_id": actor_id, "occurred_at": None,
+                        "observed_at": "2026-01-01T00:00:00Z", "time_basis": "unknown",
+                        "evidence_id": "00000000-0000-0000-0000-000000000006",
+                        "parser_version": "bench/1", "payload": {"n": i},
+                    })
                 command = {
                     "schema": "rh-postgres-command/1", "operation": "page_commit_events",
                     "run_id": seed["run_id"], "job_id": "00000000-0000-0000-0000-000000000002",
                     "fencing_token": 1, "page_number": page_number, "scope_hash": "pg-write-bench",
                     "cursor_before": "", "cursor_after": json.dumps({"page": page_number + 1}, separators=(",", ":")),
                     "completeness": "complete", "record_count": event_count, "evidence_id": "",
-                    "events_json": json.dumps(events, separators=(",", ":")), "subjects_json": "[]", "actors_json": "[]",
+                    "events_json": json.dumps(events, separators=(",", ":")),
+                    "subjects_json": json.dumps(subjects, separators=(",", ":")),
+                    "actors_json": json.dumps(actors, separators=(",", ":")),
                     "now": "2026-01-01T00:01:00Z",
                 }
                 encoded = (json.dumps(command, separators=(",", ":")) + "\n").encode()
-                if len(command["events_json"].encode()) > 1_048_576:
-                    raise RuntimeError("workload exceeds the adapter's 1 MiB event JSON bound")
+                argument_sizes = {key: len(command[key].encode()) for key in ("events_json", "subjects_json", "actors_json")}
+                if max(argument_sizes.values()) > 1_048_576:
+                    raise RuntimeError("workload exceeds an adapter's 1 MiB JSON argument bound")
                 input_path = work / "command.json"
                 output_path = work / "result.json"
                 input_path.write_bytes(encoded)
@@ -139,6 +150,9 @@ VALUES ('00000000-0000-0000-0000-000000000006', 'public', 'sha256', repeat('a', 
             workloads.append({
                 "events": event_count, "payload_bytes": len(inputs[0]),
                 "events_json_bytes": len(json.loads(inputs[0])["events_json"].encode()),
+                "subjects_json_bytes": len(json.loads(inputs[0])["subjects_json"].encode()),
+                "actors_json_bytes": len(json.loads(inputs[0])["actors_json"].encode()),
+                "typed_subjects": event_count, "typed_actors": event_count,
                 "input_sha256": hashlib.sha256(inputs[0]).hexdigest(),
                 "latency": {"median_ms": sorted(latencies)[len(latencies) // 2], "p95_ms": percentile(latencies, 0.95), "samples_ms": latencies},
                 "peak_rss": {"max_bytes": max(rss), "samples_bytes": rss},
@@ -149,6 +163,10 @@ VALUES ('00000000-0000-0000-0000-000000000006', 'public', 'sha256', repeat('a', 
         expected_count = sum(workload["events"] * (reps + 1) for workload in workloads)
         if committed_count != expected_count:
             raise RuntimeError("database contains %d benchmark events; expected %d" % (committed_count, expected_count))
+        for table in ("entity", "account"):
+            actual_count = int(docker_exec("psql", "-At", "-U", "postgres", "-d", "repo_health", "-c", "SELECT count(*) FROM %s WHERE id::text LIKE '%s%%'" % (table, "10000000-" if table == "entity" else "20000000-")))
+            if actual_count != expected_count:
+                raise RuntimeError("database contains %d benchmark %s rows; expected %d" % (actual_count, table, expected_count))
 finally:
     subprocess.run([docker, "rm", "-f", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
