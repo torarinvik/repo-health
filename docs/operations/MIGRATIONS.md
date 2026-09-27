@@ -128,7 +128,7 @@ The CLI command contract and failure gates are covered by
   can register evidence metadata and commit normalized event pages or bounded
   raw staged pages under job leases through `rh_cli ingest --postgres`; staged
   pages do not infer event identities, and normalization replay wiring remains
-  open. Shared-blob distribution also remains open. Filesystem fencing
+  open. The bounded, operator-mediated `rh-evidence-transfer/1` export/import path can move verified blobs between isolated stores; automatic shared-store replication remains open. Filesystem fencing
   continues to govern the active filesystem ingest runtime.
 - No migration has been performed across a format change in this repository
   yet; the rules above are the contract, and the first real migration must
