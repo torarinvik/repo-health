@@ -109,6 +109,15 @@ assert graph == {"direction": "upstream", "nodes": [2], "truncated": True, "comp
 print("[query] upstream fanout respects node budget")
 PY
 
+printf '{"schema":"rh-query-input/1","kind":"downstream","ids":[],"graph":{"direction":"downstream","subject":1,"nodes":[1],"edges":[],"source_truncated":true}}' > "$T/graph-source-truncated.json"
+"$ROOT/build/rh_cli" query --input "$T/graph-source-truncated.json" --out "$T/graph-source-truncated.out" >/dev/null || fail "graph source truncation"
+python3 - "$T/graph-source-truncated.out" <<'PY'
+import json, sys
+graph = json.load(open(sys.argv[1]))["graph"]
+assert graph["nodes"] == [] and graph["truncated"] is True and graph["complete"] is False, graph
+print("[query] source-side truncation is preserved")
+PY
+
 echo "[query] determinism"
 "$ROOT/build/rh_cli" query --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "query output not deterministic"
@@ -141,9 +150,11 @@ printf '{"schema":"rh-query-input/1","kind":"upstream","ids":[],"graph":{"direct
 "$ROOT/build/rh_cli" query --input "$T/duplicate-entity-map.json" --out "$T/x" >/dev/null 2>&1; rc_entity_duplicate=$?
 printf '{"schema":"rh-query-input/1","kind":"upstream","ids":[],"graph":{"direction":"upstream","subject":1,"nodes":[1,2],"entity_ids":["only-one"],"edges":[{"from":1,"to":2}]}}' > "$T/short-entity-map.json"
 "$ROOT/build/rh_cli" query --input "$T/short-entity-map.json" --out "$T/x" >/dev/null 2>&1; rc_entity_count=$?
+printf '{"schema":"rh-query-input/1","kind":"upstream","ids":[],"graph":{"direction":"upstream","subject":1,"nodes":[1],"edges":[],"source_truncated":"true"}}' > "$T/bad-source-truncated.json"
+"$ROOT/build/rh_cli" query --input "$T/bad-source-truncated.json" --out "$T/x" >/dev/null 2>&1; rc_source_truncated=$?
 "$ROOT/build/rh_cli" query --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
-for rc in "$rc_schema" "$rc_kind" "$rc_ids" "$rc_unsorted" "$rc_duplicate" "$rc_negative" "$rc_cursor" "$rc_limit" "$rc_state" "$rc_phase" "$rc_graph" "$rc_entity_duplicate" "$rc_entity_count" "$rc_missing"; do
+for rc in "$rc_schema" "$rc_kind" "$rc_ids" "$rc_unsorted" "$rc_duplicate" "$rc_negative" "$rc_cursor" "$rc_limit" "$rc_state" "$rc_phase" "$rc_graph" "$rc_entity_duplicate" "$rc_entity_count" "$rc_source_truncated" "$rc_missing"; do
   [[ "$rc" -eq 4 ]] || fail "malformed query input must exit 4 (got $rc)"
 done
 
