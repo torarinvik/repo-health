@@ -1199,12 +1199,30 @@ docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <
 DO $$
 DECLARE
   chunk_input jsonb;
+  edges_input jsonb;
+  first_edges jsonb;
+  last_edges jsonb;
   stage_status text;
+  replay_rejected boolean;
 BEGIN
+  SELECT jsonb_agg(jsonb_build_object(
+    'from_entity_id', '00000000-0000-0000-0000-' || lpad((1000001 + ((edge_number - 1) / 100))::text, 12, '0'),
+    'to_entity_id', '00000000-0000-0000-0000-' || lpad((1000201 + ((edge_number - 1) % 100))::text, 12, '0'),
+    'edge_kind', 'depends_on',
+    'known_at', '2026-01-01T00:00:00Z'
+  ) ORDER BY edge_number)
+  INTO edges_input
+  FROM generate_series(1, 10001) AS edge_number;
+  SELECT jsonb_agg(edge.value ORDER BY edge.ordinality) INTO first_edges
+  FROM jsonb_array_elements(edges_input) WITH ORDINALITY AS edge(value, ordinality)
+  WHERE edge.ordinality <= 10000;
+  SELECT jsonb_agg(edge.value ORDER BY edge.ordinality) INTO last_edges
+  FROM jsonb_array_elements(edges_input) WITH ORDINALITY AS edge(value, ordinality)
+  WHERE edge.ordinality > 10000;
   chunk_input := jsonb_build_object(
     'schema', 'rh-postgres-projection-chunk/1',
     'projection', jsonb_build_object(
-      'id', '00000000-0000-0000-0000-000000009004',
+      'id', '00000000-0000-0000-0000-000000009005',
       'projection_kind', 'dependency',
       'visibility_scope', 'public',
       'input_cutoff', '2026-01-01T00:00:00Z',
@@ -1214,26 +1232,39 @@ BEGIN
       'completeness', 'complete',
       'manifest_digest', repeat('b', 64)
     ),
-    'expected_edge_count', 1,
+    'expected_edge_count', 10001,
     'chunk_index', 0,
-    'chunk_count', 1,
-    'edges', jsonb_build_array(jsonb_build_object(
-      'from_entity_id', '00000000-0000-0000-0000-000001000001',
-      'to_entity_id', '00000000-0000-0000-0000-000001000002',
-      'edge_kind', 'depends_on',
-      'known_at', '2026-01-01T00:00:00Z'
-    ))
+    'chunk_count', 2,
+    'edges', first_edges
   );
   stage_status := rh_stage_graph_projection_chunk(chunk_input);
-  IF stage_status <> 'stored' OR rh_stage_graph_projection_chunk(chunk_input) <> 'replay' THEN
-    RAISE EXCEPTION 'single-chunk projection did not publish and replay: %', stage_status;
+  IF stage_status <> 'staged' OR EXISTS (SELECT 1 FROM graph_projection WHERE id = '00000000-0000-0000-0000-000000009005') THEN
+    RAISE EXCEPTION 'incomplete projection became visible before its final chunk: %', stage_status;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM projection_membership WHERE projection_id = '00000000-0000-0000-0000-000000009004') THEN
-    RAISE EXCEPTION 'published chunk projection is missing membership';
+  chunk_input := jsonb_set(chunk_input, '{chunk_index}', '1'::jsonb);
+  chunk_input := jsonb_set(chunk_input, '{edges}', last_edges);
+  stage_status := rh_stage_graph_projection_chunk(chunk_input);
+  IF stage_status <> 'stored' OR rh_stage_graph_projection_chunk(
+    jsonb_set(jsonb_set(chunk_input, '{chunk_index}', '0'::jsonb), '{edges}', first_edges)
+  ) <> 'replay' THEN
+    RAISE EXCEPTION 'multi-chunk projection did not publish and replay: %', stage_status;
   END IF;
+  IF (SELECT count(*) FROM projection_membership WHERE projection_id = '00000000-0000-0000-0000-000000009005') <> 10001 THEN
+    RAISE EXCEPTION 'published chunk projection has the wrong membership count';
+  END IF;
+  replay_rejected := false;
+  BEGIN
+    PERFORM rh_stage_graph_projection_chunk(jsonb_set(
+      jsonb_set(jsonb_set(chunk_input, '{chunk_index}', '0'::jsonb), '{edges}', first_edges),
+      '{edges,0,known_at}', '"2026-01-02T00:00:00Z"'::jsonb
+    ));
+  EXCEPTION WHEN raise_exception THEN
+    replay_rejected := true;
+  END;
+  IF NOT replay_rejected THEN RAISE EXCEPTION 'altered chunk replay was accepted'; END IF;
 END $$;
 SQL
-echo "[migrations-live] single-chunk staging publishes atomically and exact replay is a no-op"
+echo "[migrations-live] incomplete chunk sets stay invisible; final publication, exact replay, and altered replay are checked"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "durable operator source stop lifecycle"
 DO $$
