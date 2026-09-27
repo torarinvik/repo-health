@@ -44,6 +44,16 @@ def observation_decode_rejects(document: u8&) -> bool can[Memory.Allocate, Abort
     decoded: mutable Observation::RhObservation = Observation::rh_observation_make(Observation::RH_ST_UNAVAILABLE, Observation::RhMetricValue.Absent, false)
     not ObservationCodec::rh_observation_decode(raw, &decoded)
 
+def observation_evidence_roundtrip() -> bool can[Memory.Allocate, Abort.Panic]:
+    quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Unknown, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Unknown, provenance: Observation::RhProvenanceQuality.Unknown}
+    evidence: Observation::RhEvidenceLinks = Observation::RhEvidenceLinks{count: 2, first: Observation::RhEvidenceObject.GitLog, second: Observation::RhEvidenceObject.GitShallow}
+    observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Count(2), false, quality, evidence)
+    encoded: mutable darray[u8] = []
+    return false if not ObservationCodec::rh_observation_encode(observation, encoded)
+    decoded: mutable Observation::RhObservation = observation
+    return false if not ObservationCodec::rh_observation_decode(encoded, &decoded)
+    decoded.evidence.count == 2 and decoded.evidence.first == Observation::RhEvidenceObject.GitLog and decoded.evidence.second == Observation::RhEvidenceObject.GitShallow
+
 def check_byte_helpers(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     empty: darray[u8] = []
     check(Base::rh_bytes_equal_literal(empty, 0, 0, ""), "empty-span-equality", fails)
@@ -173,14 +183,16 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
                 valid <- valid and observation_roundtrip(Observation::rh_observation_make(status, Observation::RhMetricValue.Boolean(false), incomplete))
                 valid <- valid and observation_roundtrip(Observation::rh_observation_make(status, Observation::RhMetricValue.Enumeration(0), incomplete))
     check(serialized_cross_product, "typed-observation-json-roundtrip-cross-product", &fails)
+    check(observation_evidence_roundtrip(), "typed-observation-evidence-link-roundtrip", &fails)
     report_quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Partial, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.EvidenceBacked}
     check(observation_roundtrip(Observation::rh_observation_make_with_quality(Observation::RH_ST_PARTIAL, Observation::RhMetricValue.Ratio(1, 2), true, report_quality)), "typed-quality-json-roundtrip", &fails)
-    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"absent\"},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}"), "codec-observed-absent-rejected", &fails)
-    check(observation_decode_rejects("{\"status\":4,\"value\":{\"kind\":\"ratio\",\"num\":1,\"den\":2},\"incomplete\":false,\"quality\":{\"completeness\":\"partial\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}"), "codec-partial-without-incompleteness-rejected", &fails)
-    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"ratio\",\"num\":1,\"den\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}"), "codec-zero-denominator-rejected", &fails)
-    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count_pair\",\"first\":0,\"second\":-1},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}"), "codec-negative-count-pair-rejected", &fails)
-    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count_pair\",\"first\":2,\"second\":1},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}"), "codec-count-pair-order-rejected", &fails)
-    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"nonsense\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}"), "codec-unknown-quality-label-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"absent\"},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-observed-absent-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":4,\"value\":{\"kind\":\"ratio\",\"num\":1,\"den\":2},\"incomplete\":false,\"quality\":{\"completeness\":\"partial\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-partial-without-incompleteness-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"ratio\",\"num\":1,\"den\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-zero-denominator-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count_pair\",\"first\":0,\"second\":-1},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-negative-count-pair-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count_pair\",\"first\":2,\"second\":1},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-count-pair-order-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"nonsense\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-unknown-quality-label-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[\"unknown\"]}"), "codec-unknown-evidence-link-rejected", &fails)
     check(observation_decode_rejects("not-json"), "codec-malformed-json-rejected", &fails)
 
 # --- M00-03 temporal primitives ---

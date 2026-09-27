@@ -161,6 +161,45 @@ module ObservationCodec:
                     Base::rh_push_decimal_i64(out, code)
                     Base::rh_push_text(out, "}")
 
+        def rh_codec_evidence_object(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, node: i64, out: mutable Observation::RhEvidenceObject&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if node < 0 or nodes[node.usize()].kind != Json::RH_JSON_STR
+            start: i64 = nodes[node.usize()].text_start
+            end: i64 = nodes[node.usize()].text_end
+            return false if Base::rh_bytes_equal_literal(texts, start, end, "git_log") == false and Base::rh_bytes_equal_literal(texts, start, end, "git_shallow") == false and Base::rh_bytes_equal_literal(texts, start, end, "git_files") == false and Base::rh_bytes_equal_literal(texts, start, end, "git_default_count") == false
+            out[0] <- Observation::RhEvidenceObject.GitLog if Base::rh_bytes_equal_literal(texts, start, end, "git_log")
+            out[0] <- Observation::RhEvidenceObject.GitShallow if Base::rh_bytes_equal_literal(texts, start, end, "git_shallow")
+            out[0] <- Observation::RhEvidenceObject.GitFiles if Base::rh_bytes_equal_literal(texts, start, end, "git_files")
+            out[0] <- Observation::RhEvidenceObject.GitDefaultCount if Base::rh_bytes_equal_literal(texts, start, end, "git_default_count")
+            true
+
+        def rh_codec_evidence_decode(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, out: mutable Observation::RhEvidenceLinks&) -> bool can[Memory.Allocate, Abort.Panic]:
+            evidence_node: i64 = Json::rh_json_obj_get(nodes, texts, root, "evidence")
+            return false if evidence_node < 0 or nodes[evidence_node.usize()].kind != Json::RH_JSON_ARR
+            return false if nodes[evidence_node.usize()].child_count > 2
+            items: mutable Observation::RhEvidenceLinks = Observation::RhEvidenceLinks{count: 0, first: Observation::RhEvidenceObject.GitLog, second: Observation::RhEvidenceObject.GitLog}
+            child: mutable i64 = nodes[evidence_node.usize()].first_child
+            while child >= 0 |child, nodes, texts, items|:
+                object: mutable Observation::RhEvidenceObject = Observation::RhEvidenceObject.GitLog
+                return false if not rh_codec_evidence_object(nodes, texts, child, &object)
+                items.first <- object if items.count == 0
+                items.second <- object if items.count == 1
+                items.count <- items.count + 1
+                child <- nodes[child.usize()].next_sibling
+            out[0] <- items
+            true
+
+        def rh_codec_evidence_emit(out: mutable darray[u8]&, evidence: Observation::RhEvidenceLinks) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, ",\"evidence\":[")
+            if evidence.count > 0:
+                Base::rh_push_text(out, "\"")
+                Base::rh_push_text(out, Observation::rh_evidence_object_label(evidence.first))
+                Base::rh_push_text(out, "\"")
+            if evidence.count > 1:
+                Base::rh_push_text(out, ",\"")
+                Base::rh_push_text(out, Observation::rh_evidence_object_label(evidence.second))
+                Base::rh_push_text(out, "\"")
+            Base::rh_push_text(out, "]")
+
     public:
         def rh_observation_encode(observation: Observation::RhObservation, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if not Observation::rh_observation_valid(observation)
@@ -178,14 +217,16 @@ module ObservationCodec:
             Base::rh_push_text(out, Observation::rh_validity_label(observation.quality.validity))
             Base::rh_push_text(out, "\",\"provenance\":\"")
             Base::rh_push_text(out, Observation::rh_provenance_quality_label(observation.quality.provenance))
-            Base::rh_push_text(out, "\"}}")
+            Base::rh_push_text(out, "\"}")
+            rh_codec_evidence_emit(out, observation.evidence)
+            Base::rh_push_text(out, "}")
             true
 
         def rh_observation_decode(raw: darray[u8]&, out: mutable Observation::RhObservation&) -> bool can[Memory.Allocate, Abort.Panic]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
-            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ or nodes[root.usize()].child_count != 8
+            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ or nodes[root.usize()].child_count != 10
             status: mutable i64 = 0
             return false if not rh_codec_int_field(nodes, raw, texts, root, "status", &status) or status < 0 or status >= Observation::RH_ST_COUNT.i64()
             value_node: i64 = Json::rh_json_obj_get(nodes, texts, root, "value")
@@ -198,7 +239,9 @@ module ObservationCodec:
             quality_node: i64 = Json::rh_json_obj_get(nodes, texts, root, "quality")
             quality: mutable Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Unknown, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Unknown, provenance: Observation::RhProvenanceQuality.Unknown}
             return false if not rh_codec_quality(nodes, texts, quality_node, &quality)
-            observation: Observation::RhObservation = Observation::rh_observation_make_with_quality(status.u8(), value, incomplete, quality)
+            evidence: mutable Observation::RhEvidenceLinks = Observation::RhEvidenceLinks{count: 0, first: Observation::RhEvidenceObject.GitLog, second: Observation::RhEvidenceObject.GitLog}
+            return false if not rh_codec_evidence_decode(nodes, texts, root, &evidence)
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(status.u8(), value, incomplete, quality, evidence)
             return false if not Observation::rh_observation_valid(observation)
             out[0] <- observation
             true

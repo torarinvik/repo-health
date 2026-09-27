@@ -58,6 +58,35 @@ module Observation:
         Unverified
         Unknown
 
+    # Evidence identity is a closed domain value; report paths and source
+    # locators stay in the adapter that owns their serialization.
+    enum RhEvidenceObject:
+        GitLog
+        GitShallow
+        GitFiles
+        GitDefaultCount
+
+    struct RhEvidenceLink:
+        object: RhEvidenceObject
+
+    # Current report observations need at most two source objects. Inline
+    # storage keeps the common envelope allocation-free and ABI-stable.
+    struct RhEvidenceLinks:
+        count: u8
+        first: RhEvidenceObject
+        second: RhEvidenceObject
+
+    def rh_evidence_object_label(object: RhEvidenceObject) -> u8&:
+        match object:
+            RhEvidenceObject.GitLog:
+                "git_log"
+            RhEvidenceObject.GitShallow:
+                "git_shallow"
+            RhEvidenceObject.GitFiles:
+                "git_files"
+            RhEvidenceObject.GitDefaultCount:
+                "git_default_count"
+
     struct RhQualityDimensions:
         completeness: RhCompleteness
         freshness: RhFreshness
@@ -72,6 +101,7 @@ module Observation:
         value: RhMetricValue
         has_incompleteness: bool
         quality: RhQualityDimensions
+        evidence: RhEvidenceLinks
 
     def rh_status_valid(status: u8) -> bool:
         status < RH_ST_COUNT
@@ -140,10 +170,13 @@ module Observation:
         completeness: RhCompleteness = RhCompleteness.Partial if status == RH_ST_PARTIAL else RhCompleteness.Unknown
         freshness: RhFreshness = RhFreshness.Stale if status == RH_ST_STALE else RhFreshness.Unknown
         quality: RhQualityDimensions = RhQualityDimensions{completeness: completeness, freshness: freshness, validity: RhValidity.Unknown, provenance: RhProvenanceQuality.Unknown}
-        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality}
+        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality, evidence: RhEvidenceLinks{count: 0, first: RhEvidenceObject.GitLog, second: RhEvidenceObject.GitLog}}
 
     def rh_observation_make_with_quality(status: u8, value: RhMetricValue, has_incompleteness: bool, quality: RhQualityDimensions) -> RhObservation:
-        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality}
+        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality, evidence: RhEvidenceLinks{count: 0, first: RhEvidenceObject.GitLog, second: RhEvidenceObject.GitLog}}
+
+    def rh_observation_make_with_evidence(status: u8, value: RhMetricValue, has_incompleteness: bool, quality: RhQualityDimensions, evidence: RhEvidenceLinks) -> RhObservation:
+        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality, evidence: evidence}
 
     def rh_quality_dimensions_valid(status: u8, quality: RhQualityDimensions) -> bool:
         return false if status == RH_ST_PARTIAL and quality.completeness != RhCompleteness.Partial
@@ -178,6 +211,7 @@ module Observation:
         return false if not rh_observation_consistent(observation.status, has_value)
         return false if (observation.status == RH_ST_PARTIAL or observation.status == RH_ST_STALE) and not observation.has_incompleteness
         return false if observation.status != RH_ST_PARTIAL and observation.status != RH_ST_STALE and observation.has_incompleteness
+        return false if observation.evidence.count > 2
         return false if not rh_quality_dimensions_valid(observation.status, observation.quality)
         true
 
