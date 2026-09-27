@@ -9,6 +9,7 @@ include "./rh_base.elisa"
 include "./rh_domain.elisa"
 include "./rh_temporal.elisa"
 include "./rh_observation.elisa"
+include "./rh_observation_codec.elisa"
 include "./rh_registry.elisa"
 include "./rh_evidence.elisa"
 include "./rh_metrics.elisa"
@@ -27,6 +28,21 @@ def check(condition: bool, label: u8&, fails: mutable i64&) -> void can[Memory.A
         buffer.push(10)
         buffer
     Base::rh_write_stdout(buffer)
+
+def observation_roundtrip(observation: Observation::RhObservation) -> bool can[Memory.Allocate, Abort.Panic]:
+    encoded: mutable darray[u8] = []
+    return false if not ObservationCodec::rh_observation_encode(observation, encoded)
+    decoded: mutable Observation::RhObservation = observation
+    return false if not ObservationCodec::rh_observation_decode(encoded, &decoded)
+    reencoded: mutable darray[u8] = []
+    return false if not ObservationCodec::rh_observation_encode(decoded, reencoded)
+    Base::rh_bytes_equal_span(encoded, 0, encoded.count.i64(), reencoded, 0, reencoded.count.i64())
+
+def observation_decode_rejects(document: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+    raw: mutable darray[u8] = []
+    Base::rh_push_text(raw, document)
+    decoded: mutable Observation::RhObservation = Observation::rh_observation_make(Observation::RH_ST_UNAVAILABLE, Observation::RhMetricValue.Absent, false)
+    not ObservationCodec::rh_observation_decode(raw, &decoded)
 
 def check_byte_helpers(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     empty: darray[u8] = []
@@ -142,6 +158,27 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
             expected_value: bool = status == Observation::RH_ST_OBSERVED or status == Observation::RH_ST_PARTIAL or status == Observation::RH_ST_STALE
             valid <- valid and accepts_no_value == expected_no_value and accepts_value == expected_value
     check(state_value_cross_product, "typed-status-value-cross-product", &fails)
+    serialized_cross_product: bool =
+        for status in 0..<Observation::RH_ST_COUNT |valid: bool = true| -> valid:
+            incomplete: bool = status == Observation::RH_ST_PARTIAL or status == Observation::RH_ST_STALE
+            absent: Observation::RhObservation = Observation::rh_observation_make(status, Observation::RhMetricValue.Absent, incomplete)
+            absent_roundtrips: bool = Observation::rh_observation_valid(absent) and observation_roundtrip(absent)
+            expected_absent: bool = status != Observation::RH_ST_OBSERVED
+            valid <- valid and absent_roundtrips == expected_absent
+            if status == Observation::RH_ST_OBSERVED or incomplete:
+                valid <- valid and observation_roundtrip(Observation::rh_observation_make(status, Observation::RhMetricValue.Count(0), incomplete))
+                valid <- valid and observation_roundtrip(Observation::rh_observation_make(status, Observation::RhMetricValue.Timestamp(0), incomplete))
+                valid <- valid and observation_roundtrip(Observation::rh_observation_make(status, Observation::RhMetricValue.Ratio(-1, 2), incomplete))
+                valid <- valid and observation_roundtrip(Observation::rh_observation_make(status, Observation::RhMetricValue.Boolean(false), incomplete))
+                valid <- valid and observation_roundtrip(Observation::rh_observation_make(status, Observation::RhMetricValue.Enumeration(0), incomplete))
+    check(serialized_cross_product, "typed-observation-json-roundtrip-cross-product", &fails)
+    report_quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Partial, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.EvidenceBacked}
+    check(observation_roundtrip(Observation::rh_observation_make_with_quality(Observation::RH_ST_PARTIAL, Observation::RhMetricValue.Ratio(1, 2), true, report_quality)), "typed-quality-json-roundtrip", &fails)
+    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"absent\"},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}"), "codec-observed-absent-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":4,\"value\":{\"kind\":\"ratio\",\"num\":1,\"den\":2},\"incomplete\":false,\"quality\":{\"completeness\":\"partial\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}"), "codec-partial-without-incompleteness-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"ratio\",\"num\":1,\"den\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}"), "codec-zero-denominator-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"nonsense\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}"), "codec-unknown-quality-label-rejected", &fails)
+    check(observation_decode_rejects("not-json"), "codec-malformed-json-rejected", &fails)
 
 # --- M00-03 temporal primitives ---
     check(Temporal::rh_interval_valid(10, 20), "interval-valid", &fails)

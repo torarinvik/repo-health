@@ -1,0 +1,190 @@
+# rh_observation_codec.elisa — canonical typed observation round trips (M00-04).
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_observation.elisa"
+
+module ObservationCodec:
+    private:
+        def rh_codec_string_is(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, expected: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            field: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            start: mutable i64 = 0
+            end: mutable i64 = 0
+            return false if not Json::rh_json_str_span(nodes, field, &start, &end)
+            Base::rh_bytes_equal_literal(texts, start, end, expected)
+
+        def rh_codec_int_field(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, object: i64, key: u8&, value_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            field: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            return false if field < 0
+            ok: mutable i64 = 0
+            value_out[0] <- Json::rh_json_int(nodes, raw, field, &ok)
+            ok == 1
+
+        def rh_codec_bool_field(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, object: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            field: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            return -1 if field < 0 or nodes[field.usize()].kind != Json::RH_JSON_BOOL
+            1 if raw[nodes[field.usize()].text_start.usize()] == 116 else 0
+
+        def rh_codec_completeness(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, out: mutable Observation::RhCompleteness&) -> bool can[Memory.Allocate, Abort.Panic]:
+            complete: bool = rh_codec_string_is(nodes, texts, object, "completeness", "complete")
+            partial: bool = rh_codec_string_is(nodes, texts, object, "completeness", "partial")
+            unknown: bool = rh_codec_string_is(nodes, texts, object, "completeness", "unknown")
+            return false if not complete and not partial and not unknown
+            out[0] <- Observation::RhCompleteness.Complete if complete
+            out[0] <- Observation::RhCompleteness.Partial if partial
+            out[0] <- Observation::RhCompleteness.Unknown if unknown
+            true
+
+        def rh_codec_freshness(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, out: mutable Observation::RhFreshness&) -> bool can[Memory.Allocate, Abort.Panic]:
+            fresh: bool = rh_codec_string_is(nodes, texts, object, "freshness", "fresh")
+            stale: bool = rh_codec_string_is(nodes, texts, object, "freshness", "stale")
+            unknown: bool = rh_codec_string_is(nodes, texts, object, "freshness", "unknown")
+            return false if not fresh and not stale and not unknown
+            out[0] <- Observation::RhFreshness.Fresh if fresh
+            out[0] <- Observation::RhFreshness.Stale if stale
+            out[0] <- Observation::RhFreshness.Unknown if unknown
+            true
+
+        def rh_codec_validity(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, out: mutable Observation::RhValidity&) -> bool can[Memory.Allocate, Abort.Panic]:
+            valid: bool = rh_codec_string_is(nodes, texts, object, "validity", "valid")
+            invalid: bool = rh_codec_string_is(nodes, texts, object, "validity", "invalid")
+            unknown: bool = rh_codec_string_is(nodes, texts, object, "validity", "unknown")
+            return false if not valid and not invalid and not unknown
+            out[0] <- Observation::RhValidity.Valid if valid
+            out[0] <- Observation::RhValidity.Invalid if invalid
+            out[0] <- Observation::RhValidity.Unknown if unknown
+            true
+
+        def rh_codec_provenance(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, out: mutable Observation::RhProvenanceQuality&) -> bool can[Memory.Allocate, Abort.Panic]:
+            evidence_backed: bool = rh_codec_string_is(nodes, texts, object, "provenance", "evidence_backed")
+            derived: bool = rh_codec_string_is(nodes, texts, object, "provenance", "derived")
+            unverified: bool = rh_codec_string_is(nodes, texts, object, "provenance", "unverified")
+            unknown: bool = rh_codec_string_is(nodes, texts, object, "provenance", "unknown")
+            return false if not evidence_backed and not derived and not unverified and not unknown
+            out[0] <- Observation::RhProvenanceQuality.EvidenceBacked if evidence_backed
+            out[0] <- Observation::RhProvenanceQuality.Derived if derived
+            out[0] <- Observation::RhProvenanceQuality.Unverified if unverified
+            out[0] <- Observation::RhProvenanceQuality.Unknown if unknown
+            true
+
+        def rh_codec_quality(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, out: mutable Observation::RhQualityDimensions&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if object < 0 or nodes[object.usize()].kind != Json::RH_JSON_OBJ or nodes[object.usize()].child_count != 8
+            completeness: mutable Observation::RhCompleteness = Observation::RhCompleteness.Unknown
+            freshness: mutable Observation::RhFreshness = Observation::RhFreshness.Unknown
+            validity: mutable Observation::RhValidity = Observation::RhValidity.Unknown
+            provenance: mutable Observation::RhProvenanceQuality = Observation::RhProvenanceQuality.Unknown
+            return false if not rh_codec_completeness(nodes, texts, object, &completeness)
+            return false if not rh_codec_freshness(nodes, texts, object, &freshness)
+            return false if not rh_codec_validity(nodes, texts, object, &validity)
+            return false if not rh_codec_provenance(nodes, texts, object, &provenance)
+            out[0] <- Observation::RhQualityDimensions{completeness: completeness, freshness: freshness, validity: validity, provenance: provenance}
+            true
+
+        def rh_codec_value(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, object: i64, ok_out: mutable i64&) -> Observation::RhMetricValue can[Memory.Allocate, Abort.Panic]:
+            ok_out[0] <- 0
+            return Observation::RhMetricValue.Absent if object < 0 or nodes[object.usize()].kind != Json::RH_JSON_OBJ
+            return Observation::RhMetricValue.Absent if not rh_codec_string_is(nodes, texts, object, "kind", "absent") and not rh_codec_string_is(nodes, texts, object, "kind", "count") and not rh_codec_string_is(nodes, texts, object, "kind", "timestamp") and not rh_codec_string_is(nodes, texts, object, "kind", "ratio") and not rh_codec_string_is(nodes, texts, object, "kind", "boolean") and not rh_codec_string_is(nodes, texts, object, "kind", "enumeration")
+            if rh_codec_string_is(nodes, texts, object, "kind", "absent"):
+                return Observation::RhMetricValue.Absent if nodes[object.usize()].child_count != 2
+                ok_out[0] <- 1
+                return Observation::RhMetricValue.Absent
+            if rh_codec_string_is(nodes, texts, object, "kind", "count"):
+                return Observation::RhMetricValue.Absent if nodes[object.usize()].child_count != 4
+                value: mutable i64 = 0
+                return Observation::RhMetricValue.Absent if not rh_codec_int_field(nodes, raw, texts, object, "value", &value)
+                ok_out[0] <- 1
+                return Observation::RhMetricValue.Count(value)
+            if rh_codec_string_is(nodes, texts, object, "kind", "timestamp"):
+                return Observation::RhMetricValue.Absent if nodes[object.usize()].child_count != 4
+                value: mutable i64 = 0
+                return Observation::RhMetricValue.Absent if not rh_codec_int_field(nodes, raw, texts, object, "unix_seconds", &value)
+                ok_out[0] <- 1
+                return Observation::RhMetricValue.Timestamp(value)
+            if rh_codec_string_is(nodes, texts, object, "kind", "ratio"):
+                return Observation::RhMetricValue.Absent if nodes[object.usize()].child_count != 6
+                num: mutable i64 = 0
+                den: mutable i64 = 0
+                return Observation::RhMetricValue.Absent if not rh_codec_int_field(nodes, raw, texts, object, "num", &num)
+                return Observation::RhMetricValue.Absent if not rh_codec_int_field(nodes, raw, texts, object, "den", &den)
+                ok_out[0] <- 1
+                return Observation::RhMetricValue.Ratio(num, den)
+            if rh_codec_string_is(nodes, texts, object, "kind", "boolean"):
+                return Observation::RhMetricValue.Absent if nodes[object.usize()].child_count != 4
+                value: i64 = rh_codec_bool_field(nodes, raw, texts, object, "value")
+                return Observation::RhMetricValue.Absent if value < 0
+                ok_out[0] <- 1
+                return Observation::RhMetricValue.Boolean(value == 1)
+            return Observation::RhMetricValue.Absent if nodes[object.usize()].child_count != 4
+            code: mutable i64 = 0
+            return Observation::RhMetricValue.Absent if not rh_codec_int_field(nodes, raw, texts, object, "code", &code)
+            ok_out[0] <- 1
+            Observation::RhMetricValue.Enumeration(code)
+
+        def rh_codec_value_emit(out: mutable darray[u8]&, value: Observation::RhMetricValue) -> void can[Memory.Allocate, Abort.Panic]:
+            match value:
+                Observation::RhMetricValue.Absent:
+                    Base::rh_push_text(out, "{\"kind\":\"absent\"}")
+                Observation::RhMetricValue.Count(count):
+                    Base::rh_push_text(out, "{\"kind\":\"count\",\"value\":")
+                    Base::rh_push_decimal_i64(out, count)
+                    Base::rh_push_text(out, "}")
+                Observation::RhMetricValue.Timestamp(seconds):
+                    Base::rh_push_text(out, "{\"kind\":\"timestamp\",\"unix_seconds\":")
+                    Base::rh_push_decimal_i64(out, seconds)
+                    Base::rh_push_text(out, "}")
+                Observation::RhMetricValue.Ratio(num, den):
+                    Base::rh_push_text(out, "{\"kind\":\"ratio\",\"num\":")
+                    Base::rh_push_decimal_i64(out, num)
+                    Base::rh_push_text(out, ",\"den\":")
+                    Base::rh_push_decimal_i64(out, den)
+                    Base::rh_push_text(out, "}")
+                Observation::RhMetricValue.Boolean(flag):
+                    Base::rh_push_text(out, "{\"kind\":\"boolean\",\"value\":")
+                    Base::rh_push_text(out, "true" if flag else "false")
+                    Base::rh_push_text(out, "}")
+                Observation::RhMetricValue.Enumeration(code):
+                    Base::rh_push_text(out, "{\"kind\":\"enumeration\",\"code\":")
+                    Base::rh_push_decimal_i64(out, code)
+                    Base::rh_push_text(out, "}")
+
+    public:
+        def rh_observation_encode(observation: Observation::RhObservation, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not Observation::rh_observation_valid(observation)
+            Base::rh_push_text(out, "{\"status\":")
+            Base::rh_push_decimal_u64(out, observation.status.u64())
+            Base::rh_push_text(out, ",\"value\":")
+            rh_codec_value_emit(out, observation.value)
+            Base::rh_push_text(out, ",\"incomplete\":")
+            Base::rh_push_text(out, "true" if observation.has_incompleteness else "false")
+            Base::rh_push_text(out, ",\"quality\":{\"completeness\":\"")
+            Base::rh_push_text(out, Observation::rh_completeness_label(observation.quality.completeness))
+            Base::rh_push_text(out, "\",\"freshness\":\"")
+            Base::rh_push_text(out, Observation::rh_freshness_label(observation.quality.freshness))
+            Base::rh_push_text(out, "\",\"validity\":\"")
+            Base::rh_push_text(out, Observation::rh_validity_label(observation.quality.validity))
+            Base::rh_push_text(out, "\",\"provenance\":\"")
+            Base::rh_push_text(out, Observation::rh_provenance_quality_label(observation.quality.provenance))
+            Base::rh_push_text(out, "\"}}")
+            true
+
+        def rh_observation_decode(raw: darray[u8]&, out: mutable Observation::RhObservation&) -> bool can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ or nodes[root.usize()].child_count != 8
+            status: mutable i64 = 0
+            return false if not rh_codec_int_field(nodes, raw, texts, root, "status", &status) or status < 0 or status >= Observation::RH_ST_COUNT.i64()
+            value_node: i64 = Json::rh_json_obj_get(nodes, texts, root, "value")
+            value_ok: mutable i64 = 0
+            value: Observation::RhMetricValue = rh_codec_value(nodes, raw, texts, value_node, &value_ok)
+            return false if value_ok == 0
+            incomplete_code: i64 = rh_codec_bool_field(nodes, raw, texts, root, "incomplete")
+            return false if incomplete_code < 0
+            incomplete: bool = incomplete_code == 1
+            quality_node: i64 = Json::rh_json_obj_get(nodes, texts, root, "quality")
+            quality: mutable Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Unknown, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Unknown, provenance: Observation::RhProvenanceQuality.Unknown}
+            return false if not rh_codec_quality(nodes, texts, quality_node, &quality)
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_quality(status.u8(), value, incomplete, quality)
+            return false if not Observation::rh_observation_valid(observation)
+            out[0] <- observation
+            true
