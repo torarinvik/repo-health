@@ -71,6 +71,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
 assert m["history.commit_count"]["value"] == 3, m
+assert m["history.commit_count"]["evidence"] == ["evidence/git-log.bin"], m
 assert m["history.reachable_revisions"]["value"] == 3, m
 assert m["history.revisions_reachable_default"]["value"] == 3, m
 assert m["history.revisions_reachable_default"]["quality_dimensions"] == {
@@ -82,6 +83,12 @@ assert m["history.collection_complete_windows"]["quality_dimensions"] == {
     "completeness":"complete", "freshness":"unknown",
     "validity":"valid", "provenance":"evidence_backed",
 }, m["history.collection_complete_windows"]
+assert m["history.collection_complete_windows"]["evidence"] == [
+    "evidence/git-log.bin", "evidence/git-shallow.txt"
+], m["history.collection_complete_windows"]
+assert m["history.coverage_state"]["evidence"] == [
+    "evidence/git-log.bin", "evidence/git-shallow.txt"
+], m["history.coverage_state"]
 assert m["history.rejected_record_count"]["value"] == 0, m
 assert m["contributors.raw_identity_count"]["value"] == 2, m
 assert m["activity.active_complete_months"]["value"] == 3, m
@@ -90,6 +97,7 @@ assert m["activity.active_months"]["value"] == 3, m
 assert m["contributor.source_accounts"]["value"] == 2, m
 assert m["coverage.lineage_complete_share"]["value"] == {"num": 1, "den": 1}, m
 assert m["documentation.readme_present"]["value"] is False, m
+assert m["documentation.readme_present"]["evidence"] == ["evidence/git-files.txt"], m
 assert m["documentation.contributing_guide_present"]["value"] is False, m
 assert m["licensing.license_declaration_present"]["value"] is False, m
 expected_quality = {
