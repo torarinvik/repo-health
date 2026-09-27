@@ -133,5 +133,12 @@ set +e
 rc_corrupt_state=$?
 set -e
 [[ "$rc_corrupt_state" -eq 4 && ! -e "$T/corrupt-state-out.json" ]] || fail "corrupt cache pointer must fail closed before output"
+mkdir -p "$T/failing-state-store"
+ln -s missing-lock-target "$T/failing-state-store/.rh-evidence.lock"
+set +e
+"$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/publish-failure-out.json" --state-store "$T/failing-state-store" >/dev/null 2>&1
+rc_publish_failure=$?
+set -e
+[[ "$rc_publish_failure" -eq 4 && ! -e "$T/publish-failure-out.json" ]] || fail "cache publication failure must not replace report output"
 
 echo "test_aggregate_cli OK"
