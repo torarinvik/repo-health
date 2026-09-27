@@ -26,6 +26,8 @@ module Json:
         const RH_JSON_MAX_DEPTH: i64 = 32
         # private to this file (modules retried after re-seed; see CHANGELOG).
         const RH_JSON_MAX_NODES: i64 = 200000
+        # A separately opted-in ceiling for bounded large local projections.
+        const RH_JSON_MAX_LARGE_NODES: i64 = 2000000
 
         struct RhJsonNode:
             kind: mutable u8
@@ -41,8 +43,8 @@ module Json:
 
         # Append a node; returns its index, or -1 past the node cap.
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_json_emit(nodes: mutable darray[RhJsonNode]&, kind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
-            return -1 if nodes.count.i64() >= RH_JSON_MAX_NODES
+        def rh_json_emit(nodes: mutable darray[RhJsonNode]&, kind: u8, node_limit: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if nodes.count.i64() >= node_limit
             nodes.push(rh_json_node(kind))
             (nodes.count - 1).i64()
 
@@ -77,13 +79,13 @@ module Json:
         # Parse a JSON string at pos (input[pos] == '"'). Decodes into texts;
         # end_out = first byte past closing quote. Returns node idx or -1.
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_json_string(input: darray[u8]&, pos: usize, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&, end_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_json_string(input: darray[u8]&, pos: usize, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&, end_out: mutable i64&, node_limit: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             end_out[0] <- -1
             t0: i64 = texts.count.i64()
             while i < input.count |i: usize = pos + 1, input, texts|:
                 b: u8 = input[i]
                 if b == 34:
-                    idx: i64 = rh_json_emit(nodes, RH_JSON_STR)
+                    idx: i64 = rh_json_emit(nodes, RH_JSON_STR, node_limit)
                     return -1 if idx < 0
                     n: RhJsonNode = nodes[idx.usize()]
                     n.text_start <- t0
@@ -144,7 +146,7 @@ module Json:
 
         # Parse a JSON number at pos. Stores the raw span. Returns idx or -1.
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_json_number(input: darray[u8]&, pos: usize, nodes: mutable darray[RhJsonNode]&, end_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_json_number(input: darray[u8]&, pos: usize, nodes: mutable darray[RhJsonNode]&, end_out: mutable i64&, node_limit: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             end_out[0] <- -1
             i: mutable usize = pos
             if i < input.count and input[i] == 45:
@@ -172,7 +174,7 @@ module Json:
                 while i < input.count |i, input|:
                     break if input[i] < 48 or input[i] > 57
                     i <- i + 1
-            idx: i64 = rh_json_emit(nodes, RH_JSON_NUM)
+            idx: i64 = rh_json_emit(nodes, RH_JSON_NUM, node_limit)
             return -1 if idx < 0
             n: RhJsonNode = nodes[idx.usize()]
             n.text_start <- pos.i64()
@@ -182,14 +184,14 @@ module Json:
             idx
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_json_literal(input: darray[u8]&, pos: usize, word: u8&, kind: u8, nodes: mutable darray[RhJsonNode]&, end_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_json_literal(input: darray[u8]&, pos: usize, word: u8&, kind: u8, nodes: mutable darray[RhJsonNode]&, end_out: mutable i64&, node_limit: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             end_out[0] <- -1
             n: usize = strlen(word)
             return -1 if pos + n > input.count
             while k < n |k: usize = 0, input, pos, word|:
                 return -1 if input[pos + k] != word[k]
                 k <- k + 1
-            idx: i64 = rh_json_emit(nodes, kind)
+            idx: i64 = rh_json_emit(nodes, kind, node_limit)
             return -1 if idx < 0
             node: RhJsonNode = nodes[idx.usize()]
             node.text_start <- pos.i64()
@@ -199,25 +201,25 @@ module Json:
             idx
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_json_value(input: darray[u8]&, pos: usize, depth: i64, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&, end_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_json_value(input: darray[u8]&, pos: usize, depth: i64, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&, end_out: mutable i64&, node_limit: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             end_out[0] <- -1
             return -1 if depth > RH_JSON_MAX_DEPTH
             p: usize = rh_json_skip_ws(input, pos)
             return -1 if p >= input.count
             b: u8 = input[p]
-            return rh_json_object(input, p, depth, nodes, texts, end_out) if b == 123
-            return rh_json_array(input, p, depth, nodes, texts, end_out) if b == 91
-            return rh_json_string(input, p, nodes, texts, end_out) if b == 34
-            return rh_json_literal(input, p, "true", RH_JSON_BOOL, nodes, end_out) if b == 116
-            return rh_json_literal(input, p, "false", RH_JSON_BOOL, nodes, end_out) if b == 102
-            return rh_json_literal(input, p, "null", RH_JSON_NULL, nodes, end_out) if b == 110
-            return rh_json_number(input, p, nodes, end_out) if b == 45 or (b >= 48 and b <= 57)
+            return rh_json_object(input, p, depth, nodes, texts, end_out, node_limit) if b == 123
+            return rh_json_array(input, p, depth, nodes, texts, end_out, node_limit) if b == 91
+            return rh_json_string(input, p, nodes, texts, end_out, node_limit) if b == 34
+            return rh_json_literal(input, p, "true", RH_JSON_BOOL, nodes, end_out, node_limit) if b == 116
+            return rh_json_literal(input, p, "false", RH_JSON_BOOL, nodes, end_out, node_limit) if b == 102
+            return rh_json_literal(input, p, "null", RH_JSON_NULL, nodes, end_out, node_limit) if b == 110
+            return rh_json_number(input, p, nodes, end_out, node_limit) if b == 45 or (b >= 48 and b <= 57)
             -1
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_json_object(input: darray[u8]&, pos: usize, depth: i64, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&, end_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_json_object(input: darray[u8]&, pos: usize, depth: i64, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&, end_out: mutable i64&, node_limit: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             end_out[0] <- -1
-            self_idx: i64 = rh_json_emit(nodes, RH_JSON_OBJ)
+            self_idx: i64 = rh_json_emit(nodes, RH_JSON_OBJ, node_limit)
             return -1 if self_idx < 0
             nodes[self_idx.usize()].text_start <- pos.i64()
             i: mutable usize = rh_json_skip_ws(input, pos + 1)
@@ -229,12 +231,12 @@ module Json:
                 i <- rh_json_skip_ws(input, i)
                 return -1 if i >= input.count or input[i] != 34
                 key_end: mutable i64 = 0
-                key_idx: i64 = rh_json_string(input, i, nodes, texts, &key_end)
+                key_idx: i64 = rh_json_string(input, i, nodes, texts, &key_end, node_limit)
                 return -1 if key_idx < 0
                 i <- rh_json_skip_ws(input, key_end.usize())
                 return -1 if i >= input.count or input[i] != 58
                 val_end: mutable i64 = 0
-                val_idx: i64 = rh_json_value(input, i + 1, depth + 1, nodes, texts, &val_end)
+                val_idx: i64 = rh_json_value(input, i + 1, depth + 1, nodes, texts, &val_end, node_limit)
                 return -1 if val_idx < 0
                 rh_json_link(nodes, self_idx, key_idx)
                 rh_json_link(nodes, self_idx, val_idx)
@@ -251,9 +253,9 @@ module Json:
             -1
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_json_array(input: darray[u8]&, pos: usize, depth: i64, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&, end_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_json_array(input: darray[u8]&, pos: usize, depth: i64, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&, end_out: mutable i64&, node_limit: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             end_out[0] <- -1
-            self_idx: i64 = rh_json_emit(nodes, RH_JSON_ARR)
+            self_idx: i64 = rh_json_emit(nodes, RH_JSON_ARR, node_limit)
             return -1 if self_idx < 0
             nodes[self_idx.usize()].text_start <- pos.i64()
             i: mutable usize = rh_json_skip_ws(input, pos + 1)
@@ -263,7 +265,7 @@ module Json:
                 return self_idx
             while true |i, input, depth, nodes, texts, self_idx|:
                 val_end: mutable i64 = 0
-                val_idx: i64 = rh_json_value(input, i, depth + 1, nodes, texts, &val_end)
+                val_idx: i64 = rh_json_value(input, i, depth + 1, nodes, texts, &val_end, node_limit)
                 return -1 if val_idx < 0
                 rh_json_link(nodes, self_idx, val_idx)
                 i <- rh_json_skip_ws(input, val_end.usize())
@@ -281,13 +283,24 @@ module Json:
         # Parse a whole document. Returns root idx, or -1 on any malformed input
         # (including trailing garbage). Empty/whitespace-only input is malformed.
         def rh_json_parse(input: darray[u8]&, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_json_parse_with_limit(input, nodes, texts, RH_JSON_MAX_NODES)
+
+        # Explicit bounded variant for trusted local workloads with a documented
+        # larger input envelope. Ordinary adapters retain the default 200k cap.
+        def rh_json_parse_large_bounded(input: darray[u8]&, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&, node_limit: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if node_limit <= 0 or node_limit > RH_JSON_MAX_LARGE_NODES
+            rh_json_parse_with_limit(input, nodes, texts, node_limit)
+
+    private:
+        def rh_json_parse_with_limit(input: darray[u8]&, nodes: mutable darray[RhJsonNode]&, texts: mutable darray[u8]&, node_limit: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             fin: mutable i64 = 0
-            root: i64 = rh_json_value(input, 0, 0, nodes, texts, &fin)
+            root: i64 = rh_json_value(input, 0, 0, nodes, texts, &fin, node_limit)
             return -1 if root < 0
             rest: usize = rh_json_skip_ws(input, fin.usize())
             return -1 if rest != input.count
             root
 
+    public:
         # Object member lookup by decoded key bytes. Returns value idx or -1.
         # Children alternate key,value,key,value... (emitted as pairs).
         def rh_json_obj_get(nodes: darray[RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
