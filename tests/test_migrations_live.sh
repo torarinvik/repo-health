@@ -1283,8 +1283,8 @@ BEGIN
     '00000000-0000-0000-0000-000000009002', 'public', 'depends_on', 'outgoing',
     '00000000-0000-0000-0000-000001000001', 10, 1, 10
   );
-  IF walk_result->>'truncated' <> 'false' OR jsonb_array_length(walk_result->'edges') <> 2 THEN
-    RAISE EXCEPTION 'depth-limited projection walk lost its boundary edge: %', walk_result;
+  IF walk_result->>'truncated' <> 'true' OR jsonb_array_length(walk_result->'edges') <> 2 THEN
+    RAISE EXCEPTION 'depth-limited projection walk lost its boundary edge or truncation: %', walk_result;
   END IF;
   SELECT edges, truncated INTO result_edges, result_truncated
   FROM rh_projection_adjacency_batch(

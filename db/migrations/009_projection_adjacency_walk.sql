@@ -99,6 +99,13 @@ BEGIN
         ) AS candidates
         WHERE NOT candidates.entity_id = ANY(v_seen);
 
+        IF v_depth >= p_max_depth AND cardinality(v_candidates) > 0 THEN
+            -- Match the in-memory evaluator: edges beyond the requested depth
+            -- are retained as boundary evidence, and any unseen endpoint
+            -- makes the result explicitly truncated.
+            v_truncated := true;
+        END IF;
+
         v_remaining_nodes := p_max_nodes - (cardinality(v_seen) - 1);
         v_add_limit := greatest(0, v_remaining_nodes) + 1;
         IF cardinality(v_candidates) > v_add_limit THEN
@@ -117,7 +124,9 @@ BEGIN
             END IF;
         END LOOP;
 
-        EXIT WHEN v_batch_truncated OR cardinality(v_seen) - 1 > p_max_nodes;
+        EXIT WHEN v_batch_truncated
+            OR cardinality(v_seen) - 1 > p_max_nodes
+            OR v_depth >= p_max_depth;
         v_frontier := v_next;
         v_depth := v_depth + 1;
     END LOOP;
