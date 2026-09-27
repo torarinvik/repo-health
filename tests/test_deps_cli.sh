@@ -538,11 +538,25 @@ cat > "$T/rubysrc/composer.lock" <<'JSON'
 JSON
 "$ROOT/build/rh_cli" deps --repo "$T/rubysrc" --out "$T/rubyout" \
   | grep -q "ecosystems=2 rubygems=2/2 unresolved=0 unsupported=0 composer=1/4 unresolved=3 unsupported=0" || fail "RubyGems/Composer summary"
-python3 - "$T/rubyout" <<'PY'
+python3 - "$T/rubyout" "$T/rubysrc/Gemfile.lock" "$T/rubysrc/composer.lock" <<'PY'
+import hashlib
 import json, sys
 out = sys.argv[1]
+gemfile_lock, composer_lock = (open(path, "rb").read() for path in sys.argv[2:])
 g = json.load(open(out + "/deps-rubygems-graph.json"))
 c = json.load(open(out + "/deps-composer-graph.json"))
+gem_report = json.load(open(out + "/deps-rubygems-graph.json.transformations.json"))
+composer_report = json.load(open(out + "/deps-composer-graph.json.transformations.json"))
+for report, adapter, source, graph_name, config in (
+    (gem_report, "rubygems-lock-graph", gemfile_lock, "deps-rubygems-graph.json", b"repo-health/gemfile-lock/1;osv=none"),
+    (composer_report, "composer-lock-graph", composer_lock, "deps-composer-graph.json", b"repo-health/composer-lock/1;osv=none"),
+):
+    framed = str(len(source)).encode() + b":" + source + b"0:"
+    assert report["adapter"] == adapter, report
+    assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), report
+    assert report["normalized_output_sha256"] == hashlib.sha256(open(out + "/" + graph_name, "rb").read()).hexdigest(), report
+    assert report["configuration_sha256"] == hashlib.sha256(config).hexdigest(), report
+    assert {field["state"] for field in report["fields"]} >= {"preserved", "transformed", "unknown", "unsupported", "discarded"}, report
 assert [n["name"] for n in g["nodes"]] == ["root", "rack", "json"], g["nodes"]
 assert len(g["edges"]) == 2 and g["unresolved"] == [], g
 assert [n["name"] for n in c["nodes"]] == ["root", "monolog/monolog", "phpunit/phpunit"], c["nodes"]
