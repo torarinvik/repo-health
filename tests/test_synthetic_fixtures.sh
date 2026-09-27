@@ -19,9 +19,10 @@ bash "$ROOT/tools/build.sh" >/dev/null
 CLI="$ROOT/build/rh_cli"
 "$CLI" scan --repo "$T/first/history/repo" --out "$T/history-report" --window-days 36500 >/dev/null || fail "scan generated history"
 "$CLI" snapshot --input "$T/first/graph/input.json" --out "$T/graph-result.json" >/dev/null || fail "snapshot generated graph"
+"$CLI" index --input "$T/first/graph/input.json" --out "$T/graph-index.json" >/dev/null || fail "index generated graph"
 "$CLI" roles --input "$T/first/roles/input.json" --out "$T/roles-result.json" >/dev/null || fail "analyze generated role events"
 
-python3 - "$T/first/expected.json" "$T/history-report/report.json" "$T/graph-result.json" "$T/roles-result.json" <<'PY'
+python3 - "$T/first/expected.json" "$T/history-report/report.json" "$T/graph-result.json" "$T/graph-index.json" "$T/roles-result.json" <<'PY'
 import json, sys
 expected = json.load(open(sys.argv[1]))
 report = json.load(open(sys.argv[2]))
@@ -32,13 +33,23 @@ assert metrics["activity.active_months"]["value"] == expected["history"]["active
 
 graph = json.load(open(sys.argv[3]))
 assert graph["row_counts"] == {"nodes": expected["graph"]["nodes"], "edges": expected["graph"]["edges"]}, graph
+index = json.load(open(sys.argv[4]))
+assert index["degree_summary"] == {
+    "max_out": expected["graph"]["max_out_degree"],
+    "max_out_node": 0,
+    "max_in": expected["graph"]["max_in_degree"],
+    "max_in_node": expected["graph"]["max_in_node"],
+}, index
 
-roles = json.load(open(sys.argv[4]))
+roles = json.load(open(sys.argv[5]))
 assert roles["declaration_count"] == expected["roles"]["declarations"], roles
 assert roles["role_tally"]["owner"] == expected["roles"]["owners"], roles
 assert roles["role_tally"]["member"] == expected["roles"]["members"], roles
+assert roles["role_tally"]["maintainer"] == expected["roles"]["maintainers"], roles
 assert roles["action_events_by_actor_type"]["release"]["human"] == expected["roles"]["release_events"], roles
 assert roles["action_events_by_actor_type"]["review"]["human"] == expected["roles"]["review_events"], roles
+assert [query["declared_role"] for query in roles["queries"][:2]] == expected["roles"]["effective_boundary"], roles
+assert [query["declared_role"] for query in roles["queries"][2:]] == expected["roles"]["revocation_boundary"], roles
 print("[synthetic] history, graph, role events match independent expectations")
 PY
 

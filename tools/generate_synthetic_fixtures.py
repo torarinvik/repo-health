@@ -84,12 +84,19 @@ def generate_roles(root: Path) -> None:
         "declarations": [
             {"actor_id": 101, "role": "owner", "permission": 1, "source": "provider", "declared_at": 100},
             {"actor_id": 102, "role": "member", "permission": 4, "source": "file", "declared_at": 110},
+            {"actor_id": 103, "role": "maintainer", "permission": 2, "source": "operator", "declared_at": 90, "revoked_at": 150},
         ],
         "observed_actions": [
             {"actor_id": 101, "actor_type": "human", "kind": "release", "at": 120},
+            {"actor_id": 103, "actor_type": "human", "kind": "release", "at": 149},
             {"actor_id": 102, "actor_type": "human", "kind": "review", "at": 130},
         ],
-        "queries": [],
+        "queries": [
+            {"actor_id": 101, "as_of": 99},
+            {"actor_id": 101, "as_of": 100},
+            {"actor_id": 103, "as_of": 149},
+            {"actor_id": 103, "as_of": 150},
+        ],
         "permission_queries": [],
     }
     write_json(root / "roles" / "input.json", roles)
@@ -103,8 +110,25 @@ def generate(root: Path) -> None:
     # These are independent expected results, intentionally literal.
     write_json(root / "expected.json", {
         "history": {"commits": 3, "distinct_authors": 2, "active_months": 3},
-        "graph": {"nodes": 5, "edges": 6, "diamond_join_node": 3, "cycle_edges": 1},
-        "roles": {"declarations": 2, "owners": 1, "members": 1, "release_events": 1, "review_events": 1},
+        "graph": {
+            "nodes": 5,
+            "edges": 6,
+            "diamond_join_node": 3,
+            "cycle_edges": 1,
+            "max_out_degree": 2,
+            "max_in_degree": 3,
+            "max_in_node": 3,
+        },
+        "roles": {
+            "declarations": 3,
+            "owners": 1,
+            "members": 1,
+            "maintainers": 1,
+            "release_events": 2,
+            "review_events": 1,
+            "effective_boundary": ["unknown", "owner"],
+            "revocation_boundary": ["maintainer", "unknown"],
+        },
     })
 
 
