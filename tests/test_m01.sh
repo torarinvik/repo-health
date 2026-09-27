@@ -77,6 +77,13 @@ assert m["coverage.lineage_complete_share"]["value"] == {"num": 1, "den": 1}, m
 assert m["documentation.readme_present"]["value"] is False, m
 assert m["documentation.contributing_guide_present"]["value"] is False, m
 assert m["licensing.license_declaration_present"]["value"] is False, m
+expected_quality = {
+    "completeness":"complete", "freshness":"unknown",
+    "validity":"valid", "provenance":"evidence_backed",
+}
+for key in ("history.commit_count", "history.first_author_time", "history.coverage_state",
+            "documentation.readme_present", "code.source_file_count", "coverage.lineage_complete_share"):
+    assert m[key]["quality_dimensions"] == expected_quality, (key, m[key])
 assert m["activity.weekly_count_slope"]["status"] in ("observed", "not_applicable"), m
 assert m["activity.weekly_count_variance"]["status"] in ("observed", "not_applicable"), m
 assert len(d["metrics"]) == 61, d
@@ -116,7 +123,11 @@ python3 - "$T/rep-docs/report.json" "$T/rep-docs/evidence/git-files.txt" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
-assert m["documentation.readme_present"] == {"key":"documentation.readme_present","version":"1.0.0","status":"observed","value":True,"evidence":["evidence/git-files.txt"]}, m
+assert m["documentation.readme_present"] == {
+    "key":"documentation.readme_present","version":"1.0.0","status":"observed","value":True,
+    "quality_dimensions":{"completeness":"complete","freshness":"unknown","validity":"valid","provenance":"evidence_backed"},
+    "evidence":["evidence/git-files.txt"]
+}, m
 assert m["documentation.contributing_guide_present"]["value"] is True, m
 assert m["licensing.license_declaration_present"]["value"] is True, m
 assert m["documentation.installation_guide_present"]["value"] is True, m
@@ -134,7 +145,11 @@ assert m["code.source_file_count"]["value"] == 2, m
 assert m["build.ci_configuration_present"]["value"] is True, m
 assert m["testing.test_files_observed"]["value"] == 1, m
 assert m["code.source_bytes"]["value"] == 10, m
-assert m["history.missing_object_count"] == {"key":"history.missing_object_count","version":"1.0.0","status":"observed","value":0,"evidence":["evidence/git-files.txt"]}, m
+assert m["history.missing_object_count"] == {
+    "key":"history.missing_object_count","version":"1.0.0","status":"observed","value":0,
+    "quality_dimensions":{"completeness":"complete","freshness":"unknown","validity":"valid","provenance":"evidence_backed"},
+    "evidence":["evidence/git-files.txt"]
+}, m
 assert b"\tREADME.md\0" in open(sys.argv[2], "rb").read(), "retained long-tree evidence missing README"
 print("[m01] snapshot file classification OK")
 PY
