@@ -70,7 +70,8 @@ ecosystem = [r for r in a["runs"] if r["stage"] == "ecosystem"]
 assert len(ecosystem) == 1, a
 fields = dict(token.split("=", 1) for token in ecosystem[0]["output"].split() if "=" in token)
 assert fields["versions"] == "1000" and fields["packages"] == "500", fields
-assert fields["corrections"] == "32" and fields["superseded"] == "64", fields
+assert fields["corrections"] == "32" and fields["superseded"] == "128", fields
+assert fields["history_revisions"] == "4", fields
 print("[profile-bench] stage manifest + deterministic digests OK")
 PY
 

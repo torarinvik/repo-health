@@ -71,9 +71,11 @@ and dependency edges with scope, platform, introduction, removal, and first
 observation fields. Its timed stage runs valid-time and known-time projections,
 a runtime/Linux projection, mirror-family grouping, per-metric coverage, and
 the correction engine's accepted-correction invalidation and replay path. The
-current 1,000-node fixture includes 32 accepted corrections and invalidates 64
-derived records. These are controlled synthetic inputs, not claims about real
-ecosystem distributions or a production correction history.
+current 1,000-node fixture includes four historical derived revisions per
+subject. Its 32 accepted corrections invalidate 128 derived records from those
+historical revisions and replay the corrected values. These are controlled
+synthetic inputs, not claims about real ecosystem distributions or a production
+correction history.
 
 These workloads measure graph construction, reverse traversal on bounded
 cases, indegree concentration, and the ecosystem projection operations listed

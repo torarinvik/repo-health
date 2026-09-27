@@ -84,7 +84,8 @@ for r in a["runs"]:
         assert 0 < int(fields["historical_edges"]) <= int(fields["edges"]), fields
         assert 0 < int(fields["current_edges"]) <= int(fields["edges"]), fields
         assert 0 < int(fields["runtime_linux_edges"]) <= int(fields["current_edges"]), fields
-        assert fields["corrections"] == "32" and fields["superseded"] == "64", fields
+        assert fields["corrections"] == "32" and fields["superseded"] == "128", fields
+        assert fields["history_revisions"] == "4", fields
         assert int(fields["replay_sum"]) > 0, fields
 print("[bench] manifest OK:", len(a["runs"]), "runs")
 PY
