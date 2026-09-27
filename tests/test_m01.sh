@@ -44,6 +44,13 @@ assert m["history.commit_count"]["value"] == 0, m
 assert m["contributors.raw_identity_count"]["value"] == 0, m
 assert m["freshness.evidence_max_age_hours"]["status"] == "unavailable", m
 assert "value" not in m["freshness.evidence_max_age_hours"], "unknown must carry no value"
+default_revisions = m["history.revisions_reachable_default"]
+assert default_revisions["status"] == "observed" and default_revisions["value"] == 0, default_revisions
+assert default_revisions["evidence"] == ["evidence/git-default-count.txt"], default_revisions
+assert default_revisions["quality_dimensions"] == {
+    "completeness":"complete", "freshness":"unknown",
+    "validity":"valid", "provenance":"evidence_backed",
+}, default_revisions
 print("[m01] F001 empty OK")
 EOF
 
@@ -66,6 +73,10 @@ m = {x["key"]: x for x in d["metrics"]}
 assert m["history.commit_count"]["value"] == 3, m
 assert m["history.reachable_revisions"]["value"] == 3, m
 assert m["history.revisions_reachable_default"]["value"] == 3, m
+assert m["history.revisions_reachable_default"]["quality_dimensions"] == {
+    "completeness":"complete", "freshness":"unknown",
+    "validity":"valid", "provenance":"evidence_backed",
+}, m["history.revisions_reachable_default"]
 assert m["history.collection_complete_windows"]["value"] == {"complete": 1, "requested": 1}, m
 assert m["history.collection_complete_windows"]["quality_dimensions"] == {
     "completeness":"complete", "freshness":"unknown",
@@ -338,6 +349,11 @@ d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
 assert m["history.missing_object_count"]["status"] == "partial", m
 assert m["history.missing_object_count"]["value"] == 1, m
+assert m["history.missing_object_count"]["reason"] == "blob-size-unavailable", m
+assert m["history.missing_object_count"]["quality_dimensions"] == {
+    "completeness":"partial", "freshness":"unknown",
+    "validity":"valid", "provenance":"evidence_backed",
+}, m["history.missing_object_count"]
 print("[m01] missing-object partial state OK")
 EOF
 "$CLI" scan --repo "$T/fix2" --out "$T/rep-nopart" --window-days 36500 >/dev/null || fail "nopart scan"
