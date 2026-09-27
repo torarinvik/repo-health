@@ -266,11 +266,20 @@ output = json.loads(output_path.read_bytes())
 assert report["schema"] == "rh-adapter-transformation-report/1", report
 assert report["adapter"] == "local-artifact-byte-observation", report
 assert report["output_schema"] == "rh-go-zip-observation-result/1", report
+assert report["normalizer_version"] == "1.0.0", report
 assert report["source_input_sha256"] == hashlib.sha256(graph_path.read_bytes()).hexdigest(), report
 assert report["source_artifact_sha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/local-artifact-byte-observation/1").hexdigest(), report
 assert report["normalized_output_sha256"] == hashlib.sha256(output_path.read_bytes()).hexdigest(), report
 assert output["verification_basis"] == "go_h1_zip_contents", output
-assert {field["state"] for field in report["fields"]} >= {"preserved", "transformed", "discarded", "unsupported"}, report
+assert [(field["source"], field["target"], field["state"]) for field in report["fields"]] == [
+    ("graph-local artifact id and package node", "observation.artifact_id|package_node", "preserved"),
+    ("lockfile expected integrity", "observation.expected_digest", "preserved"),
+    ("local artifact bytes", "observation.observed_digest", "transformed"),
+    ("expected and observed integrity comparison", "observation.identity_state", "transformed"),
+    ("archive entries and local filesystem path", "published observation", "discarded"),
+    ("provider metadata outside the artifact record", "observation result", "unsupported"),
+], report
 PY
 python3 - "$T" <<'PY'
 import base64, hashlib, pathlib, struct, warnings, zipfile, sys
