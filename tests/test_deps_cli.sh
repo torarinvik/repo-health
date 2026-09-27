@@ -362,6 +362,9 @@ python = "^3.11"
 requests = ">=2.31,<3.0"
 conditional = "^1.0"
 
+[tool.poetry.group.dev]
+optional = true
+
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
 EOF
@@ -421,7 +424,7 @@ assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), repo
 assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/python-pyproject/1;poetry-lock=present;osv=none").hexdigest(), report
 nodes = graph["nodes"]
 assert [n["name"] for n in nodes] == ["root", "requests", "urllib3", "pytest", "conditional"], nodes
-assert {(e["from"], e["to"], e["scope"]) for e in graph["edges"]} == {(0, 1, "normal"), (1, 2, "normal"), (1, 2, "dev"), (0, 3, "dev")}, graph["edges"]
+assert {(e["from"], e["to"], e["scope"], e.get("optional", False)) for e in graph["edges"]} == {(0, 1, "normal", False), (1, 2, "normal", False), (1, 2, "dev", False), (0, 3, "dev", True)}, graph["edges"]
 assert nodes[4]["requires_python"] == ">=3.10", nodes[4]
 assert len(graph["artifacts"]) == 2, graph["artifacts"]
 assert {a["expected_digest"] for a in graph["artifacts"]} == {"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"}, graph["artifacts"]
