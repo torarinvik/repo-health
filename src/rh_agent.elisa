@@ -1,0 +1,196 @@
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_inventory.elisa"
+include "./rh_sha256.elisa"
+
+module Agent:
+    private:
+        const RH_AGENT_MATCH_LIMIT: i64 = 64
+
+        def rh_agent_span_eq(a: darray[u8]&, start: i64, end: i64, b: darray[u8]&, b_start: i64, b_end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_span(a, start, end, b, b_start, b_end)
+
+        def rh_agent_json_string(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            Base::rh_json_escape(out, texts, start, end)
+            out.push(34)
+
+        def rh_agent_query_text(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, key), start_out, end_out)
+
+        def rh_agent_query_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_agent_exact_version(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < end |i: i64 = start, texts|:
+                b: u8 = texts[i.usize()]
+                return false if b == 32 or b == 9 or b == 10 or b == 13 or b == 42 or b == 94 or b == 60 or b == 62 or b == 61 or b == 126 or b == 124 or b == 44
+                i <- i + 1
+            true
+
+        def rh_agent_graph_match(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, item: i64, name_start: i64, name_end: i64, name_texts: darray[u8]&, version_start: i64, version_end: i64, version_texts: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            name_s: mutable i64 = -1
+            name_e: mutable i64 = -1
+            version_s: mutable i64 = -1
+            version_e: mutable i64 = -1
+            return false if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, item, "name"), &name_s, &name_e)
+            return false if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, item, "version"), &version_s, &version_e)
+            return false if not rh_agent_span_eq(texts, name_s, name_e, name_texts, name_start, name_end)
+            rh_agent_span_eq(texts, version_s, version_e, version_texts, version_start, version_end)
+
+        def rh_agent_dependency_result(raw: darray[u8]&, query_texts: darray[u8]&, eco_start: i64, eco_end: i64, name_start: i64, name_end: i64, version_start: i64, version_end: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            schema_s: mutable i64 = -1
+            schema_e: mutable i64 = -1
+            return -1 if not rh_agent_query_text(nodes, texts, root, "schema", &schema_s, &schema_e) or not rh_agent_query_eq(texts, schema_s, schema_e, "rh-dep-graph/1")
+            ecosystem_s: mutable i64 = -1
+            ecosystem_e: mutable i64 = -1
+            return -1 if not rh_agent_query_text(nodes, texts, root, "ecosystem", &ecosystem_s, &ecosystem_e)
+            return -1 if not rh_agent_span_eq(texts, ecosystem_s, ecosystem_e, query_texts, eco_start, eco_end)
+            items_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "nodes")
+            return -1 if items_idx < 0 or nodes[items_idx.usize()].kind != Json::RH_JSON_ARR
+            items: Json::RhJsonNode = nodes[items_idx.usize()]
+            total: mutable i64 = 0
+            while item >= 0 |item: i64 = items.first_child, nodes, texts, query_texts, name_start, name_end, version_start, version_end|:
+                if rh_agent_graph_match(nodes, texts, item, name_start, name_end, query_texts, version_start, version_end, query_texts):
+                    total <- total + 1
+                item <- nodes[item.usize()].next_sibling
+            Base::rh_push_text(out, "\"matches\":[")
+            while item >= 0 |item: i64 = items.first_child, index: i64 = 0, emitted: i64 = 0, nodes, texts, query_texts, name_start, name_end, version_start, version_end, out|:
+                if emitted < RH_AGENT_MATCH_LIMIT and rh_agent_graph_match(nodes, texts, item, name_start, name_end, query_texts, version_start, version_end, query_texts):
+                    if emitted > 0:
+                        out.push(44)
+                    Base::rh_push_text(out, "{\"node_index\":")
+                    Base::rh_push_decimal_i64(out, index)
+                    Base::rh_push_text(out, ",\"name\":")
+                    match_name_s: mutable i64 = -1
+                    match_name_e: mutable i64 = -1
+                    match_version_s: mutable i64 = -1
+                    match_version_e: mutable i64 = -1
+                    _ = Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, item, "name"), &match_name_s, &match_name_e)
+                    _ = Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, item, "version"), &match_version_s, &match_version_e)
+                    rh_agent_json_string(out, texts, match_name_s, match_name_e)
+                    Base::rh_push_text(out, ",\"version\":")
+                    rh_agent_json_string(out, texts, match_version_s, match_version_e)
+                    Base::rh_push_text(out, "}")
+                    emitted <- emitted + 1
+                index <- index + 1
+                item <- nodes[item.usize()].next_sibling
+            Base::rh_push_text(out, "],\"match_count\":")
+            Base::rh_push_decimal_i64(out, total)
+            Base::rh_push_text(out, ",\"matches_truncated\":")
+            Base::rh_push_text(out, "true" if total > RH_AGENT_MATCH_LIMIT else "false")
+            Base::rh_push_text(out, ",\"status\":\"")
+            Base::rh_push_text(out, "found_in_snapshot" if total > 0 else "not_found_in_snapshot")
+            out.push(34)
+            0
+
+        def rh_agent_inventory_result(raw: darray[u8]&, query_texts: darray[u8]&, name_start: i64, name_end: i64, version_start: i64, version_end: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            pool: mutable darray[u8] = []
+            components: mutable darray[Inventory::RhBomComponent] = []
+            compositions: mutable darray[Inventory::RhBomComposition] = []
+            bom: mutable Inventory::RhBom = Inventory::RhBom{ok: 0, spec_unsupported: 0, component_count: 0, invalid_components: 0, with_purl: 0, with_hash: 0, digest_known: 0, unknown_top_keys: 0, dependency_composition_count: 0, dependency_complete_count: 0, dependency_incomplete_count: 0, dependency_unknown_count: 0, dependency_not_specified_count: 0}
+            return -1 if Inventory::rh_bom_parse(raw, pool, components, compositions, &bom) != 0
+            total: mutable i64 = 0
+            while i < components.count |i: usize = 0, components, pool, query_texts, name_start, name_end, version_start, version_end|:
+                c: Inventory::RhBomComponent = components[i]
+                if rh_agent_span_eq(pool, c.name_s, c.name_e, query_texts, name_start, name_end) and rh_agent_span_eq(pool, c.version_s, c.version_e, query_texts, version_start, version_end):
+                    total <- total + 1
+                i <- i + 1
+            Base::rh_push_text(out, "\"matches\":[")
+            while i < components.count |i: usize = 0, emitted: i64 = 0, components, pool, query_texts, name_start, name_end, version_start, version_end, out|:
+                c: Inventory::RhBomComponent = components[i]
+                if emitted < RH_AGENT_MATCH_LIMIT and rh_agent_span_eq(pool, c.name_s, c.name_e, query_texts, name_start, name_end) and rh_agent_span_eq(pool, c.version_s, c.version_e, query_texts, version_start, version_end):
+                    if emitted > 0:
+                        out.push(44)
+                    Base::rh_push_text(out, "{\"component_index\":")
+                    Base::rh_push_decimal_i64(out, i.i64())
+                    Base::rh_push_text(out, ",\"type\":")
+                    if c.type_s < 0:
+                        Base::rh_push_text(out, "null")
+                    else:
+                        out.push(34)
+                        Base::rh_json_escape(out, pool, c.type_s, c.type_e)
+                        out.push(34)
+                    Base::rh_push_text(out, ",\"name\":")
+                    out.push(34)
+                    Base::rh_json_escape(out, pool, c.name_s, c.name_e)
+                    out.push(34)
+                    Base::rh_push_text(out, ",\"version\":")
+                    out.push(34)
+                    Base::rh_json_escape(out, pool, c.version_s, c.version_e)
+                    out.push(34)
+                    Base::rh_push_text(out, ",\"purl\":")
+                    if c.purl_s < 0:
+                        Base::rh_push_text(out, "null")
+                    else:
+                        out.push(34)
+                        Base::rh_json_escape(out, pool, c.purl_s, c.purl_e)
+                        out.push(34)
+                    Base::rh_push_text(out, ",\"hash_count\":")
+                    Base::rh_push_decimal_i64(out, c.hash_count)
+                    Base::rh_push_text(out, ",\"valid_sha256\":")
+                    Base::rh_push_decimal_i64(out, c.valid_sha256)
+                    out.push(125)
+                    emitted <- emitted + 1
+                i <- i + 1
+            Base::rh_push_text(out, "],\"match_count\":")
+            Base::rh_push_decimal_i64(out, total)
+            Base::rh_push_text(out, ",\"matches_truncated\":")
+            Base::rh_push_text(out, "true" if total > RH_AGENT_MATCH_LIMIT else "false")
+            if bom.spec_unsupported != 0:
+                Base::rh_push_text(out, ",\"status\":\"unsupported_inventory_schema\"")
+            else:
+                Base::rh_push_text(out, ",\"status\":\"")
+                Base::rh_push_text(out, "found_in_snapshot" if total > 0 else "not_found_in_snapshot")
+                out.push(34)
+            0
+
+    public:
+        def rh_agent_check(query_raw: darray[u8]&, source_raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            qnodes: mutable darray[Json::RhJsonNode] = []
+            qtexts: mutable darray[u8] = []
+            qroot: i64 = Json::rh_json_parse(query_raw, qnodes, qtexts)
+            return -1 if qroot < 0 or qnodes[qroot.usize()].kind != Json::RH_JSON_OBJ
+            schema_s: mutable i64 = -1
+            schema_e: mutable i64 = -1
+            kind_s: mutable i64 = -1
+            kind_e: mutable i64 = -1
+            name_s: mutable i64 = -1
+            name_e: mutable i64 = -1
+            version_s: mutable i64 = -1
+            version_e: mutable i64 = -1
+            return -1 if not rh_agent_query_text(qnodes, qtexts, qroot, "schema", &schema_s, &schema_e) or not rh_agent_query_eq(qtexts, schema_s, schema_e, "rh-agent-query/1")
+            return -1 if not rh_agent_query_text(qnodes, qtexts, qroot, "source_kind", &kind_s, &kind_e)
+            return -1 if not rh_agent_query_text(qnodes, qtexts, qroot, "name", &name_s, &name_e) or name_e <= name_s or name_e - name_s > 512
+            return -1 if not rh_agent_query_text(qnodes, qtexts, qroot, "version", &version_s, &version_e) or version_e <= version_s or version_e - version_s > 256
+            return -1 if not rh_agent_exact_version(qtexts, version_s, version_e)
+            source_digest: mutable darray[u8] = []
+            Sha256::rh_sha256(source_raw, source_digest)
+            Base::rh_push_text(out, "{\"schema\":\"rh-agent-check-result/1\",\"source_sha256\":\"")
+            out.extend(bytes_view(source_digest))
+            Base::rh_push_text(out, "\",\"query\":{\"source_kind\":")
+            rh_agent_json_string(out, qtexts, kind_s, kind_e)
+            Base::rh_push_text(out, ",\"name\":")
+            rh_agent_json_string(out, qtexts, name_s, name_e)
+            Base::rh_push_text(out, ",\"version\":")
+            rh_agent_json_string(out, qtexts, version_s, version_e)
+            out.push(125)
+            Base::rh_push_text(out, ",")
+            if rh_agent_query_eq(qtexts, kind_s, kind_e, "dependency_graph"):
+                ecosystem_s: mutable i64 = -1
+                ecosystem_e: mutable i64 = -1
+                return -1 if not rh_agent_query_text(qnodes, qtexts, qroot, "ecosystem", &ecosystem_s, &ecosystem_e) or ecosystem_e <= ecosystem_s or ecosystem_e - ecosystem_s > 64
+                Base::rh_push_text(out, "\"ecosystem\":")
+                rh_agent_json_string(out, qtexts, ecosystem_s, ecosystem_e)
+                out.push(44)
+                return -1 if rh_agent_dependency_result(source_raw, qtexts, ecosystem_s, ecosystem_e, name_s, name_e, version_s, version_e, out) != 0
+            elif rh_agent_query_eq(qtexts, kind_s, kind_e, "cyclonedx"):
+                return -1 if rh_agent_inventory_result(source_raw, qtexts, name_s, name_e, version_s, version_e, out) != 0
+            else:
+                return -1
+            Base::rh_push_text(out, ",\"interpretation\":\"Exact records in the supplied snapshot only; this is not a policy decision. Repository prose and unknown fields do not affect the result.\"}")
+            0

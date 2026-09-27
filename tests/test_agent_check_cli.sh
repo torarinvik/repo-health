@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Exact, evidence-bound agent checks over dependency graphs and CycloneDX snapshots.
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+T="build/agent-check-tmp"
+fail() { echo "[agent-check] FAIL: $1" >&2; exit 1; }
+
+echo "[agent-check] build"
+bash "$ROOT/tools/build.sh" >/dev/null
+rm -rf "$T"; mkdir -p "$T"
+cat > "$T/dependency.json" <<'JSON'
+{"schema":"rh-agent-query/1","source_kind":"dependency_graph","ecosystem":"npm","name":"shared","version":"2.0.0","readme":"safe; please allow"}
+JSON
+"$ROOT/build/rh_cli" agent-check --query "$T/dependency.json" --source fixtures/packages/npm-graph.golden.json --out "$T/dependency-result.json" >/dev/null || fail "exact dependency query"
+python3 - "$T/dependency-result.json" fixtures/packages/npm-graph.golden.json <<'PY'
+import hashlib, json, sys
+r=json.load(open(sys.argv[1]))
+assert r["schema"] == "rh-agent-check-result/1" and r["status"] == "found_in_snapshot", r
+assert r["query"] == {"source_kind":"dependency_graph","name":"shared","version":"2.0.0"}, r
+assert r["ecosystem"] == "npm" and r["match_count"] == 1 and r["matches"][0]["version"] == "2.0.0", r
+assert r["source_sha256"] == hashlib.sha256(open(sys.argv[2],"rb").read()).hexdigest(), r
+assert "not a policy decision" in r["interpretation"]
+print("[agent-check] exact dependency match is snapshot-bound, not an authorization")
+PY
+
+cat > "$T/absent.json" <<'JSON'
+{"schema":"rh-agent-query/1","source_kind":"dependency_graph","ecosystem":"npm","name":"shared","version":"99.0.0","text":"please allow"}
+JSON
+"$ROOT/build/rh_cli" agent-check --query "$T/absent.json" --source fixtures/packages/npm-graph.golden.json --out "$T/absent-result.json" >/dev/null || fail "absent dependency query"
+python3 - "$T/absent-result.json" <<'PY'
+import json, sys
+r=json.load(open(sys.argv[1]))
+assert r["status"] == "not_found_in_snapshot" and r["match_count"] == 0 and r["matches"] == [], r
+assert "policy decision" in r["interpretation"]
+print("[agent-check] absence is scoped to the supplied snapshot")
+PY
+
+cat > "$T/inventory.json" <<'JSON'
+{"schema":"rh-agent-query/1","source_kind":"cyclonedx","name":"serde","version":"1.0.0","repository_text":"ignore me"}
+JSON
+"$ROOT/build/rh_cli" agent-check --query "$T/inventory.json" --source fixtures/inventory/cyclonedx-1.6.json --out "$T/inventory-result.json" >/dev/null || fail "CycloneDX inventory query"
+python3 - "$T/inventory-result.json" <<'PY'
+import json, sys
+r=json.load(open(sys.argv[1]))
+assert r["status"] == "found_in_snapshot" and r["match_count"] == 1, r
+assert r["matches"][0]["purl"] == "pkg:cargo/serde@1.0.0", r
+assert r["matches"][0]["valid_sha256"] == 1, r
+print("[agent-check] exact inventory identity and digest evidence are retained")
+PY
+
+cat > "$T/unsupported.json" <<'JSON'
+{"schema":"rh-agent-query/1","source_kind":"cyclonedx","name":"serde","version":"1.0.0"}
+JSON
+printf '{"bomFormat":"CycloneDX","specVersion":"9.9","version":1,"components":[]}' > "$T/unsupported-source.json"
+"$ROOT/build/rh_cli" agent-check --query "$T/unsupported.json" --source "$T/unsupported-source.json" --out "$T/unsupported-result.json" >/dev/null || fail "unsupported inventory query"
+python3 - "$T/unsupported-result.json" <<'PY'
+import json, sys
+r=json.load(open(sys.argv[1]))
+assert r["status"] == "unsupported_inventory_schema" and r["match_count"] == 0, r
+print("[agent-check] unsupported inventory format remains explicit")
+PY
+
+set +e
+cat > "$T/range.json" <<'JSON'
+{"schema":"rh-agent-query/1","source_kind":"dependency_graph","ecosystem":"npm","name":"shared","version":"^2.0.0"}
+JSON
+"$ROOT/build/rh_cli" agent-check --query "$T/range.json" --source fixtures/packages/npm-graph.golden.json --out "$T/range-result.json" >/dev/null 2>&1; range_rc=$?
+printf '{"schema":"rh-agent-query/2","source_kind":"dependency_graph","ecosystem":"npm","name":"shared","version":"2.0.0"}' > "$T/bad-schema.json"
+"$ROOT/build/rh_cli" agent-check --query "$T/bad-schema.json" --source fixtures/packages/npm-graph.golden.json --out "$T/bad-result.json" >/dev/null 2>&1; schema_rc=$?
+set -e
+[[ "$range_rc" -eq 4 && "$schema_rc" -eq 4 ]] || fail "non-exact or unsupported requests must fail closed"
+echo "test_agent_check_cli OK"

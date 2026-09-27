@@ -72,6 +72,7 @@ include "./rh_job.elisa"
 include "./rh_reconcile.elisa"
 include "./rh_worker.elisa"
 include "./rh_inventory_report.elisa"
+include "./rh_agent.elisa"
 include "./rh_inventory_transformation.elisa"
 include "./rh_vcs_report.elisa"
 include "./rh_vcs_transformation.elisa"
@@ -200,6 +201,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli snapshot-reconcile --input <rh-snapshot-reconcile-input/1> --out <file>")
     rh_cli_err("       rh_cli worker tick --input <file> --out <file>")
     rh_cli_err("       rh_cli inventory --format cyclonedx|spdx (--input <file> | --url <https-or-file-url>) --out <file>")
+    rh_cli_err("       rh_cli agent-check --query <rh-agent-query/1> --source <graph|CycloneDX> --out <file>")
     rh_cli_err("       rh_cli vcs --format hg|svn|fossil|patch --input <file> --out <file>")
     rh_cli_err("       rh_cli vcs --format hg|svn|fossil --repo <path> --out <file>")
     rh_cli_err("       rh_cli notify --input <file> --out <file> [--state <file> | --state-store <dir>]")
@@ -2663,6 +2665,33 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 eq <- eq + 1
         return rh_cli_usage(2) if ei_idx < 0 or eo_idx < 0
         return rh_do_explain(slots[ei_idx], slots[eo_idx])
+    if Base::rh_streq(cmd, "agent-check"):
+        aq_idx, as_idx, ao_idx =
+            while aiq < argc |aq_idx: i64 = -1, as_idx: i64 = -1, ao_idx: i64 = -1, aiq: i64 = 2, slots| -> aq_idx, as_idx, ao_idx:
+                aa: u8& = slots[aiq].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(aa, "--query"):
+                    if aiq + 1 < argc:
+                        aiq <- aiq + 1
+                        aq_idx <- aiq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(aa, "--source"):
+                    if aiq + 1 < argc:
+                        aiq <- aiq + 1
+                        as_idx <- aiq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(aa, "--out"):
+                    if aiq + 1 < argc:
+                        aiq <- aiq + 1
+                        ao_idx <- aiq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                aiq <- aiq + 1
+        return rh_cli_usage(2) if aq_idx < 0 or as_idx < 0 or ao_idx < 0
+        return rh_do_agent_check(slots[aq_idx], slots[as_idx], slots[ao_idx])
     if Base::rh_streq(cmd, "proof"):
         pi_idx, po_idx =
             while ppq < argc |pi_idx: i64 = -1, po_idx: i64 = -1, ppq: i64 = 2, slots| -> pi_idx, po_idx:
@@ -9356,6 +9385,26 @@ def rh_do_explain(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, 
         rh_cli_err("explain: cannot write --out")
         return 4
     rh_cli_out("explain: ok")
+    0
+
+def rh_do_agent_check(query_path: cstr, source_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(query_path) or not Git::rh_arg_safe(source_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected agent-check path (allowlist)")
+        return 3
+    query_raw: mutable darray[u8] = []
+    source_raw: mutable darray[u8] = []
+    if Base::rh_io_read(query_path, query_raw) < 0 or Base::rh_io_read(source_path, source_raw) < 0:
+        rh_cli_err("agent-check: cannot read query or source snapshot")
+        return 4
+    result: mutable darray[u8] = []
+    if Agent::rh_agent_check(query_raw, source_raw, result) != 0:
+        rh_cli_err("agent-check: malformed query or unsupported source snapshot (fail closed)")
+        return 4
+    result.push(10)
+    if not Base::rh_io_write(out_path, result):
+        rh_cli_err("agent-check: cannot write result")
+        return 4
+    rh_cli_out("agent-check: exact snapshot lookup complete; no policy decision made")
     0
 
 # --- M11 formal-proof evidence adapter. ---
