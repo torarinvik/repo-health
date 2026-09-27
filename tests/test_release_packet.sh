@@ -73,7 +73,7 @@ echo "[packet] markdown OK"
 echo "[packet] signing round-trip (M07-04)"
 [[ -x "$ROOT/build/rh_cli" ]] || bash "$ROOT/tools/build.sh" >/dev/null
 key="$tmp/key"
-printf 'test-key-material\n' > "$key"
+printf '0123456789abcdef0123456789abcdef\n' > "$key"
 RH_SIGNING_KEY_FILE="$key" bash "$ROOT/tools/release-packet.sh" "$tmp" test-label >/dev/null 2>&1
 [[ -f "$tmp/release-packet.sig" ]] || fail "signed packet missing signature file"
 vsig="$("$ROOT/build/rh_cli" verify --key "$key" --subject "$tmp/release-packet.json" --sig "$tmp/release-packet.sig")" \
