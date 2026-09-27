@@ -583,11 +583,18 @@ cat > "$T/nugetsrc/packages.config" <<'EOF'
 EOF
 "$ROOT/build/rh_cli" deps --repo "$T/nugetsrc" --out "$T/nugetout" \
   | grep -q "ecosystems=1 nuget=2/3 unresolved=1 unsupported=1" || fail "NuGet summary"
-python3 - "$T/nugetout" <<'PY'
-import json, sys
+python3 - "$T/nugetout" "$T/nugetsrc/packages.config" <<'PY'
+import hashlib, json, sys
 out = sys.argv[1]
+source = open(sys.argv[2], "rb").read()
 g = json.load(open(out + "/deps-nuget-graph.json"))
 m = json.load(open(out + "/deps-metrics.json"))
+report = json.load(open(out + "/deps-nuget-graph.json.transformations.json"))
+assert report["adapter"] == "nuget-dependency-graph", report
+assert report["source_input_sha256"] == hashlib.sha256(str(len(source)).encode() + b":" + source + b"0:").hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(open(out + "/deps-nuget-graph.json", "rb").read()).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/nuget-deps/1;parser=packages-config;osv=none").hexdigest(), report
+assert {field["state"] for field in report["fields"]} >= {"preserved", "transformed", "unknown", "unsupported", "discarded"}, report
 assert g["ecosystem"] == "nuget", g["ecosystem"]
 assert [n["name"] for n in g["nodes"]] == ["root", "Newtonsoft.Json", "NUnit"], g["nodes"]
 assert [(e["to"], e["scope"]) for e in g["edges"]] == [(1, "normal"), (2, "dev")], g["edges"]
@@ -613,11 +620,15 @@ cp "$ROOT/fixtures/packages/nuget-packages.lock.json" "$T/nuget-lock-src/package
 "$ROOT/build/rh_cli" deps --repo "$T/nuget-lock-src" --out "$T/nuget-lock-out" \
   | grep -q "ecosystems=1 nuget=2/2 unresolved=0 unsupported=1" || fail "NuGet lock summary"
 cmp -s "$T/nuget-lock-out/deps-nuget-graph.json" "$ROOT/fixtures/packages/nuget-packages-lock.golden.json" || fail "NuGet lock graph differs from golden"
-python3 - "$T/nuget-lock-out" <<'PY'
-import json, sys
+python3 - "$T/nuget-lock-out" "$T/nuget-lock-src/packages.lock.json" <<'PY'
+import hashlib, json, sys
 out = sys.argv[1]
+source = open(sys.argv[2], "rb").read()
 g = json.load(open(out + "/deps-nuget-graph.json"))
 m = json.load(open(out + "/deps-metrics.json"))
+report = json.load(open(out + "/deps-nuget-graph.json.transformations.json"))
+assert report["source_input_sha256"] == hashlib.sha256(str(len(source)).encode() + b":" + source + b"0:").hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/nuget-deps/1;parser=packages-lock-json;osv=none").hexdigest(), report
 assert g["nodes"][0]["target_framework"] == "net8.0", g["nodes"][0]
 assert [n["name"] for n in g["nodes"]] == ["root", "Newtonsoft.Json", "System.Memory"], g["nodes"]
 assert [n["target_framework"] for n in g["nodes"]] == ["net8.0"] * 3, g["nodes"]
@@ -744,10 +755,17 @@ cat > "$T/mavensrc/pom.xml" <<'EOF'
 EOF
 "$ROOT/build/rh_cli" deps --repo "$T/mavensrc" --out "$T/mavenout" \
   | grep -q "ecosystems=1 maven=2/3 unresolved=1 unsupported=1" || fail "Maven summary"
-python3 - "$T/mavenout" <<'PY'
-import json, sys
+python3 - "$T/mavenout" "$T/mavensrc/pom.xml" <<'PY'
+import hashlib, json, sys
 out = sys.argv[1]
+source = open(sys.argv[2], "rb").read()
 g = json.load(open(out + "/deps-maven-graph.json"))
+report = json.load(open(out + "/deps-maven-graph.json.transformations.json"))
+assert report["adapter"] == "maven-pom-graph", report
+assert report["source_input_sha256"] == hashlib.sha256(str(len(source)).encode() + b":" + source + b"0:").hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(open(out + "/deps-maven-graph.json", "rb").read()).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/maven-pom/1;osv=none").hexdigest(), report
+assert {field["state"] for field in report["fields"]} >= {"preserved", "transformed", "unknown", "unsupported", "discarded"}, report
 m = json.load(open(out + "/deps-metrics.json"))
 assert g["ecosystem"] == "maven", g["ecosystem"]
 assert [n["name"] for n in g["nodes"]] == ["org.example:app", "org.slf4j:slf4j-api", "junit:junit"], g["nodes"]
