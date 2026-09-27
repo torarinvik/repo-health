@@ -199,11 +199,20 @@ cp "$ROOT/fixtures/packages/python-requirements.txt" "$T/pysrc/requirements.txt"
   | grep -q "ecosystems=1 pypi=3/7 unresolved=5 unsupported=1" || fail "pypi deps summary"
 [[ -f "$T/pyout/deps-pypi-graph.json" ]] || fail "missing pypi graph"
 [[ -f "$T/pyout/deps-metrics.json" ]] || fail "missing pypi metrics"
-python3 - "$T/pyout" <<'PY'
-import json, sys
+python3 - "$T/pyout" "$T/pysrc/requirements.txt" "$T/src/osv-response.json" <<'PY'
+import hashlib, json, sys
 out = sys.argv[1]
+requirements = open(sys.argv[2], "rb").read()
+osv = open(sys.argv[3], "rb").read()
 pg = json.load(open(out + "/deps-pypi-graph.json"))
 m = json.load(open(out + "/deps-metrics.json"))
+report = json.load(open(out + "/deps-pypi-graph.json.transformations.json"))
+framed = str(len(requirements)).encode() + b":" + requirements + str(len(osv)).encode() + b":" + osv
+assert report["adapter"] == "python-requirements", report
+assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(open(out + "/deps-pypi-graph.json", "rb").read()).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/python-requirements/1;osv=file").hexdigest(), report
+assert {field["state"] for field in report["fields"]} >= {"preserved", "transformed", "unknown", "unsupported", "discarded"}, report
 assert pg["ecosystem"] == "pypi", pg["ecosystem"]
 # root + 3 exact pins; ranges/extras/markers/URLs/options stay unresolved
 assert len(pg["nodes"]) == 4, pg["nodes"]
@@ -241,6 +250,18 @@ assert metrics["security.known_unique_advisories"]["value"] == 0, metrics
 assert metrics["security.affected_resolved_nodes"]["value"] == 0, metrics
 assert metrics["security.withdrawn_advisory_count"]["value"] == 1, metrics
 print("[deps] pypi graph + per-ecosystem metrics OK")
+PY
+"$ROOT/build/rh_cli" deps --repo "$T/pysrc" --out "$T/pyurlout" --osv-url "file://$T/src/osv-response.json" >/dev/null || fail "pypi URL-enriched deps failed"
+python3 - "$T/pyurlout" "$T/pysrc/requirements.txt" <<'PY'
+import hashlib, json, pathlib, sys
+out, requirements_path = sys.argv[1:]
+requirements = open(requirements_path, "rb").read()
+osv = open(pathlib.Path(out).parent / "src" / "osv-response.json", "rb").read()
+framed = str(len(requirements)).encode() + b":" + requirements + str(len(osv)).encode() + b":" + osv
+report = json.load(open(out + "/deps-pypi-graph.json.transformations.json"))
+assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/python-requirements/1;osv=fetched").hexdigest(), report
+print("[deps] requirements transformation binds fetched OSV response bytes")
 PY
 
 echo "[deps] PEP 621 pyproject.toml preserves optional dependency scope"

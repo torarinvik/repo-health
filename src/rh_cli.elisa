@@ -3510,20 +3510,20 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         resolved_has_osv <- true
     osv_nodes: mutable darray[Json::RhJsonNode] = []
     osv_texts: mutable darray[u8] = []
+    osv_source_bytes: mutable darray[u8] = []
     osv_root: mutable i64 = -1
     if resolved_has_osv:
-        parsed_osv: i64 = |resolved_osv_path, osv_nodes, osv_texts|
+        parsed_osv: i64 = |resolved_osv_path, osv_nodes, osv_texts, osv_source_bytes|
             op: mutable darray[u8] =
                 op: mutable darray[u8] = []
                 Base::rh_push_cstr(op, resolved_osv_path)
                 op.push(0)
                 op
             oreadp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
-            oraw: mutable darray[u8] = []
-            if Base::rh_io_read(oreadp, oraw) < 0:
+            if Base::rh_io_read(oreadp, osv_source_bytes) < 0:
                 rh_cli_err("deps: cannot read --osv file")
                 return 4
-            block_result: i64 = Json::rh_json_parse(oraw, osv_nodes, osv_texts)
+            block_result: i64 = Json::rh_json_parse(osv_source_bytes, osv_nodes, osv_texts)
             block_result
         if parsed_osv < 0:
             rh_cli_err("deps: --osv file is not valid JSON")
@@ -3811,6 +3811,25 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         pfp: cstr = (&pf[0]).cast[cstr] can Unsafe.PointerCast
         if not Base::rh_io_write(pfp, pg):
             rh_cli_err("deps: cannot write pypi graph")
+            return 4
+        pypi_transform_input: mutable darray[u8] =
+            pypi_transform_input: mutable darray[u8] = []
+            Base::rh_push_decimal_i64(pypi_transform_input, rb.count.i64())
+            pypi_transform_input.push(58)
+            pypi_transform_input.extend(bytes_view(rb))
+            Base::rh_push_decimal_i64(pypi_transform_input, osv_source_bytes.count.i64())
+            pypi_transform_input.push(58)
+            pypi_transform_input.extend(bytes_view(osv_source_bytes))
+            pypi_transform_input
+        pypi_transform_configuration: mutable darray[u8] =
+            pypi_transform_configuration: mutable darray[u8] = []
+            Base::rh_push_text(pypi_transform_configuration, "repo-health/python-requirements/1;osv=")
+            Base::rh_push_text(pypi_transform_configuration, "fetched" if has_osv_url else "file" if resolved_has_osv else "none")
+            pypi_transform_configuration.push(0)
+            pypi_transform_configuration
+        pypi_transform_configuration_ptr: cstr = (&pypi_transform_configuration[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_cli_write_adapter_transformation(pypi_transform_input, pg, "python-requirements", "rh-dep-graph/1", pypi_transform_configuration_ptr, "[{\"source\":\"requirements.txt lines\",\"target\":\"declared PyPI requirements\",\"state\":\"preserved\"},{\"source\":\"exact public package pins\",\"target\":\"resolved graph nodes and edges\",\"state\":\"transformed\"},{\"source\":\"ranges, markers, extras, URLs, and options\",\"target\":\"unresolved requirements\",\"state\":\"unknown\"},{\"source\":\"unsupported requirement syntax\",\"target\":\"dependency graph\",\"state\":\"unsupported\"},{\"source\":\"comments and unmodeled pip options\",\"target\":\"canonical graph\",\"state\":\"discarded\"},{\"source\":\"optional retained OSV response\",\"target\":\"advisory matches\",\"state\":\"transformed\"}]", pfp):
+            rh_cli_err("deps: cannot write requirements transformation report")
             return 4
         eco_codes.push(2)
         declared.push(preqs.count.i64())
