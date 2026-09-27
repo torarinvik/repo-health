@@ -15,6 +15,13 @@ fail() { echo "[pg-adapter-live] FAIL: $1" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 docker info >/dev/null 2>&1 || fail "docker daemon is unavailable"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "image is unavailable: $IMAGE"
+if [[ -n "${RH_LIBPQ_PATH:-}" ]]; then
+  [[ -f "$RH_LIBPQ_PATH" ]] || fail "libpq library does not exist: $RH_LIBPQ_PATH"
+elif [[ ! -f /opt/homebrew/opt/libpq/lib/libpq.5.dylib \
+    && ! -f /usr/local/opt/libpq/lib/libpq.5.dylib \
+    && -z "$(python3 -c 'import ctypes.util; print(ctypes.util.find_library("pq") or "")')" ]]; then
+  fail "libpq is required; install it or set RH_LIBPQ_PATH to its library"
+fi
 cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 
