@@ -62,6 +62,19 @@ done
 "$ROOT/build/rh_cli" ops restore --root "$T/ev" --dest "$T/restore" --manifest "$T/backup.manifest" | grep -q "restored=2" || fail "idempotent restore into populated destination"
 echo "[store] repeated distribution is idempotent and no-clobber"
 
+echo "[store] restored evidence reproduces a pinned identity report"
+mkdir -p "$T/replay-source" "$T/replay-restored"
+cat > "$T/replay-input.json" <<'JSON'
+{"schema":"rh-identity-input/1","actor_count":3,"links":[{"a":0,"b":1,"state":"accepted","revision_added":1}],"actor_kinds":["human","human","unresolved"]}
+JSON
+replay_name="$("$ROOT/build/rh_cli" store put --root "$T/replay-source" --file "$T/replay-input.json" | awk '{print $3}')"
+printf '%s\n' "$replay_name" > "$T/replay-names.txt"
+"$ROOT/build/rh_cli" ops backup --root "$T/replay-source" --manifest "$T/replay.manifest" --names "$T/replay-names.txt" >/dev/null || fail "replay backup"
+"$ROOT/build/rh_cli" ops restore --root "$T/replay-source" --dest "$T/replay-restored" --manifest "$T/replay.manifest" >/dev/null || fail "replay restore"
+"$ROOT/build/rh_cli" identity --input "$T/replay-input.json" --out "$T/replay-original.out" >/dev/null || fail "original replay report"
+"$ROOT/build/rh_cli" identity --input "$T/replay-restored/$replay_name" --out "$T/replay-restored.out" >/dev/null || fail "restored replay report"
+cmp -s "$T/replay-original.out" "$T/replay-restored.out" || fail "restored evidence changed pinned report output"
+
 printf 'preserve this file\n' > "$T/outside"
 printf 'rh-backup/1 fnv1a-64-hex\n../outside\n' > "$T/path-traversal.manifest"
 set +e
