@@ -19,9 +19,13 @@ JSON
 
 echo "[adapter-manifest] reviewed binding is retained"
 "$ROOT/build/rh_cli" adapter-manifest --input "$T/input.json" --out "$T/out.json" >/dev/null || fail "adapter manifest run"
-python3 - "$T/out.json" <<'PY'
+python3 - "$T/input.json" "$T/out.json" "$T/out.json.transformations.json" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1]))
+import hashlib
+from pathlib import Path
+raw = Path(sys.argv[1]).read_bytes()
+normalized = Path(sys.argv[2]).read_bytes()
+d = json.loads(normalized)
 assert d["schema"] == "rh-adapter-manifest-result/1", d
 assert d["adapter"]["connector_id"] == "deps.dev", d
 assert d["adapter"]["review_state"] == "reviewed", d
@@ -29,6 +33,14 @@ assert d["adapter"]["capabilities"] == ["version", "dependencies", "advisories"]
 assert d["cache_identity"]["visibility"] == "public", d
 assert d["graph_context"] == {"ecosystem": "cargo", "snapshot_schema": "rh-dep-graph/1"}, d
 assert "complete identity" in d["note"], d
+sidecar = json.load(open(sys.argv[3]))
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "reviewed-adapter-manifest", sidecar
+assert sidecar["output_schema"] == "rh-adapter-manifest-result/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/reviewed-adapter-manifest/1").hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["preserved", "preserved", "unsupported"], sidecar
 print("[adapter-manifest] reviewed identity + rights + graph binding OK")
 PY
 
