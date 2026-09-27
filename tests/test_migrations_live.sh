@@ -43,6 +43,8 @@ docker cp "$ROOT/db/migrations/002_current_state_reconciliation.sql" "$CONTAINER
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/002_current_state_reconciliation.sql >/dev/null || fail "apply current-state migration"
 docker cp "$ROOT/db/migrations/003_projection_adjacency_batch.sql" "$CONTAINER:/tmp/003_projection_adjacency_batch.sql" || fail "copy projection-adjacency migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/003_projection_adjacency_batch.sql >/dev/null || fail "apply projection-adjacency migration"
+docker cp "$ROOT/db/migrations/004_graph_query_claim_attempt.sql" "$CONTAINER:/tmp/004_graph_query_claim_attempt.sql" || fail "copy graph-query worker migration"
+docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/004_graph_query_claim_attempt.sql >/dev/null || fail "apply graph-query worker migration"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
 DO $$
@@ -150,9 +152,9 @@ BEGIN
   IF c->>'status' <> 'queued' OR c ? 'result' THEN
     RAISE EXCEPTION 'queued graph job exposed a result or wrong status: %', c;
   END IF;
-  c := rh_claim_graph_query_job('graph-worker', '2026-01-02T00:00:01Z', 60, '00000000-0000-0000-0000-000000000099');
+  c := rh_claim_graph_query_job_with_attempt('graph-worker', '2026-01-02T00:00:01Z', 60, '00000000-0000-0000-0000-000000000099');
   token_value := (c->>'fencing_token')::bigint;
-  IF c->>'status' <> 'claimed' OR c->>'job_id' <> '00000000-0000-0000-0000-000000000099' OR token_value <> 1 OR c->'request' <> request_value THEN
+  IF c->>'status' <> 'claimed' OR c->>'job_id' <> '00000000-0000-0000-0000-000000000099' OR token_value <> 1 OR c->>'attempt_count' <> '1' OR c->'request' <> request_value THEN
     RAISE EXCEPTION 'graph claim omitted its lease or immutable request: %', c;
   END IF;
   IF rh_read_graph_query_request('00000000-0000-0000-0000-000000000099', token_value, '2026-01-02T00:00:02Z') IS DISTINCT FROM request_value THEN

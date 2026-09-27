@@ -825,6 +825,88 @@ module PostgresReport:
                 Base::rh_push_text(out, "\"}")
                 return 0
 
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "run_graph_query_job"):
+                worker_s: mutable i64 = 0
+                worker_e: mutable i64 = 0
+                now_s: mutable i64 = 0
+                now_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "worker_id", &worker_s, &worker_e, false) or worker_e - worker_s > 256
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "now", &now_s, &now_e, false)
+                lease_seconds: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "lease_seconds", 1, 86400, &lease_seconds)
+                requested_job: mutable darray[u8] = []
+                requested_job_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "job_id")
+                if requested_job_idx >= 0:
+                    job_s: mutable i64 = 0
+                    job_e: mutable i64 = 0
+                    return -1 if not Json::rh_json_str_span(nodes, requested_job_idx, &job_s, &job_e) or not PostgresReport::rh_pg_report_uuid_valid(texts, job_s, job_e)
+                    requested_job <- PostgresReport::rh_pg_report_text(texts, job_s, job_e)
+                worker: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, worker_s, worker_e)
+                now: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, now_s, now_e)
+                worker_ptr: cstr = (&worker[0]).cast[cstr] can Unsafe.PointerCast
+                now_ptr: cstr = (&now[0]).cast[cstr] can Unsafe.PointerCast
+                requested_job_ptr: cstr = (&requested_job[0]).cast[cstr] can Unsafe.PointerCast if requested_job.count > 0 else ""
+                claim_result: mutable darray[u8] = []
+                claim_bytes: i64 = Postgres::rh_pg_claim_graph_query_job(conninfo, worker_ptr, now_ptr, lease_seconds, requested_job_ptr, claim_result)
+                return -1 if claim_bytes <= 0 or claim_bytes > 1048576
+                claim_nodes: mutable darray[Json::RhJsonNode] = []
+                claim_texts: mutable darray[u8] = []
+                claim_root: i64 = Json::rh_json_parse(claim_result, claim_nodes, claim_texts)
+                return -1 if claim_root < 0 or claim_nodes[claim_root.usize()].kind != Json::RH_JSON_OBJ
+                status_s: mutable i64 = 0
+                status_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(claim_nodes, claim_texts, claim_root, "status", &status_s, &status_e, false)
+                if PostgresReport::rh_pg_report_eq(claim_texts, status_s, status_e, "empty"):
+                    Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"run_graph_query_job\",\"status\":\"empty\"}")
+                    return 0
+                return -1 if not PostgresReport::rh_pg_report_eq(claim_texts, status_s, status_e, "claimed")
+                job_s: mutable i64 = 0
+                job_e: mutable i64 = 0
+                token: mutable i64 = 0
+                attempt: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(claim_nodes, claim_texts, claim_root, "job_id", &job_s, &job_e, false) or not PostgresReport::rh_pg_report_uuid_valid(claim_texts, job_s, job_e)
+                return -1 if not PostgresReport::rh_pg_report_int(claim_nodes, claim_result, claim_texts, claim_root, "fencing_token", 1, 9223372036854775807, &token)
+                return -1 if not PostgresReport::rh_pg_report_int(claim_nodes, claim_result, claim_texts, claim_root, "attempt_count", 1, 2147483647, &attempt)
+                request_idx: i64 = Json::rh_json_obj_get(claim_nodes, claim_texts, claim_root, "request")
+                request_valid: mutable bool = false
+                request_raw: mutable darray[u8] = []
+                if request_idx >= 0 and claim_nodes[request_idx.usize()].kind == Json::RH_JSON_OBJ:
+                    request_node: Json::RhJsonNode = claim_nodes[request_idx.usize()]
+                    if request_node.text_start >= 0 and request_node.text_end > request_node.text_start and request_node.text_end - request_node.text_start <= 1048576:
+                        while i < request_node.text_end |i: i64 = request_node.text_start, request_raw, claim_result|:
+                            request_raw.push(claim_result[i.usize()])
+                            i <- i + 1
+                        request_validation: mutable darray[u8] = []
+                        request_raw.push(0)
+                        while i + 1 < request_raw.count |i: usize = 0, request_raw, request_validation|:
+                            request_validation.push(request_raw[i])
+                            i <- i + 1
+                        validation_result: mutable darray[u8] = []
+                        request_valid <- QueryReport::rh_query_report(request_validation, validation_result) == 0
+                job_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(claim_texts, job_s, job_e)
+                job_ptr: cstr = (&job_id[0]).cast[cstr] can Unsafe.PointerCast
+                if not request_valid:
+                    applied: i64 = Postgres::rh_pg_retry_graph_query_job(conninfo, job_ptr, token, attempt, 0, "malformed", 7, 0, now_ptr)
+                    return -1 if applied < 0
+                    Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"run_graph_query_job\",\"status\":\"")
+                    Base::rh_push_text(out, "dead_letter" if applied == 1 else "fenced")
+                    Base::rh_push_text(out, "\"}")
+                    return 0
+                query_input: mutable darray[u8] = []
+                while i + 1 < request_raw.count |i: usize = 0, request_raw, query_input|:
+                    query_input.push(request_raw[i])
+                    i <- i + 1
+                query_result: mutable darray[u8] = []
+                return -1 if QueryReport::rh_query_report(query_input, query_result) != 0 or query_result.count == 0
+                query_result.push(0)
+                query_result_ptr: cstr = (&query_result[0]).cast[cstr] can Unsafe.PointerCast
+                published: i64 = Postgres::rh_pg_publish_graph_query_result(conninfo, job_ptr, token, now_ptr, query_result_ptr)
+                return -1 if published < 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"run_graph_query_job\",\"status\":\"")
+                Base::rh_push_text(out, "published" if published == 1 else "fenced")
+                Base::rh_push_text(out, "\"}")
+                return 0
+
             if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "claim_graph_query_job"):
                 worker_s: mutable i64 = 0
                 worker_e: mutable i64 = 0

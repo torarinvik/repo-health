@@ -9,7 +9,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATIONS="$ROOT/db/migrations"
 
 fail() { echo "[migrations] FAIL: $1" >&2; exit 1; }
-[[ -f "$MIGRATIONS/001_initial.sql" && -f "$MIGRATIONS/002_current_state_reconciliation.sql" && -f "$MIGRATIONS/003_projection_adjacency_batch.sql" ]] || fail "expected migration is missing"
+[[ -f "$MIGRATIONS/001_initial.sql" && -f "$MIGRATIONS/002_current_state_reconciliation.sql" && -f "$MIGRATIONS/003_projection_adjacency_batch.sql" && -f "$MIGRATIONS/004_graph_query_claim_attempt.sql" ]] || fail "expected migration is missing"
 
 python3 - "$MIGRATIONS" <<'PY'
 import re
@@ -47,7 +47,7 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_request_source_stop", "rh_resolve_source_stop", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_claim_graph_query_job", "rh_read_graph_query_request", "rh_get_graph_query_job", "rh_publish_graph_query_result", "rh_retry_graph_query_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events", "rh_reconcile_source_objects", "rh_projection_adjacency_batch"} <= functions
+assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_request_source_stop", "rh_resolve_source_stop", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_claim_graph_query_job", "rh_claim_graph_query_job_with_attempt", "rh_read_graph_query_request", "rh_get_graph_query_job", "rh_publish_graph_query_result", "rh_retry_graph_query_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events", "rh_reconcile_source_objects", "rh_projection_adjacency_batch"} <= functions
 assert all(
     re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).lstrip().startswith("BEGIN;") and
     re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).rstrip().endswith("COMMIT;")

@@ -30,10 +30,19 @@ result contains an ordered edge page and an explicit `truncated` flag. A
 projection whose visibility does not match returns an empty page. The
 `read_projection_adjacency_batch` command validates identifiers and bounds
 before connecting and passes every value through `PQexecParams`. It is a batch
-read primitive; the asynchronous graph-query worker is not yet wired to use it.
+read primitive. The `run_graph_query_job` command claims one persisted request,
+evaluates its bounded `rh-query-input/1` graph snapshot, and publishes the
+result with the claim's fencing token. It uses the existing evaluator and does
+not yet read adjacency through this projection batch primitive.
 The live migration rehearsal checks both directions, visibility mismatch, and
 truncation; this PostgreSQL 16 gate has not been run in environments without a
 Docker daemon.
+
+The additive
+[`db/migrations/004_graph_query_claim_attempt.sql`](../../db/migrations/004_graph_query_claim_attempt.sql)
+adds a claim wrapper that returns the durable attempt count together with the
+lease. The worker uses that count when dead-lettering malformed persisted
+requests through the existing fenced retry transition.
 
 Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa),
 with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).

@@ -7,6 +7,7 @@ typedef struct { int status; int rows; int columns; const char *value; } FakeRes
 
 static FakeConnection connection = { 1 };
 static FakeResult result = { 2, 1, 1, "t" };
+static int run_graph_query_is_publish = 0;
 static const char *claim_cells[3] = {
     "00000000-0000-0000-0000-000000000004", "5", "2026-01-01 00:02:00+00"
 };
@@ -25,7 +26,7 @@ static const char *evidence_references_truncated_json =
 static const char *evidence_references_unsorted_json =
     "{\"storage_keys\":[\"fnv1a64:f5e19178d3ff184e\",\"fnv1a64:0000000000000000\"],\"invalid_count\":0,\"truncated\":false,\"count\":2}";
 static const char *graph_query_claimed_json =
-    "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_graph_query_job\",\"status\":\"claimed\",\"job_id\":\"00000000-0000-0000-0000-000000000099\",\"fencing_token\":1,\"lease_expires_at\":\"2026-01-01T00:02:00+00:00\",\"request\":{\"schema\":\"rh-query-input/1\",\"kind\":\"downstream\",\"ids\":[1],\"graph\":{\"direction\":\"downstream\",\"subject\":1,\"nodes\":[1,2],\"edges\":[{\"from\":2,\"to\":1}],\"max_nodes\":20,\"max_depth\":5}}}";
+    "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_graph_query_job\",\"status\":\"claimed\",\"job_id\":\"00000000-0000-0000-0000-000000000099\",\"fencing_token\":1,\"attempt_count\":1,\"lease_expires_at\":\"2026-01-01T00:02:00+00:00\",\"request\":{\"schema\":\"rh-query-input/1\",\"kind\":\"downstream\",\"ids\":[1],\"graph\":{\"direction\":\"downstream\",\"subject\":1,\"nodes\":[1,2],\"edges\":[{\"from\":2,\"to\":1}],\"max_nodes\":20,\"max_depth\":5}}}";
 static const char *graph_query_empty_json =
     "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"claim_graph_query_job\",\"status\":\"empty\"}";
 static const char *graph_query_poll_succeeded_json =
@@ -150,6 +151,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         "00000000-0000-0000-0000-000000000099", "1", "2026-01-01T00:01:30Z",
         "{\"schema\":\"rh-query-result/1\",\"kind\":\"downstream\",\"graph\":{\"direction\":\"downstream\",\"nodes\":[2],\"truncated\":false,\"complete\":true}}"
     };
+    static const char *run_graph_publish_values[4] = {
+        "00000000-0000-0000-0000-000000000099", "1", "2026-01-01T00:01:00Z",
+        "{\"schema\":\"rh-query-result/1\",\"kind\":\"downstream\",\"page\":{\"ids\":[1],\"next_cursor\":null,\"complete\":true},\"graph\":{\"direction\":\"downstream\",\"nodes\":[2],\"truncated\":false,\"complete\":true},\"note\":\"cursor pagination is idempotent for a replayed cursor; scan status is a per-capability breakdown, never one project verdict; job leases carry fencing tokens\"}"
+    };
     static const char *retry_graph_values[8] = {
         "00000000-0000-0000-0000-000000000099", "1", "1", "5", "transient", "6", "1767225602", "2026-01-01T00:00:00Z"
     };
@@ -264,7 +269,12 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     } else if (operation != NULL && strcmp(operation, "claim_graph") == 0) {
         expected = claim_graph_values;
         expected_count = 4;
-        prefix = "SELECT public.rh_claim_graph_query_job(";
+        prefix = "SELECT public.rh_claim_graph_query_job_with_attempt(";
+    } else if (operation != NULL && strcmp(operation, "run_graph_query") == 0) {
+        run_graph_query_is_publish = query != NULL && strncmp(query, "SELECT public.rh_publish_graph_query_result(", strlen("SELECT public.rh_publish_graph_query_result(")) == 0;
+        expected = run_graph_query_is_publish ? run_graph_publish_values : claim_graph_values;
+        expected_count = 4;
+        prefix = run_graph_query_is_publish ? "SELECT public.rh_publish_graph_query_result(" : "SELECT public.rh_claim_graph_query_job_with_attempt(";
     } else if (operation != NULL && strcmp(operation, "publish_graph") == 0) {
         expected = publish_graph_values;
         expected_count = 4;
@@ -349,6 +359,8 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             fprintf(stderr, "fake libpq adoption call mismatch: query=%s count=%d expected=%d prefix=%s\n", query == NULL ? "(null)" : query, count, expected_count, prefix);
         if (operation != NULL && strcmp(operation, "ingest") == 0)
             fprintf(stderr, "fake libpq ingest call mismatch: query=%s count=%d expected=%d prefix=%s\n", query == NULL ? "(null)" : query, count, expected_count, prefix);
+        if (operation != NULL && strcmp(operation, "run_graph_query") == 0)
+            fprintf(stderr, "fake libpq graph worker call mismatch: query=%s count=%d expected=%d prefix=%s\n", query == NULL ? "(null)" : query, count, expected_count, prefix);
         return NULL;
     }
     for (int i = 0; i < count; ++i)
@@ -357,6 +369,8 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
                 fprintf(stderr, "fake libpq adoption parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
             if (operation != NULL && strcmp(operation, "ingest") == 0)
                 fprintf(stderr, "fake libpq ingest parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
+            if (operation != NULL && strcmp(operation, "run_graph_query") == 0)
+                fprintf(stderr, "fake libpq graph worker parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
             return NULL;
         }
     if (claim_query || (operation != NULL && (strcmp(operation, "claim") == 0 || strcmp(operation, "claim_collection") == 0))) {
@@ -370,6 +384,13 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.rows = 1;
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
         result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? graph_query_empty_json : graph_query_claimed_json;
+        return &result;
+    }
+    if (operation != NULL && strcmp(operation, "run_graph_query") == 0) {
+        result.columns = 1;
+        result.rows = 1;
+        result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+        result.value = run_graph_query_is_publish ? "t" : graph_query_claimed_json;
         return &result;
     }
     if (operation != NULL && strcmp(operation, "poll_graph") == 0) {
