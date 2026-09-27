@@ -32,12 +32,20 @@ for f in deps-cargo-graph.json deps-npm-graph.json deps-metrics.json; do
   [[ -f "$T/out/$f" ]] || fail "missing $f"
 done
 
-python3 - "$T/out" <<'PY'
-import json, sys
+python3 - "$T/out" "$T/src/Cargo.lock" "$T/src/osv-response.json" <<'PY'
+import hashlib, json, sys
 out = sys.argv[1]
+lock, osv = (open(path, "rb").read() for path in sys.argv[2:])
+framed = b"".join(str(len(value)).encode() + b":" + value for value in (lock, osv))
 cg = json.load(open(out + "/deps-cargo-graph.json"))
 ng = json.load(open(out + "/deps-npm-graph.json"))
 m = json.load(open(out + "/deps-metrics.json"))
+cargo_transform = json.load(open(out + "/deps-cargo-graph.json.transformations.json"))
+assert cargo_transform["adapter"] == "cargo-lock-graph", cargo_transform
+assert cargo_transform["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), cargo_transform
+assert cargo_transform["normalized_output_sha256"] == hashlib.sha256(open(out + "/deps-cargo-graph.json", "rb").read()).hexdigest(), cargo_transform
+assert cargo_transform["configuration_sha256"] == hashlib.sha256(b"repo-health/cargo-lock/1;osv=file").hexdigest(), cargo_transform
+assert {field["state"] for field in cargo_transform["fields"]} >= {"preserved", "transformed", "unknown", "unsupported", "discarded"}, cargo_transform
 assert cg["schema"] == "rh-dep-graph/1" and cg["ecosystem"] == "cargo"
 assert ng["schema"] == "rh-dep-graph/1" and ng["ecosystem"] == "npm"
 assert len(cg["nodes"]) == 7, cg["nodes"]
