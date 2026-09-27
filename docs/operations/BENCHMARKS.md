@@ -112,3 +112,17 @@ individual-child peak RSS was 18.17 MiB full and 18.46 MiB partial. Seeding the
 prior cache took a separate median 1,193 ms and is excluded from the partial
 timings. This is a single local synthetic profile; it is not a service
 capacity or production workload claim.
+
+
+A follow-up at revision `7d64f3b` used 12,000 events, the same 91 daily and 14
+weekly partitions, and three measured repetitions. Full recomputation had a
+1,566 ms median and 27.36 MiB maximum individual-child peak RSS; partial-cache
+recomputation had a 1,270 ms median and 28.77 MiB maximum peak RSS. It reused
+103 of 105 partition rows and produced byte-identical output
+(`37f5dcb7bbb35fb7c28709fde2982d27440ed3e6d8b115e9d3dd02dd7957d177`). Cache
+seeding took a separate 3,645 ms median. Attempts at 20,000 and 100,000 events
+were rejected by the JSON parser's 200,000-node bound before measurement. This
+exposes a concrete input-scale ceiling; larger aggregate workloads need a
+bounded parsing strategy or a justified parser budget change before they can
+be benchmarked. These measurements remain local synthetic evidence, not a
+capacity claim.
