@@ -1073,7 +1073,7 @@ Include a long-tail degree distribution, a few highly central dependencies, cycl
 
 **M10-01: Profiling.** Identify whether bottlenecks are network rate limits, VCS retrieval, parsing, database writes, graph queries, metric computation, or report rendering. Do not optimize the graph database before measuring it.
 
-**M10-02: Incremental aggregates.** Maintain validated daily/weekly event aggregates and role counts with input partitions and correction invalidation. Test equivalence against full recomputation.
+**M10-02: Incremental aggregates.** Maintain validated daily/weekly event aggregates and role counts with input partitions and correction invalidation. Test equivalence against full recomputation. `rh_cli aggregate --state-store <dir>` now persists an immutable cache record bound to the exact SHA-256 of the authoritative input and reuses its verified projection on an identical replay; changed snapshots miss the cache and recompute, with the 240-event daily/weekly/role oracle checking equality to an independent full recomputation. A corrupt state pointer fails before report publication. Per-partition signatures and reuse across partially changed snapshots remain open; this cache is an exact-input replay optimization, not yet partition-incremental aggregation.
 
 **M10-03: Query plans and indexes.** Inspect real query plans, add justified indexes, batch lookups, avoid per-node network/database calls, and test high-degree nodes.
 

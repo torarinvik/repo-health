@@ -232,7 +232,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli mapping --input <file> --out <file>")
     rh_cli_err("       rh_cli coverage --input <file> --out <file>")
     rh_cli_err("       rh_cli snapshot --input <rh-dep-graph/1> --out <file>")
-    rh_cli_err("       rh_cli aggregate --input <file> --out <file>")
+    rh_cli_err("       rh_cli aggregate --input <file> --out <file> [--state-store <dir>]")
     rh_cli_err("       rh_cli index --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli adoption --input <file> --out <file> [--store-root <dir> | --postgres] (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli lineage --input <file> --out <file>")
@@ -2834,8 +2834,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if si_idx < 0 or so_idx < 0
         return rh_do_snapshot(slots[si_idx], slots[so_idx])
     if Base::rh_streq(cmd, "aggregate"):
-        ai_idx, ao_idx =
-            while aaq < argc |ai_idx: i64 = -1, ao_idx: i64 = -1, aaq: i64 = 2, slots| -> ai_idx, ao_idx:
+        ai_idx, ao_idx, as_idx =
+            while aaq < argc |ai_idx: i64 = -1, ao_idx: i64 = -1, as_idx: i64 = -1, aaq: i64 = 2, slots| -> ai_idx, ao_idx, as_idx:
                 a33: u8& = slots[aaq].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(a33, "--input"):
                     if aaq + 1 < argc:
@@ -2849,11 +2849,17 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         ao_idx <- aaq
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(a33, "--state-store"):
+                    if aaq + 1 < argc:
+                        aaq <- aaq + 1
+                        as_idx <- aaq
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 aaq <- aaq + 1
         return rh_cli_usage(2) if ai_idx < 0 or ao_idx < 0
-        return rh_do_aggregate(slots[ai_idx], slots[ao_idx])
+        return rh_do_aggregate(slots[ai_idx], slots[ao_idx], slots[as_idx] if as_idx >= 0 else slots[0], as_idx >= 0)
     if Base::rh_streq(cmd, "index"):
         xi_idx, xo_idx =
             while xxq < argc |xi_idx: i64 = -1, xo_idx: i64 = -1, xxq: i64 = 2, slots| -> xi_idx, xo_idx:
@@ -9698,10 +9704,20 @@ def rh_do_snapshot(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
 # --- M10 validated aggregate execution path. ---
 # Computes daily/weekly event and role aggregates from the authoritative event
 # set, while corrections expose the exact partitions that require invalidation.
-def rh_do_aggregate(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+def rh_do_aggregate(input_path: cstr, out_path: cstr, state_root: cstr, has_state_root: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path) or (has_state_root and not Git::rh_arg_safe(state_root)):
         rh_cli_err("rejected aggregate argument (allowlist)")
         return 3
+    if has_state_root:
+        pointer_path: mutable darray[u8] = []
+        Base::rh_push_cstr(pointer_path, state_root)
+        pointer_path.push(47)
+        Base::rh_push_text(pointer_path, "current")
+        pointer_path.push(0)
+        pointer_cstr: cstr = (&pointer_path[0]).cast[cstr] can Unsafe.PointerCast
+        if Base::rh_streq(out_path, pointer_cstr):
+            rh_cli_err("aggregate: --out cannot replace the --state-store current pointer")
+            return 3
     ip: mutable darray[u8] =
         ip: mutable darray[u8] = []
         Base::rh_push_cstr(ip, input_path)
@@ -9712,15 +9728,55 @@ def rh_do_aggregate(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate
     if Base::rh_io_read(ipp, raw) < 0:
         rh_cli_err("aggregate: cannot read --input")
         return 4
+    cache_hit: mutable bool = false
     body: mutable darray[u8] = []
-    if Aggregates::rh_aggregate_report(raw, body) != 0:
-        rh_cli_err("aggregate: unsupported or malformed aggregate envelope (fail closed)")
-        return 4
-    body.push(10)
+    fingerprint: mutable darray[u8] = []
+    if has_state_root:
+        if Git::rh_ensure_dir(state_root) != 0:
+            rh_cli_err("aggregate: cannot create --state-store")
+            return 4
+        Sha256::rh_sha256(raw, fingerprint)
+        prefix: mutable darray[u8] = []
+        Base::rh_push_text(prefix, "rh-aggregate-cache/1\n")
+        Base::rh_push_text(prefix, "sha256:")
+        prefix.extend(bytes_view(fingerprint))
+        prefix.push(10)
+        prior: mutable darray[u8] = []
+        loaded: i64 = StateStore::rh_state_store_load(state_root, prior)
+        if loaded < 0:
+            rh_cli_err("aggregate: corrupt --state-store (fail closed)")
+            return 4
+        cache_hit <- true if prior.count > prefix.count
+        while cache_hit and i < prefix.count |i: usize = 0, prefix, prior, cache_hit|:
+            cache_hit <- prior[i] == prefix[i]
+            i <- i + 1
+        if cache_hit:
+            while i < prior.count |i: usize = prefix.count, prior, body|:
+                body.push(prior[i])
+                i <- i + 1
+    if not cache_hit:
+        if Aggregates::rh_aggregate_report(raw, body) != 0:
+            rh_cli_err("aggregate: unsupported or malformed aggregate envelope (fail closed)")
+            return 4
+        body.push(10)
     if not Base::rh_io_write(out_path, body):
         rh_cli_err("aggregate: cannot write --out")
         return 4
-    rh_cli_out("aggregate: validated projection written")
+    if has_state_root and not cache_hit:
+        cached: mutable darray[u8] = []
+        Base::rh_push_text(cached, "rh-aggregate-cache/1\n")
+        Base::rh_push_text(cached, "sha256:")
+        cached.extend(bytes_view(fingerprint))
+        cached.push(10)
+        cached.extend(bytes_view(body))
+        state_id: mutable darray[u8] = []
+        if StateStore::rh_state_store_publish(state_root, cached, state_id) != 0:
+            rh_cli_err("aggregate: cannot publish --state-store")
+            return 4
+    if has_state_root:
+        rh_cli_out("aggregate: validated projection written (cache=hit)" if cache_hit else "aggregate: validated projection written (cache=miss)")
+    else:
+        rh_cli_out("aggregate: validated projection written")
     0
 
 # --- M10 rebuildable query-index execution path. ---

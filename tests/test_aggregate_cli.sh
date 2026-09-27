@@ -104,4 +104,34 @@ printf '{"schema":"rh-aggregate-input/1","events":[{"id":"e1","actor":"a","kind"
 set -e
 [[ "$rc_action" -eq 4 && "$rc_id" -eq 4 && "$rc_time" -eq 4 ]] || fail "invalid aggregate must exit 4 (got $rc_action/$rc_id/$rc_time)"
 
+echo "[aggregate] durable exact-snapshot cache reuses a verified projection"
+"$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/state-first.json" --state-store "$T/state-store" > "$T/state-first.out" || fail "cache first projection"
+"$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/state-second.json" --state-store "$T/state-store" > "$T/state-second.out" || fail "cache replay projection"
+cmp -s "$T/state-first.json" "$T/state-second.json" || fail "cached projection differs"
+grep -q 'cache=miss' "$T/state-first.out" || fail "first state-store run should compute"
+grep -q 'cache=hit' "$T/state-second.out" || fail "identical state-store run should reuse"
+python3 - "$T/in.json" "$T/changed.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["events"][0]["actor"] = "corrected-actor"
+d["events"][0]["at"] += 86400
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" aggregate --input "$T/changed.json" --out "$T/state-changed.json" --state-store "$T/state-store" > "$T/state-changed.out" || fail "changed state-store projection"
+grep -q 'cache=miss' "$T/state-changed.out" || fail "changed snapshot must invalidate cached projection"
+"$ROOT/build/rh_cli" aggregate --input "$T/changed.json" --out "$T/changed-fresh.json" >/dev/null || fail "changed full recomputation"
+cmp -s "$T/changed-fresh.json" "$T/state-changed.json" || fail "cache miss differs from a fresh recomputation"
+cmp -s "$T/state-first.json" "$T/state-changed.json" && fail "changed input reused stale projection"
+set +e
+"$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/state-store/current" --state-store "$T/state-store" >/dev/null 2>&1
+rc_output_collision=$?
+set -e
+[[ "$rc_output_collision" -eq 3 ]] || fail "output must not replace state-store pointer"
+printf 'not-a-digest\n' > "$T/state-store/current"
+set +e
+"$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/corrupt-state-out.json" --state-store "$T/state-store" >/dev/null 2>&1
+rc_corrupt_state=$?
+set -e
+[[ "$rc_corrupt_state" -eq 4 && ! -e "$T/corrupt-state-out.json" ]] || fail "corrupt cache pointer must fail closed before output"
+
 echo "test_aggregate_cli OK"
