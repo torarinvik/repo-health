@@ -39,6 +39,8 @@ run_ok enqueue_graph duplicate enqueue-graph-query-job
 run_ok claim_graph committed claim-graph-query-job
 run_ok claim_graph duplicate claim-graph-query-job
 run_ok run_graph_query committed run-graph-query-job
+run_ok run_graph_query duplicate run-graph-query-job
+run_ok run_graph_query malformed run-graph-query-job
 run_ok projection_batch ok read-projection-adjacency-batch
 run_ok publish_graph committed publish-graph-query-result
 run_ok publish_graph duplicate publish-graph-query-result
@@ -161,9 +163,11 @@ import json, sys
 assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))
 assert json.load(open(sys.argv[3])) == {"schema":"rh-postgres-result/1","operation":"claim_graph_query_job","status":"empty"}
 PY
-python3 - "$T/run-graph-query-job-committed.json" <<'PY'
+python3 - "$T/run-graph-query-job-committed.json" "$T/run-graph-query-job-duplicate.json" "$T/run-graph-query-job-malformed.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"run_graph_query_job","status":"published"}
+assert json.load(open(sys.argv[2])) == {"schema":"rh-postgres-result/1","operation":"run_graph_query_job","status":"empty"}
+assert json.load(open(sys.argv[3])) == {"schema":"rh-postgres-result/1","operation":"run_graph_query_job","status":"dead_letter"}
 PY
 python3 - "$T/publish-graph-query-result-committed.json" "$T/publish-graph-query-result-duplicate.json" <<'PY'
 import json, sys
