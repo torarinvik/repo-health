@@ -250,5 +250,9 @@ an unchanged input after restart is skipped. Direct callers of `rh_cli worker
 tick` should persist and pass the cursor themselves; without one, the pass
 seeds its starting position from `now` for compatibility. Keep the cursor with
 the stable source ordering; when that ordering changes, reset it to zero. This
-proves same-host, same-output scheduling behavior, not fairness across hosts or
-database workers.
+proves same-host, same-output scheduling behavior. At the database boundary,
+graph-query claims return `empty` with
+`reason=load_shed_collection_backlog` while collection jobs are queued or have
+an active lease, and generic claims rank collection work ahead of graph
+queries. Fairness across hosts or database workers still needs deployment
+validation.
