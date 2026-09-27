@@ -26,6 +26,7 @@ module Worker:
             last_full: mutable i64
             cursor_time: mutable i64
             overlap_secs: mutable i64
+            operator_stopped: mutable bool
 
         # What the pass decided for one source.
         #   mode 0 = skipped (queue full / quota exhausted)
@@ -38,9 +39,10 @@ module Worker:
             horizon_secs: mutable i64
             overlap_start: mutable i64
             debt: mutable i64
+            reason: mutable u8
 
         def rh_worker_source(source_id: i64, interval: i64, last_full: i64, cursor_time: i64, overlap: i64) -> RhSourceJob:
-            RhSourceJob{source_id: source_id, interval_secs: interval, last_full: last_full, cursor_time: cursor_time, overlap_secs: overlap}
+            RhSourceJob{source_id: source_id, interval_secs: interval, last_full: last_full, cursor_time: cursor_time, overlap_secs: overlap, operator_stopped: false}
 
         # Run one scheduling pass. Due full reconciles are considered before any
         # incremental work. Within each priority class, the starting source rotates
@@ -64,19 +66,21 @@ module Worker:
                     if i >= sources.count:
                         i <- i - sources.count
                     s: RhSourceJob = sources[i]
-                    if Reconcile::rh_reconcile_due(s.last_full, s.interval_secs, now):
+                    if s.operator_stopped and Reconcile::rh_reconcile_due(s.last_full, s.interval_secs, now):
+                        decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 0, slot: -1, horizon_secs: Reconcile::rh_reconcile_horizon(s.last_full, now), overlap_start: Reconcile::rh_cursor_overlap_start(s.cursor_time, s.overlap_secs), debt: Reconcile::rh_reconcile_debt(s.last_full, s.interval_secs, now), reason: 1})
+                    elif Reconcile::rh_reconcile_due(s.last_full, s.interval_secs, now):
                         horizon: i64 = Reconcile::rh_reconcile_horizon(s.last_full, now)
                         debt: i64 = Reconcile::rh_reconcile_debt(s.last_full, s.interval_secs, now)
                         ovl: i64 = Reconcile::rh_cursor_overlap_start(s.cursor_time, s.overlap_secs)
                         if not Job::rh_sched_host_allow(h, now):
-                            decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 0, slot: -1, horizon_secs: horizon, overlap_start: ovl, debt: debt})
+                            decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 0, slot: -1, horizon_secs: horizon, overlap_start: ovl, debt: debt, reason: 0})
                         else:
                             idx: i64 = Job::rh_sched_enqueue(slots, now)
                             if idx < 0:
-                                decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 0, slot: -1, horizon_secs: horizon, overlap_start: ovl, debt: debt})
+                                decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 0, slot: -1, horizon_secs: horizon, overlap_start: ovl, debt: debt, reason: 0})
                             else:
                                 h.tokens <- h.tokens - 1
-                                decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 1, slot: idx, horizon_secs: horizon, overlap_start: ovl, debt: debt})
+                                decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 1, slot: idx, horizon_secs: horizon, overlap_start: ovl, debt: debt, reason: 0})
                                 enqueued <- enqueued + 1
                     offset <- offset + 1
                 while offset < sources.count |offset: usize = 0, enqueued, start, now, sources, h, slots, decisions|:
@@ -84,19 +88,21 @@ module Worker:
                     if i >= sources.count:
                         i <- i - sources.count
                     s: RhSourceJob = sources[i]
-                    if not Reconcile::rh_reconcile_due(s.last_full, s.interval_secs, now):
+                    if s.operator_stopped and not Reconcile::rh_reconcile_due(s.last_full, s.interval_secs, now):
+                        decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 0, slot: -1, horizon_secs: Reconcile::rh_reconcile_horizon(s.last_full, now), overlap_start: Reconcile::rh_cursor_overlap_start(s.cursor_time, s.overlap_secs), debt: Reconcile::rh_reconcile_debt(s.last_full, s.interval_secs, now), reason: 1})
+                    elif not Reconcile::rh_reconcile_due(s.last_full, s.interval_secs, now):
                         horizon: i64 = Reconcile::rh_reconcile_horizon(s.last_full, now)
                         debt: i64 = Reconcile::rh_reconcile_debt(s.last_full, s.interval_secs, now)
                         ovl: i64 = Reconcile::rh_cursor_overlap_start(s.cursor_time, s.overlap_secs)
                         if not Job::rh_sched_host_allow(h, now):
-                            decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 0, slot: -1, horizon_secs: horizon, overlap_start: ovl, debt: debt})
+                            decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 0, slot: -1, horizon_secs: horizon, overlap_start: ovl, debt: debt, reason: 0})
                         else:
                             idx: i64 = Job::rh_sched_enqueue(slots, now)
                             if idx < 0:
-                                decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 0, slot: -1, horizon_secs: horizon, overlap_start: ovl, debt: debt})
+                                decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 0, slot: -1, horizon_secs: horizon, overlap_start: ovl, debt: debt, reason: 0})
                             else:
                                 h.tokens <- h.tokens - 1
-                                decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 2, slot: idx, horizon_secs: horizon, overlap_start: ovl, debt: debt})
+                                decisions.push(RhWorkerDecision{source_id: s.source_id, mode: 2, slot: idx, horizon_secs: horizon, overlap_start: ovl, debt: debt, reason: 0})
                                 enqueued <- enqueued + 1
                     offset <- offset + 1
                 enqueued

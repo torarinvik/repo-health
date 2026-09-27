@@ -757,7 +757,9 @@ registered evidence blobs when `RH_EVIDENCE_ROOT` is configured; without it,
 object-failure counts remain `null` (`-1` in exposition), not zero. Rates with no denominator are `null`
 (unknown, not 0). Queue-age and cursor-lag
 maxima are `null` when no corresponding sample was supplied (`-1` in
-exposition); sampled zero remains zero. `rh_cli ops quota
+exposition); sampled zero remains zero. Worker inputs may mark one source
+`operator_stopped`; that source receives an explicit skipped reason before it
+can consume quota (`tests/test_worker_cli.sh`). `rh_cli ops quota
 --input <file> --out <file>` emits `rh-quota-result/1` running a per-host
 token bucket with exponential capped backoff, operator stop, and cancel
 refund (`tests/test_ops_cli.sh`). M07-04 release

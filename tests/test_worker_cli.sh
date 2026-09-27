@@ -62,6 +62,24 @@ assert d["health"]["skipped"] == 2 and d["health"]["overdue"] == 3, d["health"]
 print("[worker] bounded OK")
 PY
 
+echo "[worker] source operator stop skips only that source before quota consumption"
+cat > "$T/operator-stop.json" <<'JSON'
+{"schema":"rh-worker-input/1","capacity":1,"now":5000,
+ "sources":[
+  {"source_id":1,"interval_secs":1000,"operator_stopped":true},
+  {"source_id":2,"interval_secs":1000}
+ ]}
+JSON
+"$ROOT/build/rh_cli" worker tick --input "$T/operator-stop.json" --out "$T/operator-stop.out" >/dev/null || fail "operator stop run"
+python3 - "$T/operator-stop.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["decisions"][0]["mode"] == "skipped" and d["decisions"][0]["reason"] == "operator_stop", d
+assert d["decisions"][1]["mode"] == "full" and d["decisions"][1]["reason"] is None, d
+assert d["health"]["enqueued"] == 1 and d["health"]["skipped"] == 1, d["health"]
+print("[worker] source-scoped stop and quota preservation OK")
+PY
+
 echo "[worker] due reconciles take the slot before incremental work"
 cat > "$T/priority.json" <<'JSON'
 {"schema":"rh-worker-input/1","capacity":1,"now":2500,
@@ -121,8 +139,9 @@ rc4=$(check_rc '{"schema":"rh-worker-input/1","capacity":1,"sources":[]}')
 rc5=$(check_rc '{"schema":"rh-worker-input/1","capacity":1,"now":1}')
 rc6=$(check_rc '{"schema":"rh-worker-input/1","capacity":1,"now":1,"sources":[{"source_id":1,"interval_secs":0}]}')
 rc7=$(check_rc 'not json')
+rc8=$(check_rc '{"schema":"rh-worker-input/1","capacity":1,"now":1,"sources":[{"source_id":1,"interval_secs":60,"operator_stopped":"yes"}]}')
 set -e
-for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7"; do
+for rc in "$rc1" "$rc2" "$rc3" "$rc4" "$rc5" "$rc6" "$rc7" "$rc8"; do
   [[ "$rc" -eq 4 ]] || fail "malformed worker input must exit 4 (got $rc)"
 done
 
