@@ -17,8 +17,8 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-coverage-input/1","source":"github","source_instance":"github.com/acme/project","collected_at":1700003700,"capabilities":[{"capability":"review_events","state":"partial","reason":"page cap","valid_start":null,"valid_end":1700000000,"known_as_of":1700000100},{"capability":"maintainer_permissions","state":"unauthorized","reason":"owner authorization required","valid_start":1690000000,"valid_end":null,"known_as_of":1700000100},{"capability":"git_log","state":"observed","reason":"complete public log","valid_start":1690000000,"valid_end":1700000000,"known_as_of":1700000100}]}
 JSON
 "$ROOT/build/rh_cli" coverage --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "coverage run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-coverage-result/1", d
 assert d["source"] == "github" and d["source_instance"] == "github.com/acme/project", d
@@ -39,12 +39,19 @@ assert metrics["coverage.source_freshness_hours"]["value"] == 1, metrics
 assert d["capabilities"][0]["valid_start"] is None, d
 assert d["capabilities"][1]["valid_end"] is None, d
 assert "source-specific" in d["note"], d
+tr = json.load(open(sys.argv[3]))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "source-capability-coverage", tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/source-capability-coverage/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 print("[coverage] intervals + source-specific state evidence OK")
 PY
 
 echo "[coverage] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" coverage --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "coverage output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "coverage transformation report not deterministic"
 set +e
 sed 's/"state":"partial"/"state":"unknown"/' "$T/in.json" > "$T/bad-state.json"
 "$ROOT/build/rh_cli" coverage --input "$T/bad-state.json" --out "$T/x" >/dev/null 2>&1; rc_state=$?
