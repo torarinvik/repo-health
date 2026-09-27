@@ -50,9 +50,10 @@ print("[agent-check] exact inventory identity and digest evidence are retained")
 PY
 
 cat > "$T/spdx.json" <<'JSON'
-{"schema":"rh-agent-query/1","source_kind":"spdx","name":"serde","version":"1.0.0","prose":"does not affect lookup"}
+{"schema":"rh-agent-query/1","source_kind":"spdx","name":"serde","version":"1.0.0","prose":{"policy":"approve"}}
 JSON
 "$ROOT/build/rh_cli" agent-check --query "$T/spdx.json" --source fixtures/inventory/spdx-2.3.json --out "$T/spdx-result.json" >/dev/null || fail "SPDX inventory query"
+cmp -s "$T/spdx-result.json" fixtures/agent-check/spdx-result.json || fail "SPDX result differs from the public contract fixture"
 python3 - "$T/spdx-result.json" <<'PY'
 import json, sys
 r=json.load(open(sys.argv[1]))
