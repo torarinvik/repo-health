@@ -20,7 +20,7 @@ echo "[parser-diff] equal snapshots match"
 "$ROOT/build/rh_cli" parser-diff --native "$T/native.json" --candidate "$T/native.json" --out "$T/match.json" \
   --native-parser native-lock/1 --candidate-parser alt-lock/2 --config cargo-default --visibility public >/dev/null || fail "equal diff"
 python3 - "$T/match.json" <<'PY'
-import json, sys
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-parser-diff/1" and d["status"] == "match", d
 assert d["summary"] == {"mismatches": 0, "mapping": 0, "context": 0, "parser_support": 0, "normalization": 0}, d["summary"]
@@ -29,6 +29,19 @@ assert metrics["coverage.parser_error_count"]["value"] == 0, metrics
 assert metrics["coverage.mapping_conflict_count"]["value"] == 0, metrics
 assert d["parsers"] == {"native": "native-lock/1", "candidate": "alt-lock/2", "configuration": "cargo-default", "visibility": "public"}, d["parsers"]
 assert len(d["cache_key"]) == 16, d
+report = json.load(open(sys.argv[1] + ".transformations.json"))
+native = open(sys.argv[1].rsplit("/", 1)[0] + "/native.json", "rb").read()
+configuration = [b"native-lock/1", b"alt-lock/2", b"cargo-default", b"public"]
+combined = str(len(native)).encode() + b":" + native + str(len(native)).encode() + b":" + native
+config = b"".join(str(len(value)).encode() + b":" + value for value in configuration)
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "dependency-parser-differential", report
+assert report["output_schema"] == "rh-parser-diff/1", report
+assert report["source_input_sha256"] == hashlib.sha256(combined).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(config).hexdigest(), report
+states = {field["state"] for field in report["fields"]}
+assert {"preserved", "transformed", "unsupported", "discarded"} <= states, report
 print("[parser-diff] equal snapshot + metadata OK")
 PY
 
@@ -75,6 +88,9 @@ d = json.load(open(sys.argv[1]))
 assert d["status"] == "unsupported", d
 assert "successful empty graph" in d["note"], d
 assert d["summary"]["mismatches"] == 0, d
+report = json.load(open(sys.argv[1] + ".transformations.json"))
+assert report["output_schema"] == "rh-parser-diff/1", report
+assert any(field["state"] == "unsupported" for field in report["fields"]), report
 print("[parser-diff] unsupported state OK")
 PY
 
