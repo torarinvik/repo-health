@@ -16,8 +16,8 @@ include "./rh_store.elisa"
 # ---------------------------------------------------------------------------
 
 # Write a canonical backup manifest: a header line naming the digest
-# algorithm, then one evidence object name per line in caller order
-# (callers sort for determinism). Deterministic: identical input -> bytes.
+# algorithm, then strictly increasing evidence object names. Deterministic:
+# identical sorted input -> bytes; duplicate or unsorted names are rejected.
 module Ops:
     public:
         def rh_backup_write(manifest_path: cstr, names: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
@@ -510,6 +510,17 @@ module Ops:
                 out.push(raw[k])
                 k <- k + 1
 
+        # Fixed-width lowercase hex names compare lexicographically without
+        # allocation; strict order rejects both duplicates and noncanonical rows.
+        def rh_backup_name_after(raw: darray[u8]&, previous: usize, current: usize) -> bool:
+            while i < 16 |i: usize = 0, raw, previous, current|:
+                before: u8 = raw[previous + i]
+                after: u8 = raw[current + i]
+                return true if before < after
+                return false if before > after
+                i <- i + 1
+            false
+
         # For every named object under evidence_root: count present+digest-verified
         # and present-but-corrupt. Missing files are counted missing. A restore is
         # trustworthy only when both failure counts are zero; the caller decides
@@ -526,7 +537,7 @@ module Ops:
         # Validate the complete newline-separated transfer list before reading
         # source paths or publishing destination objects.
         def rh_backup_names_valid(raw: darray[u8]&, offset: usize) -> bool can[Memory.Allocate, Abort.Panic]:
-            while start < raw.count |start: usize = offset, raw|:
+            while start < raw.count |start: usize = offset, previous: usize = 0, has_previous: mutable bool = false, raw|:
                 stop: i64 = Base::rh_find_byte(raw, start, 10)
                 end: usize = stop.usize() if stop >= 0 else raw.count
                 return false if end - start != 16
@@ -534,6 +545,9 @@ module Ops:
                     b: u8 = raw[i]
                     return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
                     i <- i + 1
+                return false if has_previous and not rh_backup_name_after(raw, previous, start)
+                previous <- start
+                has_previous <- true
                 start <- end + 1 if stop >= 0 else raw.count
             true
 

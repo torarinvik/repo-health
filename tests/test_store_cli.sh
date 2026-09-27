@@ -85,6 +85,17 @@ set -e
 [[ "$rc_traversal" -eq 4 ]] || fail "path-like backup name must fail closed (got $rc_traversal)"
 [[ "$(cat "$T/outside")" == "preserve this file" ]] || fail "restore changed a path outside the evidence root"
 
+echo "[store] duplicate and unsorted backup names fail before restore"
+printf 'rh-backup/1 fnv1a-64-hex\n%s\n%s\n' "${names[0]}" "${names[0]}" > "$T/duplicate.manifest"
+printf 'rh-backup/1 fnv1a-64-hex\n%s\n%s\n' "${names[1]}" "${names[0]}" > "$T/unsorted.manifest"
+mkdir -p "$T/reject-duplicate" "$T/reject-unsorted"
+set +e
+"$ROOT/build/rh_cli" ops restore --root "$T/ev" --dest "$T/reject-duplicate" --manifest "$T/duplicate.manifest" >/dev/null 2>&1; rc_duplicate=$?
+"$ROOT/build/rh_cli" ops restore --root "$T/ev" --dest "$T/reject-unsorted" --manifest "$T/unsorted.manifest" >/dev/null 2>&1; rc_unsorted=$?
+set -e
+[[ "$rc_duplicate" -eq 4 && "$rc_unsorted" -eq 4 ]] || fail "noncanonical backup names must fail closed ($rc_duplicate/$rc_unsorted)"
+[[ -z "$(find "$T/reject-duplicate" -type f -print -quit)" && -z "$(find "$T/reject-unsorted" -type f -print -quit)" ]] || fail "invalid manifests partially restored objects"
+
 mkdir -p "$T/restore-conflict"
 printf 'destination conflict\n' > "$T/restore-conflict/${names[0]}"
 set +e
