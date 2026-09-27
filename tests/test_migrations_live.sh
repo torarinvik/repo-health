@@ -51,6 +51,8 @@ docker cp "$ROOT/db/migrations/006_stage_graph_projection_chunks.sql" "$CONTAINE
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/006_stage_graph_projection_chunks.sql >/dev/null || fail "apply projection-chunk migration"
 docker cp "$ROOT/db/migrations/007_projection_adjacency_temporal_metadata.sql" "$CONTAINER:/tmp/007_projection_adjacency_temporal_metadata.sql" || fail "copy projection-adjacency temporal metadata migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/007_projection_adjacency_temporal_metadata.sql >/dev/null || fail "apply projection-adjacency temporal metadata migration"
+docker cp "$ROOT/db/migrations/008_bind_projection_query_scope.sql" "$CONTAINER:/tmp/008_bind_projection_query_scope.sql" || fail "copy projection-query scope migration"
+docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/008_bind_projection_query_scope.sql >/dev/null || fail "apply projection-query scope migration"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
 DO $$
@@ -139,6 +141,40 @@ BEGIN
   IF NOT rh_finish_job(c.job_id, c.fencing_token, 'succeeded', '2026-01-01T00:00:20Z', 'ok', NULL) THEN
     RAISE EXCEPTION 'current finish was refused';
   END IF;
+END $$;
+
+DO $$
+DECLARE
+  valid_request jsonb := '{"schema":"rh-query-input/1","kind":"downstream","ids":[],"graph":{"direction":"downstream","subject":1,"nodes":[1],"entity_ids":["00000000-0000-0000-0000-000001000001"],"edges":[],"projection":{"id":"00000000-0000-0000-0000-000000009001","subject_entity_id":"00000000-0000-0000-0000-000001000001","edge_kind":"depends_on","visibility_scope":"public"}}}'::jsonb;
+  invalid_request jsonb;
+BEGIN
+  BEGIN
+    PERFORM rh_enqueue_graph_query_job(
+      '00000000-0000-0000-0000-000000000095', 'tenant-private', valid_request, 0,
+      '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z'
+    );
+    RAISE EXCEPTION 'cross-scope projection query was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('crosses job visibility scope' IN SQLERRM) = 0 THEN RAISE; END IF;
+  END;
+  invalid_request := jsonb_set(valid_request, '{graph,projection,id}', '"not-a-uuid"'::jsonb);
+  BEGIN
+    PERFORM rh_enqueue_graph_query_job(
+      '00000000-0000-0000-0000-000000000095', 'public', invalid_request, 0,
+      '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z'
+    );
+    RAISE EXCEPTION 'malformed projection descriptor was accepted';
+  EXCEPTION WHEN OTHERS THEN
+    IF POSITION('descriptor is malformed' IN SQLERRM) = 0 THEN RAISE; END IF;
+  END;
+  IF NOT rh_enqueue_graph_query_job(
+    '00000000-0000-0000-0000-000000000095', 'public', valid_request, 0,
+    '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'matching-scope projection query was not enqueued';
+  END IF;
+  DELETE FROM graph_query_job WHERE job_id = '00000000-0000-0000-0000-000000000095';
+  DELETE FROM job WHERE id = '00000000-0000-0000-0000-000000000095';
 END $$;
 
 DO $$

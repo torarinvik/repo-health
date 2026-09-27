@@ -9,7 +9,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATIONS="$ROOT/db/migrations"
 
 fail() { echo "[migrations] FAIL: $1" >&2; exit 1; }
-[[ -f "$MIGRATIONS/001_initial.sql" && -f "$MIGRATIONS/002_current_state_reconciliation.sql" && -f "$MIGRATIONS/003_projection_adjacency_batch.sql" && -f "$MIGRATIONS/004_graph_query_claim_attempt.sql" && -f "$MIGRATIONS/005_store_graph_projection.sql" && -f "$MIGRATIONS/006_stage_graph_projection_chunks.sql" && -f "$MIGRATIONS/007_projection_adjacency_temporal_metadata.sql" ]] || fail "expected migration is missing"
+[[ -f "$MIGRATIONS/001_initial.sql" && -f "$MIGRATIONS/002_current_state_reconciliation.sql" && -f "$MIGRATIONS/003_projection_adjacency_batch.sql" && -f "$MIGRATIONS/004_graph_query_claim_attempt.sql" && -f "$MIGRATIONS/005_store_graph_projection.sql" && -f "$MIGRATIONS/006_stage_graph_projection_chunks.sql" && -f "$MIGRATIONS/007_projection_adjacency_temporal_metadata.sql" && -f "$MIGRATIONS/008_bind_projection_query_scope.sql" ]] || fail "expected migration is missing"
 
 python3 - "$MIGRATIONS" <<'PY'
 import re
@@ -47,7 +47,7 @@ required_tables = {
 }
 missing = sorted(required_tables - tables)
 assert not missing, f"missing tables: {missing}"
-assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_request_source_stop", "rh_resolve_source_stop", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_claim_graph_query_job", "rh_claim_graph_query_job_with_attempt", "rh_read_graph_query_request", "rh_get_graph_query_job", "rh_publish_graph_query_result", "rh_retry_graph_query_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events", "rh_reconcile_source_objects", "rh_projection_adjacency_batch", "rh_store_graph_projection", "rh_stage_graph_projection_chunk"} <= functions
+assert {"rh_register_evidence_object", "rh_begin_collection_run", "rh_request_source_stop", "rh_resolve_source_stop", "rh_enqueue_collection_job", "rh_enqueue_graph_query_job", "rh_claim_graph_query_job", "rh_claim_graph_query_job_with_attempt", "rh_read_graph_query_request", "rh_get_graph_query_job", "rh_publish_graph_query_result", "rh_retry_graph_query_job", "rh_claim_next_job", "rh_heartbeat_job", "rh_finish_job", "rh_finish_collection_job", "rh_commit_collection_page", "rh_commit_staged_collection_page", "rh_commit_staged_normalization", "rh_commit_collection_page_events", "rh_reconcile_source_objects", "rh_projection_adjacency_batch", "rh_store_graph_projection", "rh_stage_graph_projection_chunk", "rh_enqueue_graph_query_job"} <= functions
 assert all(
     re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).lstrip().startswith("BEGIN;") and
     re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8")).rstrip().endswith("COMMIT;")
@@ -139,6 +139,12 @@ assert "incoming high-degree query did not use its adjacency index" in live_plan
 assert "batched outgoing adjacency returned" in live_plan
 assert "batched incoming adjacency returned" in live_plan
 assert "batched adjacency crossed projection visibility scope" in live_plan
+scope_upgrade = Path(sys.argv[1]) / "008_bind_projection_query_scope.sql"
+scope_sql = re.sub(r"--[^\n]*", "", scope_upgrade.read_text(encoding="utf-8"))
+assert "v_projection->>'visibility_scope' IS DISTINCT FROM p_visibility_scope::text" in scope_sql
+assert "descriptor is malformed or crosses job visibility scope" in scope_sql
+assert "subject_entity_id" in scope_sql
+
 temporal_upgrade = Path(sys.argv[1]) / "007_projection_adjacency_temporal_metadata.sql"
 temporal_sql = re.sub(r"--[^\n]*", "", temporal_upgrade.read_text(encoding="utf-8"))
 assert "CREATE OR REPLACE FUNCTION rh_projection_adjacency_batch" in temporal_sql
@@ -151,6 +157,9 @@ assert "v_completeness <> 'complete'" in temporal_sql
 assert "incomplete and unavailable for adjacency reads" in temporal_sql
 assert "batched outgoing adjacency lost edge temporal metadata" in live_plan
 assert "batched incoming adjacency lost known-at metadata" in live_plan
+assert "008_bind_projection_query_scope.sql" in live_plan
+assert "cross-scope projection query was accepted" in live_plan
+assert "matching-scope projection query was not enqueued" in live_plan
 print(f"[migrations] target contract OK: {len(tables)} tables, {len(functions)} functions")
 PY
 

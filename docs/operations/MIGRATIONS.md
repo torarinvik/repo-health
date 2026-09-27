@@ -50,6 +50,15 @@ visibility mismatch, and truncation. The non-live CLI test checks the returned
 JSON contract; a PostgreSQL 16 run is required for the migration behavior.
 
 The additive
+[`db/migrations/008_bind_projection_query_scope.sql`](../../db/migrations/008_bind_projection_query_scope.sql)
+binds an optional `graph.projection` descriptor to the visibility scope of
+its durable graph-query job. Projection ID, subject entity ID, edge kind, and
+scope are validated before enqueue; a request cannot read a projection in a
+scope different from the one under which its result will be published. The
+live rehearsal covers matching scope, cross-scope rejection, and malformed
+projection identifiers.
+
+The additive
 [`db/migrations/004_graph_query_claim_attempt.sql`](../../db/migrations/004_graph_query_claim_attempt.sql)
 adds a claim wrapper that returns the durable attempt count together with the
 lease. The worker uses that count when dead-lettering malformed persisted
