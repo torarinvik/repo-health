@@ -51,6 +51,20 @@ module Graph:
     private:
         # Compact CSR adjacency stores edge indexes so projection and visibility
         # checks still run against the original immutable edge records.
+        def rh_adjacency_node_count(edges: darray[RhGraphEdge]&, visibility_count: i64, subject: i64, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if visibility_count < 0 or visibility_count > 1000000 or subject >= 1000000
+            count: mutable i64 = visibility_count
+            while edge_index < edges.count |edge_index: usize = 0, edges, count|:
+                edge: RhGraphEdge = edges[edge_index]
+                return false if edge.from >= 1000000 or edge.dst >= 1000000
+                count <- edge.from + 1 if edge.from >= count
+                count <- edge.dst + 1 if edge.dst >= count
+                edge_index <- edge_index + 1
+            count <- subject + 1 if subject >= count
+            return false if count < 0 or count > 1000000
+            count_out[0] <- count
+            true
+
         def rh_adjacency_build(edges: darray[RhGraphEdge]&, node_count: i64, reverse: bool, offsets: mutable darray[i64]&, edge_indexes: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if node_count < 0 or node_count > 1000000 or edges.count > 1000000
             while node <= node_count |node: i64 = 0, node_count, offsets|:
@@ -176,13 +190,10 @@ module Graph:
         # truncated instead of silently stopping. Cycles terminate via `seen`.
         def rh_transitive_dependents(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subject: i64, p: RhProjection&, out_nodes: mutable darray[i64]&, trunc_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             trunc_out[0] <- 0
-            node_count: mutable i64 = vis.count.i64()
-            while i < edges.count |i: usize = 0, edges, node_count|:
-                edge: RhGraphEdge = edges[i]
-                node_count <- edge.from + 1 if edge.from >= node_count
-                node_count <- edge.dst + 1 if edge.dst >= node_count
-                i <- i + 1
-            node_count <- subject + 1 if subject >= node_count
+            node_count: mutable i64 = 0
+            if not rh_adjacency_node_count(edges, vis.count.i64(), subject, &node_count):
+                trunc_out[0] <- 1
+                return 0
             offsets: mutable darray[i64] = []
             edge_indexes: mutable darray[i64] = []
             if not rh_adjacency_build(edges, node_count, true, offsets, edge_indexes):
@@ -229,13 +240,10 @@ module Graph:
         # frontier/depth arrays keep hostile chains iterative and expose truncation.
         def rh_transitive_dependencies(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subject: i64, p: RhProjection&, out_nodes: mutable darray[i64]&, trunc_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             trunc_out[0] <- 0
-            node_count: mutable i64 = vis.count.i64()
-            while i < edges.count |i: usize = 0, edges, node_count|:
-                edge: RhGraphEdge = edges[i]
-                node_count <- edge.from + 1 if edge.from >= node_count
-                node_count <- edge.dst + 1 if edge.dst >= node_count
-                i <- i + 1
-            node_count <- subject + 1 if subject >= node_count
+            node_count: mutable i64 = 0
+            if not rh_adjacency_node_count(edges, vis.count.i64(), subject, &node_count):
+                trunc_out[0] <- 1
+                return 0
             offsets: mutable darray[i64] = []
             edge_indexes: mutable darray[i64] = []
             if not rh_adjacency_build(edges, node_count, false, offsets, edge_indexes):
