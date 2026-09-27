@@ -752,7 +752,8 @@ now a product path (`rh_cli ops backup|verify|restore`, `tests/test_store_cli.sh
 with missing and corrupt counted separately). Monitoring and source-respect
 are also product paths: `rh_cli ops monitor --input <file> --out <file>`
 emits `rh-monitor-result/2` with service and project series **separate** and
-a rate with no denominator as `null` (unknown, not 0). Queue-age and cursor-lag
+a per-source/capability freshness array; rates with no denominator are `null`
+(unknown, not 0). Queue-age and cursor-lag
 maxima are `null` when no corresponding sample was supplied (`-1` in
 exposition); sampled zero remains zero. `rh_cli ops quota
 --input <file> --out <file>` emits `rh-quota-result/1` running a per-host

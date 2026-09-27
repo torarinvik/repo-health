@@ -33,7 +33,22 @@ assert d["exposition"][0].startswith("rh_service_"), d["exposition"]
 assert any(x.startswith("rh_project_observed_rate_bp") for x in d["exposition"]), d["exposition"]
 assert "rh_project_policy_unknown_rate_bp 5000" in d["exposition"], d["exposition"]
 assert "separate" in d["note"], d["note"]
+assert d["source_freshness"] == [], d["source_freshness"]
 print("[ops] monitor series OK")
+PY
+
+echo "[ops] source/capability freshness remains individually attributable"
+printf '%s\n' '{"schema":"rh-monitor-input/1","expected_interval":60,"now":1061,"events":[{"kind":"source_success","source_instance_id":"source-a","capability":"issues","now":1000},{"kind":"source_success","source_instance_id":"source-b","capability":"reviews","now":1061}]}' > "$T/source-freshness.json"
+"$ROOT/build/rh_cli" ops monitor --input "$T/source-freshness.json" --out "$T/source-freshness.out" >/dev/null || fail "source freshness monitor"
+python3 - "$T/source-freshness.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["source_freshness"] == [
+    {"source_instance_id": "source-a", "capability": "issues", "last_success_epoch": 1000, "freshness_age": 61, "freshness_state": "stale"},
+    {"source_instance_id": "source-b", "capability": "reviews", "last_success_epoch": 1061, "freshness_age": 0, "freshness_state": "fresh"},
+], d["source_freshness"]
+assert d["service"]["freshness_state"] == "unknown", d["service"]
+print("[ops] source freshness attribution OK")
 PY
 
 echo "[ops] no denominator -> null rate (not 0); no success -> null freshness"

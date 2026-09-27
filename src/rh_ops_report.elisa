@@ -1,8 +1,8 @@
 # rh_ops_report.elisa — M07 ops monitoring + source-respect execution path
 # (M07-11, M07-12).
 #
-# `rh-monitor-input/1` -> `rh-monitor-result/2`: service health and project
-# health are SEPARATE series, and a rate with no denominator is `null`
+# `rh-monitor-input/1` -> `rh-monitor-result/2`: service health, per-source
+# freshness, and project health are separate series; denominator-free rates are `null`
 # (unknown), never 0. `rh-quota-input/1` -> `rh-quota-result/1`: a per-host
 # token bucket with exponential backoff, operator stop, and cancel refund.
 # Malformed input fails closed.
@@ -62,8 +62,10 @@ module OpsReport:
             ev_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "events")
             return -1 if ev_idx < 0 or nodes[ev_idx.usize()].kind != Json::RH_JSON_ARR
             m: mutable Ops::RhMon = Ops::rh_mon_new(interval)
+            source_freshness: mutable darray[u8] = []
+            source_freshness_count: mutable i64 = 0
             arr: Json::RhJsonNode = nodes[ev_idx.usize()]
-            while child >= 0 |child: i64 = arr.first_child, nodes, texts, raw, m|:
+            while child >= 0 |child: i64 = arr.first_child, nodes, texts, raw, m, now, interval, source_freshness, source_freshness_count|:
                 return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
                 ks: mutable i64 = 0
                 ke: mutable i64 = 0
@@ -105,6 +107,32 @@ module OpsReport:
                     success_at: mutable i64 = 0
                     return -1 if not rh_or_checked_int(nodes, raw, texts, child, "now", true, &success_at) or success_at < 0 or success_at > now
                     Ops::rh_mon_success(m, success_at)
+                elif rh_or_eq(texts, ks, ke, "source_success"):
+                    source_start: mutable i64 = 0
+                    source_end: mutable i64 = 0
+                    capability_start: mutable i64 = 0
+                    capability_end: mutable i64 = 0
+                    source_at: mutable i64 = 0
+                    return -1 if not rh_or_str(nodes, texts, child, "source_instance_id", &source_start, &source_end)
+                    return -1 if not rh_or_str(nodes, texts, child, "capability", &capability_start, &capability_end)
+                    return -1 if source_end <= source_start or capability_end <= capability_start
+                    return -1 if not rh_or_checked_int(nodes, raw, texts, child, "now", true, &source_at) or source_at < 0 or source_at > now
+                    source_age: i64 = now - source_at
+                    source_state: u8& = "unknown" if interval <= 0 else ("stale" if source_age > interval else "fresh")
+                    if source_freshness_count > 0:
+                        source_freshness.push(44)
+                    source_freshness_count <- source_freshness_count + 1
+                    Base::rh_push_text(source_freshness, "{\"source_instance_id\":\"")
+                    Base::rh_json_escape(source_freshness, texts, source_start.usize(), source_end.usize())
+                    Base::rh_push_text(source_freshness, "\",\"capability\":\"")
+                    Base::rh_json_escape(source_freshness, texts, capability_start.usize(), capability_end.usize())
+                    Base::rh_push_text(source_freshness, "\",\"last_success_epoch\":")
+                    Base::rh_push_decimal_i64(source_freshness, source_at)
+                    Base::rh_push_text(source_freshness, ",\"freshness_age\":")
+                    Base::rh_push_decimal_i64(source_freshness, source_age)
+                    Base::rh_push_text(source_freshness, ",\"freshness_state\":\"")
+                    Base::rh_push_text(source_freshness, source_state)
+                    Base::rh_push_text(source_freshness, "\"}")
                 elif rh_or_eq(texts, ks, ke, "queue_age"):
                     v: mutable i64 = 0
                     return -1 if not rh_or_checked_int(nodes, raw, texts, child, "value", true, &v) or v < 0
@@ -153,7 +181,9 @@ module OpsReport:
             Base::rh_push_decimal_i64(out, m.parser_rejects)
             Base::rh_push_text(out, ",\"object_failures\":")
             Base::rh_push_decimal_i64(out, m.object_failures)
-            Base::rh_push_text(out, "},\"project\":{\"observed\":")
+            Base::rh_push_text(out, "},\"source_freshness\":[")
+            out.extend(bytes_view(source_freshness))
+            Base::rh_push_text(out, "],\"project\":{\"observed\":")
             Base::rh_push_decimal_i64(out, m.observed)
             Base::rh_push_text(out, ",\"unknown\":")
             Base::rh_push_decimal_i64(out, m.unknown)
