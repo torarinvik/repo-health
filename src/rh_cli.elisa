@@ -3997,13 +3997,15 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         # checksums become module artifacts; /go.mod records become go_mod
         # artifacts for independent file verification.
         gartifacts: mutable darray[Package::RhArtifact] = []
+        gsb: mutable darray[u8] = []
+        has_go_sum: mutable bool = false
         gs: mutable darray[u8] = []
         if not rh_out_path(repo, "go.sum", gs):
             rh_cli_err("deps: bad repo path")
             return 3
         gsp: cstr = (&gs[0]).cast[cstr] can Unsafe.PointerCast
         if file_exists(gsp):
-            gsb: mutable darray[u8] = []
+            has_go_sum <- true
             if Base::rh_io_read(gsp, gsb) < 0:
                 rh_cli_err("deps: cannot read go.sum")
                 return 4
@@ -4027,6 +4029,30 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         gf2p: cstr = (&gf2[0]).cast[cstr] can Unsafe.PointerCast
         if not Base::rh_io_write(gf2p, gg):
             rh_cli_err("deps: cannot write go graph")
+            return 4
+        go_transform_input: mutable darray[u8] =
+            go_transform_input: mutable darray[u8] = []
+            Base::rh_push_decimal_i64(go_transform_input, gb.count.i64())
+            go_transform_input.push(58)
+            go_transform_input.extend(bytes_view(gb))
+            Base::rh_push_decimal_i64(go_transform_input, gsb.count.i64())
+            go_transform_input.push(58)
+            go_transform_input.extend(bytes_view(gsb))
+            Base::rh_push_decimal_i64(go_transform_input, osv_source_bytes.count.i64())
+            go_transform_input.push(58)
+            go_transform_input.extend(bytes_view(osv_source_bytes))
+            go_transform_input
+        go_transform_configuration: mutable darray[u8] =
+            go_transform_configuration: mutable darray[u8] = []
+            Base::rh_push_text(go_transform_configuration, "repo-health/go-mod/1;go-sum=")
+            Base::rh_push_text(go_transform_configuration, "present" if has_go_sum else "absent")
+            Base::rh_push_text(go_transform_configuration, ";osv=")
+            Base::rh_push_text(go_transform_configuration, "fetched" if has_osv_url else "file" if resolved_has_osv else "none")
+            go_transform_configuration.push(0)
+            go_transform_configuration
+        go_transform_configuration_ptr: cstr = (&go_transform_configuration[0]).cast[cstr] can Unsafe.PointerCast
+        if not rh_cli_write_adapter_transformation(go_transform_input, gg, "go-module-graph", "rh-dep-graph/1", go_transform_configuration_ptr, "[{\"source\":\"go.mod module, require, replace, and exclude declarations\",\"target\":\"Go dependency graph\",\"state\":\"preserved\"},{\"source\":\"exact module versions and local replacement context\",\"target\":\"resolved nodes, edges, and unresolved requirements\",\"state\":\"transformed\"},{\"source\":\"go.sum h1 checksums\",\"target\":\"module and go.mod artifact evidence\",\"state\":\"preserved\"},{\"source\":\"pseudo-versions and unsupported requirement forms\",\"target\":\"graph resolution\",\"state\":\"unsupported\"},{\"source\":\"optional retained OSV response\",\"target\":\"advisory matches\",\"state\":\"transformed\"},{\"source\":\"unmodeled directives and comments\",\"target\":\"canonical graph\",\"state\":\"discarded\"}]", gf2p):
+            rh_cli_err("deps: cannot write Go transformation report")
             return 4
         eco_codes.push(3)
         declared.push(greqs.count.i64())

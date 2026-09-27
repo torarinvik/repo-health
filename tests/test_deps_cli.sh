@@ -450,11 +450,20 @@ printf 'github.com/pkg/errors v0.9.1 h1:%s=\ngithub.com/pkg/errors v0.9.1/go.mod
 "$ROOT/build/rh_cli" deps --repo "$T/gosrc" --out "$T/goout" --osv "$T/src/osv-response.json" \
   | grep -q "ecosystems=1 go=4/6 unresolved=4 unsupported=0" || fail "go deps summary"
 [[ -f "$T/goout/deps-go-graph.json" ]] || fail "missing go graph"
-python3 - "$T/goout" <<'PY'
+python3 - "$T/goout" "$T/gosrc/go.mod" "$T/gosrc/go.sum" "$T/src/osv-response.json" <<'PY'
+import hashlib
 import json, sys
-out = sys.argv[1]
+out, go_mod_path, go_sum_path, osv_path = sys.argv[1:]
+go_mod, go_sum, osv = (open(path, "rb").read() for path in (go_mod_path, go_sum_path, osv_path))
+framed = b"".join(str(len(value)).encode() + b":" + value for value in (go_mod, go_sum, osv))
 g = json.load(open(out + "/deps-go-graph.json"))
 m = json.load(open(out + "/deps-metrics.json"))
+report = json.load(open(out + "/deps-go-graph.json.transformations.json"))
+assert report["adapter"] == "go-module-graph", report
+assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(open(out + "/deps-go-graph.json", "rb").read()).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/go-mod/1;go-sum=present;osv=file").hexdigest(), report
+assert {field["state"] for field in report["fields"]} >= {"preserved", "transformed", "unsupported", "discarded"}, report
 assert g["ecosystem"] == "go", g["ecosystem"]
 assert g["nodes"][0]["name"] == "example.com/app", g["nodes"][0]
 assert len(g["nodes"]) == 5 and len(g["edges"]) == 4, (g["nodes"], g["edges"])
@@ -475,6 +484,19 @@ assert digests["github.com/google/uuid"] is False, digests
 by = {b["ecosystem"]: b for b in m["by_ecosystem"]}
 assert by["go"]["resolved_edges"] == 4 and by["go"]["unresolved_requirements"] == 4, by["go"]
 print("[deps] go.mod graph + unresolved reasons OK")
+PY
+mkdir -p "$T/go-mod-only"
+cp "$ROOT/fixtures/packages/go.mod.txt" "$T/go-mod-only/go.mod"
+"$ROOT/build/rh_cli" deps --repo "$T/go-mod-only" --out "$T/go-mod-only-out" >/dev/null || fail "go.mod without go.sum failed"
+python3 - "$T/go-mod-only-out" "$T/go-mod-only/go.mod" <<'PY'
+import hashlib, json, sys
+out = sys.argv[1]
+go_mod = open(sys.argv[2], "rb").read()
+framed = str(len(go_mod)).encode() + b":" + go_mod + b"0:0:"
+report = json.load(open(out + "/deps-go-graph.json.transformations.json"))
+assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/go-mod/1;go-sum=absent;osv=none").hexdigest(), report
+print("[deps] Go transformation binds absent go.sum and OSV states")
 PY
 
 echo "[deps] Gemfile.lock and composer.lock preserve ecosystem-native scopes"
