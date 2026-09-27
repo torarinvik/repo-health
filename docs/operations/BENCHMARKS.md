@@ -140,3 +140,17 @@ partial-cache median than the earlier 12,000-event sample. The three-sample
 result is a local comparison, not a general speedup guarantee. The independent
 JSON-node ceiling remains: 20,000 events are rejected before aggregate
 measurement.
+
+
+A clean 100,000-event run at revision `df99160` used two measured repetitions
+after one warmup across 91 daily and 14 weekly partitions. Full recomputation
+had a 12,490 ms median and 225.90 MiB maximum individual-child peak RSS; partial
+cache had a 3,344 ms median and 243.17 MiB peak RSS. It reused 103/105 rows,
+with byte-identical output SHA-256
+`d824ba36a4ecd6a766f8a3d465975734692b6c9475b6f6cfad2283ed454fa76e`. Cache
+seeding took a separate 10,450 ms median. The result confirms operation at
+100k events under the aggregate-only 1.5m-node budget, but the two-sample
+latencies varied substantially and memory use is material. This is a single
+synthetic local run; it does not support deployment capacity claims. Ordinary
+JSON adapter parsing remains capped at 200,000 nodes, and larger aggregate
+workloads still require memory measurement before increasing the explicit cap.
