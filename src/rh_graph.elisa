@@ -48,6 +48,38 @@ module Graph:
             removed: mutable i64
             first_seen: mutable i64
 
+    private:
+        # Compact CSR adjacency stores edge indexes so projection and visibility
+        # checks still run against the original immutable edge records.
+        def rh_adjacency_build(edges: darray[RhGraphEdge]&, node_count: i64, reverse: bool, offsets: mutable darray[i64]&, edge_indexes: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if node_count < 0 or node_count > 1000000 or edges.count > 1000000
+            while node <= node_count |node: i64 = 0, node_count, offsets|:
+                offsets.push(0)
+                node <- node + 1
+            for edge_index in 0..<edges.count |edge_index, edges, offsets, node_count, reverse|:
+                edge: RhGraphEdge = edges[edge_index]
+                bucket: i64 = edge.dst if reverse else edge.from
+                if bucket >= 0 and bucket < node_count:
+                    offsets[(bucket + 1).usize()] <- offsets[(bucket + 1).usize()] + 1
+            while node <= node_count |node: i64 = 1, node_count, offsets|:
+                offsets[node.usize()] <- offsets[node.usize()] + offsets[(node - 1).usize()]
+                node <- node + 1
+            for edge in 0..<offsets[node_count.usize()] |edge, edge_indexes|:
+                edge_indexes.push(0)
+            cursor: mutable darray[i64] = []
+            for node in 0..<node_count |node, offsets, cursor|:
+                cursor.push(offsets[node.usize()])
+            for edge_index in 0..<edges.count |edge_index, edges, cursor, node_count, reverse, edge_indexes|:
+                edge: RhGraphEdge = edges[edge_index]
+                bucket: i64 = edge.dst if reverse else edge.from
+                if bucket >= 0 and bucket < node_count:
+                    slot: usize = cursor[bucket.usize()].usize()
+                    edge_indexes[slot] <- edge_index.i64()
+                    cursor[bucket.usize()] <- cursor[bucket.usize()] + 1
+            true
+
+    public:
+
         # One grouping assertion between two nodes (mirror, project family,
         # migration). Grouping is explicit and reviewable; forks stay distinct
         # unless an accepted assertion groups them for a stated purpose.
@@ -107,33 +139,35 @@ module Graph:
 
         # A budget/depth boundary is truncating only when it hides a new node.
         # This keeps an exact-fit traversal of a leaf from being mislabeled.
-        def rh_has_unseen_dependent(edges: darray[RhGraphEdge]&, vis: darray[u8]&, node: i64, subject: i64, p: RhProjection&, seen: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
-            while e < edges.count |e: usize = 0, edges, vis, node, subject, p, seen|:
-                ed: RhGraphEdge = edges[e]
+        def rh_has_unseen_dependent(edges: darray[RhGraphEdge]&, offsets: darray[i64]&, edge_indexes: darray[i64]&, vis: darray[u8]&, node: i64, subject: i64, p: RhProjection&, seen: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if node < 0 or node + 1 >= offsets.count.i64()
+            while e < offsets[(node + 1).usize()] |e: i64 = offsets[node.usize()], edges, offsets, edge_indexes, vis, node, subject, p, seen|:
+                ed: RhGraphEdge = edges[edge_indexes[e.usize()].usize()]
                 e <- e + 1
-                continue if ed.dst != node or ed.from == subject
+                continue if ed.from == subject
                 continue if not rh_edge_visible(ed, p, vis)
                 return true if not rh_contains(seen, ed.from)
             false
 
-        def rh_pending_has_unseen(edges: darray[RhGraphEdge]&, vis: darray[u8]&, frontier: darray[i64]&, first: usize, subject: i64, p: RhProjection&, seen: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
-            while i < frontier.count |i: usize = first, frontier, edges, vis, subject, p, seen|:
-                return true if rh_has_unseen_dependent(edges, vis, frontier[i], subject, p, seen)
+        def rh_pending_has_unseen(edges: darray[RhGraphEdge]&, offsets: darray[i64]&, edge_indexes: darray[i64]&, vis: darray[u8]&, frontier: darray[i64]&, first: usize, subject: i64, p: RhProjection&, seen: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < frontier.count |i: usize = first, frontier, edges, offsets, edge_indexes, vis, subject, p, seen|:
+                return true if rh_has_unseen_dependent(edges, offsets, edge_indexes, vis, frontier[i], subject, p, seen)
                 i <- i + 1
             false
 
-        def rh_has_unseen_dependency(edges: darray[RhGraphEdge]&, vis: darray[u8]&, node: i64, subject: i64, p: RhProjection&, seen: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
-            while e < edges.count |e: usize = 0, edges, vis, node, subject, p, seen|:
-                ed: RhGraphEdge = edges[e]
+        def rh_has_unseen_dependency(edges: darray[RhGraphEdge]&, offsets: darray[i64]&, edge_indexes: darray[i64]&, vis: darray[u8]&, node: i64, subject: i64, p: RhProjection&, seen: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if node < 0 or node + 1 >= offsets.count.i64()
+            while e < offsets[(node + 1).usize()] |e: i64 = offsets[node.usize()], edges, offsets, edge_indexes, vis, node, subject, p, seen|:
+                ed: RhGraphEdge = edges[edge_indexes[e.usize()].usize()]
                 e <- e + 1
-                continue if ed.from != node or ed.dst == subject
+                continue if ed.dst == subject
                 continue if not rh_edge_visible(ed, p, vis)
                 return true if not rh_contains(seen, ed.dst)
             false
 
-        def rh_pending_has_unseen_dependency(edges: darray[RhGraphEdge]&, vis: darray[u8]&, frontier: darray[i64]&, first: usize, subject: i64, p: RhProjection&, seen: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
-            while i < frontier.count |i: usize = first, frontier, edges, vis, subject, p, seen|:
-                return true if rh_has_unseen_dependency(edges, vis, frontier[i], subject, p, seen)
+        def rh_pending_has_unseen_dependency(edges: darray[RhGraphEdge]&, offsets: darray[i64]&, edge_indexes: darray[i64]&, vis: darray[u8]&, frontier: darray[i64]&, first: usize, subject: i64, p: RhProjection&, seen: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < frontier.count |i: usize = first, frontier, edges, offsets, edge_indexes, vis, subject, p, seen|:
+                return true if rh_has_unseen_dependency(edges, offsets, edge_indexes, vis, frontier[i], subject, p, seen)
                 i <- i + 1
             false
 
@@ -142,27 +176,41 @@ module Graph:
         # truncated instead of silently stopping. Cycles terminate via `seen`.
         def rh_transitive_dependents(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subject: i64, p: RhProjection&, out_nodes: mutable darray[i64]&, trunc_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             trunc_out[0] <- 0
+            node_count: mutable i64 = vis.count.i64()
+            while i < edges.count |i: usize = 0, edges, node_count|:
+                edge: RhGraphEdge = edges[i]
+                node_count <- edge.from + 1 if edge.from >= node_count
+                node_count <- edge.dst + 1 if edge.dst >= node_count
+                i <- i + 1
+            node_count <- subject + 1 if subject >= node_count
+            offsets: mutable darray[i64] = []
+            edge_indexes: mutable darray[i64] = []
+            if not rh_adjacency_build(edges, node_count, true, offsets, edge_indexes):
+                trunc_out[0] <- 1
+                return 0
             frontier: mutable darray[i64] = []
             depths: mutable darray[i64] = []
             seen: mutable darray[i64] = []
             frontier.push(subject)
             depths.push(0)
             seen.push(subject)
-            while fi < frontier.count |fi: usize = 0, frontier, depths, edges, vis, subject, p, out_nodes, seen, trunc_out|:
+            while fi < frontier.count |fi: usize = 0, frontier, depths, edges, offsets, edge_indexes, vis, subject, p, out_nodes, seen, trunc_out|:
                 if out_nodes.count.i64() >= p.max_nodes:
-                    trunc_out[0] <- 1 if rh_pending_has_unseen(edges, vis, frontier, fi, subject, p, seen)
+                    trunc_out[0] <- 1 if rh_pending_has_unseen(edges, offsets, edge_indexes, vis, frontier, fi, subject, p, seen)
                     fi <- frontier.count
                     continue
                 cur: i64 = frontier[fi]
                 dep: i64 = depths[fi]
                 fi <- fi + 1
                 if dep >= p.max_depth:
-                    trunc_out[0] <- 1 if rh_has_unseen_dependent(edges, vis, cur, subject, p, seen)
+                    trunc_out[0] <- 1 if rh_has_unseen_dependent(edges, offsets, edge_indexes, vis, cur, subject, p, seen)
                     continue
-                while e < edges.count |e: usize = 0, edges, vis, subject, p, out_nodes, seen, cur, dep, frontier, depths, fi, trunc_out|:
-                    ed: RhGraphEdge = edges[e]
+                if cur < 0 or cur + 1 >= offsets.count.i64():
+                    trunc_out[0] <- 1
+                    continue
+                while e < offsets[(cur + 1).usize()] |e: i64 = offsets[cur.usize()], edges, offsets, edge_indexes, vis, subject, p, out_nodes, seen, cur, dep, frontier, depths, fi, trunc_out|:
+                    ed: RhGraphEdge = edges[edge_indexes[e.usize()].usize()]
                     e <- e + 1
-                    continue if ed.dst != cur
                     continue if ed.from == subject
                     continue if not rh_edge_visible(ed, p, vis)
                     continue if rh_contains(seen, ed.from)
@@ -181,27 +229,41 @@ module Graph:
         # frontier/depth arrays keep hostile chains iterative and expose truncation.
         def rh_transitive_dependencies(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subject: i64, p: RhProjection&, out_nodes: mutable darray[i64]&, trunc_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             trunc_out[0] <- 0
+            node_count: mutable i64 = vis.count.i64()
+            while i < edges.count |i: usize = 0, edges, node_count|:
+                edge: RhGraphEdge = edges[i]
+                node_count <- edge.from + 1 if edge.from >= node_count
+                node_count <- edge.dst + 1 if edge.dst >= node_count
+                i <- i + 1
+            node_count <- subject + 1 if subject >= node_count
+            offsets: mutable darray[i64] = []
+            edge_indexes: mutable darray[i64] = []
+            if not rh_adjacency_build(edges, node_count, false, offsets, edge_indexes):
+                trunc_out[0] <- 1
+                return 0
             frontier: mutable darray[i64] = []
             depths: mutable darray[i64] = []
             seen: mutable darray[i64] = []
             frontier.push(subject)
             depths.push(0)
             seen.push(subject)
-            while fi < frontier.count |fi: usize = 0, frontier, depths, edges, vis, subject, p, out_nodes, seen, trunc_out|:
+            while fi < frontier.count |fi: usize = 0, frontier, depths, edges, offsets, edge_indexes, vis, subject, p, out_nodes, seen, trunc_out|:
                 if out_nodes.count.i64() >= p.max_nodes:
-                    trunc_out[0] <- 1 if rh_pending_has_unseen_dependency(edges, vis, frontier, fi, subject, p, seen)
+                    trunc_out[0] <- 1 if rh_pending_has_unseen_dependency(edges, offsets, edge_indexes, vis, frontier, fi, subject, p, seen)
                     fi <- frontier.count
                     continue
                 cur: i64 = frontier[fi]
                 dep: i64 = depths[fi]
                 fi <- fi + 1
                 if dep >= p.max_depth:
-                    trunc_out[0] <- 1 if rh_has_unseen_dependency(edges, vis, cur, subject, p, seen)
+                    trunc_out[0] <- 1 if rh_has_unseen_dependency(edges, offsets, edge_indexes, vis, cur, subject, p, seen)
                     continue
-                while e < edges.count |e: usize = 0, edges, vis, subject, p, out_nodes, seen, cur, dep, frontier, depths, fi, trunc_out|:
-                    ed: RhGraphEdge = edges[e]
+                if cur < 0 or cur + 1 >= offsets.count.i64():
+                    trunc_out[0] <- 1
+                    continue
+                while e < offsets[(cur + 1).usize()] |e: i64 = offsets[cur.usize()], edges, offsets, edge_indexes, vis, subject, p, out_nodes, seen, cur, dep, frontier, depths, fi, trunc_out|:
+                    ed: RhGraphEdge = edges[edge_indexes[e.usize()].usize()]
                     e <- e + 1
-                    continue if ed.from != cur
                     continue if ed.dst == subject
                     continue if not rh_edge_visible(ed, p, vis)
                     continue if rh_contains(seen, ed.dst)
