@@ -49,6 +49,26 @@ assert served == [1], plan
 print("[worker-daemon] prior plan cursor advanced service despite identical time")
 PY
 
+echo "[worker-daemon] concurrent daemons serialize cursor and suppress duplicate inputs"
+cat > "$T/concurrent.json" <<'JSON'
+{"schema":"rh-worker-input/1","capacity":1,"now":5000,"sources":[{"source_id":1,"interval_secs":10000,"last_full_reconcile":0},{"source_id":2,"interval_secs":10000,"last_full_reconcile":0},{"source_id":3,"interval_secs":10000,"last_full_reconcile":0}]}
+JSON
+"$ROOT/tools/worker-daemon.sh" --input "$T/concurrent.json" --out "$T/concurrent-plan.json" --interval-secs 0 --max-cycles 1 > "$T/daemon-a.log" &
+daemon_a=$!
+"$ROOT/tools/worker-daemon.sh" --input "$T/concurrent.json" --out "$T/concurrent-plan.json" --interval-secs 0 --max-cycles 1 > "$T/daemon-b.log" &
+daemon_b=$!
+wait "$daemon_a" || fail "first concurrent daemon failed"
+wait "$daemon_b" || fail "second concurrent daemon failed"
+scheduled_count=$(cat "$T/daemon-a.log" "$T/daemon-b.log" | grep -c 'worker-daemon-tick:scheduled' || true)
+[[ "$scheduled_count" -eq 1 ]] || fail "same input scheduled $scheduled_count times under contention"
+python3 - "$T/concurrent-plan.json" <<'PY'
+import json, sys
+plan = json.load(open(sys.argv[1]))
+served = [row["source_id"] for row in plan["decisions"] if row["mode"] != "skipped"]
+assert len(served) == 1, plan
+print("[worker-daemon] one serialized schedule produced one complete plan")
+PY
+
 echo "[worker-daemon] invalid wrapper arguments fail closed"
 set +e
 "$ROOT/tools/worker-daemon.sh" --input "$T/in.json" --out "$T/x" --interval-secs nope --max-cycles 1 >/dev/null 2>&1; rc=$?

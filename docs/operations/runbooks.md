@@ -242,12 +242,13 @@ or enabling `public_member_tokens` for a history that previously had no tokens.
 
 ## 11. Bounded worker scheduling
 
-`tools/worker-daemon.sh` carries the prior plan's `next_rotation_cursor` into the next
-refreshed `rh-worker-input/1` when the producer has not supplied
-`rotation_cursor`. This keeps a capacity-limited queue rotating across sources
-even when daemon processes restart or ticks share a timestamp. Direct callers
-of `rh_cli worker tick` should persist and pass the cursor themselves; without
-one, the pass seeds its starting position from `now` for compatibility. Keep
-the cursor with the stable source ordering; when that ordering changes, reset
-it to zero. This is local scheduling fairness evidence, not proof of fairness
-across concurrent deployed workers.
+`tools/worker-daemon.sh` keeps a digest and `next_rotation_cursor` beside its
+plan, protected by an advisory lock on the output path. It carries the cursor
+into refreshed `rh-worker-input/1` when the producer has not supplied
+`rotation_cursor`, and serializes daemons that share the same output. Replaying
+an unchanged input after restart is skipped. Direct callers of `rh_cli worker
+tick` should persist and pass the cursor themselves; without one, the pass
+seeds its starting position from `now` for compatibility. Keep the cursor with
+the stable source ordering; when that ordering changes, reset it to zero. This
+proves same-host, same-output scheduling behavior, not fairness across hosts or
+database workers.
