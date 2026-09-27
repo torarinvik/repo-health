@@ -125,6 +125,11 @@ for fragment in (
 # must never introduce a raw secret column or a plaintext credential payload.
 assert "secret_value" not in clean.lower()
 assert "secret_locator" in clean
+live_plan_test = Path(sys.argv[1]).parent.parent / "tests" / "test_migrations_live.sh"
+live_plan = live_plan_test.read_text(encoding="utf-8")
+assert "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)" in live_plan
+assert "outgoing high-degree query did not use an adjacency index" in live_plan
+assert "incoming high-degree query did not use its adjacency index" in live_plan
 print(f"[migrations] target contract OK: {len(tables)} tables, {len(functions)} functions")
 PY
 

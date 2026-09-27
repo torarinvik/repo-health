@@ -997,5 +997,65 @@ END $$;
 SQL
 echo "[migrations-live] collection backlog sheds optional graph work regardless of caller priority, then resumes it"
 
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "measure high-degree graph adjacency plans"
+INSERT INTO entity (id, entity_kind, visibility_scope, created_at)
+SELECT ('00000000-0000-0000-0000-' || lpad(n::text, 12, '0'))::uuid,
+       'package_version', 'public', '2026-01-01T00:00:00Z'
+FROM generate_series(1, 5002) AS n;
+INSERT INTO graph_projection
+    (id, projection_kind, visibility_scope, input_cutoff, as_of, identity_revision, mapping_revision, completeness, manifest_digest)
+VALUES ('00000000-0000-0000-0000-000000009001', 'dependency', 'public',
+        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'identity-1', 'mapping-1', 'complete', 'fixture');
+INSERT INTO projection_membership (projection_id, from_entity_id, to_entity_id, edge_kind, known_at)
+SELECT '00000000-0000-0000-0000-000000009001',
+       '00000000-0000-0000-0000-000000000001',
+       ('00000000-0000-0000-0000-' || lpad((n + 1)::text, 12, '0'))::uuid,
+       'depends_on', '2026-01-01T00:00:00Z'
+FROM generate_series(1, 4000) AS n;
+INSERT INTO projection_membership (projection_id, from_entity_id, to_entity_id, edge_kind, known_at)
+SELECT '00000000-0000-0000-0000-000000009001',
+       ('00000000-0000-0000-0000-' || lpad((n + 1)::text, 12, '0'))::uuid,
+       '00000000-0000-0000-0000-000000005002',
+       'depends_on', '2026-01-01T00:00:00Z'
+FROM generate_series(1, 4000) AS n;
+INSERT INTO projection_membership (projection_id, from_entity_id, to_entity_id, edge_kind, known_at)
+SELECT '00000000-0000-0000-0000-000000009001',
+       ('00000000-0000-0000-0000-' || lpad((n / 30 + 2)::text, 12, '0'))::uuid,
+       ('00000000-0000-0000-0000-' || lpad((4972 + n % 30)::text, 12, '0'))::uuid,
+       'depends_on', '2026-01-01T00:00:00Z'
+FROM generate_series(0, 149999) AS n;
+ANALYZE projection_membership;
+DO $$
+DECLARE
+  outgoing_plan json;
+  incoming_plan json;
+BEGIN
+  IF (SELECT count(*) FROM projection_membership
+      WHERE projection_id = '00000000-0000-0000-0000-000000009001'
+        AND from_entity_id = '00000000-0000-0000-0000-000000000001'
+        AND edge_kind = 'depends_on') <> 4000 THEN
+    RAISE EXCEPTION 'high-degree outgoing fixture is incomplete';
+  END IF;
+  IF (SELECT count(*) FROM projection_membership
+      WHERE projection_id = '00000000-0000-0000-0000-000000009001'
+        AND to_entity_id = '00000000-0000-0000-0000-000000005002'
+        AND edge_kind = 'depends_on') <> 4000 THEN
+    RAISE EXCEPTION 'high-degree incoming fixture is incomplete';
+  END IF;
+  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT to_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND from_entity_id = ''00000000-0000-0000-0000-000000000001'' AND edge_kind = ''depends_on''' INTO outgoing_plan;
+  EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT from_entity_id FROM projection_membership WHERE projection_id = ''00000000-0000-0000-0000-000000009001'' AND to_entity_id = ''00000000-0000-0000-0000-000000005002'' AND edge_kind = ''depends_on''' INTO incoming_plan;
+  IF outgoing_plan::text LIKE '%"Node Type": "Seq Scan"%'
+     OR outgoing_plan::text NOT LIKE '%dependency_outgoing%'
+        AND outgoing_plan::text NOT LIKE '%projection_membership_pkey%' THEN
+    RAISE EXCEPTION 'outgoing high-degree query did not use an adjacency index: %', outgoing_plan;
+  END IF;
+  IF incoming_plan::text LIKE '%"Node Type": "Seq Scan"%'
+     OR incoming_plan::text NOT LIKE '%dependency_incoming%' THEN
+    RAISE EXCEPTION 'incoming high-degree query did not use its adjacency index: %', incoming_plan;
+  END IF;
+END $$;
+SQL
+echo "[migrations-live] EXPLAIN ANALYZE confirms indexed high-degree incoming/outgoing adjacency"
+
 echo "[migrations-live] source/run, staged normalization, enqueue/claim/finish, lease-reclaim audit, stale/expired fencing, rollback, and crash-recovery boundaries OK"
 echo "test_migrations_live OK"
