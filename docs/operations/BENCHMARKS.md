@@ -103,6 +103,19 @@ is skipped by default and checks manifest shape when `RH_BROWSER_BENCH=1`.
 The profile measures one local headless browser and does not establish end-user
 device performance, deployment rendering capacity, or provider rate limits.
 
+A clean five-sample browser profile at revision
+`e95af963a8936235983cfb6d37c6927302683279` ran on macOS 27 / arm64 (10 logical
+CPUs, 24 GiB RAM) with Playwright headless Chromium 153. Median / p95
+DOMContentLoaded and load timings were 7.800 / 8.620 ms and 8.100 / 9.180 ms
+for 10 input metrics; 21.900 / 23.160 ms and 27.300 / 28.300 ms for 1,000; and
+297.500 / 405.000 ms and 314.200 / 408.900 ms for 10,000. Median / p95 first
+contentful paint was 24.000 / 24.000 ms, 52.000 / 62.400 ms, and 288.000 /
+314.400 ms, respectively. The largest page was 1,195,214 bytes with digest
+`d854a36dc1a5a19370f60c41d7966d296c11c92e2664a7a9477ea1ed4c07a168`. The
+profile made 36 loopback requests and zero external requests. Its manifest
+retains all samples and input/output digests; these browser timings are specific
+to this local headless browser and should not be generalized to user devices.
+
 Set `RH_PROFILE_REPO` to opt into a full-history scan of a local Git repository
 through `rh_cli scan`. The profile records its revision, dirty state, commit and
 identity counts, history digest, latency, and memory samples. Every repetition
