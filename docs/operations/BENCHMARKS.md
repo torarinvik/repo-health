@@ -42,6 +42,18 @@ measure database persistence or browser rendering. `tests/test_render_bench.sh`
 checks digest stability and profile structure without imposing machine-specific
 performance thresholds.
 
+A clean run at revision `ef45ca0805f7b545bf63c7e2e18fbe08696118dd` on macOS
+27 / arm64 (10 logical CPUs, 24 GiB RAM), with ten repetitions after one
+warmup, measured 6.20 ms median / 7.01 ms p95 and 2.05 MiB peak RSS for 10
+metric rows; 13.95 ms / 15.59 ms and 4.03 MiB for 1,000 rows; and 90.50 ms /
+113.25 ms and 26.88 MiB for 10,000 rows. The 10,000-row input and output were
+1,377,322 and 1,195,205 bytes, with SHA-256 digests
+`8cd61289fc59cdefecd6d271f7d0260e64c7235abb8aab8222c41fb8475d39a9` and
+`68cf58814cef46a187ddf69e4b075fc0ee3445c65872bb8c3bb49b6fb7efce49`.
+These wall-clock samples include process startup, parsing, rendering, and file
+write; they profile the CLI renderer only and do not measure browser work or
+deployment capacity.
+
 Set `RH_PROFILE_REPO` to opt into a full-history scan of a local Git repository
 through `rh_cli scan`. The profile records its revision, dirty state, commit and
 identity counts, history digest, latency, and memory samples. Every repetition
