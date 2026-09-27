@@ -348,6 +348,8 @@ Create the smallest foundation that prevents later modules from inventing incomp
 
 **M00-04 report-path increment:** Versioned ratio serialization now shares one emitter, and partial coverage ratios include the explicit `history-coverage-incomplete` reason in both metric versions. The shallow-clone report fixture asserts that both partial ratios retain this reason (`tests/test_m01.sh`). Full typed serialization and quality-dimension validation remain open.
 
+**M00-04 tagged-value increment:** `Observation` now defines inline count, timestamp, ratio, boolean, enumeration, and absent variants plus an observation contract that checks status/value agreement, nonnegative counts/timestamps, positive ratio denominators, and explicit incompleteness for partial/stale states. The report's ratio emitter validates the tagged observation before serialization and emits an `error` state if the contract is violated. Independent oracles cover observed zero, absent/unavailable, partial-with/without incompleteness, unavailable-with-value, and zero-denominator rejection. Evidence-link modeling, quality dimensions beyond incompleteness, and a serialize/deserialize cross-product remain open.
+
 ### 5.3 Essential invariants
 
 ```text

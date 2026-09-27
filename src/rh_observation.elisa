@@ -26,6 +26,24 @@ module Observation:
         num: i64
         den: i64
 
+    # Inline tagged values keep the published metric's value shape explicit
+    # without allocating a boxed payload or erasing its scalar type.
+    enum RhMetricValue:
+        Absent
+        Count(value: i64)
+        Timestamp(unix_seconds: i64)
+        Ratio(num: i64, den: i64)
+        Boolean(value: bool)
+        Enumeration(code: i64)
+
+    # Quality metadata travels with the status/value pair. Evidence references
+    # remain owned by the serialization envelope because their paths are source
+    # and report specific.
+    struct RhObservation:
+        status: u8
+        value: RhMetricValue
+        has_incompleteness: bool
+
     def rh_status_valid(status: u8) -> bool:
         status < RH_ST_COUNT
 
@@ -54,6 +72,48 @@ module Observation:
     # defined positive denominator before they can be serialized as observed.
     def rh_ratio_defined(ratio: RhRatio) -> bool:
         ratio.den > 0
+
+    def rh_metric_value_present(value: RhMetricValue) -> bool:
+        match value:
+            RhMetricValue.Absent:
+                false
+            RhMetricValue.Count(count):
+                true
+            RhMetricValue.Timestamp(unix_seconds):
+                true
+            RhMetricValue.Ratio(num, den):
+                true
+            RhMetricValue.Boolean(flag):
+                true
+            RhMetricValue.Enumeration(code):
+                true
+
+    def rh_metric_value_valid(value: RhMetricValue) -> bool:
+        match value:
+            RhMetricValue.Absent:
+                true
+            RhMetricValue.Count(count):
+                count >= 0
+            RhMetricValue.Timestamp(unix_seconds):
+                unix_seconds >= 0
+            RhMetricValue.Ratio(num, den):
+                den > 0
+            RhMetricValue.Boolean(flag):
+                flag or not flag
+            RhMetricValue.Enumeration(code):
+                code >= 0
+
+    def rh_observation_make(status: u8, value: RhMetricValue, has_incompleteness: bool) -> RhObservation:
+        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness}
+
+    # Full in-memory contract used before a value is handed to a serializer.
+    def rh_observation_valid(observation: RhObservation) -> bool:
+        has_value: bool = rh_metric_value_present(observation.value)
+        return false if not rh_metric_value_valid(observation.value)
+        return false if not rh_observation_consistent(observation.status, has_value)
+        return false if (observation.status == RH_ST_PARTIAL or observation.status == RH_ST_STALE) and not observation.has_incompleteness
+        return false if observation.status != RH_ST_PARTIAL and observation.status != RH_ST_STALE and observation.has_incompleteness
+        true
 
     # Status/value consistency (§18.2 CHECK logic). has_value = whether a value
     # is attached. partial/stale accept either, but the report layer must still
