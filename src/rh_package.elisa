@@ -3232,6 +3232,113 @@ module Package:
             0
 
     private:
+        # Compare the numeric release subset of PEP 440 without integer parsing,
+        # so arbitrarily large release components remain exact. Prereleases,
+        # epochs, local labels, and post/dev releases are rejected by the caller.
+        def rh_pypi_release_cmp(pool: darray[u8]&, a_s: usize, a_e: usize, b_s: usize, b_e: usize, result: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if a_s >= a_e or b_s >= b_e
+            while i < a_e |i: usize = a_s, pool|:
+                return false if not ((pool[i] >= 48 and pool[i] <= 57) or pool[i] == 46)
+                return false if pool[i] == 46 and (i == a_s or pool[i - 1] == 46)
+                i <- i + 1
+            return false if pool[a_e - 1] == 46
+            while i < b_e |i: usize = b_s, pool|:
+                return false if not ((pool[i] >= 48 and pool[i] <= 57) or pool[i] == 46)
+                return false if pool[i] == 46 and (i == b_s or pool[i - 1] == 46)
+                i <- i + 1
+            return false if pool[b_e - 1] == 46
+            ai: mutable usize = a_s
+            bi: mutable usize = b_s
+            result[0] <- 0
+            while ai < a_e or bi < b_e |ai, bi, a_e, b_e, pool, result|:
+                aa: mutable usize = ai
+                bb: mutable usize = bi
+                while aa < a_e and pool[aa] != 46 |aa, a_e, pool|:
+                    aa <- aa + 1
+                while bb < b_e and pool[bb] != 46 |bb, b_e, pool|:
+                    bb <- bb + 1
+                az: mutable usize = ai
+                bz: mutable usize = bi
+                while az < aa and pool[az] == 48 |az, aa, pool|:
+                    az <- az + 1
+                while bz < bb and pool[bz] == 48 |bz, bb, pool|:
+                    bz <- bz + 1
+                alen: mutable usize = aa - az
+                blen: mutable usize = bb - bz
+                if ai >= a_e:
+                    alen <- 1
+                elif alen == 0:
+                    alen <- 1
+                    az <- aa - 1
+                if bi >= b_e:
+                    blen <- 1
+                elif blen == 0:
+                    blen <- 1
+                    bz <- bb - 1
+                if alen != blen:
+                    result[0] <- 1 if alen > blen else -1
+                    break
+                if ai >= a_e:
+                    result[0] <- -1 if pool[bz] != 48 else 0
+                elif bi >= b_e:
+                    result[0] <- 1 if pool[az] != 48 else 0
+                else:
+                    while k < alen |k: usize = 0, alen, az, bz, pool, result|:
+                        if pool[az + k] > pool[bz + k]:
+                            result[0] <- 1
+                        elif pool[az + k] < pool[bz + k]:
+                            result[0] <- -1
+                        break if result[0] != 0
+                        k <- k + 1
+                break if result[0] != 0
+                ai <- aa + 1 if aa < a_e else a_e
+                bi <- bb + 1 if bb < b_e else b_e
+            true
+
+    public:
+        # Return 1 when a supported release constraint matches, 0 when it does
+        # not, and -1 for PEP 440 forms outside this explicit numeric subset.
+        def rh_pypi_constraint_satisfies(pool: darray[u8]&, version_s: usize, version_e: usize, constraint_s: usize, constraint_e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if version_s >= version_e or constraint_s >= constraint_e or version_e > pool.count or constraint_e > pool.count
+            a: mutable usize = constraint_s
+            b: mutable usize = constraint_e
+            while a < b and (pool[a] == 32 or pool[a] == 9) |a, b, pool|:
+                a <- a + 1
+            while b > a and (pool[b - 1] == 32 or pool[b - 1] == 9) |a, b, pool|:
+                b <- b - 1
+            return 1 if b - a == 1 and pool[a] == 42
+            matched: mutable i64 = 1
+            while a < b |a, b, pool, version_s, version_e, matched|:
+                clause_end: mutable usize = a
+                while clause_end < b and pool[clause_end] != 44 |clause_end, b, pool|:
+                    clause_end <- clause_end + 1
+                cs: mutable usize = a
+                cend: mutable usize = clause_end
+                while cs < cend and (pool[cs] == 32 or pool[cs] == 9) |cs, cend, pool|:
+                    cs <- cs + 1
+                while cend > cs and (pool[cend - 1] == 32 or pool[cend - 1] == 9) |cs, cend, pool|:
+                    cend <- cend - 1
+                op: mutable u8 = 0
+                if cend - cs >= 2 and ((pool[cs] == 62 or pool[cs] == 60 or pool[cs] == 33 or pool[cs] == 61) and pool[cs + 1] == 61):
+                    op <- 3 if pool[cs] == 62 else 4 if pool[cs] == 60 else 2 if pool[cs] == 33 else 1
+                    cs <- cs + 2
+                elif cs < cend and (pool[cs] == 62 or pool[cs] == 60):
+                    op <- 5 if pool[cs] == 62 else 6
+                    cs <- cs + 1
+                else:
+                    return -1
+                while cs < cend and (pool[cs] == 32 or pool[cs] == 9) |cs, cend, pool|:
+                    cs <- cs + 1
+                return -1 if cs >= cend
+                cmp: mutable i64 = 0
+                return -1 if not rh_pypi_release_cmp(pool, version_s, version_e, cs, cend, &cmp)
+                clause_ok: bool = cmp == 0 if op == 1 else cmp != 0 if op == 2 else cmp >= 0 if op == 3 else cmp <= 0 if op == 4 else cmp > 0 if op == 5 else cmp < 0
+                matched <- 0 if not clause_ok
+                return -1 if clause_end == b and pool[b - 1] == 44
+                a <- clause_end + 1 if clause_end < b else b
+            matched
+
+    private:
         # Extract quoted dependency strings from one PEP 621 array line. The
         # supported subset is deliberately narrow: basic/literal TOML strings inside
         # `project.dependencies` or an optional-dependency table. Unsupported dynamic
