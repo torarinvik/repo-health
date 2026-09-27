@@ -87,8 +87,4 @@ a deployed database or external request budget. Those
 measurements remain required before using these results to publish capacity
 limits or claim the M10 exit gate.
 Concurrent processes exercise local CPU and memory contention only; they do not
-measure scheduler throughput or load shedding. Worker unit/CLI tests cover
-bounded source rotation and full-reconcile priority. A daemon regression proves
-same-host processes sharing one output serialize their cursor and suppress
-duplicate unchanged inputs; fairness across hosts or database workers remains
-unmeasured.
+measure scheduler throughput or saturation behavior. PostgreSQL claim logic defers optional graph queries while collection jobs are queued or leased, and generic claims rank collection jobs first; the opt-in migration rehearsal covers deferral and resumption. Worker unit/CLI tests cover bounded source rotation and full-reconcile priority. A daemon regression proves same-host processes sharing one output serialize their cursor and suppress duplicate unchanged inputs; fairness across hosts or database workers remains unmeasured.

@@ -936,5 +936,66 @@ END $$;
 SQL
 echo "[migrations-live] durable current-state projection scopes absence to successful complete snapshots"
 
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "exercise essential-work load shedding"
+DO $$
+DECLARE
+  c record;
+  result_value jsonb;
+  request_value jsonb := '{"schema":"rh-query-input/1","kind":"downstream","ids":[1],"graph":{"direction":"downstream","nodes":[1],"truncated":false,"complete":true}}'::jsonb;
+BEGIN
+  IF NOT rh_begin_collection_run(
+    '00000000-0000-0000-0000-000000000001', 'github', 'https://api.github.com',
+    'public', 1, '2026-01-01T00:00:00Z',
+    '00000000-0000-0000-0000-000000000080', 'issues', 'github', '1.0.0',
+    NULL, NULL, '2026-01-09T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'load-shedding collection run was not started';
+  END IF;
+  IF NOT rh_enqueue_collection_job(
+    '00000000-0000-0000-0000-000000000080',
+    '00000000-0000-0000-0000-000000000081', -100,
+    '2026-01-09T00:00:00Z', '2026-01-09T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'load-shedding collection job was not queued';
+  END IF;
+  IF NOT rh_enqueue_graph_query_job(
+    '00000000-0000-0000-0000-000000000082', 'public', request_value, 2147483647,
+    '2026-01-09T00:00:00Z', '2026-01-09T00:00:00Z'
+  ) THEN
+    RAISE EXCEPTION 'high-priority optional graph job was not queued';
+  END IF;
+
+  result_value := rh_claim_graph_query_job('optional-worker', '2026-01-09T00:00:01Z', 60, NULL);
+  IF result_value->>'status' <> 'empty'
+     OR result_value->>'reason' <> 'load_shed_collection_backlog'
+     OR EXISTS (SELECT 1 FROM job_attempt WHERE job_id = '00000000-0000-0000-0000-000000000082') THEN
+    RAISE EXCEPTION 'optional graph work was not shed behind essential collection: %', result_value;
+  END IF;
+
+  SELECT * INTO c FROM rh_claim_next_job('collection-worker', '2026-01-09T00:00:01Z', 60);
+  IF c.job_id <> '00000000-0000-0000-0000-000000000081'::uuid OR c.fencing_token <> 1 THEN
+    RAISE EXCEPTION 'essential collection work did not outrank high-priority maintenance: %', c;
+  END IF;
+  result_value := rh_claim_graph_query_job('optional-worker', '2026-01-09T00:00:02Z', 60, NULL);
+  IF result_value->>'reason' <> 'load_shed_collection_backlog' THEN
+    RAISE EXCEPTION 'leased essential work did not keep optional computation shed: %', result_value;
+  END IF;
+  IF NOT rh_finish_collection_job(
+    '00000000-0000-0000-0000-000000000080', '00000000-0000-0000-0000-000000000081', c.fencing_token,
+    'failed', 'failed', 'unknown', '{"issues":"unavailable"}'::jsonb,
+    'failed', 'fixture_failure', '2026-01-09T00:00:03Z'
+  ) THEN
+    RAISE EXCEPTION 'essential collection job did not reach a terminal state';
+  END IF;
+  result_value := rh_claim_graph_query_job('optional-worker', '2026-01-09T00:00:04Z', 60, NULL);
+  IF result_value->>'status' <> 'claimed'
+     OR result_value->>'job_id' <> '00000000-0000-0000-0000-000000000082'
+     OR result_value->'request' <> request_value THEN
+    RAISE EXCEPTION 'optional graph work did not resume after essential work ended: %', result_value;
+  END IF;
+END $$;
+SQL
+echo "[migrations-live] collection backlog sheds optional graph work regardless of caller priority, then resumes it"
+
 echo "[migrations-live] source/run, staged normalization, enqueue/claim/finish, lease-reclaim audit, stale/expired fencing, rollback, and crash-recovery boundaries OK"
 echo "test_migrations_live OK"

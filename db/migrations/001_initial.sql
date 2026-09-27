@@ -932,7 +932,10 @@ AS $$
           AND j.next_attempt_at <= p_now
           AND (p_job_id IS NULL OR j.id = p_job_id)
           AND (p_job_kind IS NULL OR j.kind = p_job_kind)
-        ORDER BY j.priority DESC, j.next_attempt_at, j.created_at, j.id
+        -- Collection evidence is essential work; optional graph projections
+        -- never outrank it merely because a caller supplied a larger priority.
+        ORDER BY CASE WHEN j.kind = 'collection' THEN 0 ELSE 1 END,
+                 j.priority DESC, j.next_attempt_at, j.created_at, j.id
         FOR UPDATE SKIP LOCKED
         LIMIT 1
     ), claimed AS (
@@ -987,6 +990,27 @@ DECLARE
     v_claim record;
     v_request jsonb;
 BEGIN
+    -- Shed optional graph computation while any essential collection work is
+    -- runnable. The queue is checked before taking the optional lease, so a
+    -- backed-up collector keeps its capacity for source evidence.
+    IF EXISTS (
+        SELECT 1
+        FROM job AS essential
+        WHERE essential.kind = 'collection'
+          AND essential.next_attempt_at <= p_now
+          AND (
+              essential.state = 'queued'
+              OR (essential.state = 'running' AND essential.lease_expires_at > p_now)
+          )
+    ) THEN
+        RETURN jsonb_build_object(
+            'schema', 'rh-postgres-result/1',
+            'operation', 'claim_graph_query_job',
+            'status', 'empty',
+            'reason', 'load_shed_collection_backlog'
+        );
+    END IF;
+
     SELECT * INTO v_claim
     FROM rh_claim_next_job(p_worker_id, p_now, p_lease_seconds, p_job_id, 'graph_query');
     IF NOT FOUND THEN

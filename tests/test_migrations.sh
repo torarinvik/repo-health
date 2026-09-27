@@ -89,6 +89,9 @@ assert "outcome = 'lease_expired'" in clean and "error_kind = 'lease_expired'" i
 assert "a.fencing_token < j.fencing_token" in clean
 assert "p_job_id IS NULL OR j.id = p_job_id" in clean
 assert "p_job_kind IS NULL OR j.kind = p_job_kind" in clean
+assert "CASE WHEN j.kind = 'collection' THEN 0 ELSE 1 END" in clean
+assert "load_shed_collection_backlog" in clean
+assert "essential.lease_expires_at > p_now" in clean
 assert "graph query request is malformed or exceeds the bounded payload limit" in clean
 assert "graph query result is malformed or exceeds the bounded payload limit" in clean
 assert "graph query result kind does not match its immutable request" in clean
