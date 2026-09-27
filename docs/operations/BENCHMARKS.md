@@ -88,3 +88,15 @@ measurements remain required before using these results to publish capacity
 limits or claim the M10 exit gate.
 Concurrent processes exercise local CPU and memory contention only; they do not
 measure scheduler throughput or saturation behavior. PostgreSQL claim logic defers optional graph queries while collection jobs are queued or leased, and generic claims rank collection jobs first; the opt-in migration rehearsal covers deferral and resumption. Worker unit/CLI tests cover bounded source rotation and full-reconcile priority. A daemon regression proves same-host processes sharing one output serialize their cursor and suppress duplicate unchanged inputs; fairness across hosts or database workers remains unmeasured.
+
+`tools/bench-aggregate.sh` writes `rh-aggregate-bench/1` for the daily/weekly
+aggregate path. It uses deterministic event inputs, seeds an independent state
+store for every partial-cache sample, and records full-recompute and partial
+cache latency and peak RSS with one warmup and at least two measured repetitions.
+It compares output bytes for every full and partial result, records input and
+binary digests, event and partition counts, cache-seeding cost, and the number
+of reused partition rows. Set `RH_AGG_BENCH_EVENTS`, `RH_AGG_BENCH_REPS`,
+`RH_AGG_BENCH_CONCURRENT_JOBS`, and `RH_AGG_BENCH_OUT` to control the workload
+and manifest path. This synthetic benchmark includes input parsing and local
+state-store I/O, uses no external services, and does not establish a deployed
+capacity limit.
