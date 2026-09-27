@@ -31,7 +31,7 @@ database server a normal build dependency.
 | zlib | Raw DEFLATE decoding and CRC32 only for Go module ZIP verification. | Linked only into `rh_cli` with `-lz`. ZIP structure, path/name handling, limits, ordering, and Go `h1` hashing remain in Elisa. Re-run `tests/test_artifact_observation_cli.sh` including stored, deflated, CRC-invalid, and limit cases after a zlib/toolchain update. |
 | libpq | Optional PostgreSQL adapter, loaded dynamically by `src/rh_postgres.elisa`. | No link-time libpq requirement. The adapter calls the extended parameterized-query API; arbitrary SQL is not accepted from input. Validate with `tests/test_pg_adapter.sh` and `tests/test_postgres_cli.sh`; run `tests/test_pg_adapter_live.sh` and `tests/test_migrations_live.sh` against PostgreSQL 16 when Docker/libpq are available. |
 | PostgreSQL 16 | Optional persistence and live migration/recovery rehearsals. | The supported schema is versioned in `db/migrations/`. Review migration compatibility and run the live migration suite before changing the supported server major version. |
-| `pg_dump` | Optional `tools/backup-postgres.sh` database snapshot capture, in custom format. | Uses `RH_DATABASE_URL` through `PGDATABASE`, not a command-line argument. The paired binding currently reads at most 64 MiB; restore automation and larger streaming dumps are not yet supported. |
+| PostgreSQL client tools (`pg_dump`, `pg_restore`, `psql`) | Optional `tools/backup-postgres.sh` and `tools/restore-postgres-backup.sh` backup/restore workflow. | Connection URLs are supplied through `PGDATABASE`, not command-line arguments. Pair binding currently reads at most 64 MiB; larger streaming dumps are not yet supported. |
 
 ## Update procedure
 

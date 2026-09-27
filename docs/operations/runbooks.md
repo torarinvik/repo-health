@@ -145,24 +145,27 @@ to remove their data, or a rights review changes.
 
 Trigger: scheduled drill, or recovery after corruption/loss.
 
-1. Restore into a **clean** directory (never over the live store).
-2. Verify every object digest with `rh_backup_verify`; require
-   `corrupt == 0` and `missing == 0` before trusting the set.
-3. Bind the exact database dump to the verified evidence manifest with
-   `tools/backup-postgres.sh <evidence-root> <new-backup-directory>` after
-   setting `RH_DATABASE_URL` in the operator environment. It runs `pg_dump`
-   without placing the connection URL in its argument list, inventories and
-   verifies evidence objects, creates the binding, and publishes the whole
-   directory with one rename. Before restoring, run `rh_cli ops verify-binding`
-   with `--root`, `--manifest`, `--database`, and `--input <backup-binding>`;
-   it rehashes both files and verifies every evidence object. Keep the database
-   dump itself with the backup: the binding is an integrity index, not a claim
-   that the snapshot is correct. Current input reads are capped at 64 MiB, so
-   larger dumps require a streaming backup path before this runbook can cover
-   them.
-4. Restore with `rh_backup_restore`, which skips any object whose digest
-   does not match.
-5. Rebuild projections from the restored evidence and replay a sample
+1. Set `RH_DATABASE_URL` in the operator environment and run
+   `tools/backup-postgres.sh <evidence-root> <new-backup-directory>`. It runs
+   `pg_dump` without placing the connection URL in its argument list,
+   inventories and verifies evidence objects, exports the evidence bundle,
+   creates the binding, and publishes the whole directory with one rename.
+2. Before restoring, run `rh_cli ops verify-binding` with `--root`,
+   `--manifest`, `--database`, and `--input <backup-binding>`; it rehashes the
+   database dump and manifest and verifies every evidence object. Keep the
+   database dump itself with the backup: the binding is an integrity index,
+   not a claim that the snapshot is correct. Current input reads are capped at
+   64 MiB, so larger dumps require a streaming backup path.
+3. Create a **new empty database** and choose a new evidence directory (never
+   restore over live state). The restore tool refuses an existing evidence
+   destination and checks the target database for user relations, routines,
+   and custom types before it starts. Set `RH_RESTORE_DATABASE_URL` in the
+   operator environment and run
+   `tools/restore-postgres-backup.sh <backup-directory> <new-evidence-root>`.
+   It validates the custom-format dump, imports evidence into a staging root,
+   restores PostgreSQL in one transaction, then publishes the evidence root
+   and verifies the pair binding again. The URL stays out of command arguments.
+4. Rebuild projections from the restored database and evidence, then replay a sample
    report; compare against the pinned expected outputs.
 6. State the restored/unavailable/unknown sets in writing. An unrestored
    backup is not evidence.

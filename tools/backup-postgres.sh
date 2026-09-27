@@ -23,7 +23,8 @@ DEST="$PARENT/$(basename -- "$BACKUP_DIR")"
 [[ ! -e "$DEST" && ! -L "$DEST" ]] || fail "backup destination already exists"
 STAGE="$(mktemp -d "$PARENT/.repo-health-backup.XXXXXX")"
 cleanup() { [[ -z "$STAGE" ]] || rm -rf -- "$STAGE"; }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 1' INT TERM
 
 python3 - "$EVIDENCE_ROOT" "$STAGE/evidence.names" <<'PY'
 import os
@@ -46,6 +47,7 @@ PY
 PGDATABASE="$RH_DATABASE_URL" pg_dump --format=custom --file="$STAGE/database.dump" || fail "pg_dump failed"
 "$ROOT/build/rh_cli" ops backup --root "$EVIDENCE_ROOT" --manifest "$STAGE/evidence.manifest" --names "$STAGE/evidence.names" >/dev/null || fail "evidence manifest creation failed"
 "$ROOT/build/rh_cli" ops verify --root "$EVIDENCE_ROOT" --manifest "$STAGE/evidence.manifest" >/dev/null || fail "evidence verification failed"
+"$ROOT/build/rh_cli" ops export --root "$EVIDENCE_ROOT" --manifest "$STAGE/evidence.manifest" --out "$STAGE/evidence.bundle" >/dev/null || fail "evidence bundle creation failed"
 "$ROOT/build/rh_cli" ops bind --root "$EVIDENCE_ROOT" --manifest "$STAGE/evidence.manifest" --database "$STAGE/database.dump" --out "$STAGE/backup-binding.json" >/dev/null || fail "database/evidence binding failed"
 "$ROOT/build/rh_cli" ops verify-binding --root "$EVIDENCE_ROOT" --manifest "$STAGE/evidence.manifest" --database "$STAGE/database.dump" --input "$STAGE/backup-binding.json" >/dev/null || fail "database/evidence binding verification failed"
 rm -f -- "$STAGE/evidence.names"
