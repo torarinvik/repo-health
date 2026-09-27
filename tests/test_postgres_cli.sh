@@ -38,6 +38,7 @@ run_ok enqueue_graph committed enqueue-graph-query-job
 run_ok enqueue_graph duplicate enqueue-graph-query-job
 run_ok claim_graph committed claim-graph-query-job
 run_ok claim_graph duplicate claim-graph-query-job
+run_ok projection_batch ok read-projection-adjacency-batch
 run_ok publish_graph committed publish-graph-query-result
 run_ok publish_graph duplicate publish-graph-query-result
 run_ok retry_graph committed retry-graph-query-job
@@ -93,6 +94,48 @@ assert duplicate["reconciliation"]["status"] == "duplicate", duplicate
 assert duplicate["reconciliation"]["absence_inferred"] is False, duplicate
 print("[postgres-cli] current-state reconciliation is scope-bound and replay-aware")
 PY
+python3 - "$T/read-projection-adjacency-batch-ok.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d == {
+    "schema": "rh-postgres-result/1",
+    "operation": "read_projection_adjacency_batch",
+    "result": {
+        "edges": [{
+            "from": "00000000-0000-0000-0000-000001000001",
+            "to": "00000000-0000-0000-0000-000001000002",
+        }],
+        "truncated": True,
+    },
+}, d
+print("[postgres-cli] bounded batched adjacency result and truncation state retained")
+PY
+python3 - "$ROOT/fixtures/postgres/read-projection-adjacency-batch-command.json" "$T" <<'PY'
+import json, pathlib, sys
+source, directory = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+base = json.loads(source.read_text())
+cases = {
+    "bad-direction": {**base, "direction": "sideways"},
+    "bad-entity": {**base, "entity_ids": ["not-a-uuid"]},
+    "too-many-entities": {**base, "entity_ids": [base["entity_ids"][0]] * 257},
+    "bad-limit": {**base, "edge_limit": 0},
+}
+for name, value in cases.items():
+    (directory / f"projection-batch-{name}.json").write_text(json.dumps(value, separators=(",", ":")))
+PY
+for invalid_case in bad-direction bad-entity too-many-entities bad-limit; do
+  set +e
+  RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+    RH_FAKE_PG_OPERATION=projection_batch RH_FAKE_PG_EXPECT=ok \
+    RH_FAKE_PG_CONNECT_MARK="$T/projection-batch-$invalid_case.connected" \
+    "$ROOT/build/rh_cli" postgres --input "$T/projection-batch-$invalid_case.json" \
+      --out "$T/projection-batch-$invalid_case.out" >/dev/null 2>&1
+  invalid_rc=$?
+  set -e
+  [[ "$invalid_rc" -eq 4 && ! -e "$T/projection-batch-$invalid_case.connected" && ! -e "$T/projection-batch-$invalid_case.out" ]] \
+    || fail "invalid adjacency request $invalid_case reached PostgreSQL or wrote output"
+done
+echo "[postgres-cli] malformed, overbound, and invalid-direction batches fail before PostgreSQL"
 
 python3 - "$ROOT/fixtures/postgres/reconcile-source-objects-command.json" "$T/current-state-invalid.json" <<'PY'
 import json, sys

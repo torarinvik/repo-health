@@ -22,6 +22,19 @@ bound parameters. Fake-libpq tests cover preflight, applied results, and exact
 replay. The opt-in migration rehearsal covers exact-scope absence and
 partial/failed-run behavior; it still needs an executed PostgreSQL environment.
 
+The additive
+[`db/migrations/003_projection_adjacency_batch.sql`](../../db/migrations/003_projection_adjacency_batch.sql)
+adds a bounded read over an immutable graph projection. It accepts one to 256
+seed UUIDs, a direction and edge kind, and a result limit up to 10,000; the
+result contains an ordered edge page and an explicit `truncated` flag. A
+projection whose visibility does not match returns an empty page. The
+`read_projection_adjacency_batch` command validates identifiers and bounds
+before connecting and passes every value through `PQexecParams`. It is a batch
+read primitive; the asynchronous graph-query worker is not yet wired to use it.
+The live migration rehearsal checks both directions, visibility mismatch, and
+truncation; this PostgreSQL 16 gate has not been run in environments without a
+Docker daemon.
+
 Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa),
 with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).
 `rh_cli postgres --input <rh-postgres-command/1> --out <file>` starts or verifies
@@ -86,7 +99,7 @@ The CLI command contract and failure gates are covered by
 | Profile manifest | `rh-profile/3` | `build/profile-manifest.json` |
 | Release packet | `rh-release-packet/1` | `build/release-packet.json` |
 | Source register | `rh-source-review/1` | `ops/source-review-register.json` |
-| PostgreSQL target schema | migrations `001`–`002` | `db/migrations/*.sql` |
+| PostgreSQL target schema | migrations `001`–`003` | `db/migrations/*.sql` |
 
 ## Rules
 

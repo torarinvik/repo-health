@@ -725,6 +725,55 @@ module PostgresReport:
                 Base::rh_push_text(out, "\"}")
                 return 0
 
+            if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "read_projection_adjacency_batch"):
+                projection_s: mutable i64 = 0
+                projection_e: mutable i64 = 0
+                visibility_s: mutable i64 = 0
+                visibility_e: mutable i64 = 0
+                edge_kind_s: mutable i64 = 0
+                edge_kind_e: mutable i64 = 0
+                direction_s: mutable i64 = 0
+                direction_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "projection_id", &projection_s, &projection_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, projection_s, projection_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "visibility_scope", &visibility_s, &visibility_e, false) or not PostgresReport::rh_pg_report_visibility_ok(texts, visibility_s, visibility_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "edge_kind", &edge_kind_s, &edge_kind_e, false) or edge_kind_e - edge_kind_s > 64
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "direction", &direction_s, &direction_e, false)
+                outgoing: bool = PostgresReport::rh_pg_report_eq(texts, direction_s, direction_e, "outgoing")
+                incoming: bool = PostgresReport::rh_pg_report_eq(texts, direction_s, direction_e, "incoming")
+                return -1 if not outgoing and not incoming
+                entity_ids_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "entity_ids")
+                return -1 if entity_ids_idx < 0 or nodes[entity_ids_idx.usize()].kind != Json::RH_JSON_ARR or nodes[entity_ids_idx.usize()].child_count < 1 or nodes[entity_ids_idx.usize()].child_count > 256
+                entity_ids_node: Json::RhJsonNode = nodes[entity_ids_idx.usize()]
+                return -1 if entity_ids_node.text_start < 0 or entity_ids_node.text_end <= entity_ids_node.text_start or entity_ids_node.text_end - entity_ids_node.text_start > 32768
+                while entity_id >= 0 |entity_id: i64 = entity_ids_node.first_child, nodes, texts|:
+                    return -1 if nodes[entity_id.usize()].kind != Json::RH_JSON_STR
+                    entity_id_s: mutable i64 = 0
+                    entity_id_e: mutable i64 = 0
+                    return -1 if not Json::rh_json_str_span(nodes, entity_id, &entity_id_s, &entity_id_e) or not PostgresReport::rh_pg_report_uuid_valid(texts, entity_id_s, entity_id_e)
+                    entity_id <- nodes[entity_id.usize()].next_sibling
+                edge_limit: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "edge_limit", 1, 10000, &edge_limit)
+                entity_ids_json: mutable darray[u8] = []
+                while raw_offset < entity_ids_node.text_end |raw_offset: i64 = entity_ids_node.text_start, raw, entity_ids_node, entity_ids_json|:
+                    entity_ids_json.push(raw[raw_offset.usize()])
+                    raw_offset <- raw_offset + 1
+                entity_ids_json.push(0)
+                projection_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, projection_s, projection_e)
+                visibility: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, visibility_s, visibility_e)
+                edge_kind: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, edge_kind_s, edge_kind_e)
+                direction: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, direction_s, direction_e)
+                projection_ptr: cstr = (&projection_id[0]).cast[cstr] can Unsafe.PointerCast
+                visibility_ptr: cstr = (&visibility[0]).cast[cstr] can Unsafe.PointerCast
+                edge_kind_ptr: cstr = (&edge_kind[0]).cast[cstr] can Unsafe.PointerCast
+                direction_ptr: cstr = (&direction[0]).cast[cstr] can Unsafe.PointerCast
+                entity_ids_ptr: cstr = (&entity_ids_json[0]).cast[cstr] can Unsafe.PointerCast
+                adjacency_result: mutable darray[u8] = []
+                return -1 if Postgres::rh_pg_projection_adjacency_batch(conninfo, projection_ptr, visibility_ptr, edge_kind_ptr, direction_ptr, entity_ids_ptr, edge_limit, adjacency_result) <= 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"read_projection_adjacency_batch\",\"result\":")
+                out.extend(bytes_view(adjacency_result))
+                Base::rh_push_text(out, "}")
+                return 0
+
             if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "enqueue_graph_query_job"):
                 job_s: mutable i64 = 0
                 job_e: mutable i64 = 0

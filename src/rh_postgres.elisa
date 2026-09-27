@@ -731,3 +731,21 @@ module Postgres:
             params.push(job_id)
             params.push(visibility_scope)
             Postgres::rh_pg_text_params(conninfo, "SELECT public.rh_get_graph_query_job($1::uuid, $2::rh_visibility_scope)::text", params, out)
+
+        # Fetch one bounded adjacency page for a batch of seed entities. All
+        # caller data is bound, and the database returns truncation explicitly.
+        def rh_pg_projection_adjacency_batch(conninfo: cstr, projection_id: cstr, visibility_scope: cstr, edge_kind: cstr, direction: cstr, entity_ids_json: cstr, edge_limit: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if Base::rh_cstr_len_c(projection_id) != 36 or Base::rh_cstr_len_c(visibility_scope) > 32
+            return -1 if Base::rh_cstr_len_c(edge_kind) == 0 or Base::rh_cstr_len_c(edge_kind) > 64
+            return -1 if not Base::rh_streq(direction, "outgoing") and not Base::rh_streq(direction, "incoming")
+            return -1 if Base::rh_cstr_len_c(entity_ids_json) == 0 or Base::rh_cstr_len_c(entity_ids_json) > 32768 or edge_limit < 1 or edge_limit > 10000
+            limit_text: mutable darray[u8] = Postgres::rh_pg_decimal(edge_limit)
+            limit_ptr: cstr = (&limit_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(projection_id)
+            params.push(visibility_scope)
+            params.push(edge_kind)
+            params.push(direction)
+            params.push(entity_ids_json)
+            params.push(limit_ptr)
+            Postgres::rh_pg_text_params(conninfo, "SELECT jsonb_build_object('edges', adjacency.edges, 'truncated', adjacency.truncated)::text FROM public.rh_projection_adjacency_batch($1::uuid, $2::rh_visibility_scope, $3::text, $4::text, ARRAY(SELECT requested.value::uuid FROM jsonb_array_elements_text($5::jsonb) WITH ORDINALITY AS requested(value, ordinal) ORDER BY requested.ordinal), $6::integer) AS adjacency", params, out)

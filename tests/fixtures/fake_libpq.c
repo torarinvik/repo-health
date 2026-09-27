@@ -277,6 +277,14 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = poll_graph_values;
         expected_count = 2;
         prefix = "SELECT public.rh_get_graph_query_job(";
+    } else if (operation != NULL && strcmp(operation, "projection_batch") == 0) {
+        static const char *projection_batch_values[6] = {
+            "00000000-0000-0000-0000-000000009001", "public", "depends_on", "outgoing",
+            "[\"00000000-0000-0000-0000-000001000001\",\"00000000-0000-0000-0000-000001000002\"]", "37"
+        };
+        expected = projection_batch_values;
+        expected_count = 6;
+        prefix = "SELECT jsonb_build_object('edges', adjacency.edges";
     } else if (operation != NULL && strcmp(operation, "page_events") == 0) {
         expected = page_events_values;
         expected_count = 14;
@@ -370,6 +378,13 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
         result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? graph_query_poll_running_json :
             mode != NULL && strcmp(mode, "empty") == 0 ? graph_query_poll_not_found_json : graph_query_poll_succeeded_json;
+        return &result;
+    }
+    if (operation != NULL && strcmp(operation, "projection_batch") == 0) {
+        result.columns = 1;
+        result.rows = 1;
+        result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+        result.value = "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000001\",\"to\":\"00000000-0000-0000-0000-000001000002\"}],\"truncated\":true}";
         return &result;
     }
     if (operation != NULL && strcmp(operation, "current_state") == 0) {
