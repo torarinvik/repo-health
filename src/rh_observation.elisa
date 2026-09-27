@@ -36,6 +36,33 @@ module Observation:
         Boolean(value: bool)
         Enumeration(code: i64)
 
+    enum RhCompleteness:
+        Complete
+        Partial
+        Unknown
+
+    enum RhFreshness:
+        Fresh
+        Stale
+        Unknown
+
+    enum RhValidity:
+        Valid
+        Invalid
+        Unknown
+
+    enum RhProvenanceQuality:
+        EvidenceBacked
+        Derived
+        Unverified
+        Unknown
+
+    struct RhQualityDimensions:
+        completeness: RhCompleteness
+        freshness: RhFreshness
+        validity: RhValidity
+        provenance: RhProvenanceQuality
+
     # Quality metadata travels with the status/value pair. Evidence references
     # remain owned by the serialization envelope because their paths are source
     # and report specific.
@@ -43,6 +70,7 @@ module Observation:
         status: u8
         value: RhMetricValue
         has_incompleteness: bool
+        quality: RhQualityDimensions
 
     def rh_status_valid(status: u8) -> bool:
         status < RH_ST_COUNT
@@ -104,7 +132,39 @@ module Observation:
                 code >= 0
 
     def rh_observation_make(status: u8, value: RhMetricValue, has_incompleteness: bool) -> RhObservation:
-        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness}
+        completeness: RhCompleteness = RhCompleteness.Partial if status == RH_ST_PARTIAL else RhCompleteness.Unknown
+        freshness: RhFreshness = RhFreshness.Stale if status == RH_ST_STALE else RhFreshness.Unknown
+        quality: RhQualityDimensions = RhQualityDimensions{completeness: completeness, freshness: freshness, validity: RhValidity.Unknown, provenance: RhProvenanceQuality.Unknown}
+        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality}
+
+    def rh_observation_make_with_quality(status: u8, value: RhMetricValue, has_incompleteness: bool, quality: RhQualityDimensions) -> RhObservation:
+        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality}
+
+    def rh_quality_dimensions_valid(status: u8, quality: RhQualityDimensions) -> bool:
+        return false if status == RH_ST_PARTIAL and quality.completeness != RhCompleteness.Partial
+        return false if status == RH_ST_STALE and quality.freshness != RhFreshness.Stale
+        true
+
+    def rh_completeness_label(value: RhCompleteness) -> u8&:
+        return "complete" if value == RhCompleteness.Complete
+        return "partial" if value == RhCompleteness.Partial
+        "unknown"
+
+    def rh_freshness_label(value: RhFreshness) -> u8&:
+        return "fresh" if value == RhFreshness.Fresh
+        return "stale" if value == RhFreshness.Stale
+        "unknown"
+
+    def rh_validity_label(value: RhValidity) -> u8&:
+        return "valid" if value == RhValidity.Valid
+        return "invalid" if value == RhValidity.Invalid
+        "unknown"
+
+    def rh_provenance_quality_label(value: RhProvenanceQuality) -> u8&:
+        return "evidence_backed" if value == RhProvenanceQuality.EvidenceBacked
+        return "derived" if value == RhProvenanceQuality.Derived
+        return "unverified" if value == RhProvenanceQuality.Unverified
+        "unknown"
 
     # Full in-memory contract used before a value is handed to a serializer.
     def rh_observation_valid(observation: RhObservation) -> bool:
@@ -113,6 +173,7 @@ module Observation:
         return false if not rh_observation_consistent(observation.status, has_value)
         return false if (observation.status == RH_ST_PARTIAL or observation.status == RH_ST_STALE) and not observation.has_incompleteness
         return false if observation.status != RH_ST_PARTIAL and observation.status != RH_ST_STALE and observation.has_incompleteness
+        return false if not rh_quality_dimensions_valid(observation.status, observation.quality)
         true
 
     # Status/value consistency (§18.2 CHECK logic). has_value = whether a value
