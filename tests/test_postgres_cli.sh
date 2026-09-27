@@ -59,6 +59,7 @@ assert d["service"]["queue_age_max"] == 120, d
 assert d["service"]["cursor_lag_max"] == 3600, d
 assert d["service"]["errors"] == 4, d
 assert d["service"]["parser_rejects"] == 2, d
+assert d["project"]["truncations"] == 3, d
 assert d["service"]["freshness_state"] == "fresh", d
 PY
 python3 - "$T/reconcile-source-objects-applied.json" "$T/reconcile-source-objects-duplicate.json" "$ROOT/fixtures/postgres/reconcile-source-objects-projection.json" <<'PY'
