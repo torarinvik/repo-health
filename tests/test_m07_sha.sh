@@ -32,6 +32,14 @@ assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == 0o600, oct(stat.S_IMODE(os.
 PY
 echo "[m07-sha] signing key is restricted to its owner"
 grep -q '"algorithm":"hmac-sha256"' "$T/packet.sig" || fail "signature missing algorithm"
+cp "$T/packet.json" "$T/packet.before-collision"
+set +e
+"$ROOT/build/rh_cli" sign --key "$T/key" --subject "$T/packet.json" --sig "$T/packet.json" >/dev/null 2>&1; rc_sign_subject=$?
+"$ROOT/build/rh_cli" sign --key "$T/key" --subject "$T/packet.json" --sig "$T/key" >/dev/null 2>&1; rc_sign_key=$?
+"$ROOT/build/rh_cli" verify --key "$T/key" --subject "$T/packet.json" --sig "$T/packet.json" >/dev/null 2>&1; rc_verify_subject=$?
+set -e
+[[ "$rc_sign_subject" -eq 3 && "$rc_sign_key" -eq 3 && "$rc_verify_subject" -eq 3 ]] || fail "colliding signing paths must be rejected"
+cmp -s "$T/packet.json" "$T/packet.before-collision" || fail "colliding signing path modified the subject"
 vout="$("$ROOT/build/rh_cli" verify --key "$T/key" --subject "$T/packet.json" --sig "$T/packet.sig")" \
   || fail "verify failed: $vout"
 echo "$vout"

@@ -135,6 +135,13 @@ echo "[store] optional detached signature authenticates transfer before publicat
 printf 'operator transfer signing key 0123456789abcdef' > "$T/transfer.key"
 chmod 600 "$T/transfer.key"
 "$ROOT/build/rh_cli" ops export --root "$T/transfer-source" --manifest "$T/transfer.manifest" --out "$T/signed.bundle" --key "$T/transfer.key" --sig "$T/signed.bundle.sig" >/dev/null || fail "signed portable export"
+cp "$T/transfer.manifest" "$T/transfer.manifest.before-collision"
+set +e
+"$ROOT/build/rh_cli" ops export --root "$T/transfer-source" --manifest "$T/transfer.manifest" --out "$T/signed.bundle" --key "$T/transfer.key" --sig "$T/transfer.manifest" >/dev/null 2>&1
+rc_manifest_collision=$?
+set -e
+[[ "$rc_manifest_collision" -eq 3 ]] || fail "signature output must not overwrite the manifest"
+cmp -s "$T/transfer.manifest" "$T/transfer.manifest.before-collision" || fail "signature path collision modified the manifest"
 "$ROOT/build/rh_cli" ops import --dest "$T/signed-destination" --input "$T/signed.bundle" --key "$T/transfer.key" --sig "$T/signed.bundle.sig" >/dev/null || fail "authenticated portable import"
 for n in "$transfer_a" "$transfer_b"; do
   "$ROOT/build/rh_cli" store verify --root "$T/signed-destination" --name "$n" >/dev/null || fail "authenticated transfer blob $n does not verify"
