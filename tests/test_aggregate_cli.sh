@@ -62,7 +62,7 @@ def aggregate(seconds):
         row["role_counts"][event["role"]] = row["role_counts"].get(event["role"], 0) + 1
     return [{"bucket": row["bucket"], "event_count": row["event_count"],
              "distinct_actor_count": len(row["actors"]), "role_counts": row["role_counts"]}
-            for row in rows.values()]
+            for _, row in sorted(rows.items())]
 def invalidated(seconds):
     result = []
     by_id = {event["id"]: event for event in events}
@@ -90,6 +90,15 @@ for key in ("daily", "weekly", "corrections"):
 assert actual["validation"]["full_recompute_equivalent"] is True, actual
 print("[aggregate] seeded 240-event daily/weekly/role oracle matches full recomputation")
 PY
+python3 - "$T/oracle-in.json" "$T/oracle-permuted.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+data["events"].reverse()
+json.dump(data, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" aggregate --input "$T/oracle-permuted.json" --out "$T/oracle-permuted-out.json" >/dev/null || fail "permuted aggregate oracle run"
+cmp -s "$T/oracle-out.json" "$T/oracle-permuted-out.json" || fail "event order changed canonical aggregate output"
+echo "[aggregate] event permutation preserves canonical bucket and role order"
 
 echo "[aggregate] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"

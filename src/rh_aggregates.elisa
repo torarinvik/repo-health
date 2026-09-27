@@ -39,6 +39,54 @@ module Aggregates:
             idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
             Json::rh_json_int(nodes, raw, idx, ok_out)
 
+        def rh_aggregate_text_compare(texts: darray[u8]&, a_s: i64, a_e: i64, b_s: i64, b_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            length: i64 = (a_e - a_s) if a_e - a_s < b_e - b_s else b_e - b_s
+            while i < length |i: i64 = 0, texts, a_s, b_s|:
+                return -1 if texts[(a_s + i).usize()] < texts[(b_s + i).usize()]
+                return 1 if texts[(a_s + i).usize()] > texts[(b_s + i).usize()]
+                i <- i + 1
+            return -1 if a_e - a_s < b_e - b_s
+            return 1 if a_e - a_s > b_e - b_s
+            0
+
+        def rh_aggregate_sort_buckets(bucket_ids: mutable darray[i64]&, event_counts: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while i < bucket_ids.count |i: usize = 1, bucket_ids, event_counts|:
+                j: mutable usize = i
+                while j > 0 and bucket_ids[j - 1] > bucket_ids[j] |j, bucket_ids, event_counts|:
+                    bucket: i64 = bucket_ids[j - 1]
+                    count: i64 = event_counts[j - 1]
+                    bucket_ids[j - 1] <- bucket_ids[j]
+                    event_counts[j - 1] <- event_counts[j]
+                    bucket_ids[j] <- bucket
+                    event_counts[j] <- count
+                    j <- j - 1
+                i <- i + 1
+
+        def rh_aggregate_sort_roles(role_buckets: mutable darray[i64]&, role_starts: mutable darray[i64]&, role_ends: mutable darray[i64]&, role_counts: mutable darray[i64]&, texts: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while i < role_buckets.count |i: usize = 1, role_buckets, role_starts, role_ends, role_counts, texts|:
+                j: mutable usize = i
+                while j > 0 |j, role_buckets, role_starts, role_ends, role_counts, texts|:
+                    left: usize = j - 1
+                    right: usize = j
+                    comparison: mutable i64 = Aggregates::rh_aggregate_text_compare(texts, role_starts[left], role_ends[left], role_starts[right], role_ends[right])
+                    comparison <- -1 if role_buckets[left] < role_buckets[right]
+                    comparison <- 1 if role_buckets[left] > role_buckets[right]
+                    break if comparison <= 0
+                    bucket: i64 = role_buckets[left]
+                    start: i64 = role_starts[left]
+                    end: i64 = role_ends[left]
+                    count: i64 = role_counts[left]
+                    role_buckets[left] <- role_buckets[right]
+                    role_starts[left] <- role_starts[right]
+                    role_ends[left] <- role_ends[right]
+                    role_counts[left] <- role_counts[right]
+                    role_buckets[right] <- bucket
+                    role_starts[right] <- start
+                    role_ends[right] <- end
+                    role_counts[right] <- count
+                    j <- j - 1
+                i <- i + 1
+
         def rh_aggregate_bucket(bucket_ids: darray[i64]&, bucket: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             while i < bucket_ids.count |i: usize = 0, bucket_ids, bucket|:
                 return i.i64() if bucket_ids[i] == bucket
@@ -176,6 +224,10 @@ module Aggregates:
                 Aggregates::rh_aggregate_add(day, event.actor_s, event.actor_e, event.role_s, event.role_e, texts, daily_buckets, daily_counts, daily_actor_buckets, daily_actor_starts, daily_actor_ends, daily_role_buckets, daily_role_starts, daily_role_ends, daily_role_counts)
                 Aggregates::rh_aggregate_add(week, event.actor_s, event.actor_e, event.role_s, event.role_e, texts, weekly_buckets, weekly_counts, weekly_actor_buckets, weekly_actor_starts, weekly_actor_ends, weekly_role_buckets, weekly_role_starts, weekly_role_ends, weekly_role_counts)
                 i <- i + 1
+            Aggregates::rh_aggregate_sort_buckets(daily_buckets, daily_counts)
+            Aggregates::rh_aggregate_sort_buckets(weekly_buckets, weekly_counts)
+            Aggregates::rh_aggregate_sort_roles(daily_role_buckets, daily_role_starts, daily_role_ends, daily_role_counts, texts)
+            Aggregates::rh_aggregate_sort_roles(weekly_role_buckets, weekly_role_starts, weekly_role_ends, weekly_role_counts, texts)
             invalid_daily: mutable darray[i64] = []
             invalid_weekly: mutable darray[i64] = []
             corrections_count: mutable i64 = 0
