@@ -433,6 +433,74 @@ assert graph["unresolved"] == [{"from": 0, "name": "conditional", "requirement":
 print("[deps] Poetry lock graph, scopes, and Python condition retention OK")
 PY
 
+echo "[deps] legacy Poetry metadata.files hashes attach only to one exact package"
+mkdir -p "$T/poetry-legacy-files"
+cat > "$T/poetry-legacy-files/pyproject.toml" <<'EOF'
+[tool.poetry.dependencies]
+python = "^3.11"
+"zope.interface" = "==6.0"
+EOF
+cat > "$T/poetry-legacy-files/poetry.lock" <<'EOF'
+[metadata]
+lock-version = "1.1"
+python-versions = "*"
+content-hash = "fixture"
+
+[[package]]
+name = "zope.interface"
+version = "6.0"
+category = "main"
+optional = false
+python-versions = "*"
+
+[metadata.files]
+"zope.interface" = [{file = "zope.interface-6.0.whl", hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+    {file = "zope.interface-6.0.tar.gz", hash = "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"},
+]
+EOF
+"$ROOT/build/rh_cli" deps --repo "$T/poetry-legacy-files" --out "$T/poetry-legacy-files-out" >/dev/null || fail "legacy Poetry metadata.files run"
+python3 - "$T/poetry-legacy-files-out/deps-pypi-graph.json" <<'PY'
+import json, sys
+graph = json.load(open(sys.argv[1]))
+assert [node["name"] for node in graph["nodes"]] == ["root", "zope.interface"], graph
+assert len(graph["artifacts"]) == 2, graph["artifacts"]
+assert {item["package_node"] for item in graph["artifacts"]} == {1}, graph["artifacts"]
+assert {item["expected_digest"] for item in graph["artifacts"]} == {
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+}, graph["artifacts"]
+print("[deps] legacy Poetry archive digests retained as package artifacts")
+PY
+cp -R "$T/poetry-legacy-files" "$T/poetry-legacy-ambiguous"
+python3 - "$T/poetry-legacy-ambiguous/poetry.lock" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+duplicate = '''
+[[package]]
+name = "zope.interface"
+version = "6.1"
+category = "dev"
+optional = false
+python-versions = "*"
+'''
+s = s.replace("\n[metadata.files]", duplicate + "\n[metadata.files]")
+open(p, "w").write(s)
+PY
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/poetry-legacy-ambiguous" --out "$T/poetry-legacy-ambiguous-out" >/dev/null 2>&1; rc_ambiguous_poetry_files=$?
+set -e
+[[ "$rc_ambiguous_poetry_files" -eq 4 ]] || fail "ambiguous legacy Poetry metadata.files identity must fail closed (got $rc_ambiguous_poetry_files)"
+[[ ! -f "$T/poetry-legacy-ambiguous-out/deps-pypi-graph.json" ]] || fail "ambiguous legacy Poetry metadata.files published a graph"
+cp -R "$T/poetry-legacy-files" "$T/poetry-legacy-bad-digest"
+sed 's/sha256:0123456789abcdef/sha256:not-a-digest/' "$T/poetry-legacy-bad-digest/poetry.lock" > "$T/poetry-legacy-bad-digest/invalid.lock"
+mv "$T/poetry-legacy-bad-digest/invalid.lock" "$T/poetry-legacy-bad-digest/poetry.lock"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/poetry-legacy-bad-digest" --out "$T/poetry-legacy-bad-digest-out" >/dev/null 2>&1; rc_bad_poetry_digest=$?
+set -e
+[[ "$rc_bad_poetry_digest" -eq 4 ]] || fail "malformed legacy Poetry archive digest must fail closed (got $rc_bad_poetry_digest)"
+[[ ! -f "$T/poetry-legacy-bad-digest-out/deps-pypi-graph.json" ]] || fail "bad legacy Poetry archive digest published a graph"
+
 echo "[deps] duplicate PyPI declaration sources fail closed"
 cp "$T/pysrc/requirements.txt" "$T/pep621src/requirements.txt"
 set +e

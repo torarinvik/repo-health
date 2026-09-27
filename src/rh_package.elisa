@@ -3641,6 +3641,7 @@ module Package:
         def rh_pypi_poetry_lock_parse(lock: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, artifacts: mutable darray[RhArtifact]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             mode: mutable u8 = 0
             current: mutable i64 = -1
+            metadata_files_node: mutable i64 = -1
             package_name_s: mutable i64 = -1
             package_name_e: mutable i64 = -1
             package_version_s: mutable i64 = -1
@@ -3652,7 +3653,7 @@ module Package:
             skip_depth: mutable i64 = 0
             skip_quote: mutable u8 = 0
             skip_escape: mutable bool = false
-            while line_start < lock.count |line_start: usize = 0, lock, pkgs, pool, reqs, artifacts, unknown_out, mode, current, package_name_s, package_name_e, package_version_s, package_version_e, seen, package_count, lock_version_seen, skip_array, skip_depth, skip_quote, skip_escape|:
+            while line_start < lock.count |line_start: usize = 0, lock, pkgs, pool, reqs, artifacts, unknown_out, mode, current, metadata_files_node, package_name_s, package_name_e, package_version_s, package_version_e, seen, package_count, lock_version_seen, skip_array, skip_depth, skip_quote, skip_escape|:
                 line_end: usize =
                     while j < lock.count and lock[j] != 10 |j: usize = line_start| -> j:
                         j <- j + 1
@@ -3663,8 +3664,8 @@ module Package:
                 while e > s and (lock[e - 1] == 32 or lock[e - 1] == 9 or lock[e - 1] == 13) |s, e, lock|:
                     e <- e - 1
                 if skip_array:
-                    while i < e |i: usize = s, e, lock, skip_depth, skip_array, skip_quote, skip_escape, mode, current, artifacts, pool|:
-                        if mode == 1 and current >= 0 and skip_quote == 0 and i + 4 <= e and lock[i] == 104 and lock[i + 1] == 97 and lock[i + 2] == 115 and lock[i + 3] == 104:
+                    while i < e |i: usize = s, e, lock, skip_depth, skip_array, skip_quote, skip_escape, mode, current, metadata_files_node, artifacts, pool|:
+                        if (mode == 1 and current >= 0 or mode == 6 and metadata_files_node >= 0) and skip_quote == 0 and i + 4 <= e and lock[i] == 104 and lock[i + 1] == 97 and lock[i + 2] == 115 and lock[i + 3] == 104:
                             hash_syntax: mutable usize = i + 4
                             while hash_syntax < e and (lock[hash_syntax] == 32 or lock[hash_syntax] == 9) |hash_syntax, e, lock|:
                                 hash_syntax <- hash_syntax + 1
@@ -3682,7 +3683,8 @@ module Package:
                                     digest_ok <- false if not digit and not lower and not upper
                                     h <- h + 1
                                 return -1 if not digest_ok
-                                return -1 if rh_artifact_add_expected(artifacts, current, RH_ART_KIND_ARCHIVE, digest_s, digest_e) < 0
+                                artifact_node: i64 = current if mode == 1 else metadata_files_node
+                                return -1 if rh_artifact_add_expected(artifacts, artifact_node, RH_ART_KIND_ARCHIVE, digest_s, digest_e) < 0
                         if skip_quote != 0:
                             if skip_escape:
                                 skip_escape <- false
@@ -3705,6 +3707,7 @@ module Package:
                     continue
                 if s < e and lock[s] == 91:
                     if Base::rh_bytes_equal_literal(lock, s.i64(), e.i64(), "[[package]]"):
+                        return -1 if mode == 6
                         return -1 if current < 0 and package_count > 0
                         current <- -1
                         package_name_s <- -1
@@ -3737,6 +3740,92 @@ module Package:
                     line_start <- line_end + 1
                     continue
                 if mode == 3 or mode == 4:
+                    line_start <- line_end + 1
+                    continue
+                if mode == 6:
+                    key_end: mutable usize = s
+                    metadata_name_s: mutable i64 = -1
+                    normalized_name_end: mutable i64 = -1
+                    if lock[s] == 34:
+                        quoted_name_s: mutable i64 = -1
+                        quoted_name_e: mutable i64 = -1
+                        quoted_end: i64 = rh_quoted_span(lock, s, e, pool, &quoted_name_s, &quoted_name_e)
+                        return -1 if quoted_name_s < 0 or quoted_end <= 0
+                        key_end <- quoted_end.usize()
+                        metadata_name_s <- rh_pypi_extra_name_copy(lock, pool, s, key_end, &normalized_name_end)
+                    else:
+                        key_start: mutable i64 = 0
+                        key_stop: mutable i64 = 0
+                        return -1 if not rh_toml_key(lock, s, e, &key_start, &key_stop)
+                        key_end <- key_stop.usize()
+                        metadata_name_s <- rh_pypi_extra_name_copy(lock, pool, key_start.usize(), key_end, &normalized_name_end)
+                    return -1 if metadata_name_s < 0
+                    value_start: mutable usize = key_end
+                    while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9) |value_start, e, lock|:
+                        value_start <- value_start + 1
+                    return -1 if value_start >= e or lock[value_start] != 61
+                    value_start <- value_start + 1
+                    while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9) |value_start, e, lock|:
+                        value_start <- value_start + 1
+                    return -1 if value_start >= e or lock[value_start] != 91
+                    metadata_files_node <- -1
+                    matches: mutable i64 = 0
+                    for index in 1..<pkgs.count |index, pkgs, pool, metadata_name_s, normalized_name_end, metadata_files_node, matches|:
+                        node: RhPkgNode = pkgs[index]
+                        if node.eco == RH_ECO_PYPI and node.name_s >= 0 and rh_name_eq(RH_ECO_PYPI, pool, node.name_s.usize(), node.name_e.usize(), metadata_name_s.usize(), normalized_name_end.usize()):
+                            metadata_files_node <- index.i64()
+                            matches <- matches + 1
+                    return -1 if matches != 1
+                    skip_depth <- 1
+                    skip_quote <- 0
+                    skip_escape <- false
+                    inline_i: mutable usize = value_start + 1
+                    while inline_i < e |inline_i, e, lock, metadata_files_node, pool, artifacts, skip_depth, skip_quote, skip_escape|:
+                        if skip_quote == 0 and lock[inline_i] == 35:
+                            break
+                        if skip_quote == 0 and inline_i + 4 <= e and lock[inline_i] == 104 and lock[inline_i + 1] == 97 and lock[inline_i + 2] == 115 and lock[inline_i + 3] == 104:
+                            boundary: bool = inline_i == value_start + 1 or lock[inline_i - 1] == 32 or lock[inline_i - 1] == 9 or lock[inline_i - 1] == 123 or lock[inline_i - 1] == 44
+                            if boundary:
+                                hash_syntax: mutable usize = inline_i + 4
+                                while hash_syntax < e and (lock[hash_syntax] == 32 or lock[hash_syntax] == 9) |hash_syntax, e, lock|:
+                                    hash_syntax <- hash_syntax + 1
+                                if hash_syntax < e and lock[hash_syntax] == 61:
+                                    digest_s: mutable i64 = -1
+                                    digest_e: mutable i64 = -1
+                                    return -1 if rh_toml_qstring(lock, inline_i + 4, e, pool, &digest_s, &digest_e) < 0
+                                    return -1 if digest_e - digest_s != 71 or not rh_span_lit(pool, digest_s.usize(), (digest_s + 7).usize(), "sha256:")
+                                    digest_ok: mutable bool = true
+                                    while h < 64 |h: usize = 0, digest_s, pool, digest_ok|:
+                                        b: u8 = pool[(digest_s + 7 + h.i64()).usize()]
+                                        digit: bool = b >= 48 and b <= 57
+                                        lower: bool = b >= 97 and b <= 102
+                                        upper: bool = b >= 65 and b <= 70
+                                        digest_ok <- false if not digit and not lower and not upper
+                                        h <- h + 1
+                                    return -1 if not digest_ok
+                                    return -1 if rh_artifact_add_expected(artifacts, metadata_files_node, RH_ART_KIND_ARCHIVE, digest_s, digest_e) < 0
+                        if skip_quote != 0:
+                            if skip_escape:
+                                skip_escape <- false
+                            elif lock[inline_i] == 92 and skip_quote == 34:
+                                skip_escape <- true
+                            elif lock[inline_i] == skip_quote:
+                                skip_quote <- 0
+                        elif lock[inline_i] == 34 or lock[inline_i] == 39:
+                            skip_quote <- lock[inline_i]
+                        elif lock[inline_i] == 91:
+                            skip_depth <- skip_depth + 1
+                        elif lock[inline_i] == 93:
+                            skip_depth <- skip_depth - 1
+                            return -1 if skip_depth < 0
+                            if skip_depth == 0:
+                                inline_rest: mutable usize = inline_i + 1
+                                while inline_rest < e and (lock[inline_rest] == 32 or lock[inline_rest] == 9 or lock[inline_rest] == 13) |inline_rest, e, lock|:
+                                    inline_rest <- inline_rest + 1
+                                return -1 if inline_rest < e and lock[inline_rest] != 35
+                                break
+                        inline_i <- inline_i + 1
+                    skip_array <- skip_depth > 0
                     line_start <- line_end + 1
                     continue
                 ks: mutable i64 = 0
@@ -3892,20 +3981,7 @@ module Package:
                         return -1 if rh_pypi_lock_seen(seen, current)
                         seen.push(current)
                 elif mode == 6:
-                    value_start: mutable usize = ke.usize()
-                    while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
-                        value_start <- value_start + 1
-                    if value_start < e and lock[value_start] == 91:
-                        skip_array <- true
-                        skip_depth <- 0
-                        unknown_out[0] <- unknown_out[0] + 1
-                        while i < e and skip_array |i: usize = value_start, e, lock, skip_array, skip_depth|:
-                            skip_depth <- skip_depth + 1 if lock[i] == 91
-                            skip_depth <- skip_depth - 1 if lock[i] == 93
-                            skip_array <- false if skip_depth <= 0
-                            i <- i + 1
-                    else:
-                        return -1
+                    return -1
                 else:
                     return -1
                 line_start <- line_end + 1
