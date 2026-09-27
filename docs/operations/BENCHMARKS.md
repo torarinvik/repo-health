@@ -174,3 +174,14 @@ recomputation measured 2,306 ms median while reusing 103/105 rows. Full and
 partial output bytes matched (`d824ba36a4ecd6a766f8a3d465975734692b6c9475b6f6cfad2283ed454fa76e`). Maximum individual-child peak RSS was 234.88 MiB full and
 243.19 MiB partial. Host load varied across this and prior small-sample runs,
 so compare only the paired full/partial samples from one manifest.
+
+
+The aggregate indexes use Elisa's allocation-free `hash_sview` for actor and
+role keys, followed by exact span comparisons on collisions. A clean run at
+revision `9da8021` measured the same 100,000-event input with three
+repetitions: full recomputation median 2,565 ms, partial-cache median 2,288 ms,
+103/105 rows reused, and byte-identical output SHA-256
+`d824ba36a4ecd6a766f8a3d465975734692b6c9475b6f6cfad2283ed454fa76e`. Maximum
+individual-child peak RSS remained 234.88 MiB full and 243.19 MiB partial.
+Sample latency varied across runs; the paired timings are local synthetic
+evidence only.
