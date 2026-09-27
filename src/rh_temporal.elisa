@@ -12,20 +12,68 @@
 # (e.g. fix-before-disclosure, plan §8.5): use rh_signed_duration there.
 
 module Temporal:
-    private:
-        const RH_TB_AUTHOR: u8 = 0
-        const RH_TB_COMMITTER: u8 = 1
-        const RH_TB_OBSERVED: u8 = 2
-        const RH_TB_VALID: u8 = 3
-        const RH_TB_SYSTEM: u8 = 4
-        const RH_TB_UNKNOWN_START: u8 = 255
-
     public:
+        const RH_TIME_BASIS_AUTHOR: u8 = 0
+        const RH_TIME_BASIS_COMMITTER: u8 = 1
+        const RH_TIME_BASIS_OBSERVED: u8 = 2
+        const RH_TIME_BASIS_VALID: u8 = 3
+        const RH_TIME_BASIS_SYSTEM: u8 = 4
+        const RH_TIME_BASIS_UNKNOWN: u8 = 255
+
+        const RH_INTERVAL_OUTSIDE: u8 = 0
+        const RH_INTERVAL_WITHIN: u8 = 1
+        const RH_INTERVAL_UNKNOWN: u8 = 2
+        const RH_INTERVAL_INVALID: u8 = 3
+
         struct RhBitemporal:
             valid_start: i64
             valid_end: i64
             known_start: i64
             known_end: i64
+
+        # Left-censored intervals have a known end but an unknown start. The
+        # unused start field is canonicalized to zero, never overloaded as an
+        # epoch or unbounded-time sentinel.
+        struct RhLeftCensoredInterval:
+            start: i64
+            end: i64
+            start_known: bool
+
+        def rh_time_basis_valid(basis: u8) -> bool:
+            return true if basis == RH_TIME_BASIS_AUTHOR
+            return true if basis == RH_TIME_BASIS_COMMITTER
+            return true if basis == RH_TIME_BASIS_OBSERVED
+            return true if basis == RH_TIME_BASIS_VALID
+            return true if basis == RH_TIME_BASIS_SYSTEM
+            basis == RH_TIME_BASIS_UNKNOWN
+
+        def rh_time_basis_label(basis: u8) -> u8&:
+            return "author" if basis == RH_TIME_BASIS_AUTHOR
+            return "committer" if basis == RH_TIME_BASIS_COMMITTER
+            return "observed" if basis == RH_TIME_BASIS_OBSERVED
+            return "valid" if basis == RH_TIME_BASIS_VALID
+            return "system" if basis == RH_TIME_BASIS_SYSTEM
+            return "unknown" if basis == RH_TIME_BASIS_UNKNOWN
+            "invalid-time-basis"
+
+        def rh_left_censored_interval_make(start_known: bool, start: i64, end: i64) -> RhLeftCensoredInterval:
+            RhLeftCensoredInterval{start: start if start_known else 0, end: end, start_known: start_known}
+
+        def rh_left_censored_interval_valid(interval: RhLeftCensoredInterval) -> bool:
+            return false if not rh_instant_supported(interval.end)
+            return false if interval.start_known and not rh_instant_supported(interval.start)
+            return rh_interval_valid(interval.start, interval.end) if interval.start_known
+            interval.start == 0 and interval.end > 0
+
+        # Membership is tri-state: a point before a known end could be inside
+        # or outside a left-censored interval, so it is never asserted true.
+        def rh_left_censored_membership(interval: RhLeftCensoredInterval, instant: i64) -> u8:
+            return RH_INTERVAL_INVALID if not rh_left_censored_interval_valid(interval)
+            return RH_INTERVAL_INVALID if not rh_instant_supported(instant)
+            return RH_INTERVAL_OUTSIDE if instant >= interval.end
+            return RH_INTERVAL_UNKNOWN if not interval.start_known
+            return RH_INTERVAL_OUTSIDE if instant < interval.start
+            RH_INTERVAL_WITHIN
 
         # Non-empty half-open interval check.
         def rh_interval_valid(start: i64, end: i64) -> bool:
