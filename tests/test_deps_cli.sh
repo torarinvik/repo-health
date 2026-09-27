@@ -392,6 +392,35 @@ rc_poetry_inline_source=0
 [[ "$rc_poetry_inline_source" -eq 4 ]] || fail "Poetry inline source locator must fail closed (got $rc_poetry_inline_source)"
 [[ ! -f "$T/poetry-inline-source-out/deps-pypi-graph.json" ]] || fail "Poetry source locator published a partial graph"
 
+echo "[deps] PEP 440 compatible-release constraints resolve the locked version"
+mkdir -p "$T/poetry-compatible"
+cat > "$T/poetry-compatible/pyproject.toml" <<'EOF'
+[tool.poetry.dependencies]
+python = "^3.11"
+compatible = "~=1.4.5"
+EOF
+cat > "$T/poetry-compatible/poetry.lock" <<'EOF'
+[metadata]
+lock-version = "2.1"
+
+[[package]]
+name = "compatible"
+version = "1.4.9"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = []
+EOF
+"$ROOT/build/rh_cli" deps --repo "$T/poetry-compatible" --out "$T/poetry-compatible-out" \
+  | grep -q "ecosystems=1 pypi=1/1 unresolved=0 unsupported=0" || fail "PEP 440 compatible-release summary"
+python3 - "$T/poetry-compatible-out/deps-pypi-graph.json" <<'PY'
+import json, sys
+graph = json.load(open(sys.argv[1]))
+assert [node.get("version") for node in graph["nodes"]] == [None, "1.4.9"], graph["nodes"]
+assert graph["edges"] == [{"from": 0, "to": 1, "scope": "normal"}], graph["edges"]
+print("[deps] PEP 440 compatible-release lock match retained")
+PY
+
 echo "[deps] Poetry lock resolves direct and transitive packages with context retention"
 mkdir -p "$T/poetry-lock"
 cat > "$T/poetry-lock/pyproject.toml" <<'EOF'
