@@ -389,7 +389,9 @@ module PostgresReport:
             return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, root, "operation", &operation_s, &operation_e, false)
 
             normalization_operation: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "commit_staged_normalization")
-            return -1 if raw.count > RH_PG_REPORT_MAX_BYTES and not normalization_operation
+            projection_operation: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "store_graph_projection")
+            return -1 if raw.count > RH_PG_REPORT_MAX_BYTES and not normalization_operation and not projection_operation
+            return -1 if projection_operation and raw.count > 4194304
 
             if normalization_operation:
                 normalization_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "normalization")
@@ -772,6 +774,83 @@ module PostgresReport:
                 Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"read_projection_adjacency_batch\",\"result\":")
                 out.extend(bytes_view(adjacency_result))
                 Base::rh_push_text(out, "}")
+                return 0
+
+            if projection_operation:
+                projection_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "projection")
+                edges_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "edges")
+                return -1 if projection_idx < 0 or nodes[projection_idx.usize()].kind != Json::RH_JSON_OBJ
+                return -1 if edges_idx < 0 or nodes[edges_idx.usize()].kind != Json::RH_JSON_ARR
+                projection_id_s: mutable i64 = 0
+                projection_id_e: mutable i64 = 0
+                kind_s: mutable i64 = 0
+                kind_e: mutable i64 = 0
+                visibility_s: mutable i64 = 0
+                visibility_e: mutable i64 = 0
+                cutoff_s: mutable i64 = 0
+                cutoff_e: mutable i64 = 0
+                as_of_s: mutable i64 = 0
+                as_of_e: mutable i64 = 0
+                identity_s: mutable i64 = 0
+                identity_e: mutable i64 = 0
+                mapping_s: mutable i64 = 0
+                mapping_e: mutable i64 = 0
+                completeness_s: mutable i64 = 0
+                completeness_e: mutable i64 = 0
+                digest_s: mutable i64 = 0
+                digest_e: mutable i64 = 0
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "id", &projection_id_s, &projection_id_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, projection_id_s, projection_id_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "projection_kind", &kind_s, &kind_e, false) or kind_e - kind_s > 64
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "visibility_scope", &visibility_s, &visibility_e, false) or not PostgresReport::rh_pg_report_visibility_ok(texts, visibility_s, visibility_e)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "input_cutoff", &cutoff_s, &cutoff_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "as_of", &as_of_s, &as_of_e, false)
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "identity_revision", &identity_s, &identity_e, true) or identity_e - identity_s > 256
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "mapping_revision", &mapping_s, &mapping_e, true) or mapping_e - mapping_s > 256
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "completeness", &completeness_s, &completeness_e, false)
+                return -1 if not PostgresReport::rh_pg_report_eq(texts, completeness_s, completeness_e, "complete") and not PostgresReport::rh_pg_report_eq(texts, completeness_s, completeness_e, "partial") and not PostgresReport::rh_pg_report_eq(texts, completeness_s, completeness_e, "truncated") and not PostgresReport::rh_pg_report_eq(texts, completeness_s, completeness_e, "failed")
+                return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "manifest_digest", &digest_s, &digest_e, false) or not PostgresReport::rh_pg_report_hex64(texts, digest_s, digest_e)
+                edges_node: Json::RhJsonNode = nodes[edges_idx.usize()]
+                return -1 if edges_node.child_count > 10000
+                return -1 if PostgresReport::rh_pg_report_eq(texts, completeness_s, completeness_e, "failed") and edges_node.child_count > 0
+                while edge_idx >= 0 |edge_idx: i64 = edges_node.first_child, nodes, texts, edges_node|:
+                    edge: i64 = edge_idx
+                    return -1 if nodes[edge.usize()].kind != Json::RH_JSON_OBJ
+                    from_s: mutable i64 = 0
+                    from_e: mutable i64 = 0
+                    to_s: mutable i64 = 0
+                    to_e: mutable i64 = 0
+                    edge_kind_s: mutable i64 = 0
+                    edge_kind_e: mutable i64 = 0
+                    known_s: mutable i64 = 0
+                    known_e: mutable i64 = 0
+                    return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, edge, "from_entity_id", &from_s, &from_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, from_s, from_e)
+                    return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, edge, "to_entity_id", &to_s, &to_e, false) or not PostgresReport::rh_pg_report_uuid_valid(texts, to_s, to_e)
+                    return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, edge, "edge_kind", &edge_kind_s, &edge_kind_e, false) or edge_kind_e - edge_kind_s > 64
+                    return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, edge, "known_at", &known_s, &known_e, false)
+                    valid_from_idx: i64 = Json::rh_json_obj_get(nodes, texts, edge, "valid_from")
+                    if valid_from_idx >= 0 and nodes[valid_from_idx.usize()].kind != Json::RH_JSON_NULL:
+                        valid_from_s: mutable i64 = 0
+                        valid_from_e: mutable i64 = 0
+                        return -1 if not Json::rh_json_str_span(nodes, valid_from_idx, &valid_from_s, &valid_from_e) or valid_from_e <= valid_from_s
+                    valid_to_idx: i64 = Json::rh_json_obj_get(nodes, texts, edge, "valid_to")
+                    if valid_to_idx >= 0 and nodes[valid_to_idx.usize()].kind != Json::RH_JSON_NULL:
+                        valid_to_s: mutable i64 = 0
+                        valid_to_e: mutable i64 = 0
+                        return -1 if not Json::rh_json_str_span(nodes, valid_to_idx, &valid_to_s, &valid_to_e) or valid_to_e <= valid_to_s
+                    edge_idx <- nodes[edge.usize()].next_sibling
+                root_node: Json::RhJsonNode = nodes[root.usize()]
+                return -1 if root_node.text_start < 0 or root_node.text_end <= root_node.text_start or root_node.text_end - root_node.text_start > 4194304
+                projection_json: mutable darray[u8] = []
+                while raw_offset < root_node.text_end |raw_offset: i64 = root_node.text_start, raw, root_node, projection_json|:
+                    projection_json.push(raw[raw_offset.usize()])
+                    raw_offset <- raw_offset + 1
+                projection_json.push(0)
+                projection_ptr: cstr = (&projection_json[0]).cast[cstr] can Unsafe.PointerCast
+                stored: i64 = Postgres::rh_pg_store_graph_projection(conninfo, projection_ptr)
+                return -1 if stored < 0
+                Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"store_graph_projection\",\"status\":\"")
+                Base::rh_push_text(out, "stored" if stored == 1 else "replay")
+                Base::rh_push_text(out, "\"}")
                 return 0
 
             if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "enqueue_graph_query_job"):

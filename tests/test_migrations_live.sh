@@ -45,6 +45,8 @@ docker cp "$ROOT/db/migrations/003_projection_adjacency_batch.sql" "$CONTAINER:/
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/003_projection_adjacency_batch.sql >/dev/null || fail "apply projection-adjacency migration"
 docker cp "$ROOT/db/migrations/004_graph_query_claim_attempt.sql" "$CONTAINER:/tmp/004_graph_query_claim_attempt.sql" || fail "copy graph-query worker migration"
 docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/004_graph_query_claim_attempt.sql >/dev/null || fail "apply graph-query worker migration"
+docker cp "$ROOT/db/migrations/005_store_graph_projection.sql" "$CONTAINER:/tmp/005_store_graph_projection.sql" || fail "copy graph-projection storage migration"
+docker exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health -f /tmp/005_store_graph_projection.sql >/dev/null || fail "apply graph-projection storage migration"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null
 DO $$
@@ -1008,6 +1010,8 @@ INSERT INTO entity (id, entity_kind, visibility_scope, created_at)
 SELECT ('00000000-0000-0000-0000-' || lpad(n::text, 12, '0'))::uuid,
        'package_version', 'public', '2026-01-01T00:00:00Z'
 FROM generate_series(1000001, 1005002) AS n;
+INSERT INTO entity (id, entity_kind, visibility_scope, created_at)
+VALUES ('00000000-0000-0000-0000-000001006000', 'package_version', 'tenant-private', '2026-01-01T00:00:00Z');
 INSERT INTO graph_projection
     (id, projection_kind, visibility_scope, input_cutoff, as_of, identity_revision, mapping_revision, completeness, manifest_digest)
 VALUES ('00000000-0000-0000-0000-000000009001', 'dependency', 'public',
@@ -1127,6 +1131,67 @@ BEGIN
 END $$;
 SQL
 echo "[migrations-live] indexed high-degree plans and bounded visibility-scoped batch adjacency pass"
+
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "store immutable graph projection"
+DO $$
+DECLARE
+  projection_input jsonb;
+  stored boolean;
+  replay_rejected boolean;
+  visibility_rejected boolean;
+  result_edges jsonb;
+  result_truncated boolean;
+BEGIN
+  projection_input := jsonb_build_object(
+    'schema', 'rh-postgres-projection-input/1',
+    'projection', jsonb_build_object(
+      'id', '00000000-0000-0000-0000-000000009002',
+      'projection_kind', 'dependency',
+      'visibility_scope', 'public',
+      'input_cutoff', '2026-01-01T00:00:00Z',
+      'as_of', '2026-01-01T00:00:00Z',
+      'identity_revision', 'identity-1',
+      'mapping_revision', 'mapping-1',
+      'completeness', 'complete',
+      'manifest_digest', repeat('a', 64)
+    ),
+    'edges', jsonb_build_array(
+      jsonb_build_object('from_entity_id', '00000000-0000-0000-0000-000001000001', 'to_entity_id', '00000000-0000-0000-0000-000001000002', 'edge_kind', 'depends_on', 'known_at', '2026-01-01T00:00:00Z'),
+      jsonb_build_object('from_entity_id', '00000000-0000-0000-0000-000001000002', 'to_entity_id', '00000000-0000-0000-0000-000001000003', 'edge_kind', 'depends_on', 'valid_from', '2025-01-01T00:00:00Z', 'valid_to', NULL, 'known_at', '2026-01-01T00:00:00Z')
+    )
+  );
+  stored := rh_store_graph_projection(projection_input);
+  IF NOT stored OR rh_store_graph_projection(projection_input) THEN
+    RAISE EXCEPTION 'graph projection store did not distinguish first write from exact replay';
+  END IF;
+  SELECT edges, truncated INTO result_edges, result_truncated
+  FROM rh_projection_adjacency_batch(
+    '00000000-0000-0000-0000-000000009002', 'public', 'depends_on', 'outgoing',
+    ARRAY['00000000-0000-0000-0000-000001000001'::uuid], 10
+  );
+  IF jsonb_array_length(result_edges) <> 1 OR result_truncated
+     OR result_edges->0->>'to' <> '00000000-0000-0000-0000-000001000002' THEN
+    RAISE EXCEPTION 'stored projection is not available to the bounded adjacency query: %', result_edges;
+  END IF;
+  replay_rejected := false;
+  BEGIN
+    PERFORM rh_store_graph_projection(jsonb_set(projection_input, '{edges,0,known_at}', '"2026-01-02T00:00:00Z"'));
+  EXCEPTION WHEN raise_exception THEN
+    replay_rejected := true;
+  END;
+  IF NOT replay_rejected THEN RAISE EXCEPTION 'altered graph projection replay was accepted'; END IF;
+  projection_input := jsonb_set(projection_input, '{projection,id}', to_jsonb('00000000-0000-0000-0000-000000009003'::text));
+  projection_input := jsonb_set(projection_input, '{edges,0,to_entity_id}', to_jsonb('00000000-0000-0000-0000-000001006000'::text));
+  visibility_rejected := false;
+  BEGIN
+    PERFORM rh_store_graph_projection(projection_input);
+  EXCEPTION WHEN insufficient_privilege THEN
+    visibility_rejected := true;
+  END;
+  IF NOT visibility_rejected THEN RAISE EXCEPTION 'graph projection accepted an edge across visibility scopes'; END IF;
+END $$;
+SQL
+echo "[migrations-live] immutable projection storage replays exactly, fences visibility, and feeds bounded adjacency reads"
 
 docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d repo_health <<'SQL' >/dev/null || fail "durable operator source stop lifecycle"
 DO $$

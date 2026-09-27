@@ -44,6 +44,18 @@ adds a claim wrapper that returns the durable attempt count together with the
 lease. The worker uses that count when dead-lettering malformed persisted
 requests through the existing fenced retry transition.
 
+The additive
+[`db/migrations/005_store_graph_projection.sql`](../../db/migrations/005_store_graph_projection.sql)
+adds `rh_store_graph_projection`, an immutable, idempotent projection writer.
+It binds a projection UUID to its temporal/revision metadata and manifest digest,
+rejects duplicate or malformed edges and cross-visibility endpoints, and
+compares exact edges on replay. The `store_graph_projection` command validates
+up to 10,000 edges before connecting; its result distinguishes first storage
+from exact replay. The live migration rehearsal writes a projection, replays
+it, rejects altered replay, and reads the stored edge through the batch API.
+Larger projection ingestion still needs bounded chunking before the worker can
+load a full production projection through this path.
+
 Application methods are in [`src/rh_postgres.elisa`](../../src/rh_postgres.elisa),
 with a bounded command adapter in [`src/rh_postgres_report.elisa`](../../src/rh_postgres_report.elisa).
 `rh_cli postgres --input <rh-postgres-command/1> --out <file>` starts or verifies

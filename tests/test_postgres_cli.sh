@@ -42,6 +42,8 @@ run_ok run_graph_query committed run-graph-query-job
 run_ok run_graph_query duplicate run-graph-query-job
 run_ok run_graph_query malformed run-graph-query-job
 run_ok projection_batch ok read-projection-adjacency-batch
+run_ok store_projection stored store-graph-projection
+run_ok store_projection duplicate store-graph-projection
 run_ok publish_graph committed publish-graph-query-result
 run_ok publish_graph duplicate publish-graph-query-result
 run_ok retry_graph committed retry-graph-query-job
@@ -113,6 +115,11 @@ assert d == {
 }, d
 print("[postgres-cli] bounded batched adjacency result and truncation state retained")
 PY
+python3 - "$T/store-graph-projection-stored.json" "$T/store-graph-projection-duplicate.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"store_graph_projection","status":"stored"}
+assert json.load(open(sys.argv[2])) == {"schema":"rh-postgres-result/1","operation":"store_graph_projection","status":"replay"}
+PY
 python3 - "$ROOT/fixtures/postgres/read-projection-adjacency-batch-command.json" "$T" <<'PY'
 import json, pathlib, sys
 source, directory = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
@@ -139,6 +146,24 @@ for invalid_case in bad-direction bad-entity too-many-entities bad-limit; do
     || fail "invalid adjacency request $invalid_case reached PostgreSQL or wrote output"
 done
 echo "[postgres-cli] malformed, overbound, and invalid-direction batches fail before PostgreSQL"
+
+python3 - "$ROOT/fixtures/postgres/store-graph-projection-command.json" "$T/store-projection-invalid.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+value["edges"][0]["from_entity_id"] = "not-a-uuid"
+json.dump(value, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+set +e
+RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+  RH_FAKE_PG_OPERATION=store_projection RH_FAKE_PG_EXPECT=stored \
+  RH_FAKE_PG_CONNECT_MARK="$T/store-projection-invalid.connected" \
+  "$ROOT/build/rh_cli" postgres --input "$T/store-projection-invalid.json" \
+    --out "$T/store-projection-invalid.out" >/dev/null 2>&1
+invalid_projection_rc=$?
+set -e
+[[ "$invalid_projection_rc" -eq 4 && ! -e "$T/store-projection-invalid.connected" && ! -e "$T/store-projection-invalid.out" ]] \
+  || fail "malformed graph projection reached PostgreSQL or wrote output"
+echo "[postgres-cli] malformed projection identifiers fail before PostgreSQL"
 
 python3 - "$ROOT/fixtures/postgres/reconcile-source-objects-command.json" "$T/current-state-invalid.json" <<'PY'
 import json, sys

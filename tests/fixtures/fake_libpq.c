@@ -163,6 +163,9 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     static const char *run_graph_retry_values[8] = {
         "00000000-0000-0000-0000-000000000099", "1", "1", "0", "malformed", "7", "0", "2026-01-01T00:01:00Z"
     };
+    static const char *store_graph_projection_values[1] = {
+        "{\"schema\":\"rh-postgres-command/1\",\"operation\":\"store_graph_projection\",\"projection\":{\"id\":\"00000000-0000-0000-0000-000000009002\",\"projection_kind\":\"dependency\",\"visibility_scope\":\"public\",\"input_cutoff\":\"2026-01-01T00:00:00Z\",\"as_of\":\"2026-01-01T00:00:00Z\",\"identity_revision\":\"identity-1\",\"mapping_revision\":\"mapping-1\",\"completeness\":\"complete\",\"manifest_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"edges\":[{\"from_entity_id\":\"00000000-0000-0000-0000-000001000001\",\"to_entity_id\":\"00000000-0000-0000-0000-000001000002\",\"edge_kind\":\"depends_on\",\"known_at\":\"2026-01-01T00:00:00Z\"}]}"
+    };
     static const char *poll_graph_values[2] = {
         "00000000-0000-0000-0000-000000000099", "public"
     };
@@ -305,6 +308,10 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = projection_batch_values;
         expected_count = 6;
         prefix = "SELECT jsonb_build_object('edges', adjacency.edges";
+    } else if (operation != NULL && strcmp(operation, "store_projection") == 0) {
+        expected = store_graph_projection_values;
+        expected_count = 1;
+        prefix = "SELECT public.rh_store_graph_projection($1::jsonb)";
     } else if (operation != NULL && strcmp(operation, "page_events") == 0) {
         expected = page_events_values;
         expected_count = 14;
@@ -418,6 +425,13 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.rows = 1;
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
         result.value = "{\"edges\":[{\"from\":\"00000000-0000-0000-0000-000001000001\",\"to\":\"00000000-0000-0000-0000-000001000002\"}],\"truncated\":true}";
+        return &result;
+    }
+    if (operation != NULL && strcmp(operation, "store_projection") == 0) {
+        result.columns = 1;
+        result.rows = 1;
+        result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+        result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? "f" : "t";
         return &result;
     }
     if (operation != NULL && strcmp(operation, "current_state") == 0) {
