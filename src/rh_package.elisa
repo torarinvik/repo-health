@@ -388,6 +388,7 @@ module Package:
             req_s: mutable i64
             req_e: mutable i64
             reason: mutable u8
+            depctx: mutable u8
             optional: mutable u8
 
         struct RhArtifact:
@@ -782,12 +783,12 @@ module Package:
                                 count <- count + 1
                         n <- n + 1
                 if count == 0:
-                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 0, optional: 0})
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 0, depctx: q.depctx, optional: 0})
                 elif count == 1:
                     if rh_edge_add(edges, q.from, first, 0, q.optional):
                         made <- made + 1
                 else:
-                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 1, optional: 0})
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.ver_s, req_e: q.ver_e, reason: 1, depctx: q.depctx, optional: 0})
                 r <- r + 1
 
     private:
@@ -1239,7 +1240,7 @@ module Package:
                 if target >= 0:
                     _ = rh_edge_add(edges, requirement.from, target, requirement.depctx, requirement.optional)
                 else:
-                    unresolved.push(RhUnresolved{from: requirement.from, name_s: requirement.name_s, name_e: requirement.name_e, req_s: requirement.req_s, req_e: requirement.req_e, reason: reason, optional: requirement.optional})
+                    unresolved.push(RhUnresolved{from: requirement.from, name_s: requirement.name_s, name_e: requirement.name_e, req_s: requirement.req_s, req_e: requirement.req_e, reason: reason, depctx: requirement.depctx, optional: requirement.optional})
                 i <- i + 1
             edges.count.i64()
 
@@ -1269,7 +1270,7 @@ module Package:
                 if candidate >= 0 and not ambiguous:
                     _ = rh_edge_add(edges, requirement.from, candidate, requirement.depctx, requirement.optional)
                 else:
-                    unresolved.push(RhUnresolved{from: requirement.from, name_s: requirement.name_s, name_e: requirement.name_e, req_s: requirement.req_s, req_e: requirement.req_e, reason: RH_UNRES_AMBIGUOUS if ambiguous else RH_UNRES_MISSING, optional: requirement.optional})
+                    unresolved.push(RhUnresolved{from: requirement.from, name_s: requirement.name_s, name_e: requirement.name_e, req_s: requirement.req_s, req_e: requirement.req_e, reason: RH_UNRES_AMBIGUOUS if ambiguous else RH_UNRES_MISSING, depctx: requirement.depctx, optional: requirement.optional})
                 i <- i + 1
             edges.count.i64()
 
@@ -1785,7 +1786,7 @@ module Package:
                         made <- made + 1
                 else:
                     code: u8 = 2 if reason == 2 else 0
-                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: code, optional: q.optional})
+                    unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: code, depctx: q.depctx, optional: q.optional})
                 r <- r + 1
 
     private:
@@ -3115,7 +3116,7 @@ module Package:
             if ne == ns:
                 unknown_out[0] <- unknown_out[0] + 1
                 uns0: i64 = rh_pool_copy(pool, buf, a, b)
-                unresolved.push(RhUnresolved{from: 0, name_s: uns0, name_e: uns0 + (b - a).i64(), req_s: -1, req_e: -1, reason: 2, optional: 0})
+                unresolved.push(RhUnresolved{from: 0, name_s: uns0, name_e: uns0 + (b - a).i64(), req_s: -1, req_e: -1, reason: 2, depctx: depctx, optional: 0})
                 return
             c: mutable usize =
                 while c < b and (buf[c] == 32 or buf[c] == 9) |c: usize = ne| -> c:
@@ -3202,7 +3203,7 @@ module Package:
                 uns_req <- rh_pool_copy(pool, buf, rs, re2)
                 uns_req_end <- uns_req + (re2 - rs).i64()
             reason: u8 = 2 if has_extras or has_marker or has_url or is_opt else 0
-            unresolved.push(RhUnresolved{from: 0, name_s: uns_name, name_e: uns_name + (ne - ns).i64(), req_s: uns_req, req_e: uns_req_end, reason: reason, optional: 0})
+            unresolved.push(RhUnresolved{from: 0, name_s: uns_name, name_e: uns_name + (ne - ns).i64(), req_s: uns_req, req_e: uns_req_end, reason: reason, depctx: depctx, optional: 0})
             return
 
         # Parse a requirements.txt into a root-plus-pinned graph. Returns 0 (root
@@ -3230,6 +3231,7 @@ module Package:
                 i <- j + 1
             0
 
+    private:
         # Extract quoted dependency strings from one PEP 621 array line. The
         # supported subset is deliberately narrow: basic/literal TOML strings inside
         # `project.dependencies` or an optional-dependency table. Unsupported dynamic
@@ -3258,9 +3260,56 @@ module Package:
                 i <- i + 1
             0
 
-        # Parse the bounded PEP 621 project metadata subset. Requirements remain
-        # declared evidence; exact pins are the only offline-resolved edges, matching
-        # requirements.txt semantics. Optional arrays retain `depctx=optional`.
+        # Bounded Poetry manifest entry: `name = "PEP 440 constraint"`. Inline
+        # tables and source locators are rejected until their optional/source
+        # semantics can be retained without losing privacy or scope.
+        def rh_pypi_poetry_line(buf: darray[u8]&, s: usize, e: usize, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, unknown_out: mutable i64&, depctx: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
+            line_start: mutable usize = s
+            line_end: mutable usize = e
+            while line_start < line_end and (buf[line_start] == 32 or buf[line_start] == 9 or buf[line_start] == 13) |line_start, line_end, buf|:
+                line_start <- line_start + 1
+            while line_end > line_start and (buf[line_end - 1] == 32 or buf[line_end - 1] == 9 or buf[line_end - 1] == 13) |line_start, line_end, buf|:
+                line_end <- line_end - 1
+            return 0 if line_start == line_end or buf[line_start] == 35
+            eq: mutable usize = line_start
+            while eq < line_end and buf[eq] != 61 |eq, line_end, buf|:
+                eq <- eq + 1
+            return -1 if eq >= line_end
+            key_start: mutable usize = line_start
+            key_end: mutable usize = eq
+            while key_start < key_end and (buf[key_start] == 32 or buf[key_start] == 9) |key_start, key_end, buf|:
+                key_start <- key_start + 1
+            while key_end > key_start and (buf[key_end - 1] == 32 or buf[key_end - 1] == 9) |key_start, key_end, buf|:
+                key_end <- key_end - 1
+            key_end_pool: mutable i64 = -1
+            name_s: i64 = rh_pypi_extra_name_copy(buf, pool, key_start, key_end, &key_end_pool)
+            return -1 if name_s < 0
+            return 0 if Base::rh_bytes_equal_literal(pool, name_s, key_end_pool, "python")
+            value_start: mutable usize = eq + 1
+            while value_start < line_end and (buf[value_start] == 32 or buf[value_start] == 9) |value_start, line_end, buf|:
+                value_start <- value_start + 1
+            return -1 if value_start >= line_end or (buf[value_start] != 34 and buf[value_start] != 39)
+            constraint_s: mutable i64 = -1
+            constraint_e: mutable i64 = -1
+            value_next: mutable i64 = rh_quoted_span(buf, value_start, line_end, pool, &constraint_s, &constraint_e)
+            return -1 if value_next < 0
+            while value_next < line_end.i64() and (buf[value_next.usize()] == 32 or buf[value_next.usize()] == 9) |value_next, line_end, buf|:
+                value_next <- value_next + 1
+            return -1 if value_next < line_end.i64() and buf[value_next.usize()] != 35
+            declaration: mutable darray[u8] = []
+            for i in name_s.usize()..<key_end_pool.usize() |i, pool, declaration|:
+                declaration.push(pool[i])
+            declaration.push(32)
+            for i in constraint_s.usize()..<constraint_e.usize() |i, pool, declaration|:
+                declaration.push(pool[i])
+            rh_pypi_line(declaration, 0, declaration.count, pkgs, pool, reqs, edges, unresolved, unknown_out, depctx, -1, -1)
+            0
+
+        # Parse PEP 621 arrays and the scalar-string Poetry dependency subset.
+        # Requirements remain declared evidence; only exact pins become offline
+        # edges. Poetry inline tables, source dependencies, and unsupported groups
+        # fail closed rather than being flattened into unconditional requirements.
+    public:
         def rh_pypi_parse_pep621(req: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, unknown_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             rroot: i64 = rh_node_add(pkgs, RH_ECO_PYPI)
             return -1 if rroot != 0
@@ -3278,7 +3327,8 @@ module Package:
             active_group_s: mutable i64 = -1
             active_group_e: mutable i64 = -1
             saw_project: mutable i64 = 0
-            while line_start <= req.count |line_start: usize = 0, req, pkgs, pool, reqs, edges, unresolved, unknown_out, section, active, active_scope, active_group_s, active_group_e, saw_project|:
+            saw_poetry: mutable i64 = 0
+            while line_start <= req.count |line_start: usize = 0, req, pkgs, pool, reqs, edges, unresolved, unknown_out, section, active, active_scope, active_group_s, active_group_e, saw_project, saw_poetry|:
                 line_end: usize =
                     while j < req.count and req[j] != 10 |j: usize = line_start| -> j:
                         j <- j + 1
@@ -3300,6 +3350,20 @@ module Package:
                     elif Base::rh_bytes_equal_literal(req, s.i64(), e.i64(), "[project.optional-dependencies]"):
                         section <- 2
                         saw_project <- 1
+                    elif Base::rh_bytes_equal_literal(req, s.i64(), e.i64(), "[tool.poetry.dependencies]"):
+                        section <- 3
+                        active_scope <- RH_SCOPE_NORMAL
+                        saw_poetry <- 1
+                        saw_project <- 1
+                    elif Base::rh_bytes_equal_literal(req, s.i64(), e.i64(), "[tool.poetry.dev-dependencies]") or Base::rh_bytes_equal_literal(req, s.i64(), e.i64(), "[tool.poetry.group.dev.dependencies]") or Base::rh_bytes_equal_literal(req, s.i64(), e.i64(), "[tool.poetry.group.test.dependencies]"):
+                        section <- 4
+                        active_scope <- RH_SCOPE_DEV
+                        saw_poetry <- 1
+                        saw_project <- 1
+                    elif rh_span_prefix(req, s, e, "[tool.poetry.group."):
+                        return -1
+                    elif Base::rh_bytes_equal_literal(req, s.i64(), e.i64(), "[tool.poetry]") or rh_span_prefix(req, s, e, "[tool.poetry."):
+                        saw_poetry <- 1
                 elif section == 1 or section == 2:
                     eq: mutable i64 = -1
                     while k < e |k: usize = s, e, req, eq|:
@@ -3330,8 +3394,10 @@ module Package:
                         closed_cont: mutable i64 = 0
                         return -1 if rh_pypi_pep621_values(req, s, e, pkgs, pool, reqs, edges, unresolved, unknown_out, active_scope, active_group_s, active_group_e, &closed_cont) != 0
                         active <- 0 if closed_cont == 1
+                elif section == 3 or section == 4:
+                    return -1 if rh_pypi_poetry_line(req, s, e, pkgs, pool, reqs, edges, unresolved, unknown_out, active_scope) != 0
                 line_start <- line_end + 1
-            return -1 if saw_project == 0 or active == 1
+            return -1 if (saw_project == 0 and saw_poetry == 0) or active == 1
             0
 
         # --- Go modules (go.mod; M08 ecosystems lane) --------------------------
@@ -3604,7 +3670,7 @@ module Package:
                 return
             # missing version or unsupported version -> unresolved (preserve text)
             uns_name: i64 = rh_pool_copy(pool, mod, ns.usize(), ne.usize())
-            unresolved.push(RhUnresolved{from: 0, name_s: uns_name, name_e: uns_name + (ne - ns), req_s: rhs, req_e: rhe, reason: 0, optional: 0})
+            unresolved.push(RhUnresolved{from: 0, name_s: uns_name, name_e: uns_name + (ne - ns), req_s: rhs, req_e: rhe, reason: 0, depctx: 0, optional: 0})
             return
 
         # Replace/exclude/retract entry -> an explicit context-unresolved record.
@@ -3616,7 +3682,7 @@ module Package:
             return if ne <= ns
             name_s: i64 = rh_pool_copy(pool, mod, ns.usize(), ne.usize())
             full_s: i64 = rh_pool_copy(pool, mod, s.usize(), e.usize())
-            unresolved.push(RhUnresolved{from: 0, name_s: name_s, name_e: name_s + (ne - ns), req_s: full_s, req_e: full_s + (e - s), reason: 2, optional: 0})
+            unresolved.push(RhUnresolved{from: 0, name_s: name_s, name_e: name_s + (ne - ns), req_s: full_s, req_e: full_s + (e - s), reason: 2, depctx: 0, optional: 0})
             return
 
         # --- Go module checksums (go.sum; M03-02) -------------------------------
@@ -4348,6 +4414,10 @@ module Package:
                 Base::rh_push_text(out, ",\"reason\":\"")
                 Base::rh_push_text(out, rh_unres_label(ur.reason))
                 out.push(34)
+                if ur.depctx != RH_SCOPE_NORMAL:
+                    Base::rh_push_text(out, ",\"scope\":\"")
+                    Base::rh_push_text(out, rh_scope_label(ur.depctx))
+                    out.push(34)
                 if ur.optional != 0:
                     Base::rh_push_text(out, ",\"optional\":true")
                 out.push(125)
@@ -4538,7 +4608,7 @@ module Package:
                     if hit >= 0:
                         edges.push(RhDepEdge{from: q.from, dst: hit, depctx: q.depctx, optional: 0})
                     else:
-                        unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 0, optional: 0})
+                        unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 0, depctx: q.depctx, optional: 0})
                 i <- i + 1
             0
 
@@ -4701,13 +4771,13 @@ module Package:
                 q: RhRequire = reqs[i.usize()]
                 if q.name_s >= 0:
                     if rh_composer_is_platform(pool, q.name_s.usize(), q.name_e.usize()):
-                        unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 2, optional: 0})
+                        unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 2, depctx: q.depctx, optional: 0})
                     else:
                         hit: i64 = rh_composer_find_by_name(pkgs, pool, q.name_s.usize(), q.name_e.usize())
                         if hit >= 0:
                             edges.push(RhDepEdge{from: q.from, dst: hit, depctx: q.depctx, optional: 0})
                         else:
-                            unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 0, optional: 0})
+                            unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: 0, depctx: q.depctx, optional: 0})
                 i <- i + 1
             0
 
@@ -4858,7 +4928,7 @@ module Package:
                             pkgs[existing.usize()] <- nd
                         edges.push(RhDepEdge{from: 0, dst: existing, depctx: depctx, optional: 0})
                     else:
-                        unresolved.push(RhUnresolved{from: 0, name_s: nname, name_e: nname_e, req_s: req_ver_s, req_e: req_ver_e, reason: RH_UNRES_MISSING, optional: 0})
+                        unresolved.push(RhUnresolved{from: 0, name_s: nname, name_e: nname_e, req_s: req_ver_s, req_e: req_ver_e, reason: RH_UNRES_MISSING, depctx: depctx, optional: 0})
                     found <- found + 1
                 line_start <- line_end + 1
             return -1 if found == 0
@@ -4953,7 +5023,7 @@ module Package:
                 pkgs[node.usize()] <- nd
                 edges.push(RhDepEdge{from: 0, dst: node, depctx: depctx, optional: 0})
             else:
-                unresolved.push(RhUnresolved{from: 0, name_s: name_s, name_e: name_e, req_s: req_s, req_e: req_e, reason: RH_UNRES_MISSING, optional: 0})
+                unresolved.push(RhUnresolved{from: 0, name_s: name_s, name_e: name_e, req_s: req_s, req_e: req_e, reason: RH_UNRES_MISSING, depctx: depctx, optional: 0})
             0
 
         # Parse the bounded Maven POM subset. Project and dependency coordinates use

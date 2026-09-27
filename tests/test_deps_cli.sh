@@ -283,6 +283,33 @@ assert metrics["dependency.optional_resolved_edges"]["value"] == 1, metrics
 print("[deps] PEP 621 graph + optional scope OK")
 PY
 
+echo "[deps] Poetry scalar declarations retain runtime and development scopes"
+mkdir -p "$T/poetry-manifest"
+cat > "$T/poetry-manifest/pyproject.toml" <<'EOF'
+[tool.poetry]
+name = "app"
+version = "1.0.0"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = ">=2.31,<3.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+EOF
+"$ROOT/build/rh_cli" deps --repo "$T/poetry-manifest" --out "$T/poetry-manifest-out" \
+  | grep -q "ecosystems=1 pypi=0/2 unresolved=2 unsupported=0" || fail "Poetry manifest summary"
+python3 - "$T/poetry-manifest-out/deps-pypi-graph.json" "$T/poetry-manifest-out/deps-metrics.json" <<'PY'
+import json, sys
+graph = json.load(open(sys.argv[1]))
+metrics = {item["key"]: item for item in json.load(open(sys.argv[2]))["metrics"]}
+assert graph["ecosystem"] == "pypi" and len(graph["nodes"]) == 1 and graph["nodes"][0]["name"] == "root", graph
+assert [(item["name"], item.get("scope", "normal"), item["reason"]) for item in graph["unresolved"]] == [("requests", "normal", "missing"), ("pytest", "dev", "missing")], graph["unresolved"]
+assert metrics["dependency.runtime_requirements"]["value"] == 1, metrics
+assert metrics["dependency.development_requirements"]["value"] == 1, metrics
+print("[deps] Poetry runtime/dev declarations preserved as unresolved ranges")
+PY
+
 echo "[deps] duplicate PyPI declaration sources fail closed"
 cp "$T/pysrc/requirements.txt" "$T/pep621src/requirements.txt"
 set +e
@@ -768,7 +795,7 @@ assert [nodes[i]["name"] for i in range(9)] == ["pnpm-app", "foo", "context-tool
 assert [nodes[i]["version"] for i in (2, 3, 6)] == ["1.0.0"] * 3, nodes
 edges = {(e["from"], e["to"], e["scope"]) for e in g["edges"]}
 assert edges == {(0, 1, "normal"), (0, 2, "normal"), (0, 7, "dev"), (0, 8, "optional"), (1, 4, "normal"), (2, 5, "normal"), (3, 4, "normal")}, edges
-assert g["unresolved"] == [{"from": 0, "name": "workspace-kit", "requirement": "workspace:*", "reason": "context"}], g["unresolved"]
+assert g["unresolved"] == [{"from": 0, "name": "workspace-kit", "requirement": "workspace:*", "reason": "context", "scope": "optional"}], g["unresolved"]
 assert len(g["artifacts"]) == 8 and nodes[8]["source_identity_sha256"] == hashlib.sha256(b"https://registry.example/optional-only-3.1.0.tgz").hexdigest(), g
 payload = open(sys.argv[1], "rb").read()
 assert b"registry.example" not in payload, "raw pnpm locator leaked"
