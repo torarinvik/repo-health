@@ -131,14 +131,41 @@ module Aggregates:
             Aggregates::rh_aggregate_text_compare(texts, left.id_s, left.id_e, right.id_s, right.id_e) < 0
 
         def rh_aggregate_sort_events(events: mutable darray[RhAggregateEvent]&, texts: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-            while i < events.count |i: usize = 1, events, texts|:
-                j: mutable usize = i
-                while j > 0 and Aggregates::rh_aggregate_event_before(texts, events[j], events[j - 1]) |j, events, texts|:
-                    event: RhAggregateEvent = events[j - 1]
-                    events[j - 1] <- events[j]
-                    events[j] <- event
-                    j <- j - 1
+            scratch: mutable darray[RhAggregateEvent] = []
+            while i < events.count |i: usize = 0, events, scratch|:
+                scratch.push(events[i])
                 i <- i + 1
+            width: mutable usize = 1
+            while width < events.count |width, events, scratch, texts|:
+                block_start: mutable usize = 0
+                while block_start < events.count |block_start, width, events, scratch, texts|:
+                    middle: usize = block_start + width if block_start + width < events.count else events.count
+                    block_end: usize = middle + width if middle + width < events.count else events.count
+                    left: mutable usize = block_start
+                    right: mutable usize = middle
+                    target: mutable usize = block_start
+                    while left < middle and right < block_end |left, right, target, middle, block_end, events, scratch, texts|:
+                        if Aggregates::rh_aggregate_event_before(texts, events[left], events[right]):
+                            scratch[target] <- events[left]
+                            left <- left + 1
+                        else:
+                            scratch[target] <- events[right]
+                            right <- right + 1
+                        target <- target + 1
+                    while left < middle |left, target, middle, events, scratch|:
+                        scratch[target] <- events[left]
+                        left <- left + 1
+                        target <- target + 1
+                    while right < block_end |right, target, block_end, events, scratch|:
+                        scratch[target] <- events[right]
+                        right <- right + 1
+                        target <- target + 1
+                    block_start <- block_end
+                copy_index: mutable usize = 0
+                while copy_index < events.count |copy_index, events, scratch|:
+                    events[copy_index] <- scratch[copy_index]
+                    copy_index <- copy_index + 1
+                width <- width * 2
 
         def rh_aggregate_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if s < 0 or e < s or e - s != strlen(lit).i64()
@@ -333,12 +360,12 @@ module Aggregates:
                 ok_at: mutable i64 = 0
                 at: i64 = Aggregates::rh_aggregate_int(nodes, raw, texts, child, "at", &ok_at)
                 return -1 if ok_at == 0 or at < 0
-                while prior < events.count |prior: usize = 0, events, texts, id_s, id_e|:
-                    return -1 if Base::rh_bytes_equal_span(texts, events[prior].id_s, events[prior].id_e, texts, id_s, id_e)
-                    prior <- prior + 1
                 events.push(RhAggregateEvent{id_s: id_s, id_e: id_e, actor_s: actor_s, actor_e: actor_e, kind_s: kind_s, kind_e: kind_e, role_s: role_s, role_e: role_e, at: at})
                 child <- nodes[child.usize()].next_sibling
             Aggregates::rh_aggregate_sort_events(events, texts)
+            while i < events.count |i: usize = 1, events, texts|:
+                return -1 if Aggregates::rh_aggregate_text_compare(texts, events[i - 1].id_s, events[i - 1].id_e, events[i].id_s, events[i].id_e) == 0
+                i <- i + 1
             daily_partitions: mutable darray[RhAggregatePartition] = []
             weekly_partitions: mutable darray[RhAggregatePartition] = []
             while i < events.count |i: usize = 0, events, texts, daily_partitions, weekly_partitions|:

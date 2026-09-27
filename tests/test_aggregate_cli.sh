@@ -108,10 +108,17 @@ sed 's/"action":"replace"/"action":"unknown"/' "$T/in.json" > "$T/bad-action.jso
 "$ROOT/build/rh_cli" aggregate --input "$T/bad-action.json" --out "$T/x" >/dev/null 2>&1; rc_action=$?
 sed 's/"id":"e1"/"id":"missing"/' "$T/in.json" > "$T/bad-id.json"
 "$ROOT/build/rh_cli" aggregate --input "$T/bad-id.json" --out "$T/x" >/dev/null 2>&1; rc_id=$?
+python3 - "$T/in.json" "$T/duplicate-id.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+data["events"].append(dict(data["events"][0]))
+json.dump(data, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" aggregate --input "$T/duplicate-id.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate_id=$?
 printf '{"schema":"rh-aggregate-input/1","events":[{"id":"e1","actor":"a","kind":"commit","role":"author","at":-1}]}' > "$T/bad-time.json"
 "$ROOT/build/rh_cli" aggregate --input "$T/bad-time.json" --out "$T/x" >/dev/null 2>&1; rc_time=$?
 set -e
-[[ "$rc_action" -eq 4 && "$rc_id" -eq 4 && "$rc_time" -eq 4 ]] || fail "invalid aggregate must exit 4 (got $rc_action/$rc_id/$rc_time)"
+[[ "$rc_action" -eq 4 && "$rc_id" -eq 4 && "$rc_duplicate_id" -eq 4 && "$rc_time" -eq 4 ]] || fail "invalid aggregate must exit 4 (got $rc_action/$rc_id/$rc_duplicate_id/$rc_time)"
 
 echo "[aggregate] durable exact-snapshot cache reuses a verified projection"
 "$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/state-first.json" --state-store "$T/state-store" > "$T/state-first.out" || fail "cache first projection"
