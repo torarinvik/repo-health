@@ -191,6 +191,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli ops import --dest <dir> --input <bundle> [--key <owner-only-key> --sig <signature-file>]")
     rh_cli_err("       rh_cli ops delete --root <dir> --name <16-hex-object>")
     rh_cli_err("       rh_cli ops monitor --input <file> --out <file> | ops quota --input <file> --out <file>")
+    rh_cli_err("       rh_cli postgres monitor --expected-interval <seconds> --out <file> (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli pilot-review --input <file> --out <file>")
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
     rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [review options] | --gitlab-project <group/path> [--resume-from <result>]) --out <file> [--max-pages N]")
@@ -2987,6 +2988,29 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
             return rh_do_postgres_ingest("", slots[ii_idx], slots[io_idx])
         return rh_do_ingest(slots[ir_idx], slots[ii_idx], slots[io_idx])
     if Base::rh_streq(cmd, "postgres"):
+        if argc >= 3:
+            postgres_subcommand: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+            if Base::rh_streq(postgres_subcommand, "monitor"):
+                monitor_out_idx, monitor_interval_idx =
+                    while monitor_arg_index < argc |monitor_out_idx: i64 = -1, monitor_interval_idx: i64 = -1, monitor_arg_index: i64 = 3, slots| -> monitor_out_idx, monitor_interval_idx:
+                        monitor_arg: u8& = slots[monitor_arg_index].cast[u8&] can Unsafe.PointerCast
+                        if Base::rh_streq(monitor_arg, "--out"):
+                            if monitor_arg_index + 1 < argc:
+                                monitor_arg_index <- monitor_arg_index + 1
+                                monitor_out_idx <- monitor_arg_index
+                            else:
+                                return rh_cli_usage(2)
+                        elif Base::rh_streq(monitor_arg, "--expected-interval"):
+                            if monitor_arg_index + 1 < argc:
+                                monitor_arg_index <- monitor_arg_index + 1
+                                monitor_interval_idx <- monitor_arg_index
+                            else:
+                                return rh_cli_usage(2)
+                        else:
+                            return rh_cli_usage(2)
+                        monitor_arg_index <- monitor_arg_index + 1
+                return rh_cli_usage(2) if monitor_out_idx < 0 or monitor_interval_idx < 0
+                return rh_do_postgres_monitor(slots[monitor_interval_idx], slots[monitor_out_idx])
         postgres_input_idx, postgres_out_idx =
             while postgres_arg_index < argc |postgres_input_idx: i64 = -1, postgres_out_idx: i64 = -1, postgres_arg_index: i64 = 2, slots| -> postgres_input_idx, postgres_out_idx:
                 postgres_arg: u8& = slots[postgres_arg_index].cast[u8&] can Unsafe.PointerCast
@@ -9848,6 +9872,37 @@ def rh_do_postgres(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
         rh_cli_err("postgres: cannot write --out")
         return 4
     rh_cli_out("postgres: operation complete")
+    0
+
+def rh_do_postgres_monitor(interval_arg: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(out_path) or not Git::rh_arg_safe(interval_arg):
+        rh_cli_err("rejected postgres monitor argument (allowlist)")
+        return 3
+    interval_bytes: mutable darray[u8] = []
+    Base::rh_push_cstr(interval_bytes, interval_arg)
+    interval_ok: mutable i64 = 0
+    interval: i64 = Base::rh_parse_i64(interval_bytes, 0, interval_bytes.count, &interval_ok)
+    if interval_ok == 0 or interval < 0 or interval > 31536000:
+        rh_cli_err("postgres monitor: expected interval must be 0..31536000 seconds")
+        return 3
+    database_url: u8&? = getenv("RH_DATABASE_URL")
+    if database_url == null:
+        rh_cli_err("postgres monitor: RH_DATABASE_URL is required")
+        return 4
+    conninfo: cstr = database_url.cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if Postgres::rh_pg_monitor_input(conninfo, interval, raw) < 0:
+        rh_cli_err("postgres monitor: database query failed")
+        return 4
+    body: mutable darray[u8] = []
+    if OpsReport::rh_monitor_report(raw, body) != 0:
+        rh_cli_err("postgres monitor: generated input failed validation")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("postgres monitor: cannot write --out")
+        return 4
+    rh_cli_out("postgres monitor: ok")
     0
 
 # --- M02 research conformance execution path. ---

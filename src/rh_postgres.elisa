@@ -270,6 +270,16 @@ module Postgres:
             outcome
 
     public:
+        # Monitor inputs are sourced from persisted queue and cursor state.
+        # SQL stays fixed here and the expected interval is bound separately.
+        def rh_pg_monitor_input(conninfo: cstr, expected_interval: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if expected_interval < 0 or expected_interval > 31536000
+            interval_text: mutable darray[u8] = Postgres::rh_pg_decimal(expected_interval)
+            interval_param: cstr = (&interval_text[0]).cast[cstr] can Unsafe.PointerCast
+            params: mutable darray[cstr] = []
+            params.push(interval_param)
+            Postgres::rh_pg_text_params(conninfo, "WITH clock AS (SELECT clock_timestamp() AS at), success_event AS (SELECT jsonb_build_object('kind','success','now',extract(epoch FROM last_success_at)::bigint) AS event FROM public.collection_cursor ORDER BY last_success_at DESC LIMIT 1), queue_event AS (SELECT jsonb_build_object('kind','queue_age','value',greatest(0,extract(epoch FROM (clock.at-min(job.created_at)))::bigint)) AS event FROM public.job CROSS JOIN clock WHERE job.state='queued' AND job.next_attempt_at<=clock.at HAVING count(*)>0), cursor_event AS (SELECT jsonb_build_object('kind','cursor_lag','value',greatest(0,extract(epoch FROM (clock.at-min(last_success_at)))::bigint)) AS event FROM public.collection_cursor CROSS JOIN clock HAVING count(*)>0), error_event AS (SELECT jsonb_build_object('kind','error','count',count(*)) AS event FROM public.job_attempt CROSS JOIN clock WHERE error_kind IS NOT NULL AND finished_at>=clock.at-interval '1 day' HAVING count(*)>0), events AS (SELECT event FROM success_event UNION ALL SELECT event FROM queue_event UNION ALL SELECT event FROM cursor_event UNION ALL SELECT event FROM error_event) SELECT jsonb_build_object('schema','rh-monitor-input/1','now',extract(epoch FROM clock.at)::bigint,'expected_interval',$1::bigint,'events',COALESCE(jsonb_agg(events.event),'[]'::jsonb))::text FROM clock LEFT JOIN events ON true GROUP BY clock.at", params, out)
+
         # Persist one bounded source-object snapshot through the scope-locked
         # database transaction. The observed JSON array is converted to text[]
         # by PostgreSQL after bound-parameter parsing, never interpolated into SQL.

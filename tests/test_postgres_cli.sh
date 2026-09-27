@@ -47,6 +47,19 @@ run_ok poll_graph duplicate get-graph-query-job
 run_ok poll_graph empty get-graph-query-job
 run_ok current_state applied reconcile-source-objects
 run_ok current_state duplicate reconcile-source-objects
+RH_DATABASE_URL='host=fake dbname=repo_health' RH_LIBPQ_PATH="$LIBPQ" \
+  RH_FAKE_PG_OPERATION=monitor RH_FAKE_PG_EXPECT=ok \
+  "$ROOT/build/rh_cli" postgres monitor --expected-interval 3600 --out "$T/monitor.json" >/dev/null \
+  || fail "PostgreSQL-backed monitor"
+python3 - "$T/monitor.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-monitor-result/2", d
+assert d["service"]["queue_age_max"] == 120, d
+assert d["service"]["cursor_lag_max"] == 3600, d
+assert d["service"]["errors"] == 1, d
+assert d["service"]["freshness_state"] == "fresh", d
+PY
 python3 - "$T/reconcile-source-objects-applied.json" "$T/reconcile-source-objects-duplicate.json" "$ROOT/fixtures/postgres/reconcile-source-objects-projection.json" <<'PY'
 import json, sys
 applied, duplicate, fixture = [json.load(open(path)) for path in sys.argv[1:]]

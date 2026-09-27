@@ -40,6 +40,8 @@ static const char *current_state_applied_json =
     "{\"schema\":\"rh-postgres-current-state-result/1\",\"status\":\"applied\",\"source_instance_id\":\"00000000-0000-0000-0000-000000000001\",\"collection_run_id\":\"00000000-0000-0000-0000-000000000040\",\"capability\":\"issues\",\"scope\":\"project-17\",\"acquisition\":\"partial\",\"observed_upserts\":2,\"unseen_state_changes\":3,\"absence_inferred\":false}";
 static const char *current_state_duplicate_json =
     "{\"schema\":\"rh-postgres-current-state-result/1\",\"status\":\"duplicate\",\"source_instance_id\":\"00000000-0000-0000-0000-000000000001\",\"collection_run_id\":\"00000000-0000-0000-0000-000000000040\",\"capability\":\"issues\",\"scope\":\"project-17\",\"acquisition\":\"partial\",\"observed_upserts\":0,\"unseen_state_changes\":0,\"absence_inferred\":false}";
+static const char *monitor_input_json =
+    "{\"schema\":\"rh-monitor-input/1\",\"now\":1767225600,\"expected_interval\":3600,\"events\":[{\"kind\":\"success\",\"now\":1767222000},{\"kind\":\"queue_age\",\"value\":120},{\"kind\":\"cursor_lag\",\"value\":3600},{\"kind\":\"error\",\"count\":1}]}";
 
 void *PQconnectdbParams(const char *const *keywords, const char *const *values, int expand_dbname) {
     const char *marker = getenv("RH_FAKE_PG_CONNECT_MARK");
@@ -207,7 +209,12 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     const char *prefix = "SELECT public.rh_commit_collection_page(";
     int expected_count = 11;
     int claim_query = 0;
-    if (operation != NULL && strcmp(operation, "adoption_history") == 0) {
+    if (operation != NULL && strcmp(operation, "monitor") == 0) {
+        static const char *monitor_values[1] = { "3600" };
+        expected = monitor_values;
+        expected_count = 1;
+        prefix = "WITH clock AS (";
+    } else if (operation != NULL && strcmp(operation, "adoption_history") == 0) {
         static const char *history_values[2] = { "00000000-0000-0000-0000-000000000001", "issues" };
         expected = history_values;
         expected_count = 2;
@@ -364,6 +371,13 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.rows = 1;
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
         result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? current_state_duplicate_json : current_state_applied_json;
+        return &result;
+    }
+    if (operation != NULL && strcmp(operation, "monitor") == 0) {
+        result.columns = 1;
+        result.rows = 1;
+        result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+        result.value = monitor_input_json;
         return &result;
     }
     result.columns = 1;
