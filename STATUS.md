@@ -437,7 +437,9 @@ into time-scoped declarations with a source stratum (provider document /
 project file / operator). Declarations are **kept strictly separate from
 observed actions** — they never become observed facts, an unknown role
 string is never guessed into maintainer, and revocation/effective-time are
-honored. Live permission-inventory import still needs owner authorization
+honored. `rh_cli roles` also emits a digest-bound transformation sidecar for
+the exact role input, canonical result, and pinned configuration. Live
+permission-inventory import still needs owner authorization
 the M02 slice lacks, so this operates on captured documents.
 
 **M04 scope (in progress):** implemented — persistence cohorts over an

@@ -20,13 +20,19 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":true,"identity_snapshot":{"identity_revision":8,"cluster_id_by_actor":[0,0,2,3,4]},"review_actor_id":4,"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"observed_actions":[{"actor_id":1,"identity_actor_index":0,"actor_type":"bot","kind":"release","at":120},{"actor_id":2,"identity_actor_index":1,"actor_type":"human","kind":"release","at":130},{"kind":"release","at":135},{"actor_id":null,"kind":"release","at":136},{"actor_id":3,"kind":"merge","at":140},{"actor_id":4,"kind":"review","at":150},{"actor_id":4,"kind":"review","at":160}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
 JSON
 "$ROOT/build/rh_cli" roles --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-roles-result/1", d
 assert d["identity_revision"] == 8, d
 assert d["declaration_count"] == 4, d
 assert d["authorization_state"] == "authorized", d
+tr = json.load(open(sys.argv[3]))
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "declared-role-ledger", tr
+assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/declared-role-ledger/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 assert d["source_tally"] == {"provider": 1, "file": 2, "operator": 1}, d["source_tally"]
 assert d["role_tally"] == {"owner": 1, "maintainer": 0, "triager": 1, "member": 1, "unknown": 1}, d["role_tally"]
 metrics = {m["key"]: m for m in d["metrics"]}
@@ -69,6 +75,7 @@ PY
 echo "[roles] determinism"
 "$ROOT/build/rh_cli" roles --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "roles output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "roles transformation report not deterministic"
 
 echo "[roles] twelve-month declared continuity uses the explicit as-of time"
 cat > "$T/long.json" <<'JSON'
