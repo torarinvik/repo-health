@@ -3614,7 +3614,9 @@ module Package:
             lock_version_seen: mutable bool = false
             skip_array: mutable bool = false
             skip_depth: mutable i64 = 0
-            while line_start < lock.count |line_start: usize = 0, lock, pkgs, pool, reqs, artifacts, unknown_out, mode, current, package_name_s, package_name_e, package_version_s, package_version_e, seen, package_count, lock_version_seen, skip_array, skip_depth|:
+            skip_quote: mutable u8 = 0
+            skip_escape: mutable bool = false
+            while line_start < lock.count |line_start: usize = 0, lock, pkgs, pool, reqs, artifacts, unknown_out, mode, current, package_name_s, package_name_e, package_version_s, package_version_e, seen, package_count, lock_version_seen, skip_array, skip_depth, skip_quote, skip_escape|:
                 line_end: usize =
                     while j < lock.count and lock[j] != 10 |j: usize = line_start| -> j:
                         j <- j + 1
@@ -3625,8 +3627,8 @@ module Package:
                 while e > s and (lock[e - 1] == 32 or lock[e - 1] == 9 or lock[e - 1] == 13) |s, e, lock|:
                     e <- e - 1
                 if skip_array:
-                    while i < e |i: usize = s, e, lock, skip_depth, skip_array, mode, current, artifacts, pool|:
-                        if mode == 1 and current >= 0 and i + 4 <= e and lock[i] == 104 and lock[i + 1] == 97 and lock[i + 2] == 115 and lock[i + 3] == 104:
+                    while i < e |i: usize = s, e, lock, skip_depth, skip_array, skip_quote, skip_escape, mode, current, artifacts, pool|:
+                        if mode == 1 and current >= 0 and skip_quote == 0 and i + 4 <= e and lock[i] == 104 and lock[i + 1] == 97 and lock[i + 2] == 115 and lock[i + 3] == 104:
                             hash_syntax: mutable usize = i + 4
                             while hash_syntax < e and (lock[hash_syntax] == 32 or lock[hash_syntax] == 9) |hash_syntax, e, lock|:
                                 hash_syntax <- hash_syntax + 1
@@ -3645,9 +3647,20 @@ module Package:
                                     h <- h + 1
                                 return -1 if not digest_ok
                                 return -1 if rh_artifact_add_expected(artifacts, current, RH_ART_KIND_ARCHIVE, digest_s, digest_e) < 0
-                        skip_depth <- skip_depth + 1 if lock[i] == 91
-                        skip_depth <- skip_depth - 1 if lock[i] == 93
-                        skip_array <- false if skip_depth <= 0
+                        if skip_quote != 0:
+                            if skip_escape:
+                                skip_escape <- false
+                            elif lock[i] == 92 and skip_quote == 34:
+                                skip_escape <- true
+                            elif lock[i] == skip_quote:
+                                skip_quote <- 0
+                        elif lock[i] == 34 or lock[i] == 39:
+                            skip_quote <- lock[i]
+                        elif lock[i] == 91:
+                            skip_depth <- skip_depth + 1
+                        elif lock[i] == 93:
+                            skip_depth <- skip_depth - 1
+                            skip_array <- false if skip_depth <= 0
                         i <- i + 1
                     line_start <- line_end + 1
                     continue
@@ -3792,10 +3805,23 @@ module Package:
                         return -1 if value_start >= e or lock[value_start] != 91
                         skip_array <- true
                         skip_depth <- 0
-                        while i < e and skip_array |i: usize = value_start, e, lock, skip_array, skip_depth, mode, current, artifacts, pool|:
-                            skip_depth <- skip_depth + 1 if lock[i] == 91
-                            skip_depth <- skip_depth - 1 if lock[i] == 93
-                            skip_array <- false if skip_depth <= 0
+                        skip_quote <- 0
+                        skip_escape <- false
+                        while i < e and skip_array |i: usize = value_start, e, lock, skip_array, skip_depth, skip_quote, skip_escape, mode, current, artifacts, pool|:
+                            if skip_quote != 0:
+                                if skip_escape:
+                                    skip_escape <- false
+                                elif lock[i] == 92 and skip_quote == 34:
+                                    skip_escape <- true
+                                elif lock[i] == skip_quote:
+                                    skip_quote <- 0
+                            elif lock[i] == 34 or lock[i] == 39:
+                                skip_quote <- lock[i]
+                            elif lock[i] == 91:
+                                skip_depth <- skip_depth + 1
+                            elif lock[i] == 93:
+                                skip_depth <- skip_depth - 1
+                                skip_array <- false if skip_depth <= 0
                             i <- i + 1
                     elif Base::rh_bytes_equal_literal(lock, ks, ke, "description") or Base::rh_bytes_equal_literal(lock, ks, ke, "develop"):
                         pass
