@@ -131,6 +131,29 @@ for n in "$transfer_a" "$transfer_b"; do
   "$ROOT/build/rh_cli" store verify --root "$T/transfer-destination" --name "$n" >/dev/null || fail "transferred blob $n does not verify"
 done
 
+echo "[store] optional detached signature authenticates transfer before publication"
+printf 'operator transfer signing key' > "$T/transfer.key"
+chmod 600 "$T/transfer.key"
+"$ROOT/build/rh_cli" ops export --root "$T/transfer-source" --manifest "$T/transfer.manifest" --out "$T/signed.bundle" --key "$T/transfer.key" --sig "$T/signed.bundle.sig" >/dev/null || fail "signed portable export"
+"$ROOT/build/rh_cli" ops import --dest "$T/signed-destination" --input "$T/signed.bundle" --key "$T/transfer.key" --sig "$T/signed.bundle.sig" >/dev/null || fail "authenticated portable import"
+for n in "$transfer_a" "$transfer_b"; do
+  "$ROOT/build/rh_cli" store verify --root "$T/signed-destination" --name "$n" >/dev/null || fail "authenticated transfer blob $n does not verify"
+done
+cp "$T/signed.bundle" "$T/signed-tampered.bundle"
+printf X | dd of="$T/signed-tampered.bundle" bs=1 seek=45 conv=notrunc status=none
+set +e
+"$ROOT/build/rh_cli" ops import --dest "$T/signed-tampered-destination" --input "$T/signed-tampered.bundle" --key "$T/transfer.key" --sig "$T/signed.bundle.sig" >/dev/null 2>&1
+rc_signature=$?
+set -e
+[[ "$rc_signature" -eq 4 ]] || fail "tampered signed package must fail before import (got $rc_signature)"
+for n in "$transfer_a" "$transfer_b"; do
+  set +e
+  "$ROOT/build/rh_cli" store verify --root "$T/signed-tampered-destination" --name "$n" >/dev/null 2>&1
+  rc_signed_unpublished=$?
+  set -e
+  [[ "$rc_signed_unpublished" -eq 5 ]] || fail "tampered signed package partially published $n"
+done
+
 echo "[store] ops delete removes one validated evidence object and is idempotent"
 mkdir -p "$T/delete-store"
 "$ROOT/build/rh_cli" store put --root "$T/delete-store" --file "$T/transfer-a.bin" > "$T/delete-put.out" || fail "prepare deletable evidence"
