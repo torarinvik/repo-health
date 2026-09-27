@@ -28,8 +28,10 @@ module Temporal:
         struct RhBitemporal:
             valid_start: i64
             valid_end: i64
+            valid_end_known: bool
             known_start: i64
             known_end: i64
+            known_end_known: bool
 
         # Left-censored intervals have a known end but an unknown start. The
         # unused start field is canonicalized to zero, never overloaded as an
@@ -155,7 +157,36 @@ module Temporal:
         # 2026 is NOT visible to a 2025-cutoff query (no historical prediction
         # using later evidence, S009); a retrospective query sees it.
         def rh_visible_as_of(fact: RhBitemporal, cutoff: i64) -> bool:
-            fact.known_start <= cutoff
+            return false if not rh_bitemporal_valid(fact)
+            return false if not rh_instant_supported(cutoff)
+            return false if cutoff < fact.known_start
+            return cutoff < fact.known_end if fact.known_end_known
+            true
 
-        def rh_bitemporal_make(valid_start: i64, valid_end: i64, known_start: i64, known_end: i64) -> RhBitemporal:
-            RhBitemporal{valid_start: valid_start, valid_end: valid_end, known_start: known_start, known_end: known_end}
+        def rh_bitemporal_valid(fact: RhBitemporal) -> bool:
+            return false if not rh_instant_supported(fact.valid_start)
+            return false if not rh_instant_supported(fact.known_start)
+            return false if fact.valid_end_known and not rh_instant_supported(fact.valid_end)
+            return false if fact.known_end_known and not rh_instant_supported(fact.known_end)
+            return false if fact.valid_end_known and not rh_interval_valid(fact.valid_start, fact.valid_end)
+            return false if fact.known_end_known and not rh_interval_valid(fact.known_start, fact.known_end)
+            return false if not fact.valid_end_known and fact.valid_end != 0
+            return false if not fact.known_end_known and fact.known_end != 0
+            true
+
+        def rh_bitemporal_visible_at(fact: RhBitemporal, valid_at: i64, known_at: i64) -> bool:
+            return false if not rh_bitemporal_valid(fact)
+            return false if not rh_instant_supported(valid_at) or not rh_instant_supported(known_at)
+            return false if valid_at < fact.valid_start or known_at < fact.known_start
+            return false if fact.valid_end_known and valid_at >= fact.valid_end
+            known_at < fact.known_end if fact.known_end_known else true
+
+        def rh_bitemporal_make(valid_start: i64, valid_end: i64, valid_end_known: bool, known_start: i64, known_end: i64, known_end_known: bool) -> RhBitemporal:
+            RhBitemporal{
+                valid_start: valid_start,
+                valid_end: valid_end if valid_end_known else 0,
+                valid_end_known: valid_end_known,
+                known_start: known_start,
+                known_end: known_end if known_end_known else 0,
+                known_end_known: known_end_known
+            }
