@@ -105,6 +105,7 @@ assert m["contributor.source_accounts"]["value"] == 2, m
 assert m["coverage.lineage_complete_share"]["value"] == {"num": 1, "den": 1}, m
 assert m["documentation.readme_present"]["value"] is False, m
 assert m["documentation.readme_present"]["evidence"] == ["evidence/git-files.txt"], m
+assert m["source.manifest_presence"]["evidence"] == ["evidence/git-files.txt"], m
 assert m["documentation.contributing_guide_present"]["value"] is False, m
 assert m["licensing.license_declaration_present"]["value"] is False, m
 expected_quality = {
