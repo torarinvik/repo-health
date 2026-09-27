@@ -152,6 +152,8 @@ assert "p_max_nodes NOT BETWEEN 1 AND 1000" in walk_sql
 assert "p_max_depth NOT BETWEEN 1 AND 1000" in walk_sql
 assert "p_edge_limit NOT BETWEEN 1 AND 10000" in walk_sql
 assert "projection_available" in walk_sql
+assert "IF v_depth >= p_max_depth AND cardinality(v_candidates) > 0" in walk_sql
+assert "OR v_depth >= p_max_depth" in walk_sql
 
 temporal_upgrade = Path(sys.argv[1]) / "007_projection_adjacency_temporal_metadata.sql"
 temporal_sql = re.sub(r"--[^\n]*", "", temporal_upgrade.read_text(encoding="utf-8"))
@@ -168,6 +170,7 @@ assert "batched incoming adjacency lost known-at metadata" in live_plan
 assert "008_bind_projection_query_scope.sql" in live_plan
 assert "009_projection_adjacency_walk.sql" in live_plan
 assert "one-call projection walk did not return the full two-edge chain" in live_plan
+assert "depth-limited projection walk lost its boundary edge or truncation" in live_plan
 assert "cross-scope projection query was accepted" in live_plan
 assert "matching-scope projection query was not enqueued" in live_plan
 print(f"[migrations] target contract OK: {len(tables)} tables, {len(functions)} functions")
