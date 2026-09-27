@@ -119,6 +119,15 @@ echo "[aggregate] durable exact-snapshot cache reuses a verified projection"
 cmp -s "$T/state-first.json" "$T/state-second.json" || fail "cached projection differs"
 grep -q 'cache=miss' "$T/state-first.out" || fail "first state-store run should compute"
 grep -q 'cache=hit' "$T/state-second.out" || fail "identical state-store run should reuse"
+python3 - "$T/in.json" "$T/in-permuted.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+data["events"].reverse()
+json.dump(data, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" aggregate --input "$T/in-permuted.json" --out "$T/state-permuted.json" --state-store "$T/state-store" > "$T/state-permuted.out" || fail "permuted partition cache projection"
+grep -q 'partition-reuse=4' "$T/state-permuted.out" || fail "event-ID ordered fingerprints should reuse all four partitions after input reordering"
+cmp -s "$T/state-first.json" "$T/state-permuted.json" || fail "permuted partition cache result differs"
 python3 - "$T/in.json" "$T/changed.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -128,9 +137,42 @@ json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
 PY
 "$ROOT/build/rh_cli" aggregate --input "$T/changed.json" --out "$T/state-changed.json" --state-store "$T/state-store" > "$T/state-changed.out" || fail "changed state-store projection"
 grep -q 'cache=miss' "$T/state-changed.out" || fail "changed snapshot must invalidate cached projection"
+grep -q 'partition-reuse=2' "$T/state-changed.out" || fail "changed snapshot should reuse its two unaffected partitions"
 "$ROOT/build/rh_cli" aggregate --input "$T/changed.json" --out "$T/changed-fresh.json" >/dev/null || fail "changed full recomputation"
 cmp -s "$T/changed-fresh.json" "$T/state-changed.json" || fail "cache miss differs from a fresh recomputation"
 cmp -s "$T/state-first.json" "$T/state-changed.json" && fail "changed input reused stale projection"
+python3 - "$T/changed.json" "$T/corrections-only.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+data["corrections"] = data["corrections"][:1]
+json.dump(data, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" aggregate --input "$T/corrections-only.json" --out "$T/corrections-partial.json" --state-store "$T/state-store" > "$T/corrections-partial.out" || fail "correction-only partial projection"
+grep -q 'partition-reuse=5' "$T/corrections-partial.out" || fail "correction-only change should reuse every daily and weekly partition"
+"$ROOT/build/rh_cli" aggregate --input "$T/corrections-only.json" --out "$T/corrections-fresh.json" >/dev/null || fail "correction-only full recomputation"
+cmp -s "$T/corrections-fresh.json" "$T/corrections-partial.json" || fail "correction-only partial result differs from full recomputation"
+python3 - "$T/corrections-partial.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert result["corrections"]["count"] == 1, result["corrections"]
+assert result["corrections"]["invalidated_daily"] == [19676], result["corrections"]
+print("[aggregate] correction-only changes reuse all five partitions and refresh invalidation metadata")
+PY
+printf '%s\n' '{"schema":"rh-aggregate-input/1","events":[{"id":"pipe-event","actor":"a","kind":"commit","role":"role R| marker","at":1700000000}]}' > "$T/pipe-role.json"
+"$ROOT/build/rh_cli" aggregate --input "$T/pipe-role.json" --out "$T/pipe-first.json" --state-store "$T/pipe-store" >/dev/null || fail "pipe role cache seed"
+"$ROOT/build/rh_cli" aggregate --input "$T/pipe-role.json" --out "$T/pipe-replay.json" --state-store "$T/pipe-store" > "$T/pipe-replay.out" || fail "pipe role cache replay"
+cmp -s "$T/pipe-first.json" "$T/pipe-replay.json" || fail "pipe in role key confused cache report record"
+grep -q 'cache=hit' "$T/pipe-replay.out" || fail "pipe role exact replay should hit"
+python3 - "$T/pipe-role.json" "$T/pipe-role-corrected.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+data["corrections"] = [{"id":"pipe-event", "action":"retract", "reason":"metadata-only change"}]
+json.dump(data, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" aggregate --input "$T/pipe-role-corrected.json" --out "$T/pipe-partial.json" --state-store "$T/pipe-store" > "$T/pipe-partial.out" || fail "pipe role partial reuse"
+grep -q 'partition-reuse=2' "$T/pipe-partial.out" || fail "pipe in cached row must not break partition reuse"
+"$ROOT/build/rh_cli" aggregate --input "$T/pipe-role-corrected.json" --out "$T/pipe-fresh.json" >/dev/null || fail "pipe role recomputation"
+cmp -s "$T/pipe-fresh.json" "$T/pipe-partial.json" || fail "pipe role partial cache differs from full recomputation"
 set +e
 "$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/state-store/current" --state-store "$T/state-store" >/dev/null 2>&1
 rc_output_collision=$?

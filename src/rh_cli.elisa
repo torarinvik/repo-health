@@ -9731,17 +9731,18 @@ def rh_do_aggregate(input_path: cstr, out_path: cstr, state_root: cstr, has_stat
     cache_hit: mutable bool = false
     body: mutable darray[u8] = []
     fingerprint: mutable darray[u8] = []
+    prior: mutable darray[u8] = []
+    prefix: mutable darray[u8] = []
+    partition_cache: mutable darray[u8] = []
+    reused_partitions: mutable i64 = 0
     if has_state_root:
         if Git::rh_ensure_dir(state_root) != 0:
             rh_cli_err("aggregate: cannot create --state-store")
             return 4
         Sha256::rh_sha256(raw, fingerprint)
-        prefix: mutable darray[u8] = []
-        Base::rh_push_text(prefix, "rh-aggregate-cache/1\n")
-        Base::rh_push_text(prefix, "sha256:")
+        Base::rh_push_text(prefix, "rh-aggregate-cache/2\ninput-sha256:")
         prefix.extend(bytes_view(fingerprint))
         prefix.push(10)
-        prior: mutable darray[u8] = []
         loaded: i64 = StateStore::rh_state_store_load(state_root, prior)
         if loaded < 0:
             rh_cli_err("aggregate: corrupt --state-store (fail closed)")
@@ -9751,21 +9752,36 @@ def rh_do_aggregate(input_path: cstr, out_path: cstr, state_root: cstr, has_stat
             cache_hit <- prior[i] == prefix[i]
             i <- i + 1
         if cache_hit:
-            while i < prior.count |i: usize = prefix.count, prior, body|:
-                body.push(prior[i])
+            report_marker: mutable i64 = -1
+            while i + 1 < prior.count |i: usize = 0, prior, report_marker|:
+                if prior[i] == 82 and prior[i + 1] == 124 and (i == 0 or prior[i - 1] == 10):
+                    report_marker <- i.i64() + 2
+                    break
                 i <- i + 1
+            if report_marker < 0:
+                rh_cli_err("aggregate: corrupt partition cache (missing report)")
+                return 4
+            report_end: mutable i64 = Base::rh_find_byte(prior, report_marker, 10)
+            report_end <- prior.count.i64() if report_end < 0
+            while i < (report_end - report_marker).usize() |i: usize = 0, prior, report_marker, report_end, body|:
+                body.push(prior[report_marker.usize() + i])
+                i <- i + 1
+            body.push(10)
     if not cache_hit:
-        if Aggregates::rh_aggregate_report(raw, body) != 0:
+        if Aggregates::rh_aggregate_report(raw, prior, body, partition_cache, &reused_partitions) != 0:
             rh_cli_err("aggregate: unsupported or malformed aggregate envelope (fail closed)")
             return 4
         body.push(10)
     if has_state_root and not cache_hit:
         cached: mutable darray[u8] = []
-        Base::rh_push_text(cached, "rh-aggregate-cache/1\n")
-        Base::rh_push_text(cached, "sha256:")
-        cached.extend(bytes_view(fingerprint))
-        cached.push(10)
-        cached.extend(bytes_view(body))
+        cached.extend(bytes_view(prefix))
+        cache_header_end: i64 = Base::rh_find_byte(partition_cache, 0, 10)
+        if cache_header_end < 0:
+            rh_cli_err("aggregate: invalid partition cache output")
+            return 4
+        while i < (partition_cache.count.i64() - cache_header_end - 1).usize() |i: usize = 0, partition_cache, cache_header_end, cached|:
+            cached.push(partition_cache[cache_header_end.usize() + 1 + i])
+            i <- i + 1
         state_id: mutable darray[u8] = []
         if StateStore::rh_state_store_publish(state_root, cached, state_id) != 0:
             rh_cli_err("aggregate: cannot publish --state-store")
@@ -9774,7 +9790,16 @@ def rh_do_aggregate(input_path: cstr, out_path: cstr, state_root: cstr, has_stat
         rh_cli_err("aggregate: cannot write --out")
         return 4
     if has_state_root:
-        rh_cli_out("aggregate: validated projection written (cache=hit)" if cache_hit else "aggregate: validated projection written (cache=miss)")
+        if cache_hit:
+            rh_cli_out("aggregate: validated projection written (cache=hit)")
+        else:
+            message: mutable darray[u8] = []
+            Base::rh_push_text(message, "aggregate: validated projection written (cache=miss, partition-reuse=")
+            Base::rh_push_decimal_i64(message, reused_partitions)
+            Base::rh_push_text(message, ")")
+            message.push(0)
+            message_cstr: u8& = (&message[0]).cast[u8&] can Unsafe.PointerCast
+            rh_cli_out(message_cstr)
     else:
         rh_cli_out("aggregate: validated projection written")
     0
