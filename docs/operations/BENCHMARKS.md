@@ -164,3 +164,13 @@ with 38.0 MiB and 40.0 MiB maximum peak RSS respectively. The clean 100,000-
 event run above demonstrates the upper tested point. Both workloads matched
 full and cached output bytes. The 100k memory and latency costs make further
 cap increases contingent on explicit resource measurements.
+
+
+The aggregate accumulator now uses bounded open-addressed actor and role
+indexes, with capacities derived from events in uncached partitions only. A
+clean run at revision `f734447` repeated the 100,000-event workload with three
+repetitions. Full recomputation measured 2,640 ms median; partial-cache
+recomputation measured 2,306 ms median while reusing 103/105 rows. Full and
+partial output bytes matched (`d824ba36a4ecd6a766f8a3d465975734692b6c9475b6f6cfad2283ed454fa76e`). Maximum individual-child peak RSS was 234.88 MiB full and
+243.19 MiB partial. Host load varied across this and prior small-sample runs,
+so compare only the paired full/partial samples from one manifest.
