@@ -354,6 +354,44 @@ assert metrics["dependency.development_requirements"]["value"] == 1, metrics
 print("[deps] Poetry runtime/dev declarations preserved as unresolved ranges")
 PY
 
+echo "[deps] Poetry inline version and optional fields retain edge semantics"
+mkdir -p "$T/poetry-inline"
+cat > "$T/poetry-inline/pyproject.toml" <<'EOF'
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = { version = "^2.31", optional = true }
+EOF
+cat > "$T/poetry-inline/poetry.lock" <<'EOF'
+[metadata]
+lock-version = "2.1"
+
+[[package]]
+name = "requests"
+version = "2.31.0"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = []
+EOF
+"$ROOT/build/rh_cli" deps --repo "$T/poetry-inline" --out "$T/poetry-inline-out" \
+  | grep -q "ecosystems=1 pypi=1/1 unresolved=0 unsupported=0" || fail "Poetry inline dependency summary"
+python3 - "$T/poetry-inline-out/deps-pypi-graph.json" <<'PY'
+import json, sys
+graph = json.load(open(sys.argv[1]))
+assert graph["edges"] == [{"from": 0, "to": 1, "scope": "normal", "optional": True}], graph["edges"]
+print("[deps] Poetry inline optional edge retained")
+PY
+mkdir -p "$T/poetry-inline-source"
+cat > "$T/poetry-inline-source/pyproject.toml" <<'EOF'
+[tool.poetry.dependencies]
+python = "^3.11"
+private = { version = "^1.0", source = "private-index" }
+EOF
+rc_poetry_inline_source=0
+"$ROOT/build/rh_cli" deps --repo "$T/poetry-inline-source" --out "$T/poetry-inline-source-out" >/dev/null 2>&1 || rc_poetry_inline_source=$?
+[[ "$rc_poetry_inline_source" -eq 4 ]] || fail "Poetry inline source locator must fail closed (got $rc_poetry_inline_source)"
+[[ ! -f "$T/poetry-inline-source-out/deps-pypi-graph.json" ]] || fail "Poetry source locator published a partial graph"
+
 echo "[deps] Poetry lock resolves direct and transitive packages with context retention"
 mkdir -p "$T/poetry-lock"
 cat > "$T/poetry-lock/pyproject.toml" <<'EOF'

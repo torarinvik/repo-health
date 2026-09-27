@@ -3450,9 +3450,9 @@ module Package:
                 i <- i + 1
             0
 
-        # Bounded Poetry manifest entry: `name = "PEP 440 constraint"`. Inline
-        # tables and source locators are rejected until their optional/source
-        # semantics can be retained without losing privacy or scope.
+        # Bounded Poetry manifest entry. Scalar constraints and inline tables
+        # containing only `version` and `optional` preserve their graph semantics;
+        # source, marker, and other contextual fields remain fail-closed.
         def rh_pypi_poetry_line(buf: darray[u8]&, s: usize, e: usize, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&, unknown_out: mutable i64&, depctx: u8, optional: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
             line_start: mutable usize = s
             line_end: mutable usize = e
@@ -3478,11 +3478,55 @@ module Package:
             value_start: mutable usize = eq + 1
             while value_start < line_end and (buf[value_start] == 32 or buf[value_start] == 9) |value_start, line_end, buf|:
                 value_start <- value_start + 1
-            return -1 if value_start >= line_end or (buf[value_start] != 34 and buf[value_start] != 39)
+            return -1 if value_start >= line_end
             constraint_s: mutable i64 = -1
             constraint_e: mutable i64 = -1
-            value_next: mutable i64 = rh_quoted_span(buf, value_start, line_end, pool, &constraint_s, &constraint_e)
-            return -1 if value_next < 0
+            entry_optional: mutable u8 = optional
+            value_next: mutable i64 = -1
+            if buf[value_start] == 123:
+                cursor: mutable usize = value_start + 1
+                saw_version: mutable i64 = 0
+                while cursor < line_end and buf[cursor] != 125 |cursor, line_end, buf, pool, constraint_s, constraint_e, entry_optional, saw_version|:
+                    while cursor < line_end and (buf[cursor] == 32 or buf[cursor] == 9 or buf[cursor] == 44) |cursor, line_end, buf|:
+                        cursor <- cursor + 1
+                    break if cursor < line_end and buf[cursor] == 125
+                    field_start: usize = cursor
+                    while cursor < line_end and buf[cursor] != 61 and buf[cursor] != 44 and buf[cursor] != 125 |cursor, line_end, buf|:
+                        cursor <- cursor + 1
+                    return -1 if cursor >= line_end or buf[cursor] != 61
+                    field_end: mutable usize = cursor
+                    while field_end > field_start and (buf[field_end - 1] == 32 or buf[field_end - 1] == 9) |field_end, field_start, buf|:
+                        field_end <- field_end - 1
+                    cursor <- cursor + 1
+                    while cursor < line_end and (buf[cursor] == 32 or buf[cursor] == 9) |cursor, line_end, buf|:
+                        cursor <- cursor + 1
+                    if Base::rh_bytes_equal_literal(buf, field_start.i64(), field_end.i64(), "version"):
+                        return -1 if saw_version != 0 or cursor >= line_end or (buf[cursor] != 34 and buf[cursor] != 39)
+                        value_next <- rh_quoted_span(buf, cursor, line_end, pool, &constraint_s, &constraint_e)
+                        return -1 if value_next < 0
+                        cursor <- value_next.usize()
+                        saw_version <- 1
+                    elif Base::rh_bytes_equal_literal(buf, field_start.i64(), field_end.i64(), "optional"):
+                        if cursor + 4 <= line_end and Base::rh_bytes_equal_literal(buf, cursor.i64(), (cursor + 4).i64(), "true"):
+                            entry_optional <- 1
+                            cursor <- cursor + 4
+                        elif cursor + 5 <= line_end and Base::rh_bytes_equal_literal(buf, cursor.i64(), (cursor + 5).i64(), "false"):
+                            entry_optional <- 0 if optional == 0
+                            cursor <- cursor + 5
+                        else:
+                            return -1
+                    else:
+                        return -1
+                    while cursor < line_end and (buf[cursor] == 32 or buf[cursor] == 9) |cursor, line_end, buf|:
+                        cursor <- cursor + 1
+                    return -1 if cursor < line_end and buf[cursor] != 44 and buf[cursor] != 125
+                    cursor <- cursor + 1 if cursor < line_end and buf[cursor] == 44
+                return -1 if cursor >= line_end or buf[cursor] != 125 or saw_version == 0
+                value_next <- cursor.i64() + 1
+            else:
+                return -1 if buf[value_start] != 34 and buf[value_start] != 39
+                value_next <- rh_quoted_span(buf, value_start, line_end, pool, &constraint_s, &constraint_e)
+                return -1 if value_next < 0
             while value_next < line_end.i64() and (buf[value_next.usize()] == 32 or buf[value_next.usize()] == 9) |value_next, line_end, buf|:
                 value_next <- value_next + 1
             return -1 if value_next < line_end.i64() and buf[value_next.usize()] != 35
@@ -3492,7 +3536,7 @@ module Package:
             declaration.push(32)
             for i in constraint_s.usize()..<constraint_e.usize() |i, pool, declaration|:
                 declaration.push(pool[i])
-            rh_pypi_line(declaration, 0, declaration.count, pkgs, pool, reqs, edges, unresolved, unknown_out, depctx, -1, -1, optional)
+            rh_pypi_line(declaration, 0, declaration.count, pkgs, pool, reqs, edges, unresolved, unknown_out, depctx, -1, -1, entry_optional)
             0
 
         # Parse PEP 621 arrays and the scalar-string Poetry dependency subset.
