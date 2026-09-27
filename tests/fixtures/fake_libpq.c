@@ -8,6 +8,7 @@ typedef struct { int status; int rows; int columns; const char *value; } FakeRes
 static FakeConnection connection = { 1 };
 static FakeResult result = { 2, 1, 1, "t" };
 static int run_graph_query_transition = 0;
+static int bulk_projection_chunk_index = -1;
 static const char *claim_cells[3] = {
     "00000000-0000-0000-0000-000000000004", "5", "2026-01-01 00:02:00+00"
 };
@@ -225,6 +226,7 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
     const char *prefix = "SELECT public.rh_commit_collection_page(";
     int expected_count = 11;
     int claim_query = 0;
+    int bulk_projection_chunk = operation != NULL && strcmp(operation, "store_projection_bulk") == 0;
     if (operation != NULL && strcmp(operation, "monitor") == 0) {
         static const char *monitor_values[1] = { "3600" };
         expected = monitor_values;
@@ -319,6 +321,9 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         expected = stage_projection_chunk_values;
         expected_count = 1;
         prefix = "SELECT public.rh_stage_graph_projection_chunk($1::jsonb)";
+    } else if (bulk_projection_chunk) {
+        expected_count = 1;
+        prefix = "SELECT public.rh_stage_graph_projection_chunk($1::jsonb)";
     } else if (operation != NULL && strcmp(operation, "page_events") == 0) {
         expected = page_events_values;
         expected_count = 14;
@@ -387,7 +392,26 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
             fprintf(stderr, "fake libpq graph worker call mismatch: query=%s count=%d expected=%d prefix=%s\n", query == NULL ? "(null)" : query, count, expected_count, prefix);
         return NULL;
     }
-    for (int i = 0; i < count; ++i)
+    if (bulk_projection_chunk) {
+        if (values == NULL || values[0] == NULL)
+            return NULL;
+        int chunk_zero = strstr(values[0], "\"chunk_index\":0") != NULL;
+        int chunk_one = strstr(values[0], "\"chunk_index\":1") != NULL;
+        int edge_occurrences = 0;
+        const char *edge_cursor = values[0];
+        while ((edge_cursor = strstr(edge_cursor, "\"from_entity_id\"")) != NULL) {
+            ++edge_occurrences;
+            edge_cursor += strlen("\"from_entity_id\"");
+        }
+        int expected_edges = chunk_zero ? 10000 : 1;
+        if (values[0] == NULL || strstr(values[0], "\"expected_edge_count\":10001") == NULL ||
+            strstr(values[0], "\"chunk_count\":2") == NULL || (!chunk_zero && !chunk_one) ||
+            edge_occurrences != expected_edges) {
+            fprintf(stderr, "fake libpq bulk projection chunk mismatch: edges=%d\n", edge_occurrences);
+            return NULL;
+        }
+        bulk_projection_chunk_index = chunk_one ? 1 : 0;
+    } else for (int i = 0; i < count; ++i)
         if (values[i] == NULL || strcmp(values[i], expected[i]) != 0) {
             if (operation != NULL && strcmp(operation, "adoption_history") == 0)
                 fprintf(stderr, "fake libpq adoption parameter %d mismatch: got=%s expected=%s\n", i, values[i] == NULL ? "(null)" : values[i], expected[i]);
@@ -446,6 +470,13 @@ void *PQexecParams(void *handle, const char *query, int count, const unsigned in
         result.rows = 1;
         result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
         result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? "replay" : "staged";
+        return &result;
+    }
+    if (operation != NULL && strcmp(operation, "store_projection_bulk") == 0) {
+        result.columns = 1;
+        result.rows = 1;
+        result.status = mode != NULL && strcmp(mode, "failure") == 0 ? 7 : 2;
+        result.value = mode != NULL && strcmp(mode, "duplicate") == 0 ? "replay" : (bulk_projection_chunk_index == 1 ? "stored" : "staged");
         return &result;
     }
     if (operation != NULL && strcmp(operation, "current_state") == 0) {

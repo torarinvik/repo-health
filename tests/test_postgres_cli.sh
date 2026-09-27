@@ -46,6 +46,55 @@ run_ok store_projection stored store-graph-projection
 run_ok store_projection duplicate store-graph-projection
 run_ok stage_projection_chunk committed stage-graph-projection-chunk
 run_ok stage_projection_chunk duplicate stage-graph-projection-chunk
+python3 - "$T/store-graph-projection-bulk-command.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+edges = [
+    {
+        "from_entity_id": f"00000000-0000-0000-0000-{1000001 + index // 100:012d}",
+        "to_entity_id": f"00000000-0000-0000-0000-{1000201 + index % 100:012d}",
+        "edge_kind": "depends_on",
+        "known_at": "2026-01-01T00:00:00Z",
+    }
+    for index in range(10001)
+]
+document = {
+    "schema": "rh-postgres-command/1",
+    "operation": "store_graph_projection",
+    "projection": {
+        "id": "00000000-0000-0000-0000-000000009005",
+        "projection_kind": "dependency",
+        "visibility_scope": "public",
+        "input_cutoff": "2026-01-01T00:00:00Z",
+        "as_of": "2026-01-01T00:00:00Z",
+        "identity_revision": "identity-1",
+        "mapping_revision": "mapping-1",
+        "completeness": "complete",
+        "manifest_digest": "b" * 64,
+    },
+    "edges": edges,
+}
+with open(path, "w") as stream:
+    json.dump(document, stream, separators=(",", ":"))
+PY
+RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+  RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=store_projection_bulk RH_FAKE_PG_EXPECT=committed \
+  "$ROOT/build/rh_cli" postgres --input "$T/store-graph-projection-bulk-command.json" \
+    --out "$T/store-graph-projection-bulk-result.json" >/dev/null \
+  || fail "store a projection through multiple durable chunks"
+python3 - "$T/store-graph-projection-bulk-result.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"store_graph_projection","status":"stored"}
+PY
+RH_DATABASE_URL='host=fake dbname=repo_health password=never-emit-this' \
+  RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=store_projection_bulk RH_FAKE_PG_EXPECT=duplicate \
+  "$ROOT/build/rh_cli" postgres --input "$T/store-graph-projection-bulk-command.json" \
+    --out "$T/store-graph-projection-bulk-replay.json" >/dev/null \
+  || fail "replay a multi-chunk graph projection"
+python3 - "$T/store-graph-projection-bulk-replay.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema":"rh-postgres-result/1","operation":"store_graph_projection","status":"replay"}
+PY
 run_ok publish_graph committed publish-graph-query-result
 run_ok publish_graph duplicate publish-graph-query-result
 run_ok retry_graph committed retry-graph-query-job

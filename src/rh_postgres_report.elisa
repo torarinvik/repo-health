@@ -55,6 +55,57 @@ module PostgresReport:
             value_out[0] <- value
             true
 
+        # Split a validated projection document into bounded database calls.
+        # Chunk buffers and edge cursors stay inside each scoped iteration.
+        def rh_pg_report_stage_projection_chunks(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, projection_idx: i64, edges_node: Json::RhJsonNode, expected_edges: i64, conninfo: cstr, status_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            projection_node: Json::RhJsonNode = nodes[projection_idx.usize()]
+            return -1 if projection_node.text_start < 0 or projection_node.text_end <= projection_node.text_start
+            return -1 if expected_edges != edges_node.child_count.i64()
+            chunk_count: i64 = (expected_edges + 9999) / 10000 if expected_edges > 0 else 1
+            chunk_index: mutable i64 = 0
+            remaining_edges: mutable i64 = edges_node.child_count.i64()
+            edge_idx: mutable i64 = edges_node.first_child
+            while chunk_index < chunk_count |chunk_index, remaining_edges, edge_idx, nodes, raw, projection_node, edges_node, expected_edges, chunk_count, conninfo, status_out|:
+                chunk_json: mutable darray[u8] = []
+                Base::rh_push_text(chunk_json, "{\"schema\":\"rh-postgres-projection-chunk/1\",\"projection\":")
+                while raw_offset < projection_node.text_end |raw_offset: i64 = projection_node.text_start, raw, projection_node, chunk_json|:
+                    chunk_json.push(raw[raw_offset.usize()])
+                    raw_offset <- raw_offset + 1
+                Base::rh_push_text(chunk_json, ",\"expected_edge_count\":")
+                Base::rh_push_decimal_i64(chunk_json, expected_edges)
+                Base::rh_push_text(chunk_json, ",\"chunk_index\":")
+                Base::rh_push_decimal_i64(chunk_json, chunk_index)
+                Base::rh_push_text(chunk_json, ",\"chunk_count\":")
+                Base::rh_push_decimal_i64(chunk_json, chunk_count)
+                Base::rh_push_text(chunk_json, ",\"edges\":[")
+                chunk_edge_count: mutable i64 = 10000
+                if remaining_edges < 10000:
+                    chunk_edge_count <- remaining_edges
+                copied_edges: mutable i64 = 0
+                while copied_edges < chunk_edge_count |copied_edges, edge_idx, nodes, raw, chunk_json|:
+                    return -1 if edge_idx < 0
+                    edge_node: Json::RhJsonNode = nodes[edge_idx.usize()]
+                    return -1 if edge_node.text_start < 0 or edge_node.text_end <= edge_node.text_start
+                    if copied_edges > 0:
+                        chunk_json.push(44)
+                    while edge_offset < edge_node.text_end |edge_offset: i64 = edge_node.text_start, raw, edge_node, chunk_json|:
+                        chunk_json.push(raw[edge_offset.usize()])
+                        edge_offset <- edge_offset + 1
+                    edge_idx <- nodes[edge_idx.usize()].next_sibling
+                    copied_edges <- copied_edges + 1
+                return -1 if copied_edges != chunk_edge_count
+                Base::rh_push_text(chunk_json, "]}")
+                chunk_json.push(0)
+                chunk_ptr: cstr = (&chunk_json[0]).cast[cstr] can Unsafe.PointerCast
+                chunk_status: mutable darray[u8] = []
+                return -1 if Postgres::rh_pg_stage_graph_projection_chunk(conninfo, chunk_ptr, chunk_status) <= 0
+                return -1 if not Base::rh_bytes_equal_literal(chunk_status, 0, chunk_status.count.i64(), "staged") and not Base::rh_bytes_equal_literal(chunk_status, 0, chunk_status.count.i64(), "stored") and not Base::rh_bytes_equal_literal(chunk_status, 0, chunk_status.count.i64(), "replay")
+                status_out <- chunk_status
+                remaining_edges <- remaining_edges - copied_edges
+                chunk_index <- chunk_index + 1
+            return -1 if remaining_edges != 0
+            status_out.count.i64()
+
         def rh_pg_report_emit_text(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
             out.push(34)
             Base::rh_json_escape(out, texts, start.usize(), end.usize())
@@ -392,7 +443,7 @@ module PostgresReport:
             projection_operation: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "store_graph_projection")
             projection_chunk_operation: bool = PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "stage_graph_projection_chunk")
             return -1 if raw.count > RH_PG_REPORT_MAX_BYTES and not normalization_operation and not projection_operation and not projection_chunk_operation
-            return -1 if projection_operation and raw.count > 4194304
+            return -1 if projection_operation and raw.count > RH_PG_REPORT_MAX_NORMALIZATION_BYTES
             return -1 if projection_chunk_operation and raw.count > 4194304
 
             if normalization_operation:
@@ -830,7 +881,7 @@ module PostgresReport:
                 return -1 if not PostgresReport::rh_pg_report_eq(texts, completeness_s, completeness_e, "complete") and not PostgresReport::rh_pg_report_eq(texts, completeness_s, completeness_e, "partial") and not PostgresReport::rh_pg_report_eq(texts, completeness_s, completeness_e, "truncated") and not PostgresReport::rh_pg_report_eq(texts, completeness_s, completeness_e, "failed")
                 return -1 if not PostgresReport::rh_pg_report_span(nodes, texts, projection_idx, "manifest_digest", &digest_s, &digest_e, false) or not PostgresReport::rh_pg_report_hex64(texts, digest_s, digest_e)
                 edges_node: Json::RhJsonNode = nodes[edges_idx.usize()]
-                return -1 if edges_node.child_count > 10000
+                return -1 if edges_node.child_count > 130000
                 return -1 if PostgresReport::rh_pg_report_eq(texts, completeness_s, completeness_e, "failed") and edges_node.child_count > 0
                 while edge_idx >= 0 |edge_idx: i64 = edges_node.first_child, nodes, texts, edges_node|:
                     edge: i64 = edge_idx
@@ -859,15 +910,27 @@ module PostgresReport:
                         return -1 if not Json::rh_json_str_span(nodes, valid_to_idx, &valid_to_s, &valid_to_e) or valid_to_e <= valid_to_s
                     edge_idx <- nodes[edge.usize()].next_sibling
                 root_node: Json::RhJsonNode = nodes[root.usize()]
-                return -1 if root_node.text_start < 0 or root_node.text_end <= root_node.text_start or root_node.text_end - root_node.text_start > 4194304
-                projection_json: mutable darray[u8] = []
-                while raw_offset < root_node.text_end |raw_offset: i64 = root_node.text_start, raw, root_node, projection_json|:
-                    projection_json.push(raw[raw_offset.usize()])
-                    raw_offset <- raw_offset + 1
-                projection_json.push(0)
-                projection_ptr: cstr = (&projection_json[0]).cast[cstr] can Unsafe.PointerCast
-                stored: i64 = Postgres::rh_pg_store_graph_projection(conninfo, projection_ptr)
-                return -1 if stored < 0
+                return -1 if root_node.text_start < 0 or root_node.text_end <= root_node.text_start
+                stored: mutable i64 = 0
+                if edges_node.child_count <= 10000:
+                    return -1 if root_node.text_end - root_node.text_start > 4194304
+                    projection_json: mutable darray[u8] = []
+                    while raw_offset < root_node.text_end |raw_offset: i64 = root_node.text_start, raw, root_node, projection_json|:
+                        projection_json.push(raw[raw_offset.usize()])
+                        raw_offset <- raw_offset + 1
+                    projection_json.push(0)
+                    projection_ptr: cstr = (&projection_json[0]).cast[cstr] can Unsafe.PointerCast
+                    stored <- Postgres::rh_pg_store_graph_projection(conninfo, projection_ptr)
+                    return -1 if stored < 0
+                else:
+                    staged_status: mutable darray[u8] = []
+                    return -1 if PostgresReport::rh_pg_report_stage_projection_chunks(nodes, raw, projection_idx, edges_node, edges_node.child_count.i64(), conninfo, staged_status) < 0
+                    stored <- 1 if Base::rh_bytes_equal_literal(staged_status, 0, staged_status.count.i64(), "stored")
+                    stored <- 0 if Base::rh_bytes_equal_literal(staged_status, 0, staged_status.count.i64(), "replay")
+                    Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"store_graph_projection\",\"status\":\"")
+                    Base::rh_push_text(out, "staged" if Base::rh_bytes_equal_literal(staged_status, 0, staged_status.count.i64(), "staged") else ("stored" if stored == 1 else "replay"))
+                    Base::rh_push_text(out, "\"}")
+                    return 0
                 Base::rh_push_text(out, "{\"schema\":\"rh-postgres-result/1\",\"operation\":\"store_graph_projection\",\"status\":\"")
                 Base::rh_push_text(out, "stored" if stored == 1 else "replay")
                 Base::rh_push_text(out, "\"}")
