@@ -149,14 +149,17 @@ Trigger: scheduled drill, or recovery after corruption/loss.
 2. Verify every object digest with `rh_backup_verify`; require
    `corrupt == 0` and `missing == 0` before trusting the set.
 3. Bind the exact database dump to the verified evidence manifest with
-   `rh_cli ops bind --root <evidence-root> --manifest <evidence-manifest>
-   --database <database-dump> --out <rh-backup-binding/1>`. Before restoring,
-   run the matching `rh_cli ops verify-binding` command with `--input
-   <rh-backup-binding/1>`; it rehashes both files and verifies every evidence
-   object. Keep the database dump itself with the backup: the binding is an
-   integrity index, not a copy of the dump or a claim that it is correct.
-   Current input reads are capped at 64 MiB, so larger dumps require a
-   streaming backup path before this runbook can cover them.
+   `tools/backup-postgres.sh <evidence-root> <new-backup-directory>` after
+   setting `RH_DATABASE_URL` in the operator environment. It runs `pg_dump`
+   without placing the connection URL in its argument list, inventories and
+   verifies evidence objects, creates the binding, and publishes the whole
+   directory with one rename. Before restoring, run `rh_cli ops verify-binding`
+   with `--root`, `--manifest`, `--database`, and `--input <backup-binding>`;
+   it rehashes both files and verifies every evidence object. Keep the database
+   dump itself with the backup: the binding is an integrity index, not a claim
+   that the snapshot is correct. Current input reads are capped at 64 MiB, so
+   larger dumps require a streaming backup path before this runbook can cover
+   them.
 4. Restore with `rh_backup_restore`, which skips any object whose digest
    does not match.
 5. Rebuild projections from the restored evidence and replay a sample
