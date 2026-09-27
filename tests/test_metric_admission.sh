@@ -40,6 +40,9 @@ echo "[metric-admission] missing class is rejected"
 rm -rf "$TMP"
 mkdir -p "$TMP/metrics"
 cp -R "$ROOT/metrics/definitions" "$TMP/metrics/definitions"
+cp "$ROOT/metrics/source-requirements.json" "$TMP/metrics/source-requirements.json"
+mkdir -p "$TMP/fixtures"
+cp "$ROOT/fixtures/fixture-catalog.json" "$TMP/fixtures/fixture-catalog.json"
 python3 - "$TMP/metrics/definitions/activity_accepted_changes.json" <<'PY'
 import json, sys
 p = sys.argv[1]
@@ -66,6 +69,30 @@ if bash "$ROOT/tools/metric-lint.sh" "$TMP" >"$TMP/boundary.log" 2>&1; then
   fail "changed CHAOSS threshold boundary was accepted"
 fi
 grep -q "CAF threshold boundary changed" "$TMP/boundary.log" || fail "boundary failed for an unexpected reason"
+
+echo "[metric-admission] entity, output type, source, and fixture references are checked"
+for case_name in subject_kind output_type cost_class privacy_class ratio_denominator source_requirement fixture_reference; do
+  rm -rf "$TMP/metrics/definitions"
+  cp -R "$ROOT/metrics/definitions" "$TMP/metrics/definitions"
+  python3 - "$TMP/metrics/definitions" "$case_name" <<'PY'
+import json, sys
+p, case_name = sys.argv[1:]
+name = "activity_bot_event_share.json" if case_name == "ratio_denominator" else "activity_accepted_changes.json"
+p = p + "/" + name
+d = json.load(open(p))
+if case_name == "subject_kind": d["subject_kind"] = "unknown"
+elif case_name == "output_type": d["output"]["type"] = "ratio"
+elif case_name == "cost_class": d["cost_class"] = "unbounded"
+elif case_name == "privacy_class": d["privacy_class"] = "individual"
+elif case_name == "ratio_denominator": del d["output"]["denominator"]
+elif case_name == "source_requirement": d["source_requirements"] = ["undeclared-source"]
+else: d["fixture_references"] = ["F999"]
+json.dump(d, open(p, "w"))
+PY
+  if bash "$ROOT/tools/metric-lint.sh" "$TMP" >"$TMP/$case_name.log" 2>&1; then
+    fail "$case_name mutation was accepted"
+  fi
+done
 rm -rf "$TMP"
 
 echo "test_metric_admission OK"

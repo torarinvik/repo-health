@@ -1083,12 +1083,12 @@ metric can appear in the reachable list (asserted).
 
 **Public schemas (M00-05):** `schemas/` holds versioned public schemas
 (`rh-jsonschema/1` dialect, six families: connector-manifest,
-canonical-repo, dep-graph, cyclonedx, spdx, registry-meta), each declaring
+canonical-repo, dep-graph, cyclonedx, spdx, registry-meta, metric-definition, metric-source-requirements), each declaring
 its target fixture globs. `tools/schema-check.sh` validates the real
 checked-in fixtures independently of generated code, and
 `tests/test_schemas.sh` runs it plus a negative control that proves a
 malformed document is rejected. This is the named `schemas/` + schema-check
-tooling from the repo-structure section.
+tooling from the repo-structure section. All 226 metric definitions now declare an explicit output type; the admission linter checks type/unit pairs, ratio denominators, source requirement IDs, entity/privacy/cost domains, and fixture catalog coverage.
 
 **M11 scope (in progress):** `src/rh_experimental.elisa` is the isolation
 gateway R024 requires: a metric may enter the experimental group only with
