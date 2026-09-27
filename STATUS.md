@@ -604,7 +604,9 @@ process an `rh-query-input/1` request into `rh-query-result/1` with cursor
 pagination (a replayed cursor is idempotent), a per-capability scan-status
 breakdown, and a bounded-job lease sequence (claim/renew/finish/budget with
 fencing tokens); `tests/test_query_cli.sh` covers pages/cursors,
-scan-status, the lease state machine, and fail-closed negatives. The notification policy is now a real surface
+scan-status, the lease state machine, and fail-closed negatives. Query output
+also carries an exact-input/output/configuration digest sidecar with preserved,
+transformed, and inferred field states. The notification policy is now a real surface
 too: `src/rh_notify_report.elisa` + `rh_cli notify --input <file> --out
 <file>` process an `rh-notify-input/3` event stream (notify/ack/resolve)
 into `rh-notify-result/4`, where an upstream maintainer is refused unless

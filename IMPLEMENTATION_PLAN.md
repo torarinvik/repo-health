@@ -712,6 +712,12 @@ Expose the observatory through a stable API, CLI, and usable website, including 
 
 **M06-01: Query API.** Implement project identity, metrics, continuity, upstream/downstream graph, findings, evidence, and scan-status endpoints. Add cursor pagination and bounded asynchronous graph jobs.
 
+The local `rh_cli query` projection also emits a digest-bound adapter
+transformation report for its exact input bytes, newline-terminated result,
+and fixed normalizer configuration. Its field map distinguishes preserved
+query scope, transformed page/status/graph calculations, inferred defaults,
+and unknown scan-state bucketing.
+
 The current bounded wire slice exposes `POST /api/query` for the versioned
 `rh-query-input/1` contract and returns `rh-query-result/1` with cursor
 pagination, scan-state tallies, and bounded job operations. A store-backed

@@ -19,9 +19,13 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-query-input/1","kind":"metrics","ids":[10,20,30,40,50],"cursor":-1,"limit":2,"scan_states":["observed","stale","partial","observed","error","unavailable"],"job":{"job_id":7,"ops":[{"op":"claim","owner":1,"now":1000,"ttl":100},{"op":"claim","owner":2,"now":1050,"ttl":100},{"op":"renew","token":0,"now":1050,"ttl":100},{"op":"renew","token":1,"now":1050,"ttl":100},{"op":"claim","owner":2,"now":1200,"ttl":100},{"op":"finish","token":1,"phase":"succeeded"},{"op":"finish","token":2,"phase":"succeeded"},{"op":"claim","owner":3,"now":1300,"ttl":100},{"op":"budget","visited_nodes":10,"deadline":5000,"now":2000,"max_nodes":100},{"op":"budget","visited_nodes":101,"deadline":5000,"now":2000,"max_nodes":100}]}}
 JSON
 "$ROOT/build/rh_cli" query --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "query run"
-python3 - "$T/out.json" <<'PY'
+python3 - "$T/in.json" "$T/out.json" "$T/out.json.transformations.json" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1]))
+import hashlib
+from pathlib import Path
+raw = Path(sys.argv[1]).read_bytes()
+normalized = Path(sys.argv[2]).read_bytes()
+d = json.loads(normalized)
 assert d["schema"] == "rh-query-result/1" and d["kind"] == "metrics", d
 assert d["page"] == {"ids": [10, 20], "next_cursor": 20, "complete": False}, d["page"]
 assert d["scan_status"] == {"observed": 2, "stale": 1, "partial": 1,
@@ -38,6 +42,13 @@ assert res[7]["result"]["outcome"] == "terminal", res[7]
 assert res[8]["result"] == {"within": True}, res[8]
 assert res[9]["result"] == {"within": False}, res[9]
 assert "never one project verdict" in d["note"], d["note"]
+sidecar = json.load(open(sys.argv[3]))
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "query" and sidecar["output_schema"] == "rh-query-result/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/query/1").hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["preserved", "transformed", "inferred", "transformed"], sidecar
 print("[query] page + scan-status + job lease OK")
 PY
 
