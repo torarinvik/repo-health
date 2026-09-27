@@ -480,6 +480,48 @@ module Pylock:
             artifacts[artifact_index.usize()] <- artifact
             true
 
+        # PEP 751 permits omitting an artifact name when the final URL/path
+        # component supplies it. Retain only that component; never copy a
+        # directory, query, or fragment into the public audit projection.
+        def rh_pylock_artifact_infer_name(pool: mutable darray[u8]&, artifact: mutable RhPylockArtifact&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if artifact.name_s >= 0
+            return false if artifact.locator_kind == 0 or artifact.locator_s < 0 or artifact.locator_e <= artifact.locator_s
+            locator_end: mutable i64 = artifact.locator_e
+            while cursor < locator_end |cursor: i64 = artifact.locator_s, pool, locator_end|:
+                if artifact.locator_kind == 1 and (pool[cursor.usize()] == 63 or pool[cursor.usize()] == 35):
+                    locator_end <- cursor
+                    cursor <- artifact.locator_e
+                else:
+                    cursor <- cursor + 1
+            return false if locator_end <= artifact.locator_s
+            authority_end: mutable i64 = artifact.locator_s
+            if artifact.locator_kind == 1:
+                while cursor + 2 < locator_end |cursor: i64 = artifact.locator_s, pool, locator_end, authority_end|:
+                    if pool[cursor.usize()] == 58 and pool[(cursor + 1).usize()] == 47 and pool[(cursor + 2).usize()] == 47:
+                        authority_end <- cursor + 3
+                        cursor <- locator_end
+                    else:
+                        cursor <- cursor + 1
+                return false if authority_end == artifact.locator_s
+            separator: mutable i64 = -1
+            while cursor < locator_end |cursor: i64 = artifact.locator_s, pool, locator_end, separator, authority_end, artifact|:
+                if pool[cursor.usize()] == 47 and (artifact.locator_kind != 1 or cursor >= authority_end):
+                    separator <- cursor
+                cursor <- cursor + 1
+            return false if separator < 0 and artifact.locator_kind == 1
+            name_start: i64 = artifact.locator_s if separator < 0 else separator + 1
+            return false if name_start >= locator_end
+            return false if Base::rh_bytes_equal_literal(pool, name_start, locator_end, ".") or Base::rh_bytes_equal_literal(pool, name_start, locator_end, "..")
+            while cursor < locator_end |cursor: i64 = name_start, pool, locator_end|:
+                return false if pool[cursor.usize()] < 32 or pool[cursor.usize()] == 127 or pool[cursor.usize()] == 92
+                cursor <- cursor + 1
+            artifact.name_s <- pool.count.i64()
+            while cursor < locator_end |cursor: i64 = name_start, pool, locator_end, artifact|:
+                pool.push(pool[cursor.usize()])
+                cursor <- cursor + 1
+            artifact.name_e <- pool.count.i64()
+            true
+
         def rh_pylock_artifact_hash_field(data: mutable darray[u8]&, pool: mutable darray[u8]&, artifacts: mutable darray[RhPylockArtifact]&, hashes: mutable darray[RhPylockArtifactHash]&, artifact_index: i64, start: usize, end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
             key_s: mutable usize = start
             key_e: mutable usize = end
@@ -1423,12 +1465,13 @@ module Pylock:
                 return -1 if reference.name_s < 0 or reference.name_s == reference.name_e
                 return -1 if reference.version_s >= 0 and reference.version_s == reference.version_e
             for artifact_id in 0..<artifacts.count |artifact_id, artifacts|:
-                artifact: RhPylockArtifact = artifacts[artifact_id]
+                artifact: mutable RhPylockArtifact = artifacts[artifact_id]
                 return -1 if (artifact.name_s < 0 and artifact.name_e >= 0) or (artifact.name_s >= 0 and artifact.name_s == artifact.name_e)
                 return -1 if (artifact.locator_kind == 0 and (artifact.locator_s >= 0 or artifact.locator_e >= 0)) or (artifact.locator_kind != 0 and (artifact.locator_s < 0 or artifact.locator_s == artifact.locator_e))
                 return -1 if (artifact.subdirectory_s < 0 and artifact.subdirectory_e >= 0) or (artifact.subdirectory_s >= 0 and artifact.subdirectory_s > artifact.subdirectory_e)
                 return -1 if (artifact.upload_time_s < 0 and artifact.upload_time_e >= 0) or (artifact.upload_time_s >= 0 and artifact.upload_time_s == artifact.upload_time_e)
-                return -1 if artifact.name_s < 0 and artifact.locator_kind == 0
+                return -1 if not rh_pylock_artifact_infer_name(pool, &artifact)
+                artifacts[artifact_id] <- artifact
                 return -1 if artifact.hash_count == 0
             0
 

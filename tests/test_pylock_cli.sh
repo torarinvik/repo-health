@@ -409,6 +409,57 @@ assert coverage["unprojected_tables"] == 0, coverage
 print("[pylock] PEP 751 relationships and loss coverage OK")
 PY
 
+echo "[pylock] infer omitted artifact names without exposing locator paths"
+cat > "$T/inferred-artifact-names.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'fixture'
+[[packages]]
+name = 'url-archive'
+[packages.archive]
+url = 'https://files.example.invalid/private/download.zip?token=secret#fragment'
+[packages.archive.hashes]
+sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+[[packages]]
+name = 'path-sdist'
+[packages.sdist]
+path = '../private/source.tar.gz'
+[packages.sdist.hashes]
+sha256 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+[[packages]]
+name = 'filename-path'
+[[packages.wheels]]
+path = 'single.whl'
+[packages.wheels.hashes]
+sha256 = 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+EOF
+"$ROOT/build/rh_cli" pylock --input "$T/inferred-artifact-names.toml" --out "$T/inferred-artifact-names.json" >/dev/null
+python3 - "$T/inferred-artifact-names.json" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1]))
+artifacts = [package["artifacts"][0] for package in report["packages"]]
+assert [artifact["name"] for artifact in artifacts] == ["download.zip", "source.tar.gz", "single.whl"], artifacts
+assert [artifact["source_kind"] for artifact in artifacts] == ["url", "path", "path"], artifacts
+serialized = open(sys.argv[1]).read()
+for private in ("/private/", "?token=secret", "#fragment", "../private/"):
+    assert private not in serialized, serialized
+transformations = json.load(open(sys.argv[1] + ".transformations.json"))
+assert any(field["state"] == "inferred" and field["target"] == "artifacts[].name" for field in transformations["fields"]), transformations
+print("[pylock] URL and path basenames retained; directories, queries and fragments withheld")
+PY
+cat > "$T/missing-artifact-basename.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'fixture'
+[[packages]]
+name = 'missing-name'
+[packages.archive]
+url = 'https://files.example.invalid/'
+[packages.archive.hashes]
+sha256 = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+EOF
+if "$ROOT/build/rh_cli" pylock --input "$T/missing-artifact-basename.toml" --out "$T/missing-artifact-basename.json" >/dev/null 2>&1; then
+  fail "artifact without a name or locator basename must fail closed"
+fi
+
 echo "[pylock] unsupported lock versions and escape handling"
 sed "s/lock-version = '1.0'/lock-version = '2.0'/" "$T/pylock.toml" > "$T/bad-version.toml"
 printf "lock-version = '1.0'\ncreated-by = \"bad\\\\escape\"\n[[packages]]\nname = 'x'\n" > "$T/bad-string.toml"
