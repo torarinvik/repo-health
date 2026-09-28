@@ -1101,6 +1101,20 @@ module Pylock:
         # PEP 751 tool tables are disposable extension metadata. Recognize
         # their standard root segments without treating their values as
         # installer inputs; nested tables share the same bounded namespace.
+        def rh_pylock_table_prefix_candidate(data: darray[u8]&, start: usize, end: usize, prefix: u8&) -> bool:
+            prefix_length: usize = strlen(prefix)
+            return false if end <= start + 2 or data[start] != 91 or data[start + 1] == 91 or data[end - 1] != 93
+            cursor: mutable usize = start + 1
+            body_end: usize = end - 1
+            while cursor < body_end and (data[cursor] == 32 or data[cursor] == 9) |cursor, body_end, data|:
+                cursor <- cursor + 1
+            return false if cursor + prefix_length > body_end
+            for index in 0..<prefix_length |index, cursor, data, prefix|:
+                return false if data[cursor + index] != prefix[index]
+            cursor <- cursor + prefix_length
+            return false if cursor < body_end and data[cursor] != 46 and data[cursor] != 32 and data[cursor] != 9
+            true
+
         def rh_pylock_table_prefix(data: darray[u8]&, start: usize, end: usize, prefix: u8&) -> bool:
             prefix_length: usize = strlen(prefix)
             return false if end <= start + 2 or data[start] != 91 or data[start + 1] == 91 or data[end - 1] != 93
@@ -1131,7 +1145,36 @@ module Pylock:
                     expected_start <- expected_start + 1
             while cursor < body_end and (data[cursor] == 32 or data[cursor] == 9) |cursor, body_end, data|:
                 cursor <- cursor + 1
-            cursor == body_end or data[cursor] == 46
+            return true if cursor == body_end
+            return false if data[cursor] != 46
+            while cursor < body_end |cursor, body_end, data|:
+                return false if data[cursor] != 46
+                cursor <- cursor + 1
+                while cursor < body_end and (data[cursor] == 32 or data[cursor] == 9) |cursor, body_end, data|:
+                    cursor <- cursor + 1
+                return false if cursor == body_end
+                if data[cursor] == 34 or data[cursor] == 39:
+                    quote: u8 = data[cursor]
+                    cursor <- cursor + 1
+                    segment_start: usize = cursor
+                    while cursor < body_end and data[cursor] != quote |cursor, body_end, data, quote|:
+                        byte: u8 = data[cursor]
+                        return false if byte == 92 or byte < 32 or byte == 127
+                        cursor <- cursor + 1
+                    return false if cursor == body_end or cursor == segment_start
+                    cursor <- cursor + 1
+                else:
+                    segment_start: usize = cursor
+                    while cursor < body_end |cursor, body_end, data|:
+                        byte: u8 = data[cursor]
+                        break if not ((byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or byte == 45 or byte == 95)
+                        cursor <- cursor + 1
+                    return false if cursor == segment_start
+                while cursor < body_end and (data[cursor] == 32 or data[cursor] == 9) |cursor, body_end, data|:
+                    cursor <- cursor + 1
+                return true if cursor == body_end
+                return false if data[cursor] != 46
+            false
 
         def rh_pylock_utf8_continuation(byte: u8) -> bool:
             byte >= 128 and byte <= 191
@@ -1293,6 +1336,8 @@ module Pylock:
                         artifact_index <- -1
                         identity_index <- -1
                         section <- 17
+                    elif rh_pylock_table_prefix_candidate(data, trimmed_start, trimmed_end, "tool") or (package_index >= 0 and rh_pylock_table_prefix_candidate(data, trimmed_start, trimmed_end, "packages.tool")):
+                        return -1
                     elif rh_pylock_table_eq(data, trimmed_start, trimmed_end, "[[packages.dependencies]]"):
                         return -1 if package_index < 0 or packages[package_index.usize()].dependency_array == 1
                         reference_index <- rh_pylock_push_reference(refs, package_index)

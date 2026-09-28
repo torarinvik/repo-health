@@ -253,6 +253,29 @@ for secret in ("must-not-be-published", "discardable", "https://private.example.
     assert secret not in serialized, serialized
 print("[pylock] PEP 751 tool-table scopes are counted while disposable values stay out of the projection")
 PY
+cp "$T/pylock.toml" "$T/tool-paths.toml"
+cat >> "$T/tool-paths.toml" <<'EOF'
+[tool."build-system".custom]
+private = "not-published"
+[packages.tool."vendor.ext".config]
+private = "also-not-published"
+EOF
+"$ROOT/build/rh_cli" pylock --input "$T/tool-paths.toml" --out "$T/tool-paths.json" >/dev/null || fail "valid nested tool table paths were rejected"
+python3 - "$T/tool-paths.json" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert report["tool_metadata_tables"] == 1, report
+assert report["packages"][-1]["tool_metadata_tables"] == 1, report
+encoded = json.dumps(report)
+assert "not-published" not in encoded, encoded
+assert "also-not-published" not in encoded, encoded
+print("[pylock] nested bare and quoted tool path segments are recognized without exposing values")
+PY
+sed 's/\[tool\."build-system"\.custom\]/[tool.build-system..custom]/' "$T/tool-paths.toml" > "$T/malformed-tool-path.toml"
+if "$ROOT/build/rh_cli" pylock --input "$T/malformed-tool-path.toml" --out "$T/malformed-tool-path.json" >/dev/null 2>&1; then
+    fail "malformed dotted tool table path was accepted"
+fi
+echo "[pylock] malformed dotted tool table path rejected"
 python3 - "$T/pylock.toml" "$T/spaced-table-headers.toml" <<'PY'
 from pathlib import Path
 import sys
