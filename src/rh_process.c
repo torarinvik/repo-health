@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
@@ -73,19 +74,42 @@ static const char *rh_process_resolve(const char *executable, char **envp,
     return NULL;
 }
 
+static int rh_process_write_all(int descriptor, const char *bytes, size_t length) {
+    size_t written = 0;
+    while (written < length) {
+        ssize_t count = write(descriptor, bytes + written, length - written);
+        if (count > 0) written += (size_t)count;
+        else if (count < 0 && errno == EINTR) continue;
+        else return -1;
+    }
+    return 0;
+}
+
+static void rh_process_close(int *descriptor) {
+    if (*descriptor >= 0) close(*descriptor);
+    *descriptor = -1;
+}
+
+static int rh_process_nonblocking(int descriptor) {
+    int flags = fcntl(descriptor, F_GETFL);
+    return flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) < 0 ? -1 : 0;
+}
+
 /*
- * Run one absolute executable path with explicit argv/envp and optional file
- * redirection. Returns child exit status, 124 on timeout, or a negative errno
- * on setup/wait failure. No shell is involved.
+ * Run one explicit executable with argv/envp, optional stdin, separately
+ * captured output streams, an aggregate output cap, and a wall-clock deadline.
+ * Returns child exit status, 124 on timeout, or a negative errno on failure.
+ * No shell is involved; timeout/overflow terminate the spawned process group.
  */
 int rh_process_run(const char *executable, const char *argv_flat,
                    const char *env_flat, const char *input_data,
                    size_t input_length, const char *stdout_path,
-                   const char *stderr_path, int timeout_ms) {
+                   const char *stderr_path, size_t max_output_bytes,
+                   int timeout_ms) {
     if (executable == NULL || argv_flat == NULL ||
         env_flat == NULL || input_length > 65536 ||
         (input_length > 0 && input_data == NULL) ||
-        timeout_ms < 1 || timeout_ms > 600000)
+        max_output_bytes == 0 || timeout_ms < 1 || timeout_ms > 600000)
         return -EINVAL;
 
     char **argv = rh_process_vector(argv_flat, 256);
@@ -105,10 +129,35 @@ int rh_process_run(const char *executable, const char *argv_flat,
     }
 
     int input_pipe[2] = {-1, -1};
+    int stdout_pipe[2] = {-1, -1};
+    int stderr_pipe[2] = {-1, -1};
+    int stdout_file = -1;
+    int stderr_file = -1;
     if (input_length > 0 && pipe(input_pipe) != 0) {
         free(argv);
         free(envp);
         return -errno;
+    }
+    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
+        int saved_error = errno;
+        rh_process_close(&input_pipe[0]); rh_process_close(&input_pipe[1]);
+        rh_process_close(&stdout_pipe[0]); rh_process_close(&stdout_pipe[1]);
+        rh_process_close(&stderr_pipe[0]); rh_process_close(&stderr_pipe[1]);
+        free(argv); free(envp);
+        return -saved_error;
+    }
+    if (stdout_path != NULL) stdout_file = open(stdout_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (stderr_path != NULL) stderr_file = open(stderr_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if ((stdout_path != NULL && stdout_file < 0) || (stderr_path != NULL && stderr_file < 0) ||
+        rh_process_nonblocking(stdout_pipe[0]) != 0 || rh_process_nonblocking(stderr_pipe[0]) != 0 ||
+        (input_length > 0 && rh_process_nonblocking(input_pipe[1]) != 0)) {
+        int saved_error = errno == 0 ? EIO : errno;
+        rh_process_close(&input_pipe[0]); rh_process_close(&input_pipe[1]);
+        rh_process_close(&stdout_pipe[0]); rh_process_close(&stdout_pipe[1]);
+        rh_process_close(&stderr_pipe[0]); rh_process_close(&stderr_pipe[1]);
+        rh_process_close(&stdout_file); rh_process_close(&stderr_file);
+        free(argv); free(envp);
+        return -saved_error;
     }
 
     posix_spawn_file_actions_t actions;
@@ -122,97 +171,115 @@ int rh_process_run(const char *executable, const char *argv_flat,
         error = posix_spawn_file_actions_addclose(&actions, input_pipe[0]);
     if (error == 0 && input_length > 0)
         error = posix_spawn_file_actions_addclose(&actions, input_pipe[1]);
-    if (error == 0 && stdout_path != NULL)
-        error = posix_spawn_file_actions_addopen(
-            &actions, STDOUT_FILENO, stdout_path,
-            O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (error == 0 && stderr_path != NULL)
-        error = posix_spawn_file_actions_addopen(
-            &actions, STDERR_FILENO, stderr_path,
-            O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (error == 0) error = posix_spawn_file_actions_adddup2(&actions, stdout_pipe[1], STDOUT_FILENO);
+    if (error == 0) error = posix_spawn_file_actions_adddup2(&actions, stderr_pipe[1], STDERR_FILENO);
+    if (error == 0) error = posix_spawn_file_actions_addclose(&actions, stdout_pipe[0]);
+    if (error == 0) error = posix_spawn_file_actions_addclose(&actions, stdout_pipe[1]);
+    if (error == 0) error = posix_spawn_file_actions_addclose(&actions, stderr_pipe[0]);
+    if (error == 0) error = posix_spawn_file_actions_addclose(&actions, stderr_pipe[1]);
 
     pid_t child = -1;
-    if (error == 0)
-        error = posix_spawn(&child, resolved, &actions, NULL, argv, envp);
+    posix_spawnattr_t attributes;
+    int attributes_ready = 0;
+    if (error == 0) {
+        error = posix_spawnattr_init(&attributes);
+        attributes_ready = error == 0;
+    }
+    if (error == 0) error = posix_spawnattr_setpgroup(&attributes, 0);
+    if (error == 0) error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+    int64_t started = rh_process_millis();
+    if (error == 0 && started < 0) error = EIO;
+    if (error == 0) error = posix_spawn(&child, resolved, &actions, &attributes, argv, envp);
+    if (attributes_ready) posix_spawnattr_destroy(&attributes);
     if (actions_ready) posix_spawn_file_actions_destroy(&actions);
     free(argv);
     free(envp);
-    if (input_pipe[0] >= 0) close(input_pipe[0]);
-    if (error == 0 && input_length > 0) {
-        sigset_t pipe_signal;
-        sigset_t previous_mask;
-        sigemptyset(&pipe_signal);
-        sigaddset(&pipe_signal, SIGPIPE);
-        int mask_error = pthread_sigmask(SIG_BLOCK, &pipe_signal, &previous_mask);
-        if (mask_error != 0) {
-            (void)kill(child, SIGKILL);
-            (void)waitpid(child, NULL, 0);
-            close(input_pipe[1]);
-            return -mask_error;
-        }
-        sigset_t pending;
-        int pipe_was_pending = sigpending(&pending) == 0 &&
-                               sigismember(&pending, SIGPIPE) == 1;
-        size_t written = 0;
-        int write_failed = 0;
-        while (written < input_length) {
-            ssize_t count = write(input_pipe[1], input_data + written,
-                                  input_length - written);
-            if (count > 0) {
-                written += (size_t)count;
-            } else if (count < 0 && errno == EINTR) {
-                continue;
-            } else {
-                (void)kill(child, SIGKILL);
-                (void)waitpid(child, NULL, 0);
-                write_failed = 1;
-                break;
-            }
-        }
-        if (!pipe_was_pending) {
-            sigset_t pending_after_write;
-            if (sigpending(&pending_after_write) == 0 &&
-                sigismember(&pending_after_write, SIGPIPE) == 1) {
-                int received_signal = 0;
-                while (sigwait(&pipe_signal, &received_signal) == EINTR) {}
-            }
-        }
-        (void)pthread_sigmask(SIG_SETMASK, &previous_mask, NULL);
-        if (write_failed) {
-            close(input_pipe[1]);
-            return -EIO;
-        }
+    rh_process_close(&input_pipe[0]);
+    rh_process_close(&stdout_pipe[1]); rh_process_close(&stderr_pipe[1]);
+    if (error != 0) {
+        rh_process_close(&input_pipe[1]); rh_process_close(&stdout_pipe[0]);
+        rh_process_close(&stderr_pipe[0]); rh_process_close(&stdout_file); rh_process_close(&stderr_file);
+        return -error;
     }
-    if (input_pipe[1] >= 0) close(input_pipe[1]);
-    if (error != 0) return -error;
 
-    const int64_t started = rh_process_millis();
-    if (started < 0) {
-        (void)kill(child, SIGKILL);
-        (void)waitpid(child, NULL, 0);
-        return -EIO;
+    sigset_t pipe_signal, previous_mask, pending;
+    sigemptyset(&pipe_signal); sigaddset(&pipe_signal, SIGPIPE);
+    int mask_error = pthread_sigmask(SIG_BLOCK, &pipe_signal, &previous_mask);
+    if (mask_error != 0) {
+        (void)kill(-child, SIGKILL); (void)waitpid(child, NULL, 0);
+        rh_process_close(&input_pipe[1]); rh_process_close(&stdout_pipe[0]);
+        rh_process_close(&stderr_pipe[0]); rh_process_close(&stdout_file); rh_process_close(&stderr_file);
+        return -mask_error;
     }
-    for (;;) {
-        int status = 0;
-        pid_t waited = waitpid(child, &status, WNOHANG);
-        if (waited == child) {
-            if (WIFEXITED(status)) return WEXITSTATUS(status);
-            if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-            return -ECHILD;
-        }
-        if (waited < 0 && errno != EINTR) return -errno;
+    int pipe_was_pending = sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1;
+    int stdout_open = 1, stderr_open = 1, child_reaped = 0, status = 0;
+    size_t input_written = 0, output_bytes = 0;
+    int result = -ECHILD;
+    while (stdout_open || stderr_open || !child_reaped) {
         int64_t now = rh_process_millis();
-        if (now < 0) {
-            (void)kill(child, SIGKILL);
-            (void)waitpid(child, NULL, 0);
-            return -EIO;
+        if (now < 0) { result = -EIO; (void)kill(-child, SIGKILL); break; }
+        if (now - started >= timeout_ms) { result = 124; (void)kill(-child, SIGKILL); break; }
+
+        struct pollfd fds[3];
+        nfds_t count = 0;
+        int input_slot = -1, stdout_slot = -1, stderr_slot = -1;
+        if (input_pipe[1] >= 0) { input_slot = (int)count; fds[count++] = (struct pollfd){input_pipe[1], POLLOUT, 0}; }
+        if (stdout_open) { stdout_slot = (int)count; fds[count++] = (struct pollfd){stdout_pipe[0], POLLIN | POLLHUP, 0}; }
+        if (stderr_open) { stderr_slot = (int)count; fds[count++] = (struct pollfd){stderr_pipe[0], POLLIN | POLLHUP, 0}; }
+        int remaining = timeout_ms - (int)(now - started);
+        int wait_ms = remaining < 10 ? remaining : 10;
+        int polled = poll(fds, count, wait_ms);
+        if (polled < 0 && errno != EINTR) { result = -errno; (void)kill(-child, SIGKILL); break; }
+
+        if (input_slot >= 0 && polled > 0 && (fds[input_slot].revents & (POLLOUT | POLLERR | POLLHUP))) {
+            ssize_t written = write(input_pipe[1], input_data + input_written, input_length - input_written);
+            if (written > 0) input_written += (size_t)written;
+            else if (written < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+                result = -EIO; (void)kill(-child, SIGKILL); break;
+            }
+            if (input_written == input_length) rh_process_close(&input_pipe[1]);
         }
-        if (now - started >= timeout_ms) {
-            (void)kill(child, SIGKILL);
-            while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
-            return 124;
+
+        int *read_fds[2] = {&stdout_pipe[0], &stderr_pipe[0]};
+        int output_fds[2] = {stdout_file, stderr_file};
+        int slots[2] = {stdout_slot, stderr_slot};
+        int *open_flags[2] = {&stdout_open, &stderr_open};
+        for (int stream = 0; stream < 2 && polled > 0; ++stream) {
+            if (slots[stream] < 0 || !(fds[slots[stream]].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+            char buffer[16384];
+            for (;;) {
+                ssize_t bytes = read(*read_fds[stream], buffer, sizeof(buffer));
+                if (bytes > 0) {
+                    if ((size_t)bytes > max_output_bytes - output_bytes) {
+                        result = -EFBIG; (void)kill(-child, SIGKILL); goto finished;
+                    }
+                    output_bytes += (size_t)bytes;
+                    if (output_fds[stream] >= 0 && rh_process_write_all(output_fds[stream], buffer, (size_t)bytes) != 0) {
+                        result = -EIO; (void)kill(-child, SIGKILL); goto finished;
+                    }
+                } else if (bytes == 0) {
+                    *open_flags[stream] = 0; rh_process_close(read_fds[stream]); break;
+                } else if (errno == EINTR) continue;
+                else if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                else { result = -errno; (void)kill(-child, SIGKILL); goto finished; }
+            }
         }
-        struct timespec pause = {.tv_sec = 0, .tv_nsec = 10000000};
-        while (nanosleep(&pause, &pause) < 0 && errno == EINTR) {}
+        if (!child_reaped) {
+            pid_t waited = waitpid(child, &status, WNOHANG);
+            if (waited == child) child_reaped = 1;
+            else if (waited < 0 && errno != EINTR) { result = -errno; (void)kill(-child, SIGKILL); break; }
+        }
     }
+finished:
+    rh_process_close(&input_pipe[1]);
+    if (!child_reaped) while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    if (!pipe_was_pending && sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1) {
+        int received = 0; while (sigwait(&pipe_signal, &received) == EINTR) {}
+    }
+    (void)pthread_sigmask(SIG_SETMASK, &previous_mask, NULL);
+    rh_process_close(&stdout_pipe[0]); rh_process_close(&stderr_pipe[0]);
+    rh_process_close(&stdout_file); rh_process_close(&stderr_file);
+    if (result == -ECHILD && WIFEXITED(status)) return WEXITSTATUS(status);
+    if (result == -ECHILD && WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return result;
 }

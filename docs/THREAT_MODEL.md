@@ -6,15 +6,18 @@
    directory. Trusted after `rh_git` validation (allowlist + kind check).
 2. **Subprocess boundary** — Git acquisition, native VCS collectors, DNS
    resolution, and curl transport use the `rh_process` POSIX spawn bridge with
-   NUL-delimited argv/env, explicit child environments, separate output-file
-   redirection, bounded optional stdin, and a wall-clock timeout. Its tests
+   NUL-delimited argv/env, explicit child environments, a combined 64 MiB
+   stdout/stderr cap, bounded optional stdin, and a monotonic wall-clock
+   timeout. Each child starts in its own process group, which is killed on
+   timeout or output overflow. Its tests
    prove shell metacharacters stay literal, byte-vector arguments preserve
    their boundaries, and transport credentials travel through stdin rather
    than argv or retained files. The process runner does not yet enforce a
-   generic output-byte cap, bound stdin delivery by the timeout, limit child
-   memory/process creation, or cancel process groups. `system(3)` remains only
-   in a store-test helper; production subprocess call sites in `rh_git` have
-   migrated. Individual fetchers retain their own byte limits.
+   child memory/process creation, or provide a directly tested descendant
+   cancellation case. Status values are integer-coded rather than a typed
+   result. `system(3)` remains only in a store-test helper; production
+   subprocess call sites in `rh_git` have migrated. Individual fetchers retain
+   their own byte limits.
 3. **No server endpoint** scans arbitrary server paths (M01-01): this CLI is
    local-only; there is no network listener in M00/M01.
 4. **No source-code execution** (S001): repositories are read with
