@@ -298,6 +298,21 @@ assert metrics["downstream_condition.intrinsic_coverage_share"]["value"] == {"nu
 print("[downstream] intrinsic join OK")
 PY
 
+echo "[downstream] scalar intrinsic observations form per-metric distributions"
+cat > "$T/intr-values.json" <<'JSON'
+{"schema":"rh-intrinsics/2","metrics":["history.months_active","review.count","release.count"],"values":[{"id":1,"mask":1,"observations":[6,null,null]},{"id":2,"mask":3,"observations":[12,2,null]},{"id":3,"mask":5,"observations":[9,null,1]}]}
+JSON
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/intr-values" --intrinsics "$T/intr-values.json" >/dev/null || fail "intrinsic distributions run"
+python3 - "$T/intr-values/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+covered = {m["key"]: m for m in d["intrinsics"]["covered"]}
+assert sorted(covered["history.months_active"]["distribution"]) == [6, 9, 12], covered
+assert covered["review.count"]["distribution"] == [2], covered
+assert covered["release.count"]["distribution"] == [1], covered
+print("[downstream] intrinsic empirical distributions OK")
+PY
+
 echo "[downstream] accepted mirror assertion collapses a family (R012)"
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/m" --mirror 2:3 >/dev/null || fail "mirror run"
 python3 - "$T/m/downstream.json" <<'PY'
@@ -444,7 +459,7 @@ rc_nofile=$?
 rc_pair=$?
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/badpair2" --mirror a:b >/dev/null 2>&1
 rc_pair2=$?
-printf '{"schema":"rh-intrinsics/2","metrics":[],"values":[]}' > "$T/badintr.json"
+printf '{"schema":"rh-intrinsics/3","metrics":[],"values":[]}' > "$T/badintr.json"
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/badintr" --intrinsics "$T/badintr.json" >/dev/null 2>&1
 rc_intr=$?
 python3 - "$T" <<'PY'
@@ -458,12 +473,16 @@ cases = {
     "duplicate-value-id": {"metrics": ["metric.one"], "values": [{"id": 1, "mask": 1}, {"id": 1, "mask": 0}]},
     "out-of-range-value-id": {"metrics": ["metric.one"], "values": [{"id": 99, "mask": 1}]},
     "malformed-value": {"metrics": ["metric.one"], "values": [None]},
+    "v2-missing-observations": {"schema": "rh-intrinsics/2", "metrics": ["metric.one"], "values": [{"id": 1, "mask": 1}]},
+    "v2-length-mismatch": {"schema": "rh-intrinsics/2", "metrics": ["metric.one"], "values": [{"id": 1, "mask": 1, "observations": []}]},
+    "v2-presence-mismatch": {"schema": "rh-intrinsics/2", "metrics": ["metric.one"], "values": [{"id": 1, "mask": 0, "observations": [2]}]},
+    "v2-unsupported-value": {"schema": "rh-intrinsics/2", "metrics": ["metric.one"], "values": [{"id": 1, "mask": 1, "observations": [True]}]},
 }
 for name, body in cases.items():
-    body["schema"] = "rh-intrinsics/1"
+    body.setdefault("schema", "rh-intrinsics/1")
     (root / f"{name}.json").write_text(json.dumps(body))
 PY
-for case in wide-metrics duplicate-metric empty-metric unknown-mask-bit duplicate-value-id out-of-range-value-id malformed-value; do
+for case in wide-metrics duplicate-metric empty-metric unknown-mask-bit duplicate-value-id out-of-range-value-id malformed-value v2-missing-observations v2-length-mismatch v2-presence-mismatch v2-unsupported-value; do
     "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/invalid-$case" --intrinsics "$T/$case.json" >/dev/null 2>&1
     rc_case=$?
     [[ "$rc_case" -eq 4 ]] || fail "invalid intrinsic contract $case must exit 4 (got $rc_case)"

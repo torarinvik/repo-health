@@ -54,6 +54,24 @@ module DownstreamReport:
                 return false if texts[(left_start.usize() + offset)] != texts[(right_start.usize() + offset)]
             true
 
+        def rh_ds_emit_intrinsic_value(out: mutable darray[u8]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, value_node: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            value: Json::RhJsonNode = nodes[value_node.usize()]
+            if value.kind == Json::RH_JSON_NUM:
+                valid: mutable i64 = 0
+                parsed: i64 = Json::rh_json_int(nodes, raw, value_node, &valid)
+                return false if valid != 1
+                Base::rh_push_decimal_i64(out, parsed)
+                return true
+            if value.kind == Json::RH_JSON_STR:
+                start: mutable i64 = 0
+                finish: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, value_node, &start, &finish)
+                out.push(34)
+                Base::rh_json_escape(out, texts, start.usize(), finish.usize())
+                out.push(34)
+                return true
+            false
+
         # Optional temporal edge fields default to an unbounded value. A present
         # field with the wrong JSON type is rejected rather than silently erased.
         def rh_ds_optional_i64(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, raw: darray[u8]&, object: i64, key: u8&, value: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -288,6 +306,8 @@ module DownstreamReport:
             icounts: mutable darray[i64] = []
             itotal: mutable i64 = 0
             ijoin: mutable bool = false
+            intrinsic_values: mutable bool = false
+            observation_rows: mutable darray[i64] = []
             if has_intr:
                 iroot: i64 = Json::rh_json_parse(intr_raw, nodes, texts)
                 return -3 if iroot < 0
@@ -300,8 +320,8 @@ module DownstreamReport:
                     se: mutable i64 = 0
                     if Json::rh_json_str_span(nodes, scheme, &ss, &se):
                         if se - ss == 15:
-                            if rh_ds_lit(texts, ss, se, "rh-intrinsics/1"):
-                                schema_ok <- true
+                            schema_ok <- rh_ds_lit(texts, ss, se, "rh-intrinsics/1") or rh_ds_lit(texts, ss, se, "rh-intrinsics/2")
+                            intrinsic_values <- rh_ds_lit(texts, ss, se, "rh-intrinsics/2")
                 metrics_idx: i64 = Json::rh_json_obj_get(nodes, texts, iroot, "metrics")
                 values_idx: i64 = Json::rh_json_obj_get(nodes, texts, iroot, "values")
                 return -3 if not schema_ok or metrics_idx < 0 or values_idx < 0
@@ -330,8 +350,11 @@ module DownstreamReport:
                 while k < node_count |k: i64 = 0, ipresent|:
                     ipresent.push(0)
                     k <- k + 1
+                while k < node_count |k: i64 = 0, observation_rows|:
+                    observation_rows.push(-1)
+                    k <- k + 1
                 varr: Json::RhJsonNode = nodes[values_idx.usize()]
-                while vchild >= 0 |vchild: i64 = varr.first_child, nodes, texts, intr_raw, imask, ipresent, node_count, icount|:
+                while vchild >= 0 |vchild: i64 = varr.first_child, nodes, texts, intr_raw, imask, ipresent, observation_rows, node_count, icount, intrinsic_values|:
                     vc: Json::RhJsonNode = nodes[vchild.usize()]
                     return -3 if vc.kind != Json::RH_JSON_OBJ
                     idk: i64 = Json::rh_json_obj_get(nodes, texts, vchild, "id")
@@ -343,6 +366,25 @@ module DownstreamReport:
                     return -3 if okid != 1 or okmk != 1 or vid < 0 or vid >= node_count or vmk < 0
                     return -3 if ipresent[vid.usize()] != 0
                     return -3 if icount < 63 and vmk.u64() >> icount.usize() != 0
+                    if intrinsic_values:
+                        observations_idx: i64 = Json::rh_json_obj_get(nodes, texts, vchild, "observations")
+                        return -3 if observations_idx < 0 or nodes[observations_idx.usize()].kind != Json::RH_JSON_ARR
+                        observations: Json::RhJsonNode = nodes[observations_idx.usize()]
+                        return -3 if observations.child_count != icount
+                        for metric_index in 0..<icount.usize() |metric_index, nodes, intr_raw, vmk, observations_idx|:
+                            observation: i64 = Json::rh_json_arr_get(nodes, observations_idx, metric_index.i64())
+                            return -3 if observation < 0
+                            item: Json::RhJsonNode = nodes[observation.usize()]
+                            has_value: bool = ((vmk.u64() >> metric_index) & 1) != 0
+                            return -3 if has_value and item.kind == Json::RH_JSON_NULL
+                            return -3 if not has_value and item.kind != Json::RH_JSON_NULL
+                            if has_value:
+                                return -3 if item.kind != Json::RH_JSON_NUM and item.kind != Json::RH_JSON_STR
+                                if item.kind == Json::RH_JSON_NUM:
+                                    valid_value: mutable i64 = 0
+                                    Json::rh_json_int(nodes, intr_raw, observation, &valid_value)
+                                    return -3 if valid_value != 1
+                        observation_rows[vid.usize()] <- observations_idx
                     imask[vid.usize()] <- vmk.u64()
                     ipresent[vid.usize()] <- 1
                     vchild <- nodes[vchild.usize()].next_sibling
@@ -444,11 +486,29 @@ module DownstreamReport:
                     Base::rh_push_text(out, "\",\"observed\":")
                     cnt: i64 = icounts[mj] if mj < icounts.count else 0
                     Base::rh_push_decimal_i64(out, cnt)
+                    Base::rh_push_text(out, ",\"distribution\":")
+                    if intrinsic_values:
+                        Base::rh_push_text(out, "[")
+                        sample_count: mutable i64 = 0
+                        for dependent_index in 0..<trans2.count |dependent_index, trans2, observation_rows, nodes, out, texts, intr_raw, mj, sample_count|:
+                            dependent_id: i64 = trans2[dependent_index]
+                            if dependent_id >= 0 and dependent_id < observation_rows.count.i64():
+                                row: i64 = observation_rows[dependent_id.usize()]
+                                if row >= 0:
+                                    observation: i64 = Json::rh_json_arr_get(nodes, row, mj.i64())
+                                    if observation >= 0 and nodes[observation.usize()].kind != Json::RH_JSON_NULL:
+                                        if sample_count > 0:
+                                            out.push(44)
+                                        return -3 if not DownstreamReport::rh_ds_emit_intrinsic_value(out, nodes, texts, intr_raw, observation)
+                                        sample_count <- sample_count + 1
+                        Base::rh_push_text(out, "]")
+                    else:
+                        Base::rh_push_text(out, "null")
                     Base::rh_push_text(out, "}")
                     mj <- mj + 1
                 Base::rh_push_text(out, "],\"dependent_total\":")
                 Base::rh_push_decimal_i64(out, itotal)
-                Base::rh_push_text(out, ",\"note\":\"per-metric covered denominators over the dependent set; a dependent missing a metric is not counted for that metric; intrinsics are independent of downstream inputs (anti-circularity)\"")
+                Base::rh_push_text(out, ",\"note\":\"per-metric covered denominators over the selected dependent set; distributions are exact scalar observations in deterministic dependent order when supplied; a dependent missing a metric is not counted for that metric; intrinsics are independent of downstream inputs (anti-circularity)\"")
                 Base::rh_push_text(out, "}")
             else:
                 Base::rh_push_text(out, "null")
