@@ -524,6 +524,10 @@ and malformed-input gates. Restricted role publication is also a real path:
 coverage aggregates only; actor IDs, permission documents, and personal
 rankings are omitted (`tests/test_role_publication_cli.sh`). The static and
 server-rendered M06 paths now expose continuity reports as accessible tables.
+Continuity, succession, and restricted role-publication outputs now each carry
+digest-bound transformation sidecars; the focused CLI tests independently
+recompute their source/configuration/output digests and check deterministic
+sidecar publication.
 NOT yet:
 live authenticated M04 role *declaration* collection from forge permissions
 (needs M02 auth flows), succession overlap published as a metric only with
