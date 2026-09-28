@@ -73,6 +73,8 @@ mkdir -p "$T/fix2" && git init -q -b main "$T/fix2" && (
   GIT_AUTHOR_DATE="2025-01-05T12:00:00Z" GIT_COMMITTER_DATE="2025-01-05T12:00:00Z" git commit -qm "third"
 )
 "$CLI" scan --repo "$T/fix2" --out "$T/rep-fix2" --window-days 36500 >/dev/null || fail "fix2 scan"
+printf 'not a directory\n' > "$T/out-file"
+expect 4 "$CLI" scan --repo "$T/fix2" --out "$T/out-file" --window-days 36500
 python3 - "$T/rep-fix2" <<'PY'
 import hashlib, pathlib, sys
 root = pathlib.Path(sys.argv[1])

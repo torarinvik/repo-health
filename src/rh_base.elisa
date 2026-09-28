@@ -1,6 +1,8 @@
 include "../../Elisa-compiler/elisacore_std/elisacore_runtime.elisa"
 include "../../Elisa-compiler/elisacore_std/elisacore_fileio.elisa"
 extern mkdir(path: cstr, mode: u16) -> i32
+extern opendir(path: cstr) -> mutable heap void&? can[Blocking.IO, Memory.Allocate]
+extern closedir(directory: heap void&) -> i32 can[Blocking.IO, Memory.Release]
 extern getenv(name: cstr) -> u8&?
 @link_name("time")
 extern c_time(arg: void&?) -> i64
@@ -14,7 +16,7 @@ module Base:
         # strcmp, puts, write, getenv, file_exists, arenas, string views. This
         # file declares NO extern that the standard library already provides.
         # Remaining direct `extern`s are only what the standard library lacks:
-        # `mkdir` and `time`.
+        # POSIX directory creation/checking and `time`.
         # File I/O uses the standard error-union helpers. Byte operations use
         # bounded string views so embedded NUL bytes remain ordinary data.
         #
@@ -197,8 +199,21 @@ module Base:
                 FileIoError.WriteFailed: false
             wrote
 
-        def rh_make_dir(path: cstr) -> bool:
-            mkdir(path, 493) == 0
+        def rh_make_dir(path: cstr) -> bool can[Blocking.IO, Memory.Allocate, Memory.Release]:
+            return true if mkdir(path, 493) == 0
+            directory: mutable heap void&? = opendir(path)
+            return false if directory == null
+            directory_ref: heap void& = directory
+            return false if closedir(directory_ref) != 0
+            true
+
+        def rh_make_dir_path_prefix(path: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return false if path.count == 0
+            path.push(0)
+            path_ptr: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+            created: bool = Base::rh_make_dir(path_ptr)
+            path.pop()
+            created
 
         # Parse decimal [start, end) from byte buffer. ok_out: 1 valid, 0 invalid.
         # Optional leading '-'; empty span or any other byte is invalid.
