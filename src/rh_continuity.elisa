@@ -20,6 +20,7 @@ module Continuity:
         const RH_RET_NOT_RETAINED: i64 = 1
         const RH_RET_CENSORED: i64 = 2
         const RH_RET_UNOBSERVABLE: i64 = 3
+        const RH_RET_INVALID: i64 = -1
 
         # Local arithmetic helper. Metrics::rh_gcd remains private to its module;
         # continuity owns this small reduction operation for its effective-count
@@ -246,10 +247,23 @@ module Continuity:
         # Retention per actor (plan §19.3). t0 is the first observed qualifying
         # event instant under the selected history policy; the return interval is
         # [t0 + start_days, t0 + end_days). Censoring beats unobservability
-        # because it needs no extra data to decide.
+        # because it needs no extra data to decide. Invalid times, reversed day
+        # ranges, and unrepresentable window endpoints return RH_RET_INVALID.
+        def rh_retention_window_bounds(t0: i64, start_days: i64, end_days: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool:
+            return false if t0 < 0 or start_days < 0 or end_days <= start_days
+            return false if start_days > 9223372036854775807 / 86400 or end_days > 9223372036854775807 / 86400
+            start_offset: i64 = start_days * 86400
+            end_offset: i64 = end_days * 86400
+            return false if t0 > 9223372036854775807 - start_offset or t0 > 9223372036854775807 - end_offset
+            start_out[0] <- t0 + start_offset
+            end_out[0] <- t0 + end_offset
+            true
+
         def rh_retention_status(t0: i64, start_days: i64, end_days: i64, cutoff: i64, coverage_start: i64, coverage_end: i64, has_return_event: bool) -> i64:
-            w_start: i64 = t0 + start_days * 86400
-            w_end: i64 = t0 + end_days * 86400
+            return RH_RET_INVALID if cutoff < 0 or coverage_start < 0 or coverage_end < coverage_start
+            w_start: mutable i64 = 0
+            w_end: mutable i64 = 0
+            return RH_RET_INVALID if not rh_retention_window_bounds(t0, start_days, end_days, &w_start, &w_end)
             return RH_RET_CENSORED if w_end > cutoff
             return RH_RET_UNOBSERVABLE if coverage_start > w_start
             return RH_RET_UNOBSERVABLE if coverage_end < w_end

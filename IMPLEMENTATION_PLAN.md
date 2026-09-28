@@ -1536,6 +1536,8 @@ First-event eligibility may additionally require a complete lookback interval so
 
 Return intervals are evaluated per actor. Do not approximate them by comparing annual totals or treating everyone active in two calendar years as 12-month retained.
 
+The retention status primitive now rejects negative/invalid times, reversed day or coverage intervals, and checked-multiplication/addition overflow with a distinct invalid result; the scan propagates that result as a failed input rather than counting it as unobservable. M04 oracles cover Unix epoch zero, reversed intervals, invalid cutoff, and both arithmetic overflow boundaries.
+
 ### 19.4 Reverse-dependency traversal
 
 Run traversal over a prefiltered graph projection so edge scope, version context, and visibility cannot be forgotten inside individual query handlers.
