@@ -452,6 +452,8 @@ import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 cases = {
     "wide-metrics": {"metrics": [f"metric.{i}" for i in range(64)], "values": []},
+    "duplicate-metric": {"metrics": ["metric.one", "metric.one"], "values": []},
+    "empty-metric": {"metrics": [""], "values": []},
     "unknown-mask-bit": {"metrics": ["metric.one"], "values": [{"id": 1, "mask": 2}]},
     "duplicate-value-id": {"metrics": ["metric.one"], "values": [{"id": 1, "mask": 1}, {"id": 1, "mask": 0}]},
     "out-of-range-value-id": {"metrics": ["metric.one"], "values": [{"id": 99, "mask": 1}]},
@@ -461,7 +463,7 @@ for name, body in cases.items():
     body["schema"] = "rh-intrinsics/1"
     (root / f"{name}.json").write_text(json.dumps(body))
 PY
-for case in wide-metrics unknown-mask-bit duplicate-value-id out-of-range-value-id malformed-value; do
+for case in wide-metrics duplicate-metric empty-metric unknown-mask-bit duplicate-value-id out-of-range-value-id malformed-value; do
     "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/invalid-$case" --intrinsics "$T/$case.json" >/dev/null 2>&1
     rc_case=$?
     [[ "$rc_case" -eq 4 ]] || fail "invalid intrinsic contract $case must exit 4 (got $rc_case)"
