@@ -1130,8 +1130,11 @@ is now available: `rh_cli proof --input <file> --out <file>` consumes
 `rh-proof-input/1` and emits `rh-proof-result/1`, retaining proposition id,
 source revision, checker version, proof digest, replay result, assumptions,
 trusted computing base, and a separate bound/conflicted/unbound artifact
-status (`tests/test_proof_cli.sh`). It never runs a checker and never calls
-replay a whole-application safety claim. Forecast evidence is now covered by
+status. Proof and artifact digests must be lowercase 64-hex SHA-256 values;
+both evidence lists are required and capped at 256 nonempty strings. The
+input/output fixtures and schemas are checked in, and malformed digest/list
+cases fail closed (`tests/test_proof_cli.sh`). It never runs a checker and
+never calls replay a whole-application safety claim. Forecast evidence is now covered by
 `rh_cli forecast --input <file> --out <file>`, which validates temporal,
 family-separated, censoring-aware splits, a named observable binary outcome,
 and model/baseline Brier scores with matching submitted cohort identifiers and

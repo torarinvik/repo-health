@@ -1218,7 +1218,7 @@ Prefer concrete first-level findings such as “artifact digest changed under th
 
 ### 16.4 Formal-proof evidence
 
-Create an adapter for proof claims with proposition identifiers, source revision, checker version, assumptions, trusted computing base, proof digest, replay result, and artifact binding.
+`rh_cli proof` accepts proposition identifiers, source revision, checker version, explicit bounded assumptions and trusted-computing-base lists, a syntactically valid `sha256:` proof digest, replay result, and an optional artifact binding with its own SHA-256 digest. `fixtures/m11/proof-input.json` and `proof-result.json` are independently schema-checked golden envelopes, and `tests/test_proof_cli.sh` rejects malformed digests and missing evidence lists.
 
 An Elisa or elisa-proof integration can use this contract later. It should not require the rest of repo-health to be implemented in Elisa. Proof validity and source-to-binary correspondence remain separate fields.
 
