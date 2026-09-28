@@ -73,6 +73,28 @@ mkdir -p "$T/fix2" && git init -q -b main "$T/fix2" && (
   GIT_AUTHOR_DATE="2025-01-05T12:00:00Z" GIT_COMMITTER_DATE="2025-01-05T12:00:00Z" git commit -qm "third"
 )
 "$CLI" scan --repo "$T/fix2" --out "$T/rep-fix2" --window-days 36500 >/dev/null || fail "fix2 scan"
+python3 - "$T/rep-fix2" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+manifest = (root / "bundle.manifest").read_text()
+for metadata in (
+    "bundle-schema: rh-evidence-bundle/1",
+    "report-schema: repo-health-m01/1.0.0",
+    "rights-status: not-assessed",
+    "retention-class: user-controlled-local",
+    "identity-revision: not-applied",
+    "mapping-revision: not-applied",
+):
+    assert metadata in manifest, metadata
+for rel in ("evidence/git-default-count.txt", "evidence/git-files.txt",
+            "evidence/git-log.bin", "evidence/git-shallow.txt", "evidence/git-version.txt"):
+    key = f"object-sha256-{rel}: "
+    expected = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+    assert manifest.count(key + expected) == 1, key
+expected = hashlib.sha256((root / "report.json").read_bytes()).hexdigest()
+assert manifest.count("expected-output-sha256-report.json: " + expected) == 1
+print("[m01] evidence manifest hashes and metadata OK")
+PY
 python3 - "$T/rep-fix2/report.json" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -453,6 +475,9 @@ EOF
 cp -r "$T/rep-fix2" "$T/rep-tampered"
 printf 'X' >> "$T/rep-tampered/evidence/git-log.bin"
 expect 5 "$CLI" replay --bundle "$T/rep-tampered/bundle.manifest" --out "$T/replay-t"
+cp -r "$T/rep-fix2" "$T/rep-files-tampered"
+printf 'X' >> "$T/rep-files-tampered/evidence/git-files.txt"
+expect 5 "$CLI" replay --bundle "$T/rep-files-tampered/bundle.manifest" --out "$T/replay-files-t"
 echo "[m01] tamper exit-5 OK"
 # corrupt manifest -> exit 4 (fails closed)
 cp "$T/rep-fix2/bundle.manifest" "$T/bad.manifest"

@@ -431,6 +431,10 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if Base::rh_io_read(logp, logb) < 0:
         rh_cli_err("cannot read log evidence (over size cap?)")
         return 4
+    git_version_bytes: mutable darray[u8] = []
+    if Base::rh_io_read(verp, git_version_bytes) < 0:
+        rh_cli_err("cannot read Git version evidence")
+        return 4
     snap: mutable Scan::RhSnapshot = Scan::RhSnapshot{commits_all: 0, commits: 0, rejected: 0, merges: 0, future: 0, skew: 0, has_commits: 0, min_at: 0, max_at: 0, min_ct: 0, max_ct: 0, oldest_at: 0, email_lines: 0, shallow: 0, truncated: 0, manifest: 0, digest: 0}
     Scan::rh_snapshot_init(&snap)
     months: mutable darray[i64] = []
@@ -550,8 +554,12 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if not Report::rh_write_report_md(repmp, repo, &snap, &ctx):
         rh_cli_err("cannot write report.md")
         return 4
+    report_bytes: mutable darray[u8] = []
+    if Base::rh_io_read(repjp, report_bytes) < 0:
+        rh_cli_err("cannot read expected report output")
+        return 4
     manp: cstr = (&manf[0]).cast[cstr] can Unsafe.PointerCast
-    if not Report::rh_write_manifest(manp, repo, &snap, &ctx):
+    if not Report::rh_write_manifest(manp, repo, &snap, &ctx, logb, defaultb, shab, filesb, git_version_bytes, report_bytes):
         rh_cli_err("cannot write bundle.manifest")
         return 4
     done: mutable darray[u8] =
@@ -627,6 +635,13 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     if Base::rh_io_read(lp, logb) < 0:
         rh_cli_err("cannot read retained log evidence (no live data substituted)")
         return 4
+    log_integrity: i64 = Report::rh_manifest_sha256_matches(manb, "object-sha256-evidence/git-log.bin", logb)
+    if log_integrity == 0:
+        rh_cli_err("bundle has no unique log digest")
+        return 4
+    if log_integrity < 0:
+        rh_cli_err("retained log digest mismatch")
+        return 5
     defaultpath: mutable darray[u8] = []
     has_default_dir: bool = rh_dirname(bundle, defaultpath)
     if has_default_dir:
@@ -638,6 +653,13 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     if Base::rh_io_read(defaultp, defaultb) < 0:
         rh_cli_err("cannot read retained default revision evidence")
         return 4
+    default_integrity: i64 = Report::rh_manifest_sha256_matches(manb, "object-sha256-evidence/git-default-count.txt", defaultb)
+    if default_integrity == 0:
+        rh_cli_err("bundle has no unique default revision digest")
+        return 4
+    if default_integrity < 0:
+        rh_cli_err("retained default revision digest mismatch")
+        return 5
     default_end: i64 = Base::rh_find_byte(defaultb, 0, 10)
     default_stop: usize = default_end.usize() if default_end >= 0 else defaultb.count
     default_ok: mutable i64 = 0
@@ -656,6 +678,13 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     if Base::rh_io_read(filesp, retained_files) < 0:
         rh_cli_err("cannot read retained snapshot file evidence")
         return 4
+    files_integrity: i64 = Report::rh_manifest_sha256_matches(manb, "object-sha256-evidence/git-files.txt", retained_files)
+    if files_integrity == 0:
+        rh_cli_err("bundle has no unique file evidence digest")
+        return 4
+    if files_integrity < 0:
+        rh_cli_err("retained file evidence digest mismatch")
+        return 5
     window_start: i64 = cutoff - days * 86400 if not full else 0
     snap: mutable Scan::RhSnapshot = Scan::RhSnapshot{commits_all: 0, commits: 0, rejected: 0, merges: 0, future: 0, skew: 0, has_commits: 0, min_at: 0, max_at: 0, min_ct: 0, max_ct: 0, oldest_at: 0, email_lines: 0, shallow: 0, truncated: 0, manifest: 0, digest: 0}
     Scan::rh_snapshot_init(&snap)

@@ -13,6 +13,7 @@
 
 
 include "./rh_base.elisa"
+include "./rh_sha256.elisa"
 include "./rh_observation.elisa"
 include "./rh_scan.elisa"
 include "./rh_git_metrics.elisa"
@@ -671,7 +672,17 @@ module Report:
             Base::rh_push_text(out, "`. Replay with `rh_cli replay` against the retained bundle.\n")
             Base::rh_io_write(path, out)
 
-        def rh_write_manifest(path: cstr, repo: cstr, snap: Scan::RhSnapshot&, ctx: RhReportCtx&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+    private:
+        def rh_report_append_sha256(out: mutable darray[u8]&, label: u8&, data: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            digest: mutable darray[u8] = []
+            Sha256::rh_sha256(data, digest)
+            Base::rh_push_text(out, label)
+            for i in 0..<digest.count |i, digest, out|:
+                out.push(digest[i])
+            out.push(10)
+
+    public:
+        def rh_write_manifest(path: cstr, repo: cstr, snap: Scan::RhSnapshot&, ctx: RhReportCtx&, log: darray[u8]&, default_count: darray[u8]&, shallow: darray[u8]&, files: darray[u8]&, git_version: darray[u8]&, report: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             out: mutable darray[u8] =
                 out: mutable darray[u8] = []
                 Base::rh_push_text(out, "repo-health-bundle-manifest 1\ntool: rh_cli 0.1.0\nsource: ")
@@ -700,7 +711,41 @@ module Report:
             Base::rh_push_text(out, "\ndefault-revisions: ")
             Base::rh_push_decimal_i64(out, ctx.default_revisions)
             Base::rh_push_text(out, "\nfiles: evidence/git-log.bin evidence/git-default-count.txt evidence/git-shallow.txt evidence/git-version.txt evidence/git-files.txt evidence/emails.uniq\n")
+            Base::rh_push_text(out, "bundle-schema: rh-evidence-bundle/1\nreport-schema: repo-health-m01/1.0.0\nrights-status: not-assessed\nretention-class: user-controlled-local\nidentity-revision: not-applied\nmapping-revision: not-applied\n")
+            rh_report_append_sha256(out, "object-sha256-evidence/git-default-count.txt: ", default_count)
+            rh_report_append_sha256(out, "object-sha256-evidence/git-files.txt: ", files)
+            rh_report_append_sha256(out, "object-sha256-evidence/git-log.bin: ", log)
+            rh_report_append_sha256(out, "object-sha256-evidence/git-shallow.txt: ", shallow)
+            rh_report_append_sha256(out, "object-sha256-evidence/git-version.txt: ", git_version)
+            rh_report_append_sha256(out, "expected-output-sha256-report.json: ", report)
             Base::rh_io_write(path, out)
+
+    public:
+        # Returns 1 for an exact single digest binding, 0 for absent/ambiguous
+        # metadata, and -1 when a present digest does not match the retained bytes.
+        def rh_manifest_sha256_matches(manifest: darray[u8]&, label: u8&, data: darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            field: mutable darray[u8] = []
+            Base::rh_push_text(field, label)
+            Base::rh_push_text(field, ": ")
+            field_count: mutable i64 = 0
+            field_start: mutable usize = 0
+            while pos + field.count <= manifest.count |pos: usize = 0, manifest, field, field_count, field_start|:
+                matched: bool =
+                    while k < field.count |matched: bool = true, k: usize = 0, pos, field, manifest| -> matched:
+                        matched <- false if manifest[pos + k] != field[k]
+                        k <- k + 1
+                if matched:
+                    field_count <- field_count + 1
+                    field_start <- pos + field.count
+                pos <- pos + 1
+            return 0 if field_count != 1 or field_start + 64 > manifest.count
+            digest: mutable darray[u8] = []
+            Sha256::rh_sha256(data, digest)
+            return 0 if digest.count != 64
+            for i in 0..<64.usize() |i, digest, manifest, field_start|:
+                return -1 if manifest[field_start + i] != digest[i]
+            return 0 if field_start + 64 < manifest.count and manifest[field_start + 64] != 10 and manifest[field_start + 64] != 13
+            1
 
         # Parse "digest-fnv1a64: <16 hex>" back out of a manifest. False when absent
         # or malformed (replay then fails closed, never fabricates success).
