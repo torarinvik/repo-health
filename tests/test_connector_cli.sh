@@ -185,6 +185,7 @@ cat > "$T/probe-bin/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >> "$RH_PROBE_CURL_ARGS"
+if [[ -n "${RH_PROBE_CURL_EXIT:-}" ]]; then exit "$RH_PROBE_CURL_EXIT"; fi
 body_out=""
 url=""
 response_body="$RH_PROBE_BODY"
@@ -274,6 +275,22 @@ grep -Fxq 'header = "Authorization: Bearer ghp_probe_fixture"' "$T/probe.config"
 for evidence in "$T"/traffic-probe.out.github-traffic-views.*; do
   [[ ! -f "$evidence" ]] || ! grep -Fq 'ghp_probe_fixture' "$evidence" || fail "probe token leaked into evidence"
 done
+
+echo "[connector] failed curl process is not confused with an HTTP response"
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_EXIT=23 RH_PROBE_CURL_ARGS="$T/probe-process-failure.args" \
+  RH_PROBE_CURL_CONFIG="$T/probe-process-failure.config" \
+  "$ROOT/build/rh_cli" connector probe --github-repo example/project --out "$T/probe-process-failure.out" >/dev/null \
+  || fail "transport process failure should be reported as probe evidence"
+python3 - "$T/probe-process-failure.out" "$T" <<'PY'
+import json, pathlib, sys
+d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[2])
+assert d["capabilities"]["traffic"]["status"] == "unavailable", d
+assert d["capabilities"]["traffic"]["http_status"] is None, d
+assert d["capabilities"]["traffic"]["coverage_state"] == "unavailable", d
+assert (t / "probe-process-failure.out.github-traffic-views.err").exists()
+print("[connector] runner failure stays distinct from upstream HTTP status")
+PY
 
 for case_spec in "401:unauthorized:$T/probe-error.json" "403:forbidden_or_rate_limited:$T/probe-error.json" "404:not_found_or_private:$T/probe-error.json" "429:rate_limited:$T/probe-error.json" "200:malformed:$T/probe-malformed.json" "000:unavailable:$T/probe-error.json"; do
   IFS=: read -r http want body <<< "$case_spec"
