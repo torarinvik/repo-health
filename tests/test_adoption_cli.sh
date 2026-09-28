@@ -37,17 +37,17 @@ metrics = {m["key"]: m for m in d["metrics"]}
 for metric in metrics.values():
     assert metric["evidence"] == ["adoption-input"], metric
     assert set(metric["quality_dimensions"]) == {"completeness", "freshness", "validity", "provenance"}, metric
-    assert metric["quality_dimensions"]["provenance"] == "evidence-backed", metric
+    assert metric["quality_dimensions"]["provenance"] == "evidence_backed", metric
     if metric["status"] == "observed":
         assert metric["quality_dimensions"] == {
             "completeness": "complete", "freshness": "unknown",
-            "validity": "valid", "provenance": "evidence-backed"
+            "validity": "valid", "provenance": "evidence_backed"
         }, metric
     else:
         assert metric["status"] == "not_applicable", metric
         assert metric["value"] is None and metric["quality_dimensions"] == {
             "completeness": "unknown", "freshness": "unknown",
-            "validity": "unknown", "provenance": "evidence-backed"
+            "validity": "unknown", "provenance": "evidence_backed"
         }, metric
 assert metrics["adoption.unknown_count"]["value"] == 1, metrics
 assert metrics["adoption.first_seen_only_count"]["value"] == 1, metrics
@@ -69,7 +69,7 @@ assert metrics["downstream_condition.supported_version_adoption_share"] == {
     "evidence": ["adoption-input"],
     "quality_dimensions": {
         "completeness": "complete", "freshness": "unknown",
-        "validity": "valid", "provenance": "evidence-backed"
+        "validity": "valid", "provenance": "evidence_backed"
     }
 }, metrics["downstream_condition.supported_version_adoption_share"]
 assert d["evidence_counts"] == {"version_comparison": 3, "version_comparison_unknown": 3, "supported_line_assessed": 3, "supported_line_unknown": 3}, d
