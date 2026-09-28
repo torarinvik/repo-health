@@ -8,7 +8,7 @@ module ForgeInstanceProbe:
     private:
         struct RhFipCapture:
             status: mutable darray[u8]
-            transport: i64
+            transport: Process::RhProcessResult
             valid: bool
 
         def rh_fip_char(byte: u8) -> bool:
@@ -37,8 +37,8 @@ module ForgeInstanceProbe:
                 i <- i + 1
             slash > 0 and not (slash == 1 and repository[0] == 46) and not (length - slash == 1 and repository[slash] == 46)
 
-        def rh_fip_status(raw: darray[u8]&, transport: i64, valid: bool) -> u8&:
-            return "unavailable" if transport != 0
+        def rh_fip_status(raw: darray[u8]&, transport: Process::RhProcessResult, valid: bool) -> u8&:
+            return "unavailable" if not Process::rh_succeeded(transport)
             return "observed" if Base::rh_bytes_equal_literal(raw, 0, raw.count.i64(), "200") and valid
             return "malformed" if Base::rh_bytes_equal_literal(raw, 0, raw.count.i64(), "200")
             return "unauthorized" if Base::rh_bytes_equal_literal(raw, 0, raw.count.i64(), "401")
@@ -77,14 +77,14 @@ module ForgeInstanceProbe:
             url_record: mutable darray[u8] = []
             Base::rh_push_cstr(url_record, url_ptr)
             url_record.push(10)
-            return RhFipCapture{status: [], transport: -1, valid: false} if not Base::rh_io_write(url_ptr_path, url_record)
-            transport: i64 = Git::rh_run_https_get_legacy(url_ptr, body_ptr, status_ptr, error_ptr)
-            return RhFipCapture{status: [], transport: transport, valid: false} if transport < 0
+            return RhFipCapture{status: [], transport: Process::rh_setup_error(5), valid: false} if not Base::rh_io_write(url_ptr_path, url_record)
+            transport: Process::RhProcessResult = Git::rh_run_https_get_result(url_ptr, body_ptr, status_ptr, error_ptr)
+            return RhFipCapture{status: [], transport: transport, valid: false} if not Process::rh_succeeded(transport)
             status: mutable darray[u8] = []
             _ = Base::rh_io_read(status_ptr, status)
             body: mutable darray[u8] = []
             body_read: i64 = Base::rh_io_read(body_ptr, body)
-            return RhFipCapture{status: status, transport: -1, valid: false} if body_read < 0 or body.count.i64() > 3145728
+            return RhFipCapture{status: status, transport: Process::rh_setup_error(5), valid: false} if body_read < 0 or body.count.i64() > 3145728
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(body, nodes, texts) if Base::rh_bytes_equal_literal(status, 0, status.count.i64(), "200") else -1

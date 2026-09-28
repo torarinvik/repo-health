@@ -10,7 +10,7 @@ module GitHubProbe:
 
         struct RhGpCapture:
             status: mutable darray[u8]
-            transport: i64
+            transport: Process::RhProcessResult
             response_valid: bool
             ok: bool
 
@@ -58,8 +58,8 @@ module GitHubProbe:
             views: i64 = Json::rh_json_obj_get(nodes, texts, root, "views")
             views >= 0 and nodes[views.usize()].kind == Json::RH_JSON_ARR
 
-        def rh_gp_traffic_status(transport: i64, status: darray[u8]&, response_valid: bool) -> u8&:
-            return "unavailable" if transport != 0
+        def rh_gp_traffic_status(transport: Process::RhProcessResult, status: darray[u8]&, response_valid: bool) -> u8&:
+            return "unavailable" if not Process::rh_succeeded(transport)
             return "observed" if GitHubProbe::rh_gp_status_is(status, "200") and response_valid
             return "malformed" if GitHubProbe::rh_gp_status_is(status, "200")
             return "unauthorized" if GitHubProbe::rh_gp_status_is(status, "401")
@@ -115,21 +115,21 @@ module GitHubProbe:
             url_evidence: mutable darray[u8] = []
             Base::rh_push_cstr(url_evidence, url_ptr)
             url_evidence.push(10)
-            return RhGpCapture{status: [], transport: -1, response_valid: false, ok: false} if not Base::rh_io_write(url_ptr_file, url_evidence)
-            transport: i64 = Git::rh_run_github_api_get_legacy(url_ptr, body_ptr, status_ptr, error_ptr)
-            return RhGpCapture{status: [], transport: transport, response_valid: false, ok: false} if transport < 0
+            return RhGpCapture{status: [], transport: Process::rh_setup_error(5), response_valid: false, ok: false} if not Base::rh_io_write(url_ptr_file, url_evidence)
+            transport: Process::RhProcessResult = Git::rh_run_github_api_get_result(url_ptr, body_ptr, status_ptr, error_ptr)
+            return RhGpCapture{status: [], transport: transport, response_valid: false, ok: false} if not Process::rh_succeeded(transport)
             status: mutable darray[u8] = []
             _ = Base::rh_io_read(status_ptr, status)
             body: mutable darray[u8] = []
             body_read: i64 = Base::rh_io_read(body_ptr, body)
-            return RhGpCapture{status: status, transport: transport, response_valid: false, ok: false} if body_read >= 0 and body.count.i64() > RH_GP_MAX_BODY_BYTES
+            return RhGpCapture{status: status, transport: Process::rh_setup_error(5), response_valid: false, ok: false} if body_read >= 0 and body.count.i64() > RH_GP_MAX_BODY_BYTES
             response_valid: mutable bool = false
             if body_read >= 0 and GitHubProbe::rh_gp_status_is(status, "200"):
                 parsed_valid: bool = GitHubProbe::rh_gp_array_body_valid(body) if not traffic_response else GitHubProbe::rh_gp_traffic_body_valid(body)
                 response_valid <- parsed_valid
             RhGpCapture{status: status, transport: transport, response_valid: response_valid, ok: true}
 
-        def rh_gp_emit_capability(out: mutable darray[u8]&, declaration: cstr, transport: i64, status: darray[u8]&, response_valid: bool, traffic: bool) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_gp_emit_capability(out: mutable darray[u8]&, declaration: cstr, transport: Process::RhProcessResult, status: darray[u8]&, response_valid: bool, traffic: bool) -> void can[Memory.Allocate, Abort.Panic]:
             label: u8& = GitHubProbe::rh_gp_traffic_status(transport, status, response_valid)
             status_ok: mutable i64 = 0
             http_status: mutable i64 = 0
@@ -165,7 +165,7 @@ module GitHubProbe:
             Base::rh_push_cstr(out, (&error_file[0]).cast[cstr] can Unsafe.PointerCast)
             Base::rh_push_text(out, "\"}")
 
-        def rh_gp_emit(repository: cstr, credential_configured: bool, transport: i64, status: darray[u8]&, response_valid: bool, url_path: cstr, body_path: cstr, status_path: cstr, error_path: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def rh_gp_emit(repository: cstr, credential_configured: bool, transport: Process::RhProcessResult, status: darray[u8]&, response_valid: bool, url_path: cstr, body_path: cstr, status_path: cstr, error_path: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             label: u8& = GitHubProbe::rh_gp_traffic_status(transport, status, response_valid)
@@ -318,8 +318,8 @@ module GitHubProbe:
             Base::rh_push_cstr(url_evidence, url_ptr)
             url_evidence.push(10)
             return -1 if not Base::rh_io_write(url_file_ptr, url_evidence)
-            transport: i64 = Git::rh_run_github_api_get_legacy(url_ptr, body_ptr, status_ptr, error_ptr)
-            return -1 if transport < 0
+            transport: Process::RhProcessResult = Git::rh_run_github_api_get_result(url_ptr, body_ptr, status_ptr, error_ptr)
+            return -1 if not Process::rh_succeeded(transport)
             status: mutable darray[u8] = []
             _ = Base::rh_io_read(status_ptr, status)
             body: mutable darray[u8] = []
