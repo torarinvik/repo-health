@@ -468,6 +468,10 @@ counts 4→3→2→3→4), automation stratification with `unresolved` never
 forced human, and an `rh-continuity/1` report carrying cohort rule,
 coverage, identity revision, concentration components, retention tallies
 and event-type totals (empty populations serialize as `null`, never 0).
+Invalid accepted-link actor indexes are ignored before parent access, and
+cluster cardinality is counted in the same pass that emits canonical roots;
+the decreasing-parent-chain regression confirms deterministic minimum-root
+labels. This removes the former pair of nested root-comparison scans.
 The identity module takes no event ledger at all, so revocation is
 structurally unable to alter raw evidence (asserted in the harness).
 Product integration now exists: `rh_cli continuity --bundle <manifest>
