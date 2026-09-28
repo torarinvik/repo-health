@@ -487,6 +487,17 @@ import re; src = re.sub(r'digest-fnv1a64: [0-9a-f]+', 'digest-fnv1a64: zzzzzzzzz
 open('$T/bad.manifest','w').write(src)"
 expect 4 "$CLI" replay --bundle "$T/bad.manifest" --out "$T/replay-b"
 echo "[m01] corrupt-manifest exit-4 OK"
+cp "$T/rep-fix2/bundle.manifest" "$T/bad-object.manifest"
+python3 - "$T/bad-object.manifest" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+needle = "object-sha256-evidence/git-log.bin: "
+assert s.count(needle) == 1
+open(p, "w").write(s.replace(needle, "x" + needle, 1))
+PY
+expect 4 "$CLI" replay --bundle "$T/bad-object.manifest" --out "$T/replay-bad-object"
+echo "[m01] malformed digest-field exit-4 OK"
 
 # --- R030: no universal score language anywhere in outputs ---
 if grep -ril "health_score\|trust_score\|trustworthy\|health-rating" "$T/rep-fix2" "$T/rep-empty" "$T/rep-hostile" 2>/dev/null; then
