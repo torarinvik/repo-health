@@ -344,13 +344,6 @@ module Adoption:
             Base::rh_push_text(out, key)
             Base::rh_push_text(out, "\",\"version\":\"1.0.0\",\"status\":\"error\",\"value\":null,\"reason\":\"invalid-observation-contract\",\"evidence\":[],\"quality_dimensions\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"}}")
 
-        def rh_adoption_specialized_quality_dimensions(out: mutable darray[u8]&, observed: bool) -> void can[Memory.Allocate, Abort.Panic]:
-            Base::rh_push_text(out, ",\"quality_dimensions\":{\"completeness\":\"")
-            Base::rh_push_text(out, "complete" if observed else "unknown")
-            Base::rh_push_text(out, "\",\"freshness\":\"unknown\",\"validity\":\"")
-            Base::rh_push_text(out, "valid" if observed else "unknown")
-            Base::rh_push_text(out, "\",\"provenance\":\"evidence_backed\"}")
-
         def rh_adoption_metric(out: mutable darray[u8]&, key: u8&, value: i64, population_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
             observation: Observation::RhObservation = rh_adoption_observation(Observation::RhMetricValue.Count(value), population_count > 0)
             if not Observation::rh_observation_valid(observation):
@@ -390,20 +383,73 @@ module Adoption:
             return 3 if duration < 31536000
             4
 
-        def rh_adoption_duration_metric(out: mutable darray[u8]&, key: u8&, counts: darray[i64]&, population_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_adoption_emit_histogram_value(out: mutable darray[u8]&, value: Observation::RhMetricValue) -> void can[Memory.Allocate, Abort.Panic]:
+            match value:
+                Observation::RhMetricValue.CountHistogram5(bin_0, bin_1, bin_2, bin_3, bin_4, population_count):
+                    Base::rh_push_text(out, "{\"bucket_upper_seconds\":[604799,2591999,7775999,31535999,null],\"counts\":[")
+                    Base::rh_push_decimal_i64(out, bin_0)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_1)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_2)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_3)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_4)
+                    Base::rh_push_text(out, "],\"population_count\":")
+                    Base::rh_push_decimal_i64(out, population_count)
+                    Base::rh_push_text(out, "}")
+                _:
+                    Base::rh_push_text(out, "null")
+
+        def rh_adoption_is_histogram(value: Observation::RhMetricValue) -> bool:
+            match value:
+                Observation::RhMetricValue.CountHistogram5(bin_0, bin_1, bin_2, bin_3, bin_4, population_count):
+                    bin_0 >= 0 and bin_1 >= 0 and bin_2 >= 0 and bin_3 >= 0 and bin_4 >= 0 and population_count > 0
+                _:
+                    false
+
+        def rh_adoption_histogram_metric(out: mutable darray[u8]&, key: u8&, counts: mutable darray[i64]&, population_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            if population_count < 0:
+                rh_adoption_contract_error_metric(out, key)
+                return
+            if population_count == 0:
+                if counts.count != 5:
+                    rh_adoption_contract_error_metric(out, key)
+                    return
+                empty_bins: bool =
+                    while index < counts.count |empty: bool = true, index: usize = 0, counts| -> empty:
+                        empty <- empty and counts[index] == 0
+                        index <- index + 1
+                if not empty_bins:
+                    rh_adoption_contract_error_metric(out, key)
+                    return
+                observation: Observation::RhObservation = rh_adoption_observation(Observation::RhMetricValue.Absent, false)
+                Base::rh_push_text(out, ",{\"key\":\"")
+                Base::rh_push_text(out, key)
+                Base::rh_push_text(out, "\",\"version\":\"1.0.0\",\"status\":\"not_applicable\",\"value\":null,\"evidence\":[\"adoption-input\"]")
+                rh_adoption_quality_dimensions(out, observation)
+                Base::rh_push_text(out, "}")
+                return
+            if counts.count != 5:
+                rh_adoption_contract_error_metric(out, key)
+                return
+            observation: Observation::RhObservation = rh_adoption_observation(Observation::RhMetricValue.CountHistogram5(counts[0], counts[1], counts[2], counts[3], counts[4], population_count), true)
+            if not Observation::rh_observation_valid(observation) or not rh_adoption_is_histogram(observation.value):
+                rh_adoption_contract_error_metric(out, key)
+                return
             Base::rh_push_text(out, ",{\"key\":\"")
             Base::rh_push_text(out, key)
             Base::rh_push_text(out, "\",\"version\":\"1.0.0\",\"status\":\"")
-            Base::rh_push_text(out, "observed\",\"value\":{\"bucket_upper_seconds\":[604799,2591999,7775999,31535999,null],\"counts\":[") if population_count > 0 else Base::rh_push_text(out, "not_applicable\",\"value\":null")
-            if population_count > 0:
-                while i < counts.count |i: usize = 0, counts, out|:
-                    Base::rh_push_text(out, ",") if i > 0
-                    Base::rh_push_decimal_i64(out, counts[i])
-                    i <- i + 1
-                Base::rh_push_text(out, "]}")
+            Base::rh_push_text(out, Observation::rh_status_label(observation.status))
+            Base::rh_push_text(out, "\",\"value\":")
+            rh_adoption_emit_histogram_value(out, observation.value)
             Base::rh_push_text(out, ",\"evidence\":[\"adoption-input\"]")
-            rh_adoption_specialized_quality_dimensions(out, population_count > 0)
+            rh_adoption_quality_dimensions(out, observation)
             Base::rh_push_text(out, "}")
+
+        def rh_adoption_duration_metric(out: mutable darray[u8]&, key: u8&, counts: mutable darray[i64]&, population_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_adoption_histogram_metric(out, key, counts, population_count)
 
         def rh_adoption_lag(release_at: i64, has_release: bool, target_version: i64, has_target: bool, qualifying_version: i64, has_qualifying_version: bool, qualifying_at: i64, has_qualifying_at: bool, followup_through: i64, has_followup: bool, coverage: RhAdoptionCoverage) -> RhAdoptionLag:
             observed: bool = has_release and has_target and has_qualifying_version and has_qualifying_at and qualifying_version >= target_version
@@ -415,20 +461,8 @@ module Adoption:
             else:
                 RhAdoptionLag{status: Downstream::RH_ADOPTION_LAG_UNKNOWN, seconds: 0, through: 0}
 
-        def rh_adoption_lag_metric(out: mutable darray[u8]&, key: u8&, counts: darray[i64]&, population_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
-            Base::rh_push_text(out, ",{\"key\":\"")
-            Base::rh_push_text(out, key)
-            Base::rh_push_text(out, "\",\"version\":\"1.0.0\",\"status\":\"")
-            Base::rh_push_text(out, "observed\",\"value\":{\"bucket_upper_seconds\":[604799,2591999,7775999,31535999,null],\"counts\":[") if population_count > 0 else Base::rh_push_text(out, "not_applicable\",\"value\":null")
-            if population_count > 0:
-                while i < counts.count |i: usize = 0, counts, out|:
-                    Base::rh_push_text(out, ",") if i > 0
-                    Base::rh_push_decimal_i64(out, counts[i])
-                    i <- i + 1
-                Base::rh_push_text(out, "]}")
-            Base::rh_push_text(out, ",\"evidence\":[\"adoption-input\"]")
-            rh_adoption_specialized_quality_dimensions(out, population_count > 0)
-            Base::rh_push_text(out, "}")
+        def rh_adoption_lag_metric(out: mutable darray[u8]&, key: u8&, counts: mutable darray[i64]&, population_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            rh_adoption_histogram_metric(out, key, counts, population_count)
 
     public:
         def rh_adoption_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:

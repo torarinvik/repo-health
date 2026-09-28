@@ -49,6 +49,33 @@ assert "losses remain explicit" in d["note"], d
 print("[lineage] separate delivery/origin identities + explicit losses OK")
 PY
 
+python3 - "$T/in.json" "$T/histogram-input.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["metrics"][0]["observation"]["value"] = {
+    "kind": "count_histogram5", "bin_0": 1, "bin_1": 2,
+    "bin_2": 0, "bin_3": 3, "bin_4": 4, "population_count": 10
+}
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" lineage --input "$T/histogram-input.json" --out "$T/histogram-output.json" >/dev/null || fail "typed histogram lineage"
+python3 - "$T/histogram-input.json" "$T/histogram-output.json" <<'PY'
+import json, sys
+source = json.load(open(sys.argv[1]))
+result = json.load(open(sys.argv[2]))
+assert result["metrics"][0]["observation"]["value"] == source["metrics"][0]["observation"]["value"], result
+print("[lineage] fixed-width histogram observations validate and round-trip")
+PY
+python3 - "$T/histogram-input.json" "$T/bad-histogram-input.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["metrics"][0]["observation"]["value"]["population_count"] = 11
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+if "$ROOT/build/rh_cli" lineage --input "$T/bad-histogram-input.json" --out "$T/bad-histogram-output.json" >/dev/null 2>&1; then
+  fail "histogram denominator mismatch accepted"
+fi
+
 python3 - "$T/in.json" "$T/legacy-v1.json" <<'PY'
 import json, sys
 document = json.load(open(sys.argv[1]))

@@ -76,10 +76,10 @@ assert d["evidence_counts"] == {"version_comparison": 3, "version_comparison_unk
 assert d["duration_counts"] == {"confirmed": 1, "right_censored": 2, "unknown": 3}, d
 assert d["upgrade_lag_counts"] == {"observed": 0, "right_censored": 0, "unknown": 6}, d
 assert metrics["adoption.confirmed_duration_distribution"]["value"] == {
-    "bucket_upper_seconds": [604799, 2591999, 7775999, 31535999, None], "counts": [1, 0, 0, 0, 0]
+    "bucket_upper_seconds": [604799, 2591999, 7775999, 31535999, None], "counts": [1, 0, 0, 0, 0], "population_count": 1
 }, metrics["adoption.confirmed_duration_distribution"]
 assert metrics["adoption.right_censored_duration_distribution"]["value"] == {
-    "bucket_upper_seconds": [604799, 2591999, 7775999, 31535999, None], "counts": [2, 0, 0, 0, 0]
+    "bucket_upper_seconds": [604799, 2591999, 7775999, 31535999, None], "counts": [2, 0, 0, 0, 0], "population_count": 2
 }, metrics["adoption.right_censored_duration_distribution"]
 assert "not proof of migration" in d["note"], d
 print("[adoption] staged states + right censoring OK")
@@ -111,7 +111,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
 assert m["adoption.confirmed_duration_distribution"]["value"] == {
-    "bucket_upper_seconds": [604799, 2591999, 7775999, 31535999, None], "counts": [2, 1, 1, 1, 1]
+    "bucket_upper_seconds": [604799, 2591999, 7775999, 31535999, None], "counts": [2, 1, 1, 1, 1], "population_count": 6
 }, m
 print("[adoption] duration histogram boundaries include exact cutoffs")
 PY
