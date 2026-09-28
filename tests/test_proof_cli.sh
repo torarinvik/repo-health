@@ -30,6 +30,19 @@ assert "not a whole-application safety claim" in d["note"], d
 print("[proof] typed replay/binding evidence OK")
 PY
 
+python3 - "$T/in.json" "$T/unbound.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["artifact_binding"] = None
+json.dump(d, open(sys.argv[2], "w"))
+PY
+"$ROOT/build/rh_cli" proof --input "$T/unbound.json" --out "$T/unbound-out.json" >/dev/null || fail "explicit null artifact binding"
+python3 - "$T/unbound-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["artifact_binding"] is None, d
+PY
+echo "[proof] explicit null artifact binding is accepted as unbound"
+
 echo "[proof] conflicted binding stays conflicted"
 sed 's/"source_revision":"rev-123","artifact_digest"/"source_revision":"other-rev","artifact_digest"/' "$T/in.json" > "$T/conflict.json"
 "$ROOT/build/rh_cli" proof --input "$T/conflict.json" --out "$T/conflict.out" >/dev/null || fail "conflict run"
