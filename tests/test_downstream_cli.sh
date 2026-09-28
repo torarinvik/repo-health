@@ -513,6 +513,10 @@ rc_time=$?
 rc_scope=$?
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/bad-platform" --platform 0 >/dev/null 2>&1
 rc_platform=$?
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/bad-unavailable" --unavailable 99 >/dev/null 2>&1
+rc_unavailable=$?
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/private-unavailable" --private 2 --unavailable 2 >/dev/null 2>&1
+rc_private_unavailable=$?
 printf '%s' '{"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"a","version":"1"}],"edges":[{"from":0,"to":0,"introduced":100,"removed":99}],"unresolved":[],"advisories":[]}' > "$T/bad-interval.json"
 "$ROOT/build/rh_cli" downstream --graph "$T/bad-interval.json" --subject 0 --out "$T/bad-interval" >/dev/null 2>&1
 rc_interval=$?
@@ -530,6 +534,8 @@ set -e
 [[ "$rc_time" -eq 2 ]] || fail "malformed valid-time filter must exit 2 (got $rc_time)"
 [[ "$rc_scope" -eq 2 ]] || fail "unknown scope filter must exit 2 (got $rc_scope)"
 [[ "$rc_platform" -eq 2 ]] || fail "invalid platform filter must exit 2 (got $rc_platform)"
+[[ "$rc_unavailable" -eq 4 ]] || fail "out-of-graph unavailable node must exit 4 (got $rc_unavailable)"
+[[ "$rc_private_unavailable" -eq 4 ]] || fail "private unavailable node must exit 4 (got $rc_private_unavailable)"
 [[ "$rc_interval" -eq 4 ]] || fail "invalid edge validity interval must exit 4 (got $rc_interval)"
 [[ "$rc_mapping_endpoint" -eq 4 ]] || fail "out-of-graph accepted mapping endpoints must exit 4 (got $rc_mapping_endpoint)"
 
