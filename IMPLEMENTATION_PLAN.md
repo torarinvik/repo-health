@@ -1032,7 +1032,7 @@ schema](https://docs.sourcehut.org/hg.sr.ht/).
 `src/rh_sourcehut.elisa` now normalizes bounded captured `git.sr.ht` GraphQL
 history pages through `rh_cli vcs --format sourcehut --input`. It preserves
 opaque repository and commit IDs, separate author and committer signatures
-and UTC timestamps, parent counts, and the exact continuation cursor; a
+and UTC timestamps, source-native parent IDs and counts, and the exact continuation cursor; a
 non-null cursor explicitly marks the page incomplete. The fixture and golden
 `rh-vcs/1` output are schema-checked, and the VCS test verifies deterministic
 bytes, transformation digests, complete/null-cursor handling, and fail-closed
