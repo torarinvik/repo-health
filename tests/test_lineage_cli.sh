@@ -77,8 +77,25 @@ sed 's/"assessment_result_digest":"[0-9a-f]*/"assessment_result_digest":"BAD/' "
 "$ROOT/build/rh_cli" lineage --input "$T/bad-assessment-digest.json" --out "$T/x" >/dev/null 2>&1; rc_assessment_digest=$?
 sed 's/"assessment_subject_revision":7/"assessment_subject_revision":-1/' "$T/in.json" > "$T/bad-subject-revision.json"
 "$ROOT/build/rh_cli" lineage --input "$T/bad-subject-revision.json" --out "$T/x" >/dev/null 2>&1; rc_revision=$?
+python3 - "$T/in.json" "$T/duplicate-coverage.json" <<'PY'
+import sys
+payload = open(sys.argv[1]).read()
+needle = '"coverage":"partial"'
+assert payload.count(needle) == 1
+open(sys.argv[2], "w").write(payload.replace(needle, needle + ',"coverage":"complete"', 1))
+PY
+"$ROOT/build/rh_cli" lineage --input "$T/duplicate-coverage.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate=$?
+python3 - "$T/in.json" "$T/duplicate-transformation-state.json" <<'PY'
+import sys
+payload = open(sys.argv[1]).read()
+needle = '"state":"preserved"'
+assert payload.count(needle) == 1
+open(sys.argv[2], "w").write(payload.replace(needle, needle + ',"state":"discarded"', 1))
+PY
+"$ROOT/build/rh_cli" lineage --input "$T/duplicate-transformation-state.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate_state=$?
 set -e
-[[ "$rc_coverage" -eq 4 && "$rc_digest" -eq 4 && "$rc_state" -eq 4 && "$rc_class" -eq 4 && "$rc_time" -eq 4 && "$rc_tool" -eq 4 && "$rc_assessment_digest" -eq 4 && "$rc_revision" -eq 4 ]] || fail "invalid lineage must exit 4 (got $rc_coverage/$rc_digest/$rc_state/$rc_class/$rc_time/$rc_tool/$rc_assessment_digest/$rc_revision)"
+[[ "$rc_coverage" -eq 4 && "$rc_digest" -eq 4 && "$rc_state" -eq 4 && "$rc_class" -eq 4 && "$rc_time" -eq 4 && "$rc_tool" -eq 4 && "$rc_assessment_digest" -eq 4 && "$rc_revision" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_duplicate_state" -eq 4 ]] || fail "invalid lineage must exit 4 (got $rc_coverage/$rc_digest/$rc_state/$rc_class/$rc_time/$rc_tool/$rc_assessment_digest/$rc_revision/$rc_duplicate/$rc_duplicate_state)"
+echo "[lineage] duplicate root and nested object keys rejected"
 
 python3 - "$T/oversized.json" <<'PY'
 import sys
