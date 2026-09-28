@@ -22,7 +22,7 @@ include "./rh_files.elisa"
 module Report:
     private:
         def rh_evidence_link(object: Observation::RhEvidenceObject) -> Observation::RhEvidenceLink:
-            Observation::RhEvidenceLink{object: object}
+            Observation::RhEvidenceLink{object: object, locator: string_view_slice(bytes_view([]), 0, 0)}
 
         def rh_evidence_locator(link: Observation::RhEvidenceLink) -> u8&:
             match link.object:
@@ -36,17 +36,22 @@ module Report:
                     "evidence/git-default-count.txt"
                 Observation::RhEvidenceObject.BundleManifest:
                     "bundle.manifest"
+                Observation::RhEvidenceObject.External:
+                    link.locator
 
         def rh_emit_evidence_link(buffer: mutable darray[u8]&, link: Observation::RhEvidenceLink) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(buffer, "\"")
-            Base::rh_push_text(buffer, rh_evidence_locator(link))
+            if link.object == Observation::RhEvidenceObject.External:
+                Base::rh_json_escape_view(buffer, link.locator)
+            else:
+                Base::rh_push_text(buffer, rh_evidence_locator(link))
             Base::rh_push_text(buffer, "\"")
 
         def rh_emit_observation_evidence(buffer: mutable darray[u8]&, observation: Observation::RhObservation) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(buffer, ",\"evidence\":[")
             for index in 0..<Observation::rh_evidence_links_count(observation.evidence) |index, observation|:
                 Base::rh_push_text(buffer, ",") if index > 0
-                rh_emit_evidence_link(buffer, Observation::RhEvidenceLink{object: Observation::rh_evidence_links_get(observation.evidence, index)})
+                rh_emit_evidence_link(buffer, Observation::rh_evidence_links_get_link(observation.evidence, index))
             Base::rh_push_text(buffer, "]")
 
         def rh_emit_contract_error(buffer: mutable darray[u8]&, key: u8&, version: u8&) -> void can[Memory.Allocate, Abort.Panic]:
@@ -58,8 +63,10 @@ module Report:
 
         def rh_report_evidence(first: Observation::RhEvidenceLink, second: Observation::RhEvidenceLink, count: u8) -> Observation::RhEvidenceLinks can[Memory.Allocate, Abort.Panic]:
             evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
-            Observation::rh_evidence_links_push(&evidence, first.object)
-            Observation::rh_evidence_links_push(&evidence, second.object) if count > 1
+            Observation::rh_evidence_links_push(&evidence, first.object) if first.object != Observation::RhEvidenceObject.External
+            Observation::rh_evidence_links_push_external(&evidence, first.locator) if first.object == Observation::RhEvidenceObject.External
+            Observation::rh_evidence_links_push(&evidence, second.object) if count > 1 and second.object != Observation::RhEvidenceObject.External
+            Observation::rh_evidence_links_push_external(&evidence, second.locator) if count > 1 and second.object == Observation::RhEvidenceObject.External
             evidence
 
         def rh_report_observation(status: u8, value: Observation::RhMetricValue, evidence_backed: bool, evidence: Observation::RhEvidenceLinks) -> Observation::RhObservation:

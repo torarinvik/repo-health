@@ -161,16 +161,23 @@ module ObservationCodec:
                     Base::rh_push_decimal_i64(out, code)
                     Base::rh_push_text(out, "}")
 
-        def rh_codec_evidence_object(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, node: i64, out: mutable Observation::RhEvidenceObject&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_codec_evidence_object(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, node: i64, out: mutable Observation::RhEvidenceLinks&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if node < 0 or nodes[node.usize()].kind != Json::RH_JSON_STR
             start: i64 = nodes[node.usize()].text_start
             end: i64 = nodes[node.usize()].text_end
-            return false if Base::rh_bytes_equal_literal(texts, start, end, "git_log") == false and Base::rh_bytes_equal_literal(texts, start, end, "git_shallow") == false and Base::rh_bytes_equal_literal(texts, start, end, "git_files") == false and Base::rh_bytes_equal_literal(texts, start, end, "git_default_count") == false and Base::rh_bytes_equal_literal(texts, start, end, "bundle_manifest") == false
-            out[0] <- Observation::RhEvidenceObject.GitLog if Base::rh_bytes_equal_literal(texts, start, end, "git_log")
-            out[0] <- Observation::RhEvidenceObject.GitShallow if Base::rh_bytes_equal_literal(texts, start, end, "git_shallow")
-            out[0] <- Observation::RhEvidenceObject.GitFiles if Base::rh_bytes_equal_literal(texts, start, end, "git_files")
-            out[0] <- Observation::RhEvidenceObject.GitDefaultCount if Base::rh_bytes_equal_literal(texts, start, end, "git_default_count")
-            out[0] <- Observation::RhEvidenceObject.BundleManifest if Base::rh_bytes_equal_literal(texts, start, end, "bundle_manifest")
+            if Base::rh_bytes_equal_literal(texts, start, end, "git_log"):
+                Observation::rh_evidence_links_push(out, Observation::RhEvidenceObject.GitLog)
+            elif Base::rh_bytes_equal_literal(texts, start, end, "git_shallow"):
+                Observation::rh_evidence_links_push(out, Observation::RhEvidenceObject.GitShallow)
+            elif Base::rh_bytes_equal_literal(texts, start, end, "git_files"):
+                Observation::rh_evidence_links_push(out, Observation::RhEvidenceObject.GitFiles)
+            elif Base::rh_bytes_equal_literal(texts, start, end, "git_default_count"):
+                Observation::rh_evidence_links_push(out, Observation::RhEvidenceObject.GitDefaultCount)
+            elif Base::rh_bytes_equal_literal(texts, start, end, "bundle_manifest"):
+                Observation::rh_evidence_links_push(out, Observation::RhEvidenceObject.BundleManifest)
+            else:
+                return false if end <= start
+                Observation::rh_evidence_links_push_external(out, string_view_slice(bytes_view(texts), start.usize(), end.usize()))
             true
 
         def rh_codec_evidence_decode(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, out: mutable Observation::RhEvidenceLinks&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -180,11 +187,8 @@ module ObservationCodec:
             items: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
             child: mutable i64 = nodes[evidence_node.usize()].first_child
             while child >= 0 |child, nodes, texts, items|:
-                object: mutable Observation::RhEvidenceObject = Observation::RhEvidenceObject.GitLog
-                return false if not rh_codec_evidence_object(nodes, texts, child, &object)
-                for index in 0..<Observation::rh_evidence_links_count(items) |index, items, object|:
-                    return false if Observation::rh_evidence_links_get(items, index) == object
-                Observation::rh_evidence_links_push(&items, object)
+                return false if not rh_codec_evidence_object(nodes, texts, child, &items)
+                return false if not Observation::rh_evidence_links_valid(items)
                 child <- nodes[child.usize()].next_sibling
             out[0] <- items
             true
@@ -194,7 +198,11 @@ module ObservationCodec:
             for index in 0..<Observation::rh_evidence_links_count(evidence) |index, evidence|:
                 Base::rh_push_text(out, ",") if index > 0
                 Base::rh_push_text(out, "\"")
-                Base::rh_push_text(out, Observation::rh_evidence_object_label(Observation::rh_evidence_links_get(evidence, index)))
+                link: Observation::RhEvidenceLink = Observation::rh_evidence_links_get_link(evidence, index)
+                if link.object == Observation::RhEvidenceObject.External:
+                    Base::rh_json_escape_view(out, link.locator)
+                else:
+                    Base::rh_push_text(out, Observation::rh_evidence_object_label(link.object))
                 Base::rh_push_text(out, "\"")
             Base::rh_push_text(out, "]")
 

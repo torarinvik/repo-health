@@ -74,6 +74,21 @@ def observation_evidence_roundtrip() -> bool can[Memory.Allocate, Abort.Panic]:
     return false if Observation::rh_evidence_links_get(decoded.evidence, 3) != Observation::RhEvidenceObject.GitDefaultCount
     Observation::rh_evidence_links_get(decoded.evidence, 4) == Observation::RhEvidenceObject.BundleManifest
 
+def observation_external_evidence_roundtrip() -> bool can[Memory.Allocate, Abort.Panic]:
+    raw: mutable darray[u8] = []
+    Base::rh_push_text(raw, "{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":1},\"incomplete\":false,\"quality\":{\"completeness\":\"complete\",\"freshness\":\"unknown\",\"validity\":\"valid\",\"provenance\":\"evidence_backed\"},\"evidence\":[\"oci://registry.invalid/artifact/\\\"quoted\\\"\"]}")
+    decoded: mutable Observation::RhObservation = Observation::rh_observation_make(Observation::RH_ST_UNAVAILABLE, Observation::RhMetricValue.Absent, false)
+    return false if not ObservationCodec::rh_observation_decode(raw, &decoded)
+    return false if Observation::rh_evidence_links_count(decoded.evidence) != 1
+    return false if Observation::rh_evidence_links_get(decoded.evidence, 0) != Observation::RhEvidenceObject.External
+    encoded: mutable darray[u8] = []
+    return false if not ObservationCodec::rh_observation_encode(decoded, encoded)
+    roundtripped: mutable Observation::RhObservation = decoded
+    return false if not ObservationCodec::rh_observation_decode(encoded, &roundtripped)
+    expected_link: Observation::RhEvidenceLink = Observation::rh_evidence_links_get_link(decoded.evidence, 0)
+    actual_link: Observation::RhEvidenceLink = Observation::rh_evidence_links_get_link(roundtripped.evidence, 0)
+    string_views_eq(expected_link.locator, actual_link.locator) == 1
+
 def check_byte_helpers(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     empty: darray[u8] = []
     check(Base::rh_bytes_equal_literal(empty, 0, 0, ""), "empty-span-equality", fails)
@@ -230,6 +245,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
                 valid <- valid and observation_roundtrip(Observation::rh_observation_make(status, Observation::RhMetricValue.Enumeration(0), incomplete))
     check(serialized_cross_product, "typed-observation-json-roundtrip-cross-product", &fails)
     check(observation_evidence_roundtrip(), "typed-observation-evidence-link-roundtrip", &fails)
+    check(observation_external_evidence_roundtrip(), "typed-observation-external-evidence-roundtrip", &fails)
     report_quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Partial, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.EvidenceBacked}
     duplicate_links: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
     Observation::rh_evidence_links_push(&duplicate_links, Observation::RhEvidenceObject.GitLog)
@@ -256,7 +272,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count_pair\",\"first\":0,\"second\":-1},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-negative-count-pair-rejected", &fails)
     check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count_pair\",\"first\":2,\"second\":1},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-count-pair-order-rejected", &fails)
     check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"nonsense\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[]}"), "codec-unknown-quality-label-rejected", &fails)
-    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[\"unknown\"]}"), "codec-unknown-evidence-link-rejected", &fails)
+    check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[\"\"]}"), "codec-empty-external-evidence-link-rejected", &fails)
     check(observation_decode_rejects_overbound_evidence(), "codec-evidence-overbound-rejected", &fails)
     check(observation_decode_rejects("{\"status\":0,\"value\":{\"kind\":\"count\",\"value\":0},\"incomplete\":false,\"quality\":{\"completeness\":\"unknown\",\"freshness\":\"unknown\",\"validity\":\"unknown\",\"provenance\":\"unknown\"},\"evidence\":[\"git_log\",\"git_log\"]}"), "codec-duplicate-evidence-rejected", &fails)
     check(observation_decode_rejects("not-json"), "codec-malformed-json-rejected", &fails)
