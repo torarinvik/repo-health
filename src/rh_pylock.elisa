@@ -34,6 +34,7 @@ module Pylock:
             extras_seen: mutable bool
             dependency_groups_seen: mutable bool
             default_groups_seen: mutable bool
+            tool_table_count: mutable i64
 
         struct RhPylockPackage:
             name_s: mutable i64
@@ -61,6 +62,7 @@ module Pylock:
             source_editable: mutable bool
             source_editable_seen: mutable bool
             dependency_array: mutable u8
+            tool_table_count: mutable i64
 
         struct RhPylockReference:
             owner: mutable i64
@@ -1096,6 +1098,41 @@ module Pylock:
                 cursor <- cursor + 1
             cursor == input_body_end
 
+        # PEP 751 tool tables are disposable extension metadata. Recognize
+        # their standard root segments without treating their values as
+        # installer inputs; nested tables share the same bounded namespace.
+        def rh_pylock_table_prefix(data: darray[u8]&, start: usize, end: usize, prefix: u8&) -> bool:
+            prefix_length: usize = strlen(prefix)
+            return false if end <= start + 2 or data[start] != 91 or data[start + 1] == 91 or data[end - 1] != 93
+            cursor: mutable usize = start + 1
+            body_end: usize = end - 1
+            expected_start: mutable usize = 0
+            while expected_start < prefix_length |cursor, body_end, data, prefix, prefix_length, expected_start|:
+                while cursor < body_end and (data[cursor] == 32 or data[cursor] == 9) |cursor, body_end, data|:
+                    cursor <- cursor + 1
+                expected_end: usize =
+                    while index < prefix_length and prefix[index] != 46 |index: usize = expected_start, prefix, prefix_length| -> index:
+                        index <- index + 1
+                quoted: bool = cursor < body_end and (data[cursor] == 34 or data[cursor] == 39)
+                quote: u8 = data[cursor] if quoted else 0
+                cursor <- cursor + 1 if quoted
+                while expected_start < expected_end |cursor, body_end, data, prefix, expected_start, expected_end|:
+                    return false if cursor >= body_end or data[cursor] != prefix[expected_start]
+                    cursor <- cursor + 1
+                    expected_start <- expected_start + 1
+                if quoted:
+                    return false if cursor >= body_end or data[cursor] != quote
+                    cursor <- cursor + 1
+                while cursor < body_end and (data[cursor] == 32 or data[cursor] == 9) |cursor, body_end, data|:
+                    cursor <- cursor + 1
+                if expected_start < prefix_length:
+                    return false if cursor >= body_end or data[cursor] != 46
+                    cursor <- cursor + 1
+                    expected_start <- expected_start + 1
+            while cursor < body_end and (data[cursor] == 32 or data[cursor] == 9) |cursor, body_end, data|:
+                cursor <- cursor + 1
+            cursor == body_end or data[cursor] == 46
+
         def rh_pylock_utf8_continuation(byte: u8) -> bool:
             byte >= 128 and byte <= 191
 
@@ -1175,6 +1212,7 @@ module Pylock:
                             source_editable: false,
                             source_editable_seen: false,
                             dependency_array: 0,
+                            tool_table_count: 0,
                         })
                         package_index <- packages.count.i64() - 1
                         reference_index <- -1
@@ -1241,6 +1279,20 @@ module Pylock:
                         return -1 if artifact_index < 0 or artifacts[artifact_index.usize()].kind != 3
                         reference_index <- -1
                         section <- 8
+                    elif rh_pylock_table_eq(data, trimmed_start, trimmed_end, "[tool]") or rh_pylock_table_prefix(data, trimmed_start, trimmed_end, "tool"):
+                        metadata.tool_table_count <- metadata.tool_table_count + 1
+                        reference_index <- -1
+                        artifact_index <- -1
+                        identity_index <- -1
+                        section <- 16
+                    elif package_index >= 0 and (rh_pylock_table_eq(data, trimmed_start, trimmed_end, "[packages.tool]") or rh_pylock_table_prefix(data, trimmed_start, trimmed_end, "packages.tool")):
+                        pkg_tool: mutable RhPylockPackage = packages[package_index.usize()]
+                        pkg_tool.tool_table_count <- pkg_tool.tool_table_count + 1
+                        packages[package_index.usize()] <- pkg_tool
+                        reference_index <- -1
+                        artifact_index <- -1
+                        identity_index <- -1
+                        section <- 17
                     elif rh_pylock_table_eq(data, trimmed_start, trimmed_end, "[[packages.dependencies]]"):
                         return -1 if package_index < 0 or packages[package_index.usize()].dependency_array == 1
                         reference_index <- rh_pylock_push_reference(refs, package_index)
@@ -1278,7 +1330,7 @@ module Pylock:
                         reference_index <- -1
                         artifact_index <- -1
                         unknown_tables[0] <- unknown_tables[0] + 1
-                    elif section == 0 or section == 1 or section == 2 or section == 3 or section == 4 or section == 5 or section == 6 or section == 7 or section == 8 or section == 10 or section == 11 or section == 12 or section == 13 or section == 14 or section == 15:
+                    elif section == 0 or section == 1 or section == 2 or section == 3 or section == 4 or section == 5 or section == 6 or section == 7 or section == 8 or section == 10 or section == 11 or section == 12 or section == 13 or section == 14 or section == 15 or section == 16 or section == 17:
                         key_s: mutable usize = trimmed_start
                         key_e: mutable usize = trimmed_end
                         value_s: mutable usize = trimmed_start
@@ -1601,7 +1653,7 @@ module Pylock:
             identities: mutable darray[RhPylockAttestationIdentity] = []
             identity_fields: mutable darray[RhPylockAttestationField] = []
             identity_claims: mutable darray[RhPylockAttestationClaim] = []
-            metadata: mutable RhPylockMetadata = RhPylockMetadata{environments: [], extras: [], dependency_groups: [], default_groups: [], environments_seen: false, extras_seen: false, dependency_groups_seen: false, default_groups_seen: false}
+            metadata: mutable RhPylockMetadata = RhPylockMetadata{environments: [], extras: [], dependency_groups: [], default_groups: [], environments_seen: false, extras_seen: false, dependency_groups_seen: false, default_groups_seen: false, tool_table_count: 0}
             created_s: mutable i64 = -1
             created_e: mutable i64 = -1
             python_s: mutable i64 = -1
@@ -1630,6 +1682,9 @@ module Pylock:
             rh_pylock_emit_strings(out, pool, metadata.dependency_groups)
             Base::rh_push_text(out, ",\"default_groups\":")
             rh_pylock_emit_strings(out, pool, metadata.default_groups)
+            Base::rh_push_text(out, ",\"tool_metadata_tables\":")
+            Base::rh_push_decimal_i64(out, metadata.tool_table_count)
+            Base::rh_push_text(out, ",\"tool_metadata_values_state\":\"discarded_disposable\"")
             Base::rh_push_text(out, ",\"root_relationship\":\"not_recorded\",\"dependency_semantics\":\"informational_only\",\"packages\":[")
             artifact_cursor: mutable usize = 0
             hash_cursor: mutable usize = 0
@@ -1652,6 +1707,9 @@ module Pylock:
                 rh_pylock_emit_fingerprint(out, pool, pkg.index_s, pkg.index_e)
                 Base::rh_push_text(out, ",\"source\":")
                 rh_pylock_emit_source(out, pool, pkg)
+                Base::rh_push_text(out, ",\"tool_metadata_tables\":")
+                Base::rh_push_decimal_i64(out, pkg.tool_table_count)
+                Base::rh_push_text(out, ",\"tool_metadata_values_state\":\"discarded_disposable\"")
                 Base::rh_push_text(out, ",\"attestation_identities\":[")
                 first_identity: mutable bool = true
                 while identity_cursor < identities.count and identities[identity_cursor].owner == package_id.i64() |identity_cursor, identities, identity_fields, identity_claims, pool, out, package_id, first_identity|:

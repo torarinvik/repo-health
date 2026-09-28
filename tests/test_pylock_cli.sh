@@ -227,6 +227,32 @@ EOF
 
 "$ROOT/build/rh_cli" pylock --input "$T/pylock.toml" --out "$T/result.json" | grep -q 'PEP 751 audit emitted' || fail "command did not emit audit"
 cmp "$ROOT/fixtures/packages/pylock-audit-result.json" "$T/result.json" || fail "audit output drifted from golden"
+cat > "$T/tool-tables.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'fixture'
+[[packages]]
+name = 'tool-aware'
+[ "tool" . audit ]
+endpoint = 'https://private.example.invalid'
+[ packages . tool ]
+token = 'must-not-be-published'
+[ packages . tool . "vendor" ]
+mode = 'discardable'
+EOF
+"$ROOT/build/rh_cli" pylock --input "$T/tool-tables.toml" --out "$T/tool-tables.json" >/dev/null || fail "PEP 751 disposable tool tables were rejected"
+python3 - "$T/tool-tables.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["tool_metadata_tables"] == 1, d
+assert d["tool_metadata_values_state"] == "discarded_disposable", d
+assert d["packages"][0]["tool_metadata_tables"] == 2, d
+assert d["packages"][0]["tool_metadata_values_state"] == "discarded_disposable", d
+assert d["coverage"]["unprojected_tables"] == 0, d
+serialized = json.dumps(d)
+for secret in ("must-not-be-published", "discardable", "https://private.example.invalid", "endpoint"):
+    assert secret not in serialized, serialized
+print("[pylock] PEP 751 tool-table scopes are counted while disposable values stay out of the projection")
+PY
 python3 - "$T/pylock.toml" "$T/spaced-table-headers.toml" <<'PY'
 from pathlib import Path
 import sys
