@@ -90,7 +90,8 @@ for metadata in (
 ):
     assert metadata in manifest, metadata
 for rel in ("evidence/git-default-count.txt", "evidence/git-files.txt",
-            "evidence/git-log.bin", "evidence/git-shallow.txt", "evidence/git-version.txt"):
+            "evidence/git-log.bin", "evidence/git-shallow.txt", "evidence/git-version.txt",
+            "evidence/git-partial.txt"):
     key = f"object-sha256-{rel}: "
     expected = hashlib.sha256((root / rel).read_bytes()).hexdigest()
     assert manifest.count(key + expected) == 1, key
@@ -265,6 +266,23 @@ mv "$T/rep-fix2/evidence/git-files.txt" "$T/rep-fix2/evidence/git-files.missing"
 expect 4 "$CLI" replay --bundle "$T/rep-fix2/bundle.manifest" --out "$T/replay-missing-files"
 mv "$T/rep-fix2/evidence/git-files.missing" "$T/rep-fix2/evidence/git-files.txt"
 echo "[m01] replay requires retained file evidence OK"
+# Rebinding a modified report digest must not make it replayable: replay
+# regenerates report.json from retained evidence and compares the exact bytes.
+cp -R "$T/rep-fix2" "$T/rep-forged-report"
+python3 - "$T/rep-forged-report/report.json" "$T/rep-forged-report/bundle.manifest" <<'PY'
+import hashlib, json, pathlib, sys
+report_path, manifest_path = map(pathlib.Path, sys.argv[1:])
+report = json.loads(report_path.read_bytes())
+report["metrics"][0]["value"] = 999
+report_bytes = (json.dumps(report, separators=(",", ":")) + "\n").encode()
+report_path.write_bytes(report_bytes)
+manifest = manifest_path.read_text()
+old = next(line for line in manifest.splitlines() if line.startswith("expected-output-sha256-report.json: "))
+new = "expected-output-sha256-report.json: " + hashlib.sha256(report_bytes).hexdigest()
+manifest_path.write_text(manifest.replace(old, new, 1))
+PY
+expect 5 "$CLI" replay --bundle "$T/rep-forged-report/bundle.manifest" --out "$T/replay-forged-report"
+echo "[m01] replay regenerates report despite rebound digest OK"
 # determinism: scan twice, same digest
 "$CLI" scan --repo "$T/fix2" --out "$T/rep-fix2b" --window-days 36500 >/dev/null || fail "rescan"
 a="$(grep digest-fnv1a64 "$T/rep-fix2/bundle.manifest")"; b="$(grep digest-fnv1a64 "$T/rep-fix2b/bundle.manifest")"
@@ -491,6 +509,20 @@ import re; src = re.sub(r'digest-fnv1a64: [0-9a-f]+', 'digest-fnv1a64: zzzzzzzzz
 open('$T/bad.manifest','w').write(src)"
 expect 4 "$CLI" replay --bundle "$T/bad.manifest" --out "$T/replay-b"
 echo "[m01] corrupt-manifest exit-4 OK"
+cp "$T/rep-fix2/bundle.manifest" "$T/duplicate-partial-clone.manifest"
+python3 - "$T/duplicate-partial-clone.manifest" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+line = next(line for line in s.splitlines(keepends=True) if line.startswith("partial-clone: "))
+open(p, "w").write(s + line)
+PY
+expect 4 "$CLI" replay --bundle "$T/duplicate-partial-clone.manifest" --out "$T/replay-duplicate-partial-clone"
+cp "$T/rep-fix2/bundle.manifest" "$T/bad-partial-clone.manifest"
+sed 's/partial-clone: false/partial-clone: maybe/' "$T/bad-partial-clone.manifest" > "$T/bad-partial-clone.tmp"
+mv "$T/bad-partial-clone.tmp" "$T/bad-partial-clone.manifest"
+expect 4 "$CLI" replay --bundle "$T/bad-partial-clone.manifest" --out "$T/replay-bad-partial-clone"
+echo "[m01] replay requires unique typed report context OK"
 cp "$T/rep-fix2/bundle.manifest" "$T/bad-object.manifest"
 python3 - "$T/bad-object.manifest" <<'PY'
 import sys

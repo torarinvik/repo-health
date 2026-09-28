@@ -546,7 +546,8 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
             Files::rh_file_metrics(filesb)
         else:
             Files::RhFileMetrics{readme: -1, contributing: -1, license: -1, installation: -1, api_reference: -1, governance: -1, code_ownership: -1, notice: -1, release_process: -1, succession_process: -1, license_files: -1, examples: -1, security_policy: -1, release_notes: -1, source_files: -1, ci_configuration: -1, test_files: -1, source_bytes: -1, missing_objects: -1}
-    snap.manifest <- Scan::rh_manifest_probe(repo, is_local)
+    snap.manifest <- Files::rh_manifest_presence(filesb) if is_local
+    snap.manifest <- 2 if not is_local
     cov_n: mutable i64 = 0
     cov_d: mutable i64 = 0
     cov_v2_n: mutable i64 = 0
@@ -589,7 +590,7 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
         rh_cli_err("cannot read expected report output")
         return 4
     manp: cstr = (&manf[0]).cast[cstr] can Unsafe.PointerCast
-    if not Report::rh_write_manifest(manp, repo, &snap, &ctx, logb, defaultb, shab, filesb, git_version_bytes, report_bytes):
+    if not Report::rh_write_manifest(manp, repo, &snap, &ctx, logb, defaultb, shab, filesb, git_version_bytes, partb, report_bytes):
         rh_cli_err("cannot write bundle.manifest")
         return 4
     done: mutable darray[u8] =
@@ -640,10 +641,14 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
         return 4
     ok_days: mutable i64 = 0
     days: i64 = Report::rh_report_manifest_int(manb, "window-days: ", &ok_days)
-    if ok_days == 0:
+    if ok_days == 0 or days <= 0 or days > 36500:
         rh_cli_err("manifest has no parseable window-days")
         return 4
-    full: bool = Report::rh_report_manifest_flag(manb, "full-history: ") == 1
+    full_history: mutable i64 = 0
+    if not Report::rh_report_manifest_bool(manb, "full-history: ", &full_history):
+        rh_cli_err("manifest has no unique boolean full-history field")
+        return 4
+    full: bool = full_history == 1
     ok_cut: mutable i64 = 0
     cutoff: i64 = Report::rh_report_manifest_int(manb, "evidence-cutoff: ", &ok_cut)
     if ok_cut == 0 or cutoff <= 0:
@@ -751,6 +756,24 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     if version_integrity < 0:
         rh_cli_err("retained Git-version digest mismatch")
         return 5
+    partialpath: mutable darray[u8] = []
+    has_partial_dir: bool = rh_dirname(bundle, partialpath)
+    if has_partial_dir:
+        partialpath.push(47)
+    Base::rh_push_text(partialpath, "evidence/git-partial.txt")
+    partialpath.push(0)
+    partialp: cstr = (&partialpath[0]).cast[cstr] can Unsafe.PointerCast
+    partialb: mutable darray[u8] = []
+    if Base::rh_io_read(partialp, partialb) < 0:
+        rh_cli_err("cannot read retained partial-clone evidence")
+        return 4
+    partial_integrity: i64 = Report::rh_manifest_sha256_matches(manb, "object-sha256-evidence/git-partial.txt", partialb)
+    if partial_integrity == 0:
+        rh_cli_err("bundle has no unique partial-clone evidence digest")
+        return 4
+    if partial_integrity < 0:
+        rh_cli_err("retained partial-clone evidence digest mismatch")
+        return 5
     expected_report_path: mutable darray[u8] = []
     has_report_dir: bool = rh_dirname(bundle, expected_report_path)
     if has_report_dir:
@@ -782,6 +805,70 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     activity: mutable GitMetrics::RhActivity = GitMetrics::RhActivity{author_times: [], committer_times: [], actor_keys: [], parent_counts: [], bot_flags: []}
     GitMetrics::rh_activity_init(&activity)
     _ = Scan::rh_parse_log(logb, window_start, cutoff, &snap, months, emails, &activity)
+    shallow: mutable i64 = 1
+    if shallowb.count >= 5 and shallowb[0] == 102 and shallowb[1] == 97 and shallowb[2] == 108 and shallowb[3] == 115 and shallowb[4] == 101:
+        shallow <- 0
+    snap.shallow <- shallow
+    git_metrics: GitMetrics::RhMetrics = GitMetrics::rh_metrics(activity, window_start, cutoff, shallow, full)
+    email_views: mutable darray[sview] = []
+    email_start: mutable usize = 0
+    while email_start < emails.count |email_start, email_views, emails|:
+        email_end: i64 = Base::rh_find_byte(emails, email_start, 10)
+        line_end: usize = email_end.usize() if email_end >= 0 else emails.count
+        email_views.push(string_view_slice(bytes_view(emails), email_start.i64(), line_end.i64()))
+        email_start <- line_end + 1 if email_end >= 0 else emails.count
+    sort[sview](email_views, rh_email_view_less)
+    uniqb: mutable darray[u8] = []
+    previous_view: mutable usize = 0
+    has_previous_view: mutable bool = false
+    for view_index in 0..<email_views.count |view_index: usize = 0, email_views, previous_view, has_previous_view, uniqb|:
+        is_new_identity: bool = not has_previous_view or not sview_eq(email_views[previous_view], email_views[view_index])
+        if is_new_identity:
+            identity: sview = email_views[view_index]
+            for byte_index in 0..<sview_len(identity) |byte_index: usize = 0, identity, uniqb|:
+                uniqb.push(sview_at(identity, byte_index))
+            uniqb.push(10)
+            previous_view <- view_index
+            has_previous_view <- true
+    identities: i64 = Base::rh_count_lines(uniqb)
+    bots: i64 = Report::rh_count_bot_lines(uniqb)
+    files: Files::RhFileMetrics =
+        if snap.commits_all > 0:
+            Files::rh_file_metrics(retained_files)
+        else:
+            Files::RhFileMetrics{readme: -1, contributing: -1, license: -1, installation: -1, api_reference: -1, governance: -1, code_ownership: -1, notice: -1, release_process: -1, succession_process: -1, license_files: -1, examples: -1, security_policy: -1, release_notes: -1, source_files: -1, ci_configuration: -1, test_files: -1, source_bytes: -1, missing_objects: -1}
+    repo_kind: i64 = Report::rh_report_manifest_repo_kind(manb)
+    return 4 if repo_kind < 0
+    source: mutable darray[u8] = []
+    return 4 if not Report::rh_report_manifest_source(manb, source)
+    source.push(0)
+    repo: cstr = (&source[0]).cast[cstr] can Unsafe.PointerCast
+    partial_clone: i64 = 1 if partialb.count > 0 else 0
+    partial_manifest: mutable i64 = 0
+    if not Report::rh_report_manifest_bool(manb, "partial-clone: ", &partial_manifest) or partial_manifest != partial_clone:
+        rh_cli_err("partial-clone field does not match retained evidence")
+        return 4
+    snap.manifest <- Files::rh_manifest_presence(retained_files) if repo_kind == 0
+    snap.manifest <- 2 if repo_kind == 1
+    cov_n: mutable i64 = 0
+    cov_d: mutable i64 = 0
+    cov_v2_n: mutable i64 = 0
+    cov_v2_d: mutable i64 = 0
+    cov_state: mutable i64 = 0
+    Scan::rh_coverage(&snap, window_start, cutoff, &cov_n, &cov_d, &cov_v2_n, &cov_v2_d, &cov_state)
+    fresh: mutable i64 = -1
+    if snap.has_commits == 1:
+        top: mutable i64 = snap.max_at
+        top <- snap.max_ct if snap.max_ct > top
+        fresh <- (cutoff - top) / 3600
+        fresh <- 0 if fresh < 0
+    ctx: Report::RhReportCtx = Report::rh_report_ctx_make(identities, bots, months.count.i64(), cov_n, cov_d, cov_v2_n, cov_v2_d, cov_state, fresh, days, 1 if full else 0, repo_kind, cutoff, partial_clone, default_revisions, files, git_metrics)
+    regenerated_report: mutable darray[u8] = []
+    Report::rh_report_json(repo, &snap, &ctx, regenerated_report)
+    report_regenerated: bool = regenerated_report.count == expected_report.count and Base::rh_bytes_equal_span(regenerated_report, 0, regenerated_report.count.i64(), expected_report, 0, expected_report.count.i64())
+    if not report_regenerated:
+        rh_cli_err("retained report differs from report regenerated from evidence")
+        return 5
     if Git::rh_ensure_dir(out) != 0:
         rh_cli_err("cannot create output directory")
         return 4
@@ -797,7 +884,7 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
         rb
     verified: bool =
         counts_match: bool = snap.commits == want_commits and snap.rejected == want_rejected
-        snap.digest == pinned and counts_match
+        snap.digest == pinned and counts_match and report_regenerated
     if verified:
         Base::rh_push_text(rb, "true")
     else:
