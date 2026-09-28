@@ -13,9 +13,8 @@
    prove shell metacharacters stay literal, byte-vector arguments preserve
    their boundaries, and transport credentials travel through stdin rather
    than argv or retained files. The process runner does not yet enforce a
-   child memory/process creation, or provide a directly tested descendant
-   cancellation case. Status values are integer-coded rather than a typed
-   result. `system(3)` remains only in a store-test helper; production
+   child memory/process creation. Status values are integer-coded rather than
+   a typed result. `system(3)` remains only in a store-test helper; production
    subprocess call sites in `rh_git` have migrated. Individual fetchers retain
    their own byte limits.
 3. **No server endpoint** scans arbitrary server paths (M01-01): this CLI is
