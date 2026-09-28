@@ -80,4 +80,16 @@ sed 's/"assessment_subject_revision":7/"assessment_subject_revision":-1/' "$T/in
 set -e
 [[ "$rc_coverage" -eq 4 && "$rc_digest" -eq 4 && "$rc_state" -eq 4 && "$rc_class" -eq 4 && "$rc_time" -eq 4 && "$rc_tool" -eq 4 && "$rc_assessment_digest" -eq 4 && "$rc_revision" -eq 4 ]] || fail "invalid lineage must exit 4 (got $rc_coverage/$rc_digest/$rc_state/$rc_class/$rc_time/$rc_tool/$rc_assessment_digest/$rc_revision)"
 
+python3 - "$T/oversized.json" <<'PY'
+import sys
+with open(sys.argv[1], "wb") as output:
+    output.write(b" " * (4 * 1024 * 1024 + 1))
+PY
+set +e
+"$ROOT/build/rh_cli" lineage --input "$T/oversized.json" --out "$T/x" >/dev/null 2>&1
+rc_size=$?
+set -e
+[[ "$rc_size" -eq 4 ]] || fail "oversized lineage must fail before parsing (got $rc_size)"
+echo "[lineage] input bound enforced"
+
 echo "test_lineage_cli OK"
