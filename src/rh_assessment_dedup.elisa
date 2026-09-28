@@ -1,0 +1,231 @@
+# rh_assessment_dedup.elisa — group repeated deliveries by complete origin identity.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+
+module AssessmentDedup:
+    private:
+        const RH_ASSESSMENT_DEDUP_MAX_ROWS: i64 = 4096
+
+        struct RhAssessmentDelivery:
+            delivery_s: mutable i64
+            delivery_e: mutable i64
+            delivery_time: mutable i64
+            tool_s: mutable i64
+            tool_e: mutable i64
+            tool_present: mutable i64
+            version_s: mutable i64
+            version_e: mutable i64
+            version_present: mutable i64
+            subject_revision: mutable i64
+            revision_present: mutable i64
+            original_run_s: mutable i64
+            original_run_e: mutable i64
+            original_run_present: mutable i64
+            original_time: mutable i64
+            original_time_present: mutable i64
+            result_digest_s: mutable i64
+            result_digest_e: mutable i64
+            result_digest_present: mutable i64
+            identity_complete: mutable i64
+            group_id: mutable i64
+            key_offset: mutable i64
+
+        def rh_dedup_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            Json::rh_json_obj_get(nodes, texts, obj, key)
+
+        def rh_dedup_string(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            index: i64 = AssessmentDedup::rh_dedup_get(nodes, texts, obj, key)
+            return false if index < 0 or nodes[index.usize()].kind != Json::RH_JSON_STR
+            node: Json::RhJsonNode = nodes[index.usize()]
+            return false if node.text_start == node.text_end
+            start_out[0] <- node.text_start
+            end_out[0] <- node.text_end
+            true
+
+        def rh_dedup_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            index: i64 = AssessmentDedup::rh_dedup_get(nodes, texts, obj, key)
+            Json::rh_json_int(nodes, raw, index, ok_out)
+
+        def rh_dedup_optional_string(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            index: i64 = AssessmentDedup::rh_dedup_get(nodes, texts, obj, key)
+            if index < 0 or nodes[index.usize()].kind == Json::RH_JSON_NULL:
+                start_out[0] <- 0
+                end_out[0] <- 0
+                present_out[0] <- 0
+                return true
+            return false if nodes[index.usize()].kind != Json::RH_JSON_STR
+            node: Json::RhJsonNode = nodes[index.usize()]
+            return false if node.text_start == node.text_end
+            start_out[0] <- node.text_start
+            end_out[0] <- node.text_end
+            present_out[0] <- 1
+            true
+
+        def rh_dedup_optional_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            index: i64 = AssessmentDedup::rh_dedup_get(nodes, texts, obj, key)
+            if index < 0 or nodes[index.usize()].kind == Json::RH_JSON_NULL:
+                value_out[0] <- 0
+                present_out[0] <- 0
+                return true
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, index, &ok)
+            return false if ok == 0 or value < 0
+            value_out[0] <- value
+            present_out[0] <- 1
+            true
+
+        def rh_dedup_hex64(texts: darray[u8]&, start: i64, stop: i64) -> bool:
+            return false if start < 0 or stop - start != 64
+            while index < 64 |index: i64 = 0, texts, start|:
+                c: u8 = texts[(start + index).usize()]
+                return false if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102))
+                index <- index + 1
+            true
+
+        def rh_dedup_same_origin(texts: darray[u8]&, left: RhAssessmentDelivery, right: RhAssessmentDelivery) -> bool:
+            return false if left.identity_complete == 0 or right.identity_complete == 0
+            return false if not Base::rh_bytes_equal_span(texts, left.tool_s, left.tool_e, texts, right.tool_s, right.tool_e)
+            return false if not Base::rh_bytes_equal_span(texts, left.version_s, left.version_e, texts, right.version_s, right.version_e)
+            return false if left.subject_revision != right.subject_revision
+            return false if not Base::rh_bytes_equal_span(texts, left.original_run_s, left.original_run_e, texts, right.original_run_s, right.original_run_e)
+            return false if left.original_time != right.original_time
+            Base::rh_bytes_equal_span(texts, left.result_digest_s, left.result_digest_e, texts, right.result_digest_s, right.result_digest_e)
+
+        def rh_dedup_append_key_part(material: mutable darray[u8]&, texts: darray[u8]&, start: i64, stop: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_decimal_i64(material, stop - start)
+            material.push(58)
+            while index < stop.usize() |index: usize = start.usize(), stop, texts, material|:
+                material.push(texts[index])
+                index <- index + 1
+            material.push(10)
+
+        def rh_dedup_origin_key(record: RhAssessmentDelivery, texts: darray[u8]&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            material: mutable darray[u8] = []
+            AssessmentDedup::rh_dedup_append_key_part(material, texts, record.tool_s, record.tool_e)
+            AssessmentDedup::rh_dedup_append_key_part(material, texts, record.version_s, record.version_e)
+            Base::rh_push_decimal_i64(material, record.subject_revision)
+            material.push(10)
+            AssessmentDedup::rh_dedup_append_key_part(material, texts, record.original_run_s, record.original_run_e)
+            Base::rh_push_decimal_i64(material, record.original_time)
+            material.push(10)
+            AssessmentDedup::rh_dedup_append_key_part(material, texts, record.result_digest_s, record.result_digest_e)
+            Sha256::rh_sha256(material, out)
+
+        def rh_dedup_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, stop: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            Base::rh_json_escape(out, texts, start.usize(), stop.usize())
+            out.push(34)
+
+    public:
+        # Complete keys deduplicate an assessment, while all delivery rows remain
+        # visible. Incomplete identities each receive their own possible-duplicate state.
+        def rh_assessment_dedup_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count > 1048576
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            schema_index: i64 = AssessmentDedup::rh_dedup_get(nodes, texts, root, "schema")
+            return -1 if schema_index < 0 or nodes[schema_index.usize()].kind != Json::RH_JSON_STR or not Base::rh_bytes_equal_literal(texts, nodes[schema_index.usize()].text_start, nodes[schema_index.usize()].text_end, "rh-assessment-dedup-input/1")
+            rows_index: i64 = AssessmentDedup::rh_dedup_get(nodes, texts, root, "deliveries")
+            return -1 if rows_index < 0 or nodes[rows_index.usize()].kind != Json::RH_JSON_ARR
+            row_count: i64 = nodes[rows_index.usize()].child_count
+            return -1 if row_count < 1 or row_count > RH_ASSESSMENT_DEDUP_MAX_ROWS
+            rows: mutable darray[RhAssessmentDelivery] = []
+            digests: mutable darray[u8] = []
+            complete_groups: mutable i64 = 0
+            repeated_deliveries: mutable i64 = 0
+            possible_duplicates: mutable i64 = 0
+            while row >= 0 |row: i64 = nodes[rows_index.usize()].first_child, nodes, texts, raw, rows, digests, complete_groups, repeated_deliveries, possible_duplicates|:
+                return -1 if nodes[row.usize()].kind != Json::RH_JSON_OBJ
+                delivery_s: mutable i64 = 0
+                delivery_e: mutable i64 = 0
+                return -1 if not AssessmentDedup::rh_dedup_string(nodes, texts, row, "delivery_id", &delivery_s, &delivery_e)
+                delivery_time_ok: mutable i64 = 0
+                delivery_time: i64 = AssessmentDedup::rh_dedup_int(nodes, raw, texts, row, "delivery_time", &delivery_time_ok)
+                return -1 if delivery_time_ok == 0 or delivery_time < 0
+                for prior in 0..<rows.count |prior, rows, texts, delivery_s, delivery_e|:
+                    return -1 if Base::rh_bytes_equal_span(texts, rows[prior].delivery_s, rows[prior].delivery_e, texts, delivery_s, delivery_e)
+                tool_s: mutable i64 = 0
+                tool_e: mutable i64 = 0
+                tool_present: mutable i64 = 0
+                version_s: mutable i64 = 0
+                version_e: mutable i64 = 0
+                version_present: mutable i64 = 0
+                revision: mutable i64 = 0
+                revision_present: mutable i64 = 0
+                original_run_s: mutable i64 = 0
+                original_run_e: mutable i64 = 0
+                original_run_present: mutable i64 = 0
+                original_time: mutable i64 = 0
+                original_time_present: mutable i64 = 0
+                result_digest_s: mutable i64 = 0
+                result_digest_e: mutable i64 = 0
+                result_digest_present: mutable i64 = 0
+                return -1 if not AssessmentDedup::rh_dedup_optional_string(nodes, texts, row, "tool", &tool_s, &tool_e, &tool_present) or not AssessmentDedup::rh_dedup_optional_string(nodes, texts, row, "tool_version", &version_s, &version_e, &version_present) or not AssessmentDedup::rh_dedup_optional_int(nodes, raw, texts, row, "subject_revision", &revision, &revision_present) or not AssessmentDedup::rh_dedup_optional_string(nodes, texts, row, "original_run", &original_run_s, &original_run_e, &original_run_present) or not AssessmentDedup::rh_dedup_optional_int(nodes, raw, texts, row, "original_time", &original_time, &original_time_present) or not AssessmentDedup::rh_dedup_optional_string(nodes, texts, row, "result_digest", &result_digest_s, &result_digest_e, &result_digest_present)
+                return -1 if result_digest_present != 0 and not AssessmentDedup::rh_dedup_hex64(texts, result_digest_s, result_digest_e)
+                complete: bool = tool_present != 0 and version_present != 0 and revision_present != 0 and original_run_present != 0 and original_time_present != 0 and result_digest_present != 0
+                item: mutable RhAssessmentDelivery = RhAssessmentDelivery{delivery_s: delivery_s, delivery_e: delivery_e, delivery_time: delivery_time, tool_s: tool_s, tool_e: tool_e, tool_present: tool_present, version_s: version_s, version_e: version_e, version_present: version_present, subject_revision: revision, revision_present: revision_present, original_run_s: original_run_s, original_run_e: original_run_e, original_run_present: original_run_present, original_time: original_time, original_time_present: original_time_present, result_digest_s: result_digest_s, result_digest_e: result_digest_e, result_digest_present: result_digest_present, identity_complete: 1 if complete else 0, group_id: -1, key_offset: -1}
+                if complete:
+                    matched_group: mutable i64 = -1
+                    matched_key_offset: mutable i64 = -1
+                    for prior in 0..<rows.count |prior, rows, texts, item|:
+                        if AssessmentDedup::rh_dedup_same_origin(texts, rows[prior], item):
+                            matched_group <- rows[prior].group_id
+                            matched_key_offset <- rows[prior].key_offset
+                            break
+                    if matched_group >= 0:
+                        item.group_id <- matched_group
+                        repeated_deliveries <- repeated_deliveries + 1
+                        item.key_offset <- matched_key_offset
+                    else:
+                        item.group_id <- complete_groups
+                        complete_groups <- complete_groups + 1
+                        key: mutable darray[u8] = []
+                        AssessmentDedup::rh_dedup_origin_key(item, texts, key)
+                        item.key_offset <- digests.count.i64()
+                        for i in 0..<key.count |i, key, digests|:
+                            digests.push(key[i])
+                else:
+                    possible_duplicates <- possible_duplicates + 1
+                rows.push(item)
+                row <- nodes[row.usize()].next_sibling
+            Base::rh_push_text(out, "{\"schema\":\"rh-assessment-dedup-result/1\",\"deliveries\":[")
+            for index in 0..<rows.count |index, rows, texts, digests, out|:
+                if index > 0:
+                    out.push(44)
+                item: RhAssessmentDelivery = rows[index]
+                Base::rh_push_text(out, "{\"delivery_id\":")
+                AssessmentDedup::rh_dedup_emit_span(out, texts, item.delivery_s, item.delivery_e)
+                Base::rh_push_text(out, ",\"delivery_time\":")
+                Base::rh_push_decimal_i64(out, item.delivery_time)
+                Base::rh_push_text(out, ",\"identity_complete\":")
+                Base::rh_push_text(out, "true" if item.identity_complete != 0 else "false")
+                Base::rh_push_text(out, ",\"deduplication_state\":\"")
+                Base::rh_push_text(out, "key_available" if item.identity_complete != 0 else "possible_duplicate")
+                Base::rh_push_text(out, "\",\"group_id\":")
+                if item.identity_complete != 0:
+                    Base::rh_push_decimal_i64(out, item.group_id)
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"assessment_key\":")
+                if item.identity_complete != 0:
+                    out.push(34)
+                    for key_index in 0..<64.usize() |key_index, item, digests, out|:
+                        out.push(digests[item.key_offset.usize() + key_index])
+                    out.push(34)
+                else:
+                    Base::rh_push_text(out, "null")
+                out.push(125)
+            Base::rh_push_text(out, "],\"counts\":{\"delivery_count\":")
+            Base::rh_push_decimal_i64(out, rows.count.i64())
+            Base::rh_push_text(out, ",\"unique_complete_origin_assessments\":")
+            Base::rh_push_decimal_i64(out, complete_groups)
+            Base::rh_push_text(out, ",\"additional_deliveries_of_same_assessment\":")
+            Base::rh_push_decimal_i64(out, repeated_deliveries)
+            Base::rh_push_text(out, ",\"possible_duplicate_deliveries\":")
+            Base::rh_push_decimal_i64(out, possible_duplicates)
+            Base::rh_push_text(out, "}}")
+            0

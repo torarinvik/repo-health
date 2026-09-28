@@ -46,7 +46,7 @@ for want in ("dep-graph", "canonical-repo", "backup-binding", "adapter-transform
              "monitor-result", "quota-result", "privacy-input", "privacy-result",
              "privacy-history",
              "roles-result", "roles-fetch", "experimental-result", "report-html", "explain-markdown", "benchmark-manifest", "profile-manifest", "proof-result", "forecast-input", "forecast-result", "intervention-result", "mapping-result", "coverage-result", "columnar-snapshot", "aggregate-result", "index-manifest", "adoption-result", "lineage-result", "lineage-input", "population-result", "ingest-conformance-result", "evidence-drilldown", "evidence-transfer", "role-grain-result", "maintenance-exposure-input", "maintenance-exposure-result", "arch-pkgbuild-result", "identity-review-notices",
-             "notify-state", "store-lease-result", "policy-state",
+             "assessment-dedup-input", "assessment-dedup-result", "notify-state", "store-lease-result", "policy-state",
              "corrections-state", "connector-instance", "job-next",
              "correction-evidence-policy",
              "correction-evidence-verification",

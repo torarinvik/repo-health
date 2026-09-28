@@ -110,6 +110,7 @@ include "./rh_aggregates.elisa"
 include "./rh_index.elisa"
 include "./rh_adoption.elisa"
 include "./rh_lineage.elisa"
+include "./rh_assessment_dedup.elisa"
 include "./rh_population.elisa"
 include "./rh_ingest_conformance.elisa"
 include "./rh_snapshot_reconcile.elisa"
@@ -196,6 +197,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli query --input <file> --out <file>")
     rh_cli_err("       rh_cli identity --input <file> --out <file> [--evidence-store <root/evidence-dir>]")
     rh_cli_err("       rh_cli identity-publish --input <file> --out <file>")
+    rh_cli_err("       rh_cli assessment-dedup --input <rh-assessment-dedup-input/1> --out <file>")
     rh_cli_err("       rh_cli distribution --input <debian/control> --out <file>")
     rh_cli_err("       rh_cli rpm-spec --input <file.spec> --out <file>")
     rh_cli_err("       rh_cli archive --input <file> --out <file>")
@@ -2953,7 +2955,28 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                     return rh_cli_usage(2)
                 llq <- llq + 1
         return rh_cli_usage(2) if li_idx < 0 or lo_idx < 0
-        return rh_do_lineage(slots[li_idx], slots[lo_idx])
+        return rh_do_lineage(slots[li_idx], slots[lo_idx], false)
+    if Base::rh_streq(cmd, "assessment-dedup"):
+        adi_idx, ado_idx =
+            while adq < argc |adi_idx: i64 = -1, ado_idx: i64 = -1, adq: i64 = 2, slots| -> adi_idx, ado_idx:
+                arg: u8& = slots[adq].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(arg, "--input"):
+                    if adq + 1 < argc:
+                        adq <- adq + 1
+                        adi_idx <- adq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(arg, "--out"):
+                    if adq + 1 < argc:
+                        adq <- adq + 1
+                        ado_idx <- adq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                adq <- adq + 1
+        return rh_cli_usage(2) if adi_idx < 0 or ado_idx < 0
+        return rh_do_lineage(slots[adi_idx], slots[ado_idx], true)
     if Base::rh_streq(cmd, "population"):
         pi_idx, po_idx =
             while ppq < argc |pi_idx: i64 = -1, po_idx: i64 = -1, ppq: i64 = 2, slots| -> pi_idx, po_idx:
@@ -10130,7 +10153,7 @@ def rh_do_adoption(input_path: cstr, out_path: cstr, store_root: cstr, has_store
 # --- M00 lineage and transformation-contract execution path. ---
 # Validates the shared source/object/assessment envelope and preserves explicit
 # field-level transformation losses for downstream evidence drill-down.
-def rh_do_lineage(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_lineage(input_path: cstr, out_path: cstr, assessment_dedup: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected lineage argument (allowlist)")
         return 3
@@ -10145,14 +10168,16 @@ def rh_do_lineage(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, 
         rh_cli_err("lineage: cannot read --input")
         return 4
     body: mutable darray[u8] = []
-    if Lineage::rh_lineage_report(raw, body) != 0:
+    report_status: i64 = AssessmentDedup::rh_assessment_dedup_report(raw, body) if assessment_dedup else Lineage::rh_lineage_report(raw, body)
+    if report_status != 0:
         rh_cli_err("lineage: unsupported or malformed lineage envelope (fail closed)")
         return 4
     body.push(10)
     if not Base::rh_io_write(out_path, body):
         rh_cli_err("lineage: cannot write --out")
         return 4
-    rh_cli_out("lineage: evidence contract validated")
+    rh_cli_out("assessment-dedup: complete origin identities grouped") if assessment_dedup
+    rh_cli_out("lineage: evidence contract validated") if not assessment_dedup
     0
 
 # --- M05 focal-library population execution path. ---
