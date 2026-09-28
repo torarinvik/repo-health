@@ -1007,19 +1007,20 @@ At least one non-PR workflow must preserve review/proposal semantics without dem
 
 ### 13.5 SourceHut validation task
 
-The official GraphQL schemas are now published at
-[`docs.sourcehut.org`](https://docs.sourcehut.org/). The `git.sr.ht` schema
-documents a read-only `repository(rid: ID!)` query whose `log(cursor, rev)`
-field returns cursor-paged commits. Each commit exposes a source-native object
-ID, message, parents, and author/committer signatures; signatures include a
-UTC `Time` field in `%Y-%m-%dT%H:%M:%SZ` form. This is sufficient to design a
-bounded Git-history adapter without treating SourceHut object IDs as another
-provider's identifiers. The schema marks repository and revision reads with
-the `REPOSITORIES:RO` and `REVISIONS:RO` scopes; implementation must keep
-authentication host-scoped and must not assume anonymous access. The API's
-cursor is continuation state, so a page limit or remaining cursor must stay
-explicit rather than being called complete. See the [git.sr.ht API
-schema](https://docs.sourcehut.org/git.sr.ht/) and the official
+The official GraphQL schemas are published at
+[`docs.sourcehut.org`](https://docs.sourcehut.org/). The current `git.sr.ht`
+schema exposes a read-only `repository(rid: ID!)` query; its `log(cursor,
+from)` field returns cursor-paged commits, where `from` is a revspec starting
+point. Repository lookup requires `REPOSITORIES:RO`, while the nested log read
+requires `OBJECTS:RO` (the current schema has no `REVISIONS` scope). Each
+commit exposes a source-native object ID, message, parents, and
+author/committer signatures; signatures include a UTC `Time` field in
+`%Y-%m-%dT%H:%M:%SZ` form. This is sufficient to design a bounded
+Git-history adapter without treating SourceHut object IDs as another
+provider's identifiers. Authentication must remain host-scoped and anonymous
+access must not be assumed. The cursor is continuation state, so a page limit
+or remaining cursor must stay explicit rather than being called complete. See
+the [git.sr.ht API schema](https://docs.sourcehut.org/git.sr.ht/) and the official
 [GraphQL documentation announcement](https://sourcehut.org/blog/2025-03-27-announcing-docs-sourcehut-org/).
 
 The separate `hg.sr.ht` schema documents `repository(rid)` and
