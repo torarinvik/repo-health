@@ -255,7 +255,7 @@ print("[pylock] PEP 751 tool-table scopes are counted while disposable values st
 PY
 cp "$T/pylock.toml" "$T/tool-paths.toml"
 cat >> "$T/tool-paths.toml" <<'EOF'
-[tool."build-system".custom]
+[tool."build\u002dsystem".custom]
 private = "not-published"
 [packages.tool."vendor.ext".config]
 private = "also-not-published"
@@ -271,7 +271,7 @@ assert "not-published" not in encoded, encoded
 assert "also-not-published" not in encoded, encoded
 print("[pylock] nested bare and quoted tool path segments are recognized without exposing values")
 PY
-sed 's/\[tool\."build-system"\.custom\]/[tool.build-system..custom]/' "$T/tool-paths.toml" > "$T/malformed-tool-path.toml"
+sed 's/\[tool\."build\\u002dsystem"\.custom\]/[tool.build-system..custom]/' "$T/tool-paths.toml" > "$T/malformed-tool-path.toml"
 if "$ROOT/build/rh_cli" pylock --input "$T/malformed-tool-path.toml" --out "$T/malformed-tool-path.json" >/dev/null 2>&1; then
     fail "malformed dotted tool table path was accepted"
 fi
