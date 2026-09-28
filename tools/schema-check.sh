@@ -40,6 +40,9 @@ def type_ok(val, t):
         return val is None or isinstance(val, str) or (isinstance(val, int) and not isinstance(val, bool))
     return False
 
+def number_ok(val):
+    return isinstance(val, (int, float)) and not isinstance(val, bool)
+
 def check_obj(obj, spec, ctx):
     allowed_keys = spec.get("allowed_keys")
     if allowed_keys is not None:
@@ -55,11 +58,15 @@ def check_obj(obj, spec, ctx):
     for k, minimum in spec.get("minimum", {}).items():
         if k in obj:
             value = obj[k]
-            assert isinstance(value, (int, float)) and not isinstance(value, bool) and value >= minimum, (ctx, "below minimum", k, value, minimum)
+            assert number_ok(value) and value >= minimum, (ctx, "below minimum", k, value, minimum)
     for k, maximum in spec.get("maximum", {}).items():
         if k in obj:
             value = obj[k]
-            assert isinstance(value, (int, float)) and not isinstance(value, bool) and value <= maximum, (ctx, "above maximum", k, value, maximum)
+            assert number_ok(value) and value <= maximum, (ctx, "above maximum", k, value, maximum)
+    for lower, upper in spec.get("less_than_or_equal", []):
+        if lower in obj and upper in obj:
+            left, right = obj[lower], obj[upper]
+            assert number_ok(left) and number_ok(right) and left <= right, (ctx, "unordered fields", lower, left, upper, right)
     for k, variant_spec in spec.get("variants", {}).items():
         if k not in obj:
             continue

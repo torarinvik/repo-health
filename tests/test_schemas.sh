@@ -185,4 +185,26 @@ PY
   trap - EXIT
 done
 echo "[schemas] input and result ratio denominators must be positive"
+for lineage_fixture in "$lineage_input" "$lineage_result"; do
+  pair_backup="$tmp/lineage-pair.json"
+  cp "$lineage_fixture" "$pair_backup"
+  restore_lineage_pair() { cp "$pair_backup" "$lineage_fixture"; }
+  trap restore_lineage_pair EXIT
+  python3 - "$lineage_fixture" <<'PY'
+import json, sys
+path = sys.argv[1]
+document = json.load(open(path))
+observation = document["metrics"][0]["observation"]
+observation["value"] = {"kind": "count_pair", "first": 4, "second": 3}
+json.dump(document, open(path, "w"), separators=(",", ":"))
+PY
+  if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+    restore_lineage_pair
+    trap - EXIT
+    fail "schema accepted a reversed count pair in $lineage_fixture"
+  fi
+  restore_lineage_pair
+  trap - EXIT
+done
+echo "[schemas] input and result count-pair order is enforced"
 echo "test_schemas OK"
