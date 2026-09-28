@@ -478,6 +478,12 @@ expect 5 "$CLI" replay --bundle "$T/rep-tampered/bundle.manifest" --out "$T/repl
 cp -r "$T/rep-fix2" "$T/rep-files-tampered"
 printf 'X' >> "$T/rep-files-tampered/evidence/git-files.txt"
 expect 5 "$CLI" replay --bundle "$T/rep-files-tampered/bundle.manifest" --out "$T/replay-files-t"
+cp -r "$T/rep-fix2" "$T/rep-shallow-tampered"
+printf 'X' >> "$T/rep-shallow-tampered/evidence/git-shallow.txt"
+expect 5 "$CLI" replay --bundle "$T/rep-shallow-tampered/bundle.manifest" --out "$T/replay-shallow-t"
+cp -r "$T/rep-fix2" "$T/rep-version-tampered"
+printf 'X' >> "$T/rep-version-tampered/evidence/git-version.txt"
+expect 5 "$CLI" replay --bundle "$T/rep-version-tampered/bundle.manifest" --out "$T/replay-version-t"
 echo "[m01] tamper exit-5 OK"
 # corrupt manifest -> exit 4 (fails closed)
 cp "$T/rep-fix2/bundle.manifest" "$T/bad.manifest"
