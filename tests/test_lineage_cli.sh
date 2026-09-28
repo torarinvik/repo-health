@@ -35,6 +35,9 @@ assert d["metric_class_counts"] == {"raw": 1, "derived": 2, "modeled": 1}, d
 assert d["transformations"][3]["state"] == "discarded", d
 assert d["metrics"][2]["version"] == "3" and d["metrics"][2]["definition_digest"] == "3" * 64, d
 assert d["metrics"][3]["class"] == "modeled", d
+assert d["metrics"][0]["observation"]["value"] == {"kind": "count", "value": 17}, d
+assert d["metrics"][0]["observation"]["evidence"] == ["raw/issues/42"], d
+assert d["metrics"][1]["observation"] is None, d
 assert "definition_digest" in d["metrics"][1], d
 assert "losses remain explicit" in d["note"], d
 print("[lineage] separate delivery/origin identities + explicit losses OK")
@@ -163,6 +166,29 @@ set +e
 set -e
 [[ "$rc_duplicate_ref" -eq 4 && "$rc_refs_bound" -eq 4 && "$rc_transformations_bound" -eq 4 && "$rc_metrics_bound" -eq 4 ]] || fail "duplicate and over-bound lineage collections must fail closed (got $rc_duplicate_ref/$rc_refs_bound/$rc_transformations_bound/$rc_metrics_bound)"
 echo "[lineage] derivation references, transformations, and metrics are bounded"
+python3 - "$T/in.json" "$T/orphan-observation-evidence.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["metrics"][0]["observation"]["evidence"] = ["not-in-derivation-refs"]
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+set +e
+"$ROOT/build/rh_cli" lineage --input "$T/orphan-observation-evidence.json" --out "$T/x" >/dev/null 2>&1
+rc_orphan_observation=$?
+set -e
+[[ "$rc_orphan_observation" -eq 4 ]] || fail "unlinked observation evidence must fail closed (got $rc_orphan_observation)"
+python3 - "$T/in.json" "$T/malformed-observation.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["metrics"][0]["observation"]["status"] = 255
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+set +e
+"$ROOT/build/rh_cli" lineage --input "$T/malformed-observation.json" --out "$T/x" >/dev/null 2>&1
+rc_bad_observation=$?
+set -e
+[[ "$rc_bad_observation" -eq 4 ]] || fail "malformed metric observation must fail closed (got $rc_bad_observation)"
+echo "[lineage] metric observations retain linked external evidence"
 
 python3 - "$T/oversized.json" <<'PY'
 import sys

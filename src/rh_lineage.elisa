@@ -11,6 +11,8 @@ include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_domain.elisa"
 include "./rh_temporal.elisa"
+include "./rh_observation.elisa"
+include "./rh_observation_codec.elisa"
 
 module Lineage:
     public:
@@ -46,6 +48,8 @@ module Lineage:
             definition_e: mutable i64
             crosswalk_s: mutable i64
             crosswalk_e: mutable i64
+            has_observation: mutable bool
+            observation_node: mutable i64
 
         def rh_lineage_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_obj_get(nodes, texts, obj, key)
@@ -164,6 +168,13 @@ module Lineage:
             Base::rh_json_escape(out, texts, s.usize(), e.usize())
             out.push(34)
 
+        def rh_lineage_emit_raw_node(out: mutable darray[u8]&, raw: darray[u8]&, nodes: darray[Json::RhJsonNode]&, node: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            start: usize = nodes[node.usize()].text_start.usize()
+            finish: usize = nodes[node.usize()].text_end.usize()
+            while index < finish |index: usize = start, out, raw|:
+                out.push(raw[index])
+                index <- index + 1
+
         def rh_lineage_emit_refs(out: mutable darray[u8]&, refs_s: darray[i64]&, refs_e: darray[i64]&, texts: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
             out.push(91)
             while i < refs_s.count |i: usize = 0, refs_s, refs_e, texts, out|:
@@ -174,6 +185,22 @@ module Lineage:
                 out.push(34)
                 i <- i + 1
             out.push(93)
+
+        def rh_lineage_observation_refs_valid(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, refs_s: darray[i64]&, refs_e: darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            evidence: i64 = Json::rh_json_obj_get(nodes, texts, root, "evidence")
+            return false if evidence < 0 or nodes[evidence.usize()].kind != Json::RH_JSON_ARR
+            child: mutable i64 = nodes[evidence.usize()].first_child
+            while child >= 0 |child, nodes, texts, refs_s, refs_e|:
+                start: i64 = nodes[child.usize()].text_start
+                finish: i64 = nodes[child.usize()].text_end
+                known: bool = Base::rh_bytes_equal_literal(texts, start, finish, "git_log") or Base::rh_bytes_equal_literal(texts, start, finish, "git_shallow") or Base::rh_bytes_equal_literal(texts, start, finish, "git_files") or Base::rh_bytes_equal_literal(texts, start, finish, "git_default_count") or Base::rh_bytes_equal_literal(texts, start, finish, "bundle_manifest")
+                if not known:
+                    found: mutable bool = false
+                    for ref_index in 0..<refs_s.count |ref_index, start, finish, refs_s, refs_e, texts, found|:
+                        found <- true if Base::rh_bytes_equal_span(texts, start, finish, texts, refs_s[ref_index], refs_e[ref_index])
+                    return false if not found
+                child <- nodes[child.usize()].next_sibling
+            true
 
     public:
         def rh_lineage_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -334,7 +361,13 @@ module Lineage:
                 while mi < metrics.count |mi: usize = 0, metrics, texts, key_s, key_e, version_s, version_e|:
                     return -1 if Base::rh_bytes_equal_span(texts, metrics[mi].key_s, metrics[mi].key_e, texts, key_s, key_e) and Base::rh_bytes_equal_span(texts, metrics[mi].version_s, metrics[mi].version_e, texts, version_s, version_e)
                     mi <- mi + 1
-                metrics.push(RhLineageMetric{key_s: key_s, key_e: key_e, version_s: version_s, version_e: version_e, class: class.u8(), definition_s: definition_s, definition_e: definition_e, crosswalk_s: crosswalk_s, crosswalk_e: crosswalk_e})
+                observation_node: i64 = Lineage::rh_lineage_get(nodes, texts, metric, "observation")
+                has_observation: bool = observation_node >= 0 and nodes[observation_node.usize()].kind != Json::RH_JSON_NULL
+                if has_observation:
+                    observation: mutable Observation::RhObservation = Observation::rh_observation_make(Observation::RH_ST_UNAVAILABLE, Observation::RhMetricValue.Absent, false)
+                    return -1 if not ObservationCodec::rh_observation_decode_node(nodes, raw, texts, observation_node, &observation)
+                    return -1 if not Lineage::rh_lineage_observation_refs_valid(nodes, texts, observation_node, refs_s, refs_e)
+                metrics.push(RhLineageMetric{key_s: key_s, key_e: key_e, version_s: version_s, version_e: version_e, class: class.u8(), definition_s: definition_s, definition_e: definition_e, crosswalk_s: crosswalk_s, crosswalk_e: crosswalk_e, has_observation: has_observation, observation_node: observation_node})
                 metric_counts[class.usize()] <- metric_counts[class.usize()] + 1
                 metric <- nodes[metric.usize()].next_sibling
             Base::rh_push_text(out, "{\"schema\":\"rh-lineage-result/1\",\"observation_id\":")
@@ -443,6 +476,11 @@ module Lineage:
                 Base::rh_push_text(out, Lineage::rh_lineage_metric_label(m.class))
                 Base::rh_push_text(out, "\",\"crosswalk\":")
                 Lineage::rh_lineage_emit_span(out, texts, m.crosswalk_s, m.crosswalk_e)
+                Base::rh_push_text(out, ",\"observation\":")
+                if m.has_observation:
+                    Lineage::rh_lineage_emit_raw_node(out, raw, nodes, m.observation_node)
+                else:
+                    Base::rh_push_text(out, "null")
                 Base::rh_push_text(out, "}")
                 i <- i + 1
             Base::rh_push_text(out, "],\"metric_class_counts\":{\"raw\":")
