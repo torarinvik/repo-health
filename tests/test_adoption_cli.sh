@@ -34,6 +34,21 @@ assert d["adoptions"][4]["duration_seconds"] is None and d["adoptions"][4]["dura
 assert d["adoptions"][5]["confirmed_introduction"] == 0 and d["adoptions"][5]["duration_seconds"] == 900, d
 assert d["status_counts"] == {"unknown": 1, "first_seen_only": 1, "confirmed_introduced": 2, "confirmed_removal": 2}, d
 metrics = {m["key"]: m for m in d["metrics"]}
+for metric in metrics.values():
+    assert metric["evidence"] == ["adoption-input"], metric
+    assert set(metric["quality_dimensions"]) == {"completeness", "freshness", "validity", "provenance"}, metric
+    assert metric["quality_dimensions"]["provenance"] == "evidence-backed", metric
+    if metric["status"] == "observed":
+        assert metric["quality_dimensions"] == {
+            "completeness": "complete", "freshness": "unknown",
+            "validity": "valid", "provenance": "evidence-backed"
+        }, metric
+    else:
+        assert metric["status"] == "not_applicable", metric
+        assert metric["value"] is None and metric["quality_dimensions"] == {
+            "completeness": "unknown", "freshness": "unknown",
+            "validity": "unknown", "provenance": "evidence-backed"
+        }, metric
 assert metrics["adoption.unknown_count"]["value"] == 1, metrics
 assert metrics["adoption.first_seen_only_count"]["value"] == 1, metrics
 assert metrics["adoption.confirmed_introduction_count"]["value"] == 2, metrics
@@ -51,7 +66,11 @@ for key, value in {
 assert metrics["downstream_condition.supported_version_adoption_share"] == {
     "key": "downstream_condition.supported_version_adoption_share",
     "version": "1.0.0", "status": "observed", "value": {"num": 2, "den": 3},
-    "evidence": ["adoption-input"]
+    "evidence": ["adoption-input"],
+    "quality_dimensions": {
+        "completeness": "complete", "freshness": "unknown",
+        "validity": "valid", "provenance": "evidence-backed"
+    }
 }, metrics["downstream_condition.supported_version_adoption_share"]
 assert d["evidence_counts"] == {"version_comparison": 3, "version_comparison_unknown": 3, "supported_line_assessed": 3, "supported_line_unknown": 3}, d
 assert d["duration_counts"] == {"confirmed": 1, "right_censored": 2, "unknown": 3}, d
