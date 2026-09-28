@@ -16,6 +16,7 @@ rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/m11/proof-input.json" "$T/in.json"
 "$ROOT/build/rh_cli" proof --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "proof run"
 cmp "$ROOT/fixtures/m11/proof-result.json" "$T/out.json" || fail "proof golden output mismatch"
+cmp "$ROOT/fixtures/m11/proof-result.transformations.json" "$T/out.json.transformations.json" || fail "proof transformation golden mismatch"
 python3 - "$T/out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -28,6 +29,17 @@ assert d["assumption_count"] == 2 and d["trusted_computing_base_count"] == 2, d
 assert d["artifact_binding"]["status"] == "bound", d
 assert "not a whole-application safety claim" in d["note"], d
 print("[proof] typed replay/binding evidence OK")
+PY
+python3 - "$T/in.json" "$T/out.json" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, pathlib, sys
+source, output, sidecar = map(pathlib.Path, sys.argv[1:])
+d = json.loads(sidecar.read_text())
+assert d["adapter"] == "formal-proof-evidence", d
+assert d["output_schema"] == "rh-proof-result/1", d
+assert d["source_input_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest(), d
+assert d["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), d
+assert [field["state"] for field in d["fields"]] == ["preserved", "preserved", "transformed", "unsupported"], d
+print("[proof] exact-byte transformation lineage OK")
 PY
 
 python3 - "$T/in.json" "$T/unbound.json" <<'PY'
