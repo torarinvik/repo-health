@@ -15,9 +15,9 @@
    than argv or retained files. The process runner does not yet enforce child memory/process creation. Its
    Elisa API returns typed exit, timeout, output-limit, setup-error, signal, and
    I/O-error results; explicit compatibility adapters still map those results
-   to numeric statuses for the remaining transport and utility APIs. `system(3)` remains
-   only in a store-test helper; production subprocess call sites in `rh_git`
-   have migrated. Individual fetchers retain
+   to numeric statuses for the remaining transport and utility APIs. No Elisa
+   source calls `system(3)`; subprocess call sites in `rh_git` use the bounded
+   process runner. Individual fetchers retain
    their own byte limits.
 3. **No server endpoint** scans arbitrary server paths (M01-01): this CLI is
    local-only; there is no network listener in M00/M01.
