@@ -77,6 +77,7 @@ python3 - "$T/rep-fix2" <<'PY'
 import hashlib, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 manifest = (root / "bundle.manifest").read_text()
+assert (root / "evidence/emails.uniq").read_bytes() == b"alice@example.com\nbob@example.com\n"
 for metadata in (
     "bundle-schema: rh-evidence-bundle/1",
     "report-schema: repo-health-m01/1.0.0",

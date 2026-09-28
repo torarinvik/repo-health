@@ -134,6 +134,16 @@ def rh_cli_err(text: u8&) -> void can[Memory.Allocate, Abort.Panic, Console, Uns
         buffer
     Base::rh_write_stderr(buffer)
 
+def rh_email_view_less(left: sview, right: sview) -> bool can[Abort.Panic]:
+    left_length: usize = sview_len(left)
+    right_length: usize = sview_len(right)
+    common_length: usize = left_length if left_length < right_length else right_length
+    for index in 0..<common_length |index: usize = 0, left, right|:
+        left_byte: u8 = sview_at(left, index)
+        right_byte: u8 = sview_at(right, index)
+        return left_byte < right_byte if left_byte != right_byte
+    left_length < right_length
+
 def rh_cli_out(text: u8&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     buffer: mutable darray[u8] =
         buffer: mutable darray[u8] = []
@@ -500,17 +510,28 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
         rh_cli_err("cannot stage uniq path")
         return 4
     uniqp: cstr = (&uniq[0]).cast[cstr] can Unsafe.PointerCast
-    sorterr: mutable darray[u8] = []
-    if not rh_out_path(evc, "sort.err", sorterr):
-        rh_cli_err("cannot stage sort error path")
-        return 4
-    sorterrp: cstr = (&sorterr[0]).cast[cstr] can Unsafe.PointerCast
-    if Git::rh_run_sort_uniq(mailp, uniqp, sorterrp) != 0:
-        rh_cli_err("sort -u failed")
-        return 4
+    email_views: mutable darray[sview] = []
+    email_start: mutable usize = 0
+    while email_start < emails.count |email_start, email_views, emails|:
+        email_end: i64 = Base::rh_find_byte(emails, email_start, 10)
+        line_end: usize = email_end.usize() if email_end >= 0 else emails.count
+        email_views.push(string_view_slice(bytes_view(emails), email_start.i64(), line_end.i64()))
+        email_start <- line_end + 1 if email_end >= 0 else emails.count
+    sort[sview](email_views, rh_email_view_less)
     uniqb: mutable darray[u8] = []
-    if Base::rh_io_read(uniqp, uniqb) < 0:
-        rh_cli_err("cannot read uniq evidence")
+    previous_view: mutable usize = 0
+    has_previous_view: mutable bool = false
+    for view_index in 0..<email_views.count |view_index: usize = 0, email_views, previous_view, has_previous_view, uniqb|:
+        is_new_identity: bool = not has_previous_view or not sview_eq(email_views[previous_view], email_views[view_index])
+        if is_new_identity:
+            identity: sview = email_views[view_index]
+            for byte_index in 0..<sview_len(identity) |byte_index: usize = 0, identity, uniqb|:
+                uniqb.push(sview_at(identity, byte_index))
+            uniqb.push(10)
+            previous_view <- view_index
+            has_previous_view <- true
+    if not Base::rh_io_write(uniqp, uniqb):
+        rh_cli_err("cannot write unique email evidence")
         return 4
     identities: i64 = Base::rh_count_lines(uniqb)
     bots: i64 = Report::rh_count_bot_lines(uniqb)
