@@ -1216,6 +1216,8 @@ Study deviations in artifact digests, source mappings, publishing actors, releas
 
 Prefer concrete first-level findings such as “artifact digest changed under the same version label” before a generic anomaly score. Explicit evidence is easier to validate and explain.
 
+The experimental evaluation path now also accepts a declared cadence spec and bounded window evidence. It emits explicit per-window floor findings, an exact baseline rational, observed/censored counts, and a name-and-deny caveat; missing evidence is unsupported, and a baseline or evaluation population with no observable windows is `not_applicable`, never converted to zero. The input/result goldens and schemas lock this surface to `rh-experimental-input/1` and `rh-experimental-result/1`; malformed, oversized, or overflowing window data fails closed. This is one concrete anomaly surface, not broad anomaly coverage.
+
 ### 16.4 Formal-proof evidence
 
 `rh_cli proof` accepts proposition identifiers, source revision, checker version, explicit bounded assumptions and trusted-computing-base lists, a syntactically valid `sha256:` proof digest, replay result, and an optional artifact binding with its own SHA-256 digest. `fixtures/m11/proof-input.json` and `proof-result.json` are independently schema-checked golden envelopes; `proof-result.transformations.json` binds exact input/output bytes and the pinned normalizer configuration. `tests/test_proof_cli.sh` verifies the lineage digests and rejects malformed digests and missing evidence lists.

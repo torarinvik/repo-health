@@ -81,10 +81,12 @@ module ExperimentalReport:
             limits: mutable darray[i64] = []
             optins: mutable darray[i64] = []
             adm: mutable darray[i64] = []
+            admissible_cadence: mutable bool = false
             sp_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "specs")
             return -1 if sp_idx < 0 or nodes[sp_idx.usize()].kind != Json::RH_JSON_ARR
             sparr: Json::RhJsonNode = nodes[sp_idx.usize()]
-            while spc >= 0 |spc: i64 = sparr.first_child, nodes, texts, raw, pool, k_starts, k_ends, waves, costs, limits, optins, adm, admissible_disc, disc_key|:
+            cadence_key: u8& = "anomaly.cadence_deviation_windows"
+            while spc >= 0 |spc: i64 = sparr.first_child, nodes, texts, raw, pool, k_starts, k_ends, waves, costs, limits, optins, adm, admissible_disc, admissible_cadence, disc_key, cadence_key|:
                 return -1 if nodes[spc.usize()].kind != Json::RH_JSON_OBJ
                 ks: mutable i64 = 0
                 ke: mutable i64 = 0
@@ -123,6 +125,8 @@ module ExperimentalReport:
                 adm.push(a)
                 if a == 1 and rh_xr_eq(pool, start, pool.count.i64(), disc_key):
                     admissible_disc <- true
+                if a == 1 and rh_xr_eq(pool, start, pool.count.i64(), cadence_key):
+                    admissible_cadence <- true
                 spc <- nodes[spc.usize()].next_sibling
 
             obs_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "observations")
@@ -145,6 +149,55 @@ module ExperimentalReport:
             cen: mutable i64 = 0
             den: mutable i64 = 0
             Experimental::rh_exp_discontinuity_aggregate(outcomes, &wr, &wo, &cen, &den)
+
+            cadence_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "cadence")
+            cadence_floor: mutable i64 = 0
+            cadence_baseline_windows: mutable i64 = 0
+            cadence_observable: mutable darray[i64] = []
+            cadence_counts: mutable darray[i64] = []
+            cadence_findings: mutable darray[i64] = []
+            cadence_finding_count: mutable i64 = 0
+            cadence_denominator: mutable i64 = 0
+            cadence_censored: mutable i64 = 0
+            cadence_baseline_sum: mutable i64 = 0
+            cadence_baseline_count: mutable i64 = 0
+            cadence_state: mutable i64 = 0
+            if admissible_cadence or cadence_idx >= 0:
+                cadence_state <- 1
+                if cadence_idx >= 0:
+                    return -1 if nodes[cadence_idx.usize()].kind != Json::RH_JSON_OBJ
+                    floor_idx: i64 = Json::rh_json_obj_get(nodes, texts, cadence_idx, "floor")
+                    baseline_idx: i64 = Json::rh_json_obj_get(nodes, texts, cadence_idx, "baseline_windows")
+                    windows_idx: i64 = Json::rh_json_obj_get(nodes, texts, cadence_idx, "windows")
+                    return -1 if floor_idx < 0 or baseline_idx < 0 or windows_idx < 0
+                    return -1 if nodes[windows_idx.usize()].kind != Json::RH_JSON_ARR
+                    floor_ok: mutable i64 = 0
+                    cadence_floor <- Json::rh_json_int(nodes, raw, floor_idx, &floor_ok)
+                    return -1 if floor_ok == 0 or cadence_floor < 0
+                    baseline_ok: mutable i64 = 0
+                    cadence_baseline_windows <- Json::rh_json_int(nodes, raw, baseline_idx, &baseline_ok)
+                    return -1 if baseline_ok == 0 or cadence_baseline_windows <= 0
+                    windows: Json::RhJsonNode = nodes[windows_idx.usize()]
+                    return -1 if windows.child_count <= 0 or windows.child_count > 256 or cadence_baseline_windows > windows.child_count
+                    while window_idx >= 0 |window_idx: i64 = windows.first_child, nodes, raw, cadence_observable, cadence_counts|:
+                        return -1 if nodes[window_idx.usize()].kind != Json::RH_JSON_OBJ
+                        observable_idx: i64 = Json::rh_json_obj_get(nodes, texts, window_idx, "observable")
+                        count_idx: i64 = Json::rh_json_obj_get(nodes, texts, window_idx, "count")
+                        return -1 if observable_idx < 0 or count_idx < 0
+                        return -1 if nodes[observable_idx.usize()].kind != Json::RH_JSON_BOOL
+                        count_ok: mutable i64 = 0
+                        count: i64 = Json::rh_json_int(nodes, raw, count_idx, &count_ok)
+                        return -1 if count_ok == 0 or count < 0
+                        cadence_observable.push(1 if Json::rh_json_is_true(nodes, raw, observable_idx) else 0)
+                        cadence_counts.push(count)
+                        window_idx <- nodes[window_idx.usize()].next_sibling
+                    baseline_state: i64 = Experimental::rh_exp_cadence_baseline(cadence_observable, cadence_counts, cadence_baseline_windows, &cadence_baseline_sum, &cadence_baseline_count)
+                    return -1 if baseline_state == -2
+                    if baseline_state == -1:
+                        cadence_state <- 2
+                    else:
+                        cadence_state <- 3
+                        Experimental::rh_exp_cadence_findings(cadence_observable, cadence_counts, cadence_floor, cadence_baseline_windows, cadence_findings, &cadence_finding_count, &cadence_denominator, &cadence_censored)
 
             Base::rh_push_text(out, "{\"schema\":\"rh-experimental-result/1\",\"specs\":[")
             while i < k_starts.count.i64() |i: i64 = 0, k_starts, k_ends, waves, costs, limits, optins, adm, pool, out|:
@@ -196,7 +249,38 @@ module ExperimentalReport:
                 Base::rh_push_text(out, ",\"den\":")
                 Base::rh_push_decimal_i64(out, den)
                 Base::rh_push_text(out, "}}")
-            Base::rh_push_text(out, "},\"label\":\"")
+            Base::rh_push_text(out, "},\"anomaly\":{\"key\":\"")
+            Base::rh_push_text(out, cadence_key)
+            Base::rh_push_text(out, "\",\"status\":\"")
+            if not admissible_cadence:
+                Base::rh_push_text(out, "unsupported\",\"reason\":\"no-admissible-experimental-spec\",\"value\":null")
+            elif cadence_state == 1:
+                Base::rh_push_text(out, "unsupported\",\"reason\":\"missing-cadence-evidence\",\"value\":null")
+            elif cadence_state == 2:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-observable-baseline-window\",\"value\":null")
+            elif cadence_denominator == 0:
+                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-observable-evaluation-window\",\"value\":null")
+            else:
+                Base::rh_push_text(out, "observed\",\"value\":{\"floor\":")
+                Base::rh_push_decimal_i64(out, cadence_floor)
+                Base::rh_push_text(out, ",\"baseline_mean\":{\"num\":")
+                Base::rh_push_decimal_i64(out, cadence_baseline_sum)
+                Base::rh_push_text(out, ",\"den\":")
+                Base::rh_push_decimal_i64(out, cadence_baseline_count)
+                Base::rh_push_text(out, "},\"finding_window_indices\":[")
+                while fi < cadence_findings.count |fi: usize = 0, cadence_findings, out|:
+                    if fi > 0:
+                        out.push(44)
+                    Base::rh_push_decimal_i64(out, cadence_findings[fi])
+                    fi <- fi + 1
+                Base::rh_push_text(out, "],\"observed_window_count\":")
+                Base::rh_push_decimal_i64(out, cadence_denominator)
+                Base::rh_push_text(out, ",\"censored_window_count\":")
+                Base::rh_push_decimal_i64(out, cadence_censored)
+                Base::rh_push_text(out, "}")
+            Base::rh_push_text(out, ",\"label\":\"")
+            Base::rh_push_text(out, Experimental::rh_exp_anomaly_label())
+            Base::rh_push_text(out, "\"},\"label\":\"")
             Base::rh_push_text(out, Experimental::rh_exp_label())
             Base::rh_push_text(out, "\",\"note\":\"experimental metrics are opt-in, costed, explicitly limited, and excluded from the default policy path; none-observed is a fact about the observation window, not a claim about the project; a censored subject is excluded from the denominator\"}")
             0
