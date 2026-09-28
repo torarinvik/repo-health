@@ -21,6 +21,28 @@ module Metrics:
         # private to this file (modules retried after re-seed; see CHANGELOG).
         const RH_U64MAX: u64 = 18446744073709551615
 
+        def rh_members_key_less(left: sview, right: sview) -> bool:
+            left_length: usize = sview_len(left)
+            right_length: usize = sview_len(right)
+            limit: usize = left_length if left_length < right_length else right_length
+            while index < limit |index: usize = 0, left, right|:
+                left_byte: u8 = sview_at(left, index)
+                right_byte: u8 = sview_at(right, index)
+                return left_byte < right_byte if left_byte != right_byte
+                index <- index + 1
+            left_length < right_length
+
+        def rh_members_key_u64(key: sview, offset: usize) -> u64:
+            key_loop: mutable sview = key
+            offset_loop: mutable usize = offset
+            for index in 0..<8 |index, value: u64 = 0, key_loop, offset_loop| -> value:
+                value <- (value << 8) | sview_at(key_loop, offset_loop + index).u64()
+
+        def rh_members_key_append(bytes: mutable darray[u8]&, value: u64) -> void can[Memory.Allocate, Abort.Panic]:
+            for index in 0..<8 |index, bytes, value|:
+                shift: u64 = ((7 - index).u64()) * 8
+                bytes.push(((value >> shift) & 255).u8())
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_gcd(a: u64, b: u64) -> u64:
             while y != 0 |x: u64 = a, y: u64 = b| -> x:
@@ -82,6 +104,52 @@ module Metrics:
                     return -3 if verdict < 0
                     return position.i64() if verdict == 1
             -1
+
+        # Deterministic membership explaining the smallest concentration prefix.
+        # The byte-view sort key is (MAX-count, actor_id), both big-endian, so the
+        # standard in-place sort gives descending counts and ascending IDs on ties.
+        def rh_concentration_members(actor_ids: darray[i64]&, counts: darray[u64]&, threshold_num: u64, threshold_den: u64, members_out: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -2 if threshold_den == 0 or threshold_num == 0 or threshold_num > threshold_den
+            return -4 if actor_ids.count != counts.count or members_out.count != 0
+            keys_bytes: mutable darray[u8] = []
+            ids_bytes: mutable darray[u8] = []
+            total: mutable u64 = 0
+            for index in 0..<actor_ids.count |index, keys_bytes, ids_bytes, total, actor_ids, counts|:
+                actor_id: i64 = actor_ids[index]
+                count: u64 = counts[index]
+                return -4 if actor_id < 0
+                return -3 if total > RH_U64MAX - count
+                total <- total + count
+                Metrics::rh_members_key_append(ids_bytes, actor_id.u64())
+                if count > 0:
+                    Metrics::rh_members_key_append(keys_bytes, RH_U64MAX - count)
+                    Metrics::rh_members_key_append(keys_bytes, actor_id.u64())
+            ids: mutable darray[sview] = []
+            for index in 0..<(ids_bytes.count / 8) |index, ids, ids_bytes|:
+                start: i64 = (index * 8).i64()
+                ids.push(string_view_slice(bytes_view(ids_bytes), start, start + 8))
+            sort[sview](ids, rh_members_key_less)
+            for index in 0..<ids.count |index, ids|:
+                return -4 if index > 0 and sview_eq(ids[index - 1], ids[index])
+            return -1 if total == 0
+            keys: mutable darray[sview] = []
+            for index in 0..<(keys_bytes.count / 16) |index, keys, keys_bytes|:
+                start: i64 = (index * 16).i64()
+                keys.push(string_view_slice(bytes_view(keys_bytes), start, start + 16))
+            sort[sview](keys, rh_members_key_less)
+            threshold_num_loop: mutable u64 = threshold_num
+            threshold_den_loop: mutable u64 = threshold_den
+            selected: i64 =
+                for index in 0..<keys.count |index, cumulative: u64 = 0, position: i64 = 0, keys, total, threshold_num_loop, threshold_den_loop| -> position:
+                    cumulative <- cumulative + RH_U64MAX - Metrics::rh_members_key_u64(keys[index], 0)
+                    position <- position + 1
+                    verdict: i64 = Metrics::rh_cross_ge(cumulative, threshold_den_loop, total, threshold_num_loop)
+                    return -3 if verdict < 0
+                    break position if verdict == 1
+            while index < selected.usize() |index: usize = 0, keys, members_out|:
+                members_out.push(Metrics::rh_members_key_u64(keys[index], 8).i64())
+                index <- index + 1
+            selected
 
         # HHI as reduced exact fraction num/den. Returns false when the population
         # is empty (caller reports not_applicable) or on overflow (bounded error).

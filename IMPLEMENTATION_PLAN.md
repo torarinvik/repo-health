@@ -1489,7 +1489,7 @@ This supports safe caching and prevents a result computed under one actor merge 
 
 ### 19.1 Exact concentration implementation
 
-Use integer event counts and rational arithmetic where feasible. Sort positive counts descending with a deterministic actor-ID tie-break for membership explanations. The count of actors reaching a share threshold is invariant to equal-count ordering, but the displayed membership set still needs deterministic ordering.
+Use integer event counts and rational arithmetic where feasible. `Metrics::rh_concentration_members` now returns the smallest positive-count prefix in descending count order with ascending actor-ID tie-breaks, using Elisa's in-place standard sort over fixed-width byte-view keys. It rejects duplicate/negative actor IDs, invalid thresholds, mismatched inputs, and total overflow before mutating output; independent M00 oracles cover exact 50%/75% boundaries, tie ordering, empty populations, and unchanged output on errors. The scalar count remains available through `Metrics::rh_concentration`.
 
 ```text
 input: actor counts x[1..n], threshold a/b
