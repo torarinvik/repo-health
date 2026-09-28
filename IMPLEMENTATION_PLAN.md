@@ -1565,6 +1565,8 @@ return results, scope, coverage, and truncation metadata
 
 Keep path witnesses bounded. Enumerating every path through a graph with cycles or diamonds can explode even when the unique-node count is moderate. A few deterministic witness paths are sufficient to explain reachability; they are not the full path count.
 
+**Repository checkpoint:** the downstream report now includes one deterministic shortest BFS witness for each of the first 16 reached dependents, with a separate witness-list truncation flag. The predecessor map is collected during the same bounded traversal, so routes obey its visibility, projection, depth, and node limits; the graph API also exposes witness reconstruction for reached targets and fails without partial output for missing targets. M05 and downstream CLI tests cover a chain, a diamond tie, and report serialization. These routes explain reachability in the traversed graph; they do not enumerate alternate paths or claim that the graph is complete.
+
 ### 19.5 Downstream aggregation
 
 The input manifest lists dependent project IDs, their mapping provenance, and the exact intrinsic observations joined. For each requested downstream metric, calculate its own covered denominator.

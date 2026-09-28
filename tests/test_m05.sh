@@ -32,10 +32,10 @@ if grep -qE "def rh_(transitive_dependents|scc_count)" "$ROOT/src/rh_graph.elisa
 import re, sys
 src = open(sys.argv[1]).read()
 for fn in ("rh_transitive_dependents", "rh_scc_count", "rh_direct_dependents"):
-    m = re.search(r'^\s*def ' + fn + r'\(.*?\)[^:]*:\n(.*?)(?=^        (?:def|#)|\Z)', src, re.M | re.S)
+    m = re.search(r'^\s*def ' + fn + r'(?!_)\(.*?\)[^:]*:\n(.*?)(?=^        (?:def|#)|\Z)', src, re.M | re.S)
     assert m, fn
     body = m.group(1)
-    assert fn not in body, (fn, "recursive")
+    assert re.search(r'\b' + fn + r'\s*\(', body) is None, (fn, "recursive")
 print("[m05] iterative traversal OK")
 EOF
 fi

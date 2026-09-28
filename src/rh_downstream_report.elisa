@@ -19,6 +19,7 @@ include "./rh_downstream.elisa"
 
 module DownstreamReport:
     private:
+        const RH_DS_PATH_WITNESS_LIMIT: i64 = 16
         # Map the dep-graph scope label back to a caller-defined scope byte:
         # 1 runtime/normal, 2 dev, 3 optional, 4 peer. The projection here keeps
         # every scope (Graph::RH_SCOPE_ALL); the label is preserved in the report.
@@ -148,6 +149,33 @@ module DownstreamReport:
                 rh_ds_emit_node(out, ids[i], nodes, texts, name_idx, ver_idx)
                 i <- i + 1
 
+        def rh_ds_emit_path_witnesses(out: mutable darray[u8]&, targets: darray[i64]&, parents: darray[i64]&, subject: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "{\"limit\":")
+            Base::rh_push_decimal_i64(out, RH_DS_PATH_WITNESS_LIMIT)
+            Base::rh_push_text(out, ",\"truncated\":")
+            Base::rh_push_text(out, "true" if targets.count.i64() > RH_DS_PATH_WITNESS_LIMIT else "false")
+            Base::rh_push_text(out, ",\"items\":[")
+            emitted: mutable i64 = 0
+            while i < targets.count and emitted < RH_DS_PATH_WITNESS_LIMIT |i: usize = 0, targets, parents, out, emitted, subject|:
+                target: i64 = targets[i]
+                i <- i + 1
+                path: mutable darray[i64] = []
+                return false if not Graph::rh_path_witness(parents, subject, target, path)
+                if emitted > 0:
+                    out.push(44)
+                Base::rh_push_text(out, "{\"target\":")
+                Base::rh_push_decimal_i64(out, target)
+                Base::rh_push_text(out, ",\"path\":[")
+                while j < path.count |j: usize = 0, path, out|:
+                    if j > 0:
+                        out.push(44)
+                    Base::rh_push_decimal_i64(out, path[j])
+                    j <- j + 1
+                Base::rh_push_text(out, "]}")
+                emitted <- emitted + 1
+            Base::rh_push_text(out, "]}")
+            true
+
         # Parse a dep graph and emit a downstream report. Returns:
         #   0 ok, -1 malformed/unsupported shape, -2 subject id not present,
         #   -3 malformed intrinsics document.
@@ -269,8 +297,9 @@ module DownstreamReport:
             direct: mutable darray[i64] = []
             dc: i64 = Graph::rh_direct_dependents(edges, vis, mapped_subject, &p, direct)
             trans: mutable darray[i64] = []
+            path_parents: mutable darray[i64] = []
             trunc: mutable i64 = 0
-            tc: i64 = Graph::rh_transitive_dependents(edges, vis, mapped_subject, &p, trans, &trunc)
+            tc: i64 = Graph::rh_transitive_dependents_with_parents(edges, vis, mapped_subject, &p, trans, &trunc, path_parents)
             scc: i64 = Graph::rh_scc_count(edges, vis, node_count, &p)
             cyclic_nodes: i64 = Graph::rh_cyclic_node_count(edges, vis, node_count, &p)
             visible_nodes: i64 =
@@ -446,6 +475,8 @@ module DownstreamReport:
             rh_ds_emit_list(out, trans2, nodes, texts, name_idx, ver_idx)
             Base::rh_push_text(out, "],\"transitive_count\":")
             Base::rh_push_decimal_i64(out, tc2)
+            Base::rh_push_text(out, ",\"path_witnesses\":")
+            return -1 if not rh_ds_emit_path_witnesses(out, trans, path_parents, mapped_subject)
             Base::rh_push_text(out, ",\"truncated\":")
             if trunc == 1:
                 Base::rh_push_text(out, "true")

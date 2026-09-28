@@ -195,6 +195,10 @@ assert d["transitive_count"] == 3, d
 assert d["truncated"] is False, d
 assert {n["id"] for n in d["direct"]} == {2, 3}, d["direct"]
 assert {n["id"] for n in d["transitive"]} == {1, 2, 3}, d["transitive"]
+assert d["path_witnesses"]["limit"] == 16 and d["path_witnesses"]["truncated"] is False, d["path_witnesses"]
+witnesses = {w["target"]: w["path"] for w in d["path_witnesses"]["items"]}
+assert witnesses[1] == [4, 2, 1], witnesses
+assert all(path[0] == 4 and path[-1] == target for target, path in witnesses.items()), witnesses
 assert any(n["name"] == "top" for n in d["transitive"]), d["transitive"]
 assert "NOT a total" in d["note"], d["note"]
 assert d["grouping"]["family_dedup"] is False, d["grouping"]
