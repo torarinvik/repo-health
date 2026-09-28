@@ -137,6 +137,8 @@ assert m["history.collection_complete_windows"]["evidence"] == [
 assert m["history.coverage_state"]["evidence"] == [
     "evidence/git-log.bin", "evidence/git-shallow.txt"
 ], m["history.coverage_state"]
+assert m["history.coverage_state"]["value"] == {"code": 0, "label": "complete"}, m
+assert m["source.manifest_presence"]["value"] == {"code": 0, "label": "none"}, m
 assert m["history.rejected_record_count"]["value"] == 0, m
 assert m["contributors.raw_identity_count"]["value"] == 2, m
 assert m["activity.active_complete_months"]["value"] == 3, m
