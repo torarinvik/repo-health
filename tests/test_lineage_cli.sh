@@ -96,20 +96,35 @@ PY
 set -e
 [[ "$rc_coverage" -eq 4 && "$rc_digest" -eq 4 && "$rc_state" -eq 4 && "$rc_class" -eq 4 && "$rc_time" -eq 4 && "$rc_tool" -eq 4 && "$rc_assessment_digest" -eq 4 && "$rc_revision" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_duplicate_state" -eq 4 ]] || fail "invalid lineage must exit 4 (got $rc_coverage/$rc_digest/$rc_state/$rc_class/$rc_time/$rc_tool/$rc_assessment_digest/$rc_revision/$rc_duplicate/$rc_duplicate_state)"
 echo "[lineage] duplicate root and nested object keys rejected"
-python3 - "$T/in.json" "$T/duplicate-ref.json" "$T/over-bound-refs.json" <<'PY'
+python3 - "$T/in.json" "$T/duplicate-ref.json" "$T/over-bound-refs.json" "$T/over-bound-transformations.json" "$T/over-bound-metrics.json" <<'PY'
 import json, sys
 document = json.load(open(sys.argv[1]))
 document["derivation_refs"] = ["same", "same"]
 json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
 document["derivation_refs"] = [f"ref-{index}" for index in range(1025)]
 json.dump(document, open(sys.argv[3], "w"), separators=(",", ":"))
+document["derivation_refs"] = []
+document["transformations"] = [
+    {"field": f"field-{index}", "state": "preserved", "reason": "copied"}
+    for index in range(1025)
+]
+json.dump(document, open(sys.argv[4], "w"), separators=(",", ":"))
+document["transformations"] = []
+document["metrics"] = [
+    {"key": f"metric-{index}", "version": "1", "definition_digest": "1" * 64,
+     "class": "raw", "crosswalk": "test"}
+    for index in range(1025)
+]
+json.dump(document, open(sys.argv[5], "w"), separators=(",", ":"))
 PY
 set +e
 "$ROOT/build/rh_cli" lineage --input "$T/duplicate-ref.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate_ref=$?
 "$ROOT/build/rh_cli" lineage --input "$T/over-bound-refs.json" --out "$T/x" >/dev/null 2>&1; rc_refs_bound=$?
+"$ROOT/build/rh_cli" lineage --input "$T/over-bound-transformations.json" --out "$T/x" >/dev/null 2>&1; rc_transformations_bound=$?
+"$ROOT/build/rh_cli" lineage --input "$T/over-bound-metrics.json" --out "$T/x" >/dev/null 2>&1; rc_metrics_bound=$?
 set -e
-[[ "$rc_duplicate_ref" -eq 4 && "$rc_refs_bound" -eq 4 ]] || fail "duplicate and over-bound lineage refs must fail closed (got $rc_duplicate_ref/$rc_refs_bound)"
-echo "[lineage] derivation references are unique and bounded"
+[[ "$rc_duplicate_ref" -eq 4 && "$rc_refs_bound" -eq 4 && "$rc_transformations_bound" -eq 4 && "$rc_metrics_bound" -eq 4 ]] || fail "duplicate and over-bound lineage collections must fail closed (got $rc_duplicate_ref/$rc_refs_bound/$rc_transformations_bound/$rc_metrics_bound)"
+echo "[lineage] derivation references, transformations, and metrics are bounded"
 
 python3 - "$T/oversized.json" <<'PY'
 import sys
