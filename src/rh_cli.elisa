@@ -333,7 +333,7 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
             rh_cli_err("cannot stage clone log")
             return 4
         clerrp: cstr = (&clerr[0]).cast[cstr] can Unsafe.PointerCast
-        if Git::rh_run_git_clone(repo, dest, clerrp, full) != 0:
+        if not Process::rh_succeeded(Git::rh_run_git_clone(repo, dest, clerrp, full)):
             rh_cli_err("clone failed; see evidence/git-clone.err (no partial report)")
             return 4
         scan_repo <- dest
@@ -393,24 +393,26 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     verp: cstr = (&verf[0]).cast[cstr] can Unsafe.PointerCast
     verep: cstr = (&vere[0]).cast[cstr] can Unsafe.PointerCast
     fileserrp: cstr = (&fileserr[0]).cast[cstr] can Unsafe.PointerCast
-    if Git::rh_run_git_version(verp, verep) != 0:
+    if not Process::rh_succeeded(Git::rh_run_git_version(verp, verep)):
         rh_cli_err("git --version failed")
         return 4
     partp: cstr = (&partf[0]).cast[cstr] can Unsafe.PointerCast
     partep: cstr = (&parte[0]).cast[cstr] can Unsafe.PointerCast
     _ = Git::rh_run_git_partial(scan_repo, partp, partep)
     shaep: cstr = (&shae[0]).cast[cstr] can Unsafe.PointerCast
-    if Git::rh_run_git_shallow(scan_repo, shap, shaep) != 0:
+    if not Process::rh_succeeded(Git::rh_run_git_shallow(scan_repo, shap, shaep)):
         rh_cli_err("rev-parse failed (not a repository?)")
         return 4
     _ = Git::rh_run_git_files(scan_repo, filesp, fileserrp)
     logep: cstr = (&loge[0]).cast[cstr] can Unsafe.PointerCast
-    if Git::rh_run_git_log(scan_repo, logp, logep, full) != 0:
+    log_result: Process::RhProcessResult = Git::rh_run_git_log(scan_repo, logp, logep, full)
+    if not Process::rh_succeeded(log_result):
         headerr: mutable darray[u8] = []
         if not rh_out_path(evc, "git-head.err", headerr):
             rh_cli_err("cannot stage head error path")
             return 4
-        if Git::rh_run_git_head(scan_repo, (&headerr[0]).cast[cstr] can Unsafe.PointerCast) != 0:
+        head_result: Process::RhProcessResult = Git::rh_run_git_head(scan_repo, (&headerr[0]).cast[cstr] can Unsafe.PointerCast)
+        if head_result.kind == Process::RhProcessKind.Exit and head_result.code == 1:
             rh_cli_err("note: repository has no commits yet; reporting observed-empty history")
             empty_log: mutable darray[u8] = []
             if not Base::rh_io_write(logp, empty_log):
@@ -8570,14 +8572,14 @@ def rh_do_vcs(format: cstr, input_path: cstr, out_path: cstr, repo_path: cstr, h
             error_path
         source_ptr: cstr = (&source_path[0]).cast[cstr] can Unsafe.PointerCast
         error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
-        command_rc: i64 =
+        command_result: Process::RhProcessResult =
             if fmt == 0:
                 Git::rh_run_hg_log(repo_path, source_ptr, error_ptr)
             elif fmt == 2:
                 Git::rh_run_svn_log(repo_path, source_ptr, error_ptr)
             else:
                 Git::rh_run_fossil_timeline(repo_path, source_ptr, error_ptr)
-        if command_rc != 0:
+        if not Process::rh_succeeded(command_result):
             rh_cli_err("vcs: native collector failed; source and stderr evidence retained")
             return 4
         if Base::rh_io_read(source_ptr, raw) < 0:
