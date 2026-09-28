@@ -63,6 +63,13 @@ def check_obj(obj, spec, ctx):
         if k in obj:
             value = obj[k]
             assert number_ok(value) and value <= maximum, (ctx, "above maximum", k, value, maximum)
+    for k, maximum in spec.get("maximum_items", {}).items():
+        if k in obj:
+            assert isinstance(obj[k], list) and len(obj[k]) <= maximum, (ctx, "too many items", k, len(obj[k]), maximum)
+    for k in spec.get("unique_items", []):
+        if k in obj:
+            values = obj[k]
+            assert isinstance(values, list) and len(values) == len(set(json.dumps(value, sort_keys=True) for value in values)), (ctx, "duplicate items", k)
     for lower, upper in spec.get("less_than_or_equal", []):
         if lower in obj and upper in obj:
             left, right = obj[lower], obj[upper]
