@@ -17,7 +17,11 @@ python3 - "$T/out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-lineage-result/1", d
+assert d["observation_id"] == "observation-42", d
+assert d["subject"] == {"type": "repository", "id": "repo:acme/project"}, d
 assert d["lineage"]["source"] == "github" and d["lineage"]["native_object_id"] == "issue-42", d
+assert d["payload"]["retained_object"].startswith("evidence:sha256:"), d
+assert d["rights"]["license_reference"] == "https://example.invalid/terms/data-use", d
 assert d["times"]["event_time"] is None and d["times"]["updated_at"] == 1700000010, d
 assert d["times"]["valid_from"] == 1699999800 and d["times"]["valid_until"] == 1700001000, d
 assert d["collection"]["coverage"]["state"] == "partial", d
@@ -35,6 +39,26 @@ assert "losses remain explicit" in d["note"], d
 print("[lineage] separate delivery/origin identities + explicit losses OK")
 PY
 
+python3 - "$T/in.json" "$T/legacy-v1.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+for field in ("observation_id", "subject_type", "subject_id", "retained_object",
+              "license_reference", "valid_from", "valid_until"):
+    document.pop(field)
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" lineage --input "$T/legacy-v1.json" --out "$T/legacy-v1-result.json" >/dev/null || fail "legacy lineage v1 must remain accepted"
+python3 - "$T/legacy-v1-result.json" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert report["observation_id"] is None
+assert report["subject"] == {"type": None, "id": None}
+assert report["payload"]["retained_object"] is None
+assert report["rights"]["license_reference"] is None
+assert report["times"]["valid_from"] is None and report["times"]["valid_until"] is None
+print("[lineage] v1 optional provenance additions remain backward compatible")
+PY
+
 python3 - "$T/in.json" "$T/incomplete-identity.json" <<'PY'
 import json, sys
 document = json.load(open(sys.argv[1]))
@@ -45,6 +69,7 @@ for field in (
     document.pop(field)
 document.pop("valid_from")
 document.pop("valid_until")
+document["license_reference"] = None
 json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
 PY
 "$ROOT/build/rh_cli" lineage --input "$T/incomplete-identity.json" --out "$T/incomplete-identity-result.json" >/dev/null || fail "incomplete origin identity should remain observable"
@@ -59,6 +84,7 @@ assert assessment["origin"] == {
 }, assessment
 assert json.load(open(sys.argv[1]))["times"]["valid_from"] is None
 assert json.load(open(sys.argv[1]))["times"]["valid_until"] is None
+assert json.load(open(sys.argv[1]))["rights"]["license_reference"] is None
 print("[lineage] incomplete origin identity remains possible duplicate")
 PY
 
@@ -84,6 +110,10 @@ sed 's/"assessment_result_digest":"[0-9a-f]*/"assessment_result_digest":"BAD/' "
 "$ROOT/build/rh_cli" lineage --input "$T/bad-assessment-digest.json" --out "$T/x" >/dev/null 2>&1; rc_assessment_digest=$?
 sed 's/"assessment_subject_revision":7/"assessment_subject_revision":-1/' "$T/in.json" > "$T/bad-subject-revision.json"
 "$ROOT/build/rh_cli" lineage --input "$T/bad-subject-revision.json" --out "$T/x" >/dev/null 2>&1; rc_revision=$?
+sed 's/"subject_type":"repository"/"subject_type":"unknown"/' "$T/in.json" > "$T/bad-subject-type.json"
+"$ROOT/build/rh_cli" lineage --input "$T/bad-subject-type.json" --out "$T/x" >/dev/null 2>&1; rc_subject_type=$?
+sed 's/"retained_object":"evidence:sha256:[^"]*"/"retained_object":""/' "$T/in.json" > "$T/empty-retained-object.json"
+"$ROOT/build/rh_cli" lineage --input "$T/empty-retained-object.json" --out "$T/x" >/dev/null 2>&1; rc_retained_object=$?
 python3 - "$T/in.json" "$T/duplicate-coverage.json" <<'PY'
 import sys
 payload = open(sys.argv[1]).read()
@@ -101,7 +131,7 @@ open(sys.argv[2], "w").write(payload.replace(needle, needle + ',"state":"discard
 PY
 "$ROOT/build/rh_cli" lineage --input "$T/duplicate-transformation-state.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate_state=$?
 set -e
-[[ "$rc_coverage" -eq 4 && "$rc_digest" -eq 4 && "$rc_state" -eq 4 && "$rc_class" -eq 4 && "$rc_time" -eq 4 && "$rc_valid_interval" -eq 4 && "$rc_tool" -eq 4 && "$rc_assessment_digest" -eq 4 && "$rc_revision" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_duplicate_state" -eq 4 ]] || fail "invalid lineage must exit 4 (got $rc_coverage/$rc_digest/$rc_state/$rc_class/$rc_time/$rc_valid_interval/$rc_tool/$rc_assessment_digest/$rc_revision/$rc_duplicate/$rc_duplicate_state)"
+[[ "$rc_coverage" -eq 4 && "$rc_digest" -eq 4 && "$rc_state" -eq 4 && "$rc_class" -eq 4 && "$rc_time" -eq 4 && "$rc_valid_interval" -eq 4 && "$rc_tool" -eq 4 && "$rc_assessment_digest" -eq 4 && "$rc_revision" -eq 4 && "$rc_subject_type" -eq 4 && "$rc_retained_object" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_duplicate_state" -eq 4 ]] || fail "invalid lineage must exit 4 (got $rc_coverage/$rc_digest/$rc_state/$rc_class/$rc_time/$rc_valid_interval/$rc_tool/$rc_assessment_digest/$rc_revision/$rc_subject_type/$rc_retained_object/$rc_duplicate/$rc_duplicate_state)"
 echo "[lineage] duplicate root and nested object keys rejected"
 python3 - "$T/in.json" "$T/duplicate-ref.json" "$T/over-bound-refs.json" "$T/over-bound-transformations.json" "$T/over-bound-metrics.json" <<'PY'
 import json, sys
