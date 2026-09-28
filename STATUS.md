@@ -26,6 +26,8 @@ catalog below contains 224 implemented definitions across 223 distinct keys.**
 
 **M00-04 typed observation integration:** lineage metric entries accept a nullable shared `ObservationCodec` value. External evidence locators must match an envelope derivation reference; the codec canonically emits validated observation fields and obtains evidence bytes from validated JSON nodes, while metric arrays retain a node index instead of copying the buffer-owning observation struct. The input/result schemas and golden include one observed metric and null peers. `tests/test_lineage_cli.sh` verifies the round trip, byte-identical output from compact and pretty-printed inputs, and fail-closed rejection of malformed or unlinked evidence; `tests/test_m00.sh` and `tools/schema-check.sh` pass. This closes the lineage integration slice only; status/denominator migration across producers and broader observation contract adoption remain open.
 
+**M00-04 observation schema variants:** `rh-jsonschema/1` now validates discriminator-specific payload fields/types, closed observation/quality keys, nonnegative counts/timestamps/codes, and positive ratio denominators in the lineage input/result schemas. `tests/test_schemas.sh` covers all seven value variants and rejects invalid count types and zero denominators in both directions.
+
 **M02 scope (in progress):** `db/migrations/001_initial.sql` target schema
 contract (56 typed PostgreSQL tables, visibility/source-scoped constraints,
 evidence and graph indexes, fenced lease/cursor SQL methods) with the static

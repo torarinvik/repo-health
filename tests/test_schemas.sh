@@ -96,4 +96,93 @@ restore_pylock_fixture
 trap - EXIT
 echo "[schemas] dynamic attestation field type check OK"
 
+echo "[schemas] tagged observation variants reject incorrect payload types"
+lineage_input="$ROOT/fixtures/lineage/input.json"
+lineage_backup="$tmp/lineage-input.json"
+cp "$lineage_input" "$lineage_backup"
+restore_lineage_input() { cp "$lineage_backup" "$lineage_input"; }
+trap restore_lineage_input EXIT
+for variant in absent count count_pair timestamp ratio boolean enumeration; do
+  python3 - "$lineage_input" "$variant" <<'PY'
+import json, sys
+path, kind = sys.argv[1:]
+document = json.load(open(path))
+observation = document["metrics"][0]["observation"]
+payloads = {
+    "absent": {"kind": "absent"},
+    "count": {"kind": "count", "value": 17},
+    "count_pair": {"kind": "count_pair", "first": 3, "second": 4},
+    "timestamp": {"kind": "timestamp", "value": 1700000000},
+    "ratio": {"kind": "ratio", "num": 1, "den": 2},
+    "boolean": {"kind": "boolean", "value": True},
+    "enumeration": {"kind": "enumeration", "code": 1},
+}
+observation["value"] = payloads[kind]
+if kind == "absent":
+    observation["status"] = 2
+    observation["quality"] = {"completeness": "unknown", "freshness": "unknown", "validity": "unknown", "provenance": "unknown"}
+    observation["evidence"] = []
+json.dump(document, open(path, "w"), separators=(",", ":"))
+PY
+  bash "$ROOT/tools/schema-check.sh" >/dev/null || fail "schema rejected valid $variant observation variant"
+  restore_lineage_input
+done
+echo "[schemas] all tagged observation variants accepted"
+python3 - "$lineage_input" <<'PY'
+import json, sys
+path = sys.argv[1]
+document = json.load(open(path))
+document["metrics"][0]["observation"]["value"]["value"] = "17"
+json.dump(document, open(path, "w"), separators=(",", ":"))
+PY
+if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+  restore_lineage_input
+  trap - EXIT
+  fail "schema accepted a string for the count observation value"
+fi
+restore_lineage_input
+trap - EXIT
+echo "[schemas] input count observation payload type check OK"
+lineage_result="$ROOT/fixtures/lineage/result.json"
+lineage_result_backup="$tmp/lineage-result.json"
+cp "$lineage_result" "$lineage_result_backup"
+restore_lineage_result() { cp "$lineage_result_backup" "$lineage_result"; }
+trap restore_lineage_result EXIT
+python3 - "$lineage_result" <<'PY'
+import json, sys
+path = sys.argv[1]
+document = json.load(open(path))
+document["metrics"][0]["observation"]["value"]["value"] = "17"
+json.dump(document, open(path, "w"), separators=(",", ":"))
+PY
+if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+  restore_lineage_result
+  trap - EXIT
+  fail "result schema accepted a string for the count observation value"
+fi
+restore_lineage_result
+trap - EXIT
+echo "[schemas] result count observation payload type check OK"
+for lineage_fixture in "$lineage_input" "$lineage_result"; do
+  ratio_backup="$tmp/lineage-ratio.json"
+  cp "$lineage_fixture" "$ratio_backup"
+  restore_lineage_ratio() { cp "$ratio_backup" "$lineage_fixture"; }
+  trap restore_lineage_ratio EXIT
+  python3 - "$lineage_fixture" <<'PY'
+import json, sys
+path = sys.argv[1]
+document = json.load(open(path))
+observation = document["metrics"][0]["observation"]
+observation["value"] = {"kind": "ratio", "num": 0, "den": 0}
+json.dump(document, open(path, "w"), separators=(",", ":"))
+PY
+  if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+    restore_lineage_ratio
+    trap - EXIT
+    fail "schema accepted a zero denominator in $lineage_fixture"
+  fi
+  restore_lineage_ratio
+  trap - EXIT
+done
+echo "[schemas] input and result ratio denominators must be positive"
 echo "test_schemas OK"

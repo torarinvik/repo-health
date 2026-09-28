@@ -41,6 +41,9 @@ def type_ok(val, t):
     return False
 
 def check_obj(obj, spec, ctx):
+    allowed_keys = spec.get("allowed_keys")
+    if allowed_keys is not None:
+        assert set(obj).issubset(set(allowed_keys)), (ctx, "unexpected keys", sorted(set(obj) - set(allowed_keys)))
     for k in spec.get("required", []):
         assert k in obj, (ctx, "missing required", k)
     for k, t in spec.get("types", {}).items():
@@ -49,6 +52,24 @@ def check_obj(obj, spec, ctx):
     for k, allowed in spec.get("enum", {}).items():
         if k in obj:
             assert obj[k] in allowed, (ctx, "bad enum", k, obj[k], allowed)
+    for k, minimum in spec.get("minimum", {}).items():
+        if k in obj:
+            value = obj[k]
+            assert isinstance(value, (int, float)) and not isinstance(value, bool) and value >= minimum, (ctx, "below minimum", k, value, minimum)
+    for k, maximum in spec.get("maximum", {}).items():
+        if k in obj:
+            value = obj[k]
+            assert isinstance(value, (int, float)) and not isinstance(value, bool) and value <= maximum, (ctx, "above maximum", k, value, maximum)
+    for k, variant_spec in spec.get("variants", {}).items():
+        if k not in obj:
+            continue
+        value = obj[k]
+        assert isinstance(value, dict), (ctx, "bad variant object", k)
+        discriminator = variant_spec["discriminator"]
+        assert discriminator in value, (ctx, "missing variant discriminator", k, discriminator)
+        cases = variant_spec["cases"]
+        assert value[discriminator] in cases, (ctx, "unknown variant", k, value[discriminator])
+        check_obj(value, cases[value[discriminator]], "%s.%s<%s>" % (ctx, k, value[discriminator]))
     for k, item_type in spec.get("item_types", {}).items():
         if k in obj:
             assert isinstance(obj[k], list), (ctx, "bad list", k)
