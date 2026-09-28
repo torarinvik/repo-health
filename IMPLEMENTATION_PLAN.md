@@ -645,6 +645,10 @@ and aggregate query coverage only. Actor IDs, permission documents, and
 individual rankings are omitted; declarations remain separate from observed
 actions. `tests/test_role_publication_cli.sh` covers unknown roles, revoked
 queries, permission coverage, deterministic replay, and malformed input.
+The publication also emits an input/configuration/output-bound transformation
+sidecar documenting aggregate projection and privacy-preserving field loss;
+the focused test recomputes each digest and verifies deterministic sidecar
+replay.
 
 **M04-10: Participation semantics and correction fan-out.** Preserve author, committer, reviewer and releaser roles without multiplying event counts. Validate relational joins against independent cardinality oracles; stable tie handling and threshold-crossing actors are mandatory. Any optional cross-project breadth is bounded participation evidence, never prestige or maintainership. Preserve unknown affiliation endpoints without factual sentinel dates. Identity corrections invalidate affected projections while raw events remain unchanged; distinguish current-corrected replay from as-known historical replay. (Paper §§7–8, 15.)
 

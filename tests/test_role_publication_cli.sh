@@ -15,9 +15,10 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
 JSON
 "$ROOT/build/rh_cli" roles-publish --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
-raw = open(sys.argv[1]).read()
+python3 - "$T/in.json" "$T/out.json" <<'PY'
+import hashlib, json, pathlib, sys
+source, output = map(pathlib.Path, sys.argv[1:])
+raw = output.read_text()
 d = json.loads(raw)
 assert d["schema"] == "rh-role-publication-result/1", d
 assert d["authorization_state"] == "authorized" and d["raw_identity"] == "restricted", d
@@ -27,12 +28,19 @@ assert d["query_coverage"] == {"role_queries": 6, "known_role": 3, "unknown_role
 assert d["personal_leaderboard"] is False, d
 assert "actor_id" not in raw and "permission_documents" not in raw, raw
 assert "separate from observed actions" in d["note"], d
+tr = json.loads(pathlib.Path(str(output) + ".transformations.json").read_bytes())
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "restricted-role-publication", tr
+assert tr["source_input_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/restricted-role-publication/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"transformed", "preserved", "unknown", "discarded"}, tr
 print("[role-publication] restricted role and permission aggregates OK")
 PY
 
 echo "[role-publication] deterministic output"
 "$ROOT/build/rh_cli" roles-publish --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "role publication output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "role publication sidecar not deterministic"
 
 echo "[role-publication] malformed input fails closed"
 set +e
