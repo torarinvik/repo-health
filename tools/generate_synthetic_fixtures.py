@@ -84,38 +84,51 @@ def generate_graph(root: Path) -> None:
     write_json(root / "graph" / "input.json", graph)
 
 
-def generate_roles(root: Path) -> None:
+def generate_graph_chain(root: Path, node_count: int) -> None:
+    graph = {
+        "schema": "rh-dep-graph/1",
+        "ecosystem": "synthetic",
+        "nodes": [{"id": index, "name": f"chain-{index}", "version": "1.0.0"} for index in range(node_count)],
+        "edges": [{"from": index, "to": index + 1, "scope": "normal"} for index in range(node_count - 1)],
+        "unresolved": [],
+        "advisories": [],
+    }
+    write_json(root / "graph" / "chain-input.json", graph)
+
+
+def generate_roles(root: Path, revoked_at: int) -> None:
     roles = {
         "schema": "rh-roles-input/1",
         "authorization": {"state": "authorized"},
         "permission_inventory_complete": True,
-        "as_of": 200,
+        "as_of": revoked_at + 50,
         "declarations": [
             {"actor_id": 101, "role": "owner", "permission": 1, "source": "provider", "declared_at": 100},
             {"actor_id": 102, "role": "member", "permission": 4, "source": "file", "declared_at": 110},
-            {"actor_id": 103, "role": "maintainer", "permission": 2, "source": "operator", "declared_at": 90, "revoked_at": 150},
+            {"actor_id": 103, "role": "maintainer", "permission": 2, "source": "operator", "declared_at": 90, "revoked_at": revoked_at},
         ],
         "observed_actions": [
             {"actor_id": 101, "actor_type": "human", "kind": "release", "at": 120},
-            {"actor_id": 103, "actor_type": "human", "kind": "release", "at": 149},
+            {"actor_id": 103, "actor_type": "human", "kind": "release", "at": revoked_at - 1},
             {"actor_id": 102, "actor_type": "human", "kind": "review", "at": 130},
         ],
         "queries": [
             {"actor_id": 101, "as_of": 99},
             {"actor_id": 101, "as_of": 100},
-            {"actor_id": 103, "as_of": 149},
-            {"actor_id": 103, "as_of": 150},
+            {"actor_id": 103, "as_of": revoked_at - 1},
+            {"actor_id": 103, "as_of": revoked_at},
         ],
         "permission_queries": [],
     }
     write_json(root / "roles" / "input.json", roles)
 
 
-def generate(root: Path, history_commits: int = 3) -> None:
+def generate(root: Path, history_commits: int = 3, graph_chain_nodes: int = 4, role_revoked_at: int = 150) -> None:
     root.mkdir(parents=True, exist_ok=True)
     generate_history(root, history_commits)
     generate_graph(root)
-    generate_roles(root)
+    generate_graph_chain(root, graph_chain_nodes)
+    generate_roles(root, role_revoked_at)
     # These are independent expected results, intentionally literal.
     write_json(root / "expected.json", {
         "history": {
@@ -132,6 +145,13 @@ def generate(root: Path, history_commits: int = 3) -> None:
             "max_in_degree": 3,
             "max_in_node": 3,
         },
+        "graph_chain": {
+            "nodes": graph_chain_nodes,
+            "edges": graph_chain_nodes - 1,
+            "max_out_degree": 1,
+            "max_in_degree": 1,
+            "max_in_node": 1,
+        },
         "roles": {
             "declarations": 3,
             "owners": 1,
@@ -139,6 +159,7 @@ def generate(root: Path, history_commits: int = 3) -> None:
             "maintainers": 1,
             "release_events": 2,
             "review_events": 1,
+            "revoked_at": role_revoked_at,
             "effective_boundary": ["unknown", "owner"],
             "revocation_boundary": ["maintainer", "unknown"],
         },
@@ -150,8 +171,12 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path, help="directory to populate with generated fixtures")
     parser.add_argument("--history-commits", type=int, choices=range(1, 13), default=3,
                         help="fixed history size from 1 to 12 commits (default: 3)")
+    parser.add_argument("--graph-chain-nodes", type=int, choices=range(2, 33), default=4,
+                        help="independent acyclic graph size from 2 to 32 nodes (default: 4)")
+    parser.add_argument("--role-revoked-at", type=int, choices=range(91, 1001), default=150,
+                        help="maintainer revocation time from 91 to 1,000 (default: 150)")
     args = parser.parse_args()
-    generate(args.out, args.history_commits)
+    generate(args.out, args.history_commits, args.graph_chain_nodes, args.role_revoked_at)
 
 
 if __name__ == "__main__":
