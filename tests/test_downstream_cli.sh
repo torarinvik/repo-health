@@ -440,6 +440,17 @@ assert metrics["graph.scenario_affected_count"]["value"] == d["scenario"]["affec
 print("[downstream] scenario OK")
 PY
 
+"$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/s-truncated" --unavailable 2 --max-nodes 1 >/dev/null || fail "truncated scenario run"
+python3 - "$T/s-truncated/downstream.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+scenario = d["scenario"]
+assert scenario["truncated"] is True and scenario["affected"] == [] and scenario["affected_count"] is None, scenario
+metric = next(m for m in d["metrics"] if m["key"] == "graph.scenario_affected_count")
+assert metric["status"] == "partial" and metric["value"] is None, metric
+print("[downstream] truncated scenario remains partial, not an exact affected count")
+PY
+
 echo "[downstream] end-to-end from a real deps graph"
 mkdir -p "$T/src"
 cp "$ROOT/fixtures/packages/cargo-diamond.lock" "$T/src/Cargo.lock"
