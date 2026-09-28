@@ -13,6 +13,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/lineage/input.json" "$T/in.json"
 "$ROOT/build/rh_cli" lineage --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "lineage run"
+cmp -s "$T/out.json" "$ROOT/fixtures/lineage/result.json" || fail "lineage result differs from the checked-in golden"
 python3 - "$T/out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
