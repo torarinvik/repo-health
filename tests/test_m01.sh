@@ -265,6 +265,7 @@ assert d['verified'] is True, d
 m = {x['key']: x for x in d['metrics']}
 assert m['coverage.replay_match_share']['value'] == {'num': 1, 'den': 1}, m
 assert open('$T/replay-fix2/report.md', 'rb').read() == open('$T/rep-fix2/report.md', 'rb').read()
+assert open('$T/replay-fix2/report.json', 'rb').read() == open('$T/rep-fix2/report.json', 'rb').read()
 print('[m01] replay verified OK')"
 cp -R "$T/rep-fix2" "$T/rep-legacy-v1"
 python3 - "$T/rep-legacy-v1/bundle.manifest" <<'PY'
@@ -276,7 +277,8 @@ path.write_text(manifest)
 PY
 "$CLI" replay --bundle "$T/rep-legacy-v1/bundle.manifest" --out "$T/replay-legacy-v1" >/dev/null || fail "legacy v1 replay"
 cmp "$T/rep-legacy-v1/report.md" "$T/replay-legacy-v1/report.md" || fail "legacy v1 markdown regeneration"
-echo "[m01] version-1 bundles replay with regenerated Markdown"
+cmp "$T/rep-legacy-v1/report.json" "$T/replay-legacy-v1/report.json" || fail "legacy v1 JSON regeneration"
+echo "[m01] version-1 bundles replay with regenerated JSON and Markdown"
 cp "$T/rep-fix2/bundle.manifest" "$T/inconsistent-schema.manifest"
 python3 - "$T/inconsistent-schema.manifest" <<'PY'
 import pathlib, sys
