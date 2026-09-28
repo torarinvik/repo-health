@@ -22,8 +22,13 @@ enum {
     RH_PROCESS_OUTPUT_LIMIT = 2,
     RH_PROCESS_SETUP_ERROR = 3,
     RH_PROCESS_SIGNAL = 4,
-    RH_PROCESS_IO_ERROR = 5
+    RH_PROCESS_IO_ERROR = 5,
+    RH_PROCESS_CAPACITY_LIMIT = 6,
+    RH_PROCESS_MAX_ACTIVE_GROUPS = 32
 };
+
+static pthread_mutex_t rh_process_capacity_mutex = PTHREAD_MUTEX_INITIALIZER;
+static size_t rh_process_active_groups = 0;
 
 static int rh_process_result(int *code_out, int kind, int code) {
     if (code_out != NULL) *code_out = code;
@@ -115,7 +120,7 @@ static int rh_process_nonblocking(int descriptor) {
  * Returns a result kind and writes its associated code to code_out. No shell
  * is involved; timeout/overflow terminate the spawned process group.
  */
-int rh_process_run(const char *executable, const char *argv_flat,
+static int rh_process_run_inner(const char *executable, const char *argv_flat,
                    const char *env_flat, const char *input_data,
                    size_t input_length, const char *stdout_path,
                    const char *stderr_path, size_t max_output_bytes,
@@ -306,4 +311,35 @@ finished:
         result_code = ECHILD;
     }
     return rh_process_result(code_out, result_kind, result_code);
+}
+
+/* Bound concurrently managed process groups even when callers run in parallel. */
+int rh_process_run(const char *executable, const char *argv_flat,
+                   const char *env_flat, const char *input_data,
+                   size_t input_length, const char *stdout_path,
+                   const char *stderr_path, size_t max_output_bytes,
+                   int timeout_ms, int *code_out) {
+    if (code_out == NULL) return RH_PROCESS_SETUP_ERROR;
+    int lock_error = pthread_mutex_lock(&rh_process_capacity_mutex);
+    if (lock_error != 0)
+        return rh_process_result(code_out, RH_PROCESS_SETUP_ERROR, lock_error);
+    if (rh_process_active_groups >= RH_PROCESS_MAX_ACTIVE_GROUPS) {
+        (void)pthread_mutex_unlock(&rh_process_capacity_mutex);
+        return rh_process_result(code_out, RH_PROCESS_CAPACITY_LIMIT, EAGAIN);
+    }
+    rh_process_active_groups += 1;
+    (void)pthread_mutex_unlock(&rh_process_capacity_mutex);
+
+    int result = rh_process_run_inner(executable, argv_flat, env_flat, input_data,
+                                      input_length, stdout_path, stderr_path,
+                                      max_output_bytes, timeout_ms, code_out);
+    lock_error = pthread_mutex_lock(&rh_process_capacity_mutex);
+    if (lock_error == 0) {
+        rh_process_active_groups -= 1;
+        (void)pthread_mutex_unlock(&rh_process_capacity_mutex);
+    } else {
+        /* Keep accounting conservative if the platform mutex reports failure. */
+        return rh_process_result(code_out, RH_PROCESS_SETUP_ERROR, lock_error);
+    }
+    return result;
 }
