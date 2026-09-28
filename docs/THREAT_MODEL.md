@@ -12,10 +12,12 @@
    timeout or output overflow. Its tests
    prove shell metacharacters stay literal, byte-vector arguments preserve
    their boundaries, and transport credentials travel through stdin rather
-   than argv or retained files. The process runner does not yet enforce a
-   child memory/process creation. Status values are integer-coded rather than
-   a typed result. `system(3)` remains only in a store-test helper; production
-   subprocess call sites in `rh_git` have migrated. Individual fetchers retain
+   than argv or retained files. The process runner does not yet enforce child memory/process creation. Its
+   Elisa API returns typed exit, timeout, output-limit, setup-error, signal, and
+   I/O-error results; explicit compatibility adapters still map those results
+   to numeric statuses for existing Git-facing contracts. `system(3)` remains
+   only in a store-test helper; production subprocess call sites in `rh_git`
+   have migrated. Individual fetchers retain
    their own byte limits.
 3. **No server endpoint** scans arbitrary server paths (M01-01): this CLI is
    local-only; there is no network listener in M00/M01.
