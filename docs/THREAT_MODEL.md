@@ -4,14 +4,15 @@
 
 1. **CLI argument boundary** — untrusted: repository URL/path, output
    directory. Trusted after `rh_git` validation (allowlist + kind check).
-2. **Subprocess boundary** — `git` is invoked via `system(3)`, which uses a
-   shell. Mitigation (documented deviation from plan §M01-02 "no shell"):
-   strict allowlist validation in Elisa *before* any call; only
-   `[A-Za-z0-9/_:.@-]` bytes permitted in user-supplied arguments; any shell
-   metacharacter (`;&|$` `` ` `` `(){}<>!*?~#'"`, whitespace, backslash,
-   `=^`) rejects the input with exit 3. Internal flags are constants, never
-   user-controlled. `system()` return is checked; nonzero is a bounded error,
-   never a fallback to invented data.
+2. **Subprocess boundary** — the retained Git-log capture now uses the
+   `rh_process` POSIX spawn bridge: fixed `/usr/bin/git`, NUL-delimited argv,
+   explicit child environment, output-file redirection, and a 120-second
+   timeout. Its test proves shell metacharacters in an argument stay literal.
+   The remaining Git helpers still use `system(3)` and retain the stricter
+   allowlist below until migrated: only `[A-Za-z0-9/_:.@-]` bytes are accepted
+   in interpolated user arguments; shell metacharacters, whitespace, and
+   backslashes reject with exit 3. Internal flags are constants. The bridge
+   does not yet enforce an output-byte limit or process-tree cancellation.
 3. **No server endpoint** scans arbitrary server paths (M01-01): this CLI is
    local-only; there is no network listener in M00/M01.
 4. **No source-code execution** (S001): repositories are read with

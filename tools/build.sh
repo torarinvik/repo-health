@@ -6,6 +6,7 @@
 # executables with `-emit exe`. No wrapper scripts, no manual clang link.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
 # Resolution order: explicit ELISA_COMPILER_BIN, else elisac-stage1 on PATH
 # (the ~/.elisac snapshot shim), else the sibling-checkout wrapper.
 # No absolute machine-specific paths are stored here.
@@ -21,6 +22,12 @@ else
 fi
 
 mkdir -p "$ROOT/build"
+PROCESS_OBJECT="$ROOT/build/rh_process.o"
+if [[ ! -f "$PROCESS_OBJECT" || "$ROOT/src/rh_process.c" -nt "$PROCESS_OBJECT" ]]; then
+  clang -std=c11 -O2 -Wall -Wextra -Werror -c "$ROOT/src/rh_process.c" -o "$PROCESS_OBJECT"
+fi
+BASE_LINK_FLAGS="${ELISA_STAGE1_LINK:-}"
+BASE_LINK_FLAGS="${BASE_LINK_FLAGS:+$BASE_LINK_FLAGS }build/rh_process.o"
 compile() {
   local src="$1" name="$2"
   local out="$ROOT/build/$name"
@@ -33,7 +40,7 @@ compile() {
   fi
   echo "compile $src -> build/$name"
   if [[ "$name" == "rh_cli" ]]; then
-    local link_flags="${ELISA_STAGE1_LINK:-}"
+    local link_flags="$BASE_LINK_FLAGS"
     link_flags="${link_flags:+$link_flags }-lz"
     if [[ "$COMPILER" == *.sh ]]; then
       ELISA_STAGE1_LINK="$link_flags" bash "$COMPILER" -emit exe -o "$out" "$src"
@@ -43,13 +50,14 @@ compile() {
     return 0
   fi
   if [[ "$COMPILER" == *.sh ]]; then
-    bash "$COMPILER" -emit exe -o "$out" "$src"
+    ELISA_STAGE1_LINK="$BASE_LINK_FLAGS" bash "$COMPILER" -emit exe -o "$out" "$src"
   else
-    "$COMPILER" -emit exe -o "$out" "$src"
+    ELISA_STAGE1_LINK="$BASE_LINK_FLAGS" "$COMPILER" -emit exe -o "$out" "$src"
   fi
 }
 
 compile "$ROOT/src/test_oracles.elisa" test_oracles
+compile "$ROOT/src/test_process.elisa" test_process
 compile "$ROOT/src/test_forge.elisa" test_forge
 compile "$ROOT/src/test_store.elisa" test_store
 compile "$ROOT/src/test_package.elisa" test_package

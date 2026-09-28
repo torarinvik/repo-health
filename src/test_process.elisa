@@ -1,0 +1,49 @@
+include "./rh_base.elisa"
+include "./rh_process.elisa"
+
+def process_check(condition: bool, label: u8&, failures: mutable i64&, output: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+    return if condition
+    failures[0] <- failures[0] + 1
+    Base::rh_push_text(output, "process-fail: ")
+    Base::rh_push_text(output, label)
+    output.push(10)
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    failures: mutable i64 = 0
+    output: mutable darray[u8] = []
+    args: mutable darray[u8] = []
+    Process::rh_append_arg(args, "printf")
+    Process::rh_append_arg(args, "%s")
+    Process::rh_append_arg(args, "literal ; $(touch /tmp/rh-process-must-not-exist)")
+    args.push(0)
+    env: mutable darray[u8] = []
+    Process::rh_append_arg(env, "LC_ALL=C")
+    Process::rh_append_arg(env, "PATH=/usr/bin:/bin")
+    env.push(0)
+    args_ptr: cstr = (&args[0]).cast[cstr] can Unsafe.PointerCast
+    env_ptr: cstr = (&env[0]).cast[cstr] can Unsafe.PointerCast
+    literal_status: i32 = rh_process_run("/usr/bin/printf", args_ptr, env_ptr, "/tmp/rh-process-literal.out", "/tmp/rh-process-literal.err", 1000)
+    process_check(literal_status == 0, "successful-exit-status", &failures, output)
+    bytes: mutable darray[u8] = []
+    read_status: i64 = Base::rh_io_read("/tmp/rh-process-literal.out", bytes)
+    process_check(read_status >= 0 and Base::rh_bytes_equal_literal(bytes, 0, bytes.count.i64(), "literal ; $(touch /tmp/rh-process-must-not-exist)"), "argv-is-literal", &failures, output)
+    process_check(not file_exists("/tmp/rh-process-must-not-exist"), "shell-metacharacters-not-executed", &failures, output)
+    timeout_args: mutable darray[u8] = []
+    Process::rh_append_arg(timeout_args, "sleep")
+    Process::rh_append_arg(timeout_args, "2")
+    timeout_args.push(0)
+    timeout_ptr: cstr = (&timeout_args[0]).cast[cstr] can Unsafe.PointerCast
+    timed_out: i32 = rh_process_run("/bin/sleep", timeout_ptr, env_ptr, "/dev/null", "/dev/null", 50)
+    process_check(timed_out == 124, "bounded-timeout", &failures, output)
+    bad_args: mutable darray[u8] = []
+    Process::rh_append_arg(bad_args, "missing")
+    bad_args.push(0)
+    bad_ptr: cstr = (&bad_args[0]).cast[cstr] can Unsafe.PointerCast
+    missing_status: i32 = rh_process_run("/missing/repo-health-command", bad_ptr, env_ptr, "/dev/null", "/dev/null", 1000)
+    process_check(missing_status < 0, "missing-executable-fails-closed", &failures, output)
+    if failures > 0:
+        Base::rh_write_stdout(output)
+        return 1
+    Base::rh_push_text(output, "PROCESS OK\n")
+    Base::rh_write_stdout(output)
+    0

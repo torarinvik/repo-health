@@ -1,13 +1,14 @@
 include "./rh_base.elisa"
+include "./rh_process.elisa"
 
 module Git:
     public:
         # rh_git.elisa — safe Git acquisition (M01-01/02/03).
         #
         # M01-01: rh_url_kind classifies local paths, public https remotes, and
-        # everything else (unsupported). M01-02: rh_arg_safe enforces the strict
-        # allowlist before ANY system() call (see docs/THREAT_MODEL.md for the
-        # documented shell deviation). M01-03: acquisition uses plumbing only
+        # everything else (unsupported). The Git log capture uses the bounded
+        # argv process bridge; other collectors still migrate in follow-up work.
+        # M01-03: acquisition uses plumbing only
         # (`log --format`, `rev-parse`); never checkout/clone-with-hooks/archive,
         # so no source-provided command ever runs (S001). Bounded by default
         # (RH_DEFAULT_MAX_COMMITS) with an explicit full-history mode.
@@ -80,21 +81,38 @@ module Git:
             return -1 if not rh_arg_safe(repo)
             return -1 if not rh_arg_safe(out_file)
             return -1 if not rh_arg_safe(err_file)
-            cmd: mutable darray[u8] =
-                cmd: mutable darray[u8] = []
-                Base::rh_push_text(cmd, "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.pager=cat -c core.quotepath=false -c mailmap.file=/dev/null -c mailmap.blob= -C ")
-                rh_push_quoted(cmd, repo)
-                Base::rh_push_text(cmd, " log --all --no-decorate --mailmap --format=%H%x01%an%x01%ae%x01%at%x01%ct%x01%P%x01%aN%x01%aE%x00")
-                cmd
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "git")
+            Process::rh_append_arg(args, "-c")
+            Process::rh_append_arg(args, "core.pager=cat")
+            Process::rh_append_arg(args, "-c")
+            Process::rh_append_arg(args, "core.quotepath=false")
+            Process::rh_append_arg(args, "-c")
+            Process::rh_append_arg(args, "mailmap.file=/dev/null")
+            Process::rh_append_arg(args, "-c")
+            Process::rh_append_arg(args, "mailmap.blob=")
+            Process::rh_append_arg(args, "-C")
+            Process::rh_append_arg(args, repo.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "log")
+            Process::rh_append_arg(args, "--all")
+            Process::rh_append_arg(args, "--no-decorate")
+            Process::rh_append_arg(args, "--mailmap")
+            Process::rh_append_arg(args, "--format=%H%x01%an%x01%ae%x01%at%x01%ct%x01%P%x01%aN%x01%aE%x00")
             if not full_history:
-                Base::rh_push_text(cmd, " --max-count=")
-                Base::rh_push_decimal_i64(cmd, RH_DEFAULT_MAX_COMMITS)
-            Base::rh_push_text(cmd, " > ")
-            rh_push_quoted(cmd, out_file)
-            Base::rh_push_text(cmd, " 2> ")
-            rh_push_quoted(cmd, err_file)
-            cmd.push(0)
-            system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+                limit: mutable darray[u8] = []
+                Base::rh_push_text(limit, "--max-count=")
+                Base::rh_push_decimal_i64(limit, RH_DEFAULT_MAX_COMMITS)
+                limit.push(0)
+                for i in 0..<limit.count |i, limit, args|:
+                    args.push(limit[i])
+            args.push(0)
+            env: mutable darray[u8] = []
+            Process::rh_append_arg(env, "PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
+            Process::rh_append_arg(env, "LC_ALL=C")
+            Process::rh_append_arg(env, "GIT_CONFIG_NOSYSTEM=1")
+            Process::rh_append_arg(env, "GIT_CONFIG_GLOBAL=/dev/null")
+            env.push(0)
+            Process::rh_run("/usr/bin/git", args, env, out_file, err_file).i64()
 
         # Run: git -C '<repo>' rev-list --count HEAD > '<out>' 2> '<err>'.
         # The retained count is the default-branch reachability projection;
