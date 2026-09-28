@@ -447,6 +447,25 @@ rc_pair2=$?
 printf '{"schema":"rh-intrinsics/2","metrics":[],"values":[]}' > "$T/badintr.json"
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/badintr" --intrinsics "$T/badintr.json" >/dev/null 2>&1
 rc_intr=$?
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+cases = {
+    "wide-metrics": {"metrics": [f"metric.{i}" for i in range(64)], "values": []},
+    "unknown-mask-bit": {"metrics": ["metric.one"], "values": [{"id": 1, "mask": 2}]},
+    "duplicate-value-id": {"metrics": ["metric.one"], "values": [{"id": 1, "mask": 1}, {"id": 1, "mask": 0}]},
+    "out-of-range-value-id": {"metrics": ["metric.one"], "values": [{"id": 99, "mask": 1}]},
+    "malformed-value": {"metrics": ["metric.one"], "values": [None]},
+}
+for name, body in cases.items():
+    body["schema"] = "rh-intrinsics/1"
+    (root / f"{name}.json").write_text(json.dumps(body))
+PY
+for case in wide-metrics unknown-mask-bit duplicate-value-id out-of-range-value-id malformed-value; do
+    "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/invalid-$case" --intrinsics "$T/$case.json" >/dev/null 2>&1
+    rc_case=$?
+    [[ "$rc_case" -eq 4 ]] || fail "invalid intrinsic contract $case must exit 4 (got $rc_case)"
+done
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/nointr" --intrinsics "$T/does-not-exist.json" >/dev/null 2>&1
 rc_intrmiss=$?
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/bad-time" --valid-as-of nope >/dev/null 2>&1
