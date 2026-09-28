@@ -417,6 +417,15 @@ assert all(cap["status"] == "observed" for cap in d["capabilities"].values()), d
 print("[connector] public GitLab probing works without configuring credentials")
 PY
 [[ ! -e "$T/gitlab-public.config" ]] || fail "unauthenticated GitLab probe unexpectedly supplied curl credentials"
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_EXIT=23 RH_PROBE_CURL_ARGS="$T/gitlab-process-failure.args" \
+  "$ROOT/build/rh_cli" connector probe --gitlab-project group/subgroup/project --all \
+    --out "$T/gitlab-process-failure.out" >/dev/null || fail "GitLab transport failure should retain capability results"
+python3 - "$T/gitlab-process-failure.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert all(c["status"] == "unavailable" and c["http_status"] is None and c["coverage_state"] == "unavailable" for c in d["capabilities"].values()), d
+print("[connector] GitLab runner failures preserve unavailable route coverage")
+PY
 set +e
 PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/gitlab-invalid.args" \
   "$ROOT/build/rh_cli" connector probe --gitlab-project 'group/../project' --all \
@@ -443,6 +452,15 @@ assert all(d["capabilities"][name]["status"] == "observed" for name in ("issues"
 assert "private" not in open(sys.argv[1]).read()
 PY
 [[ "$(grep -c 'https://codeberg.example.org/api/v1/repos/owner/project/' "$T/forge.args")" -eq 3 ]] || fail "forge matrix must issue three fixed requests"
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_EXIT=23 RH_PROBE_CURL_ARGS="$T/forge-process-failure.args" \
+  "$ROOT/build/rh_cli" connector probe --instance "$T/forge-instance.json" --repository owner/project --all \
+    --out "$T/forge-process-failure.out" >/dev/null || fail "forge transport failure should retain capability results"
+python3 - "$T/forge-process-failure.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert all(d["capabilities"][name]["status"] == "unavailable" and d["capabilities"][name]["coverage_state"] == "unavailable" for name in ("issues", "pulls", "releases")), d
+print("[connector] self-hosted forge runner failures map to unavailable")
+PY
 for route in issues pulls releases; do
   [[ -f "$T/forge-probe.out.forge-$route.json" && -f "$T/forge-probe.out.forge-$route.url" ]] || fail "forge $route evidence missing"
 done
@@ -475,6 +493,15 @@ assert d["capabilities"]["pulls"]["status"] == "observed", d
 assert d["capabilities"]["releases"] == {"declaration":"unsupported", "status":"unsupported", "coverage_state":"unavailable"}, d
 assert "private-account-must-stay-local" not in open(sys.argv[1]).read()
 assert "private-account-must-stay-local" in open(os.path.join(sys.argv[2], "bitbucket-probe.out.bitbucket-issues.json")).read()
+PY
+PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_EXIT=23 RH_PROBE_CURL_ARGS="$T/bitbucket-process-failure.args" \
+  "$ROOT/build/rh_cli" connector probe --bitbucket-repo workspace/project --all \
+    --out "$T/bitbucket-process-failure.out" >/dev/null || fail "Bitbucket transport failure should retain capability results"
+python3 - "$T/bitbucket-process-failure.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert all(d["capabilities"][name]["status"] == "unavailable" and d["capabilities"][name]["coverage_state"] == "unavailable" for name in ("issues", "pulls")), d
+print("[connector] Bitbucket runner failures map to unavailable")
 PY
 [[ "$(grep -c 'https://api.bitbucket.org/2.0/repositories/workspace/project/' "$T/bitbucket.args")" -eq 2 ]] || fail "Bitbucket matrix must issue two fixed requests"
 ! grep -Fq 'private-account-must-stay-local' "$T/bitbucket.args" || fail "Bitbucket evidence content leaked to curl args"
