@@ -498,6 +498,17 @@ open(p, "w").write(s.replace(needle, "x" + needle, 1))
 PY
 expect 4 "$CLI" replay --bundle "$T/bad-object.manifest" --out "$T/replay-bad-object"
 echo "[m01] malformed digest-field exit-4 OK"
+cp "$T/rep-fix2/bundle.manifest" "$T/duplicate-object.manifest"
+python3 - "$T/duplicate-object.manifest" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+needle = "object-sha256-evidence/git-log.bin: "
+line = next(line for line in s.splitlines(keepends=True) if line.startswith(needle))
+open(p, "w").write(s + line)
+PY
+expect 4 "$CLI" replay --bundle "$T/duplicate-object.manifest" --out "$T/replay-duplicate-object"
+echo "[m01] duplicate digest-field exit-4 OK"
 
 # --- R030: no universal score language anywhere in outputs ---
 if grep -ril "health_score\|trust_score\|trustworthy\|health-rating" "$T/rep-fix2" "$T/rep-empty" "$T/rep-hostile" 2>/dev/null; then
