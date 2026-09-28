@@ -170,6 +170,21 @@ PY
 set -e
 [[ "$rc_coverage" -eq 4 && "$rc_digest" -eq 4 && "$rc_state" -eq 4 && "$rc_class" -eq 4 && "$rc_time" -eq 4 && "$rc_valid_interval" -eq 4 && "$rc_tool" -eq 4 && "$rc_assessment_digest" -eq 4 && "$rc_revision" -eq 4 && "$rc_subject_type" -eq 4 && "$rc_retained_object" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_duplicate_state" -eq 4 ]] || fail "invalid lineage must exit 4 (got $rc_coverage/$rc_digest/$rc_state/$rc_class/$rc_time/$rc_valid_interval/$rc_tool/$rc_assessment_digest/$rc_revision/$rc_subject_type/$rc_retained_object/$rc_duplicate/$rc_duplicate_state)"
 echo "[lineage] duplicate root and nested object keys rejected"
+python3 - "$T/in.json" "$T/unknown-transformation-field.json" "$T/unknown-metric-field.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["transformations"][0]["ignored"] = "must-not-disappear"
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+document = json.load(open(sys.argv[1]))
+document["metrics"][0]["ignored"] = "must-not-disappear"
+json.dump(document, open(sys.argv[3], "w"), separators=(",", ":"))
+PY
+set +e
+"$ROOT/build/rh_cli" lineage --input "$T/unknown-transformation-field.json" --out "$T/x" >/dev/null 2>&1; rc_unknown_transformation=$?
+"$ROOT/build/rh_cli" lineage --input "$T/unknown-metric-field.json" --out "$T/x" >/dev/null 2>&1; rc_unknown_metric=$?
+set -e
+[[ "$rc_unknown_transformation" -eq 4 && "$rc_unknown_metric" -eq 4 ]] || fail "unknown lineage record fields must fail closed (got $rc_unknown_transformation/$rc_unknown_metric)"
+echo "[lineage] unknown transformation and metric fields fail closed"
 python3 - "$T/in.json" "$T/duplicate-ref.json" "$T/over-bound-refs.json" "$T/over-bound-transformations.json" "$T/over-bound-metrics.json" <<'PY'
 import json, sys
 document = json.load(open(sys.argv[1]))
