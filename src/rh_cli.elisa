@@ -6289,6 +6289,25 @@ def rh_do_continuity(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.
         if shab.count >= 4:
             if shab[0] == 116 and shab[1] == 114 and shab[2] == 117 and shab[3] == 101:
                 shallow <- true
+    # Bind the complete retained evidence set, including the distinction
+    # between an absent shallow marker and an empty one. Length framing keeps
+    # arbitrary evidence bytes unambiguous in the aggregate input digest.
+    continuity_input: mutable darray[u8] =
+        continuity_input: mutable darray[u8] = []
+        Base::rh_push_text(continuity_input, "rh-continuity-input/1\nmanifest:")
+        Base::rh_push_decimal_u64(continuity_input, manb.count.u64())
+        continuity_input.push(58)
+        continuity_input.extend(bytes_view(manb))
+        Base::rh_push_text(continuity_input, "\nlog:")
+        Base::rh_push_decimal_u64(continuity_input, logb.count.u64())
+        continuity_input.push(58)
+        continuity_input.extend(bytes_view(logb))
+        Base::rh_push_text(continuity_input, "\nshallow-present:")
+        Base::rh_push_text(continuity_input, "1\n") if shab.count > 0 else Base::rh_push_text(continuity_input, "0\n")
+        Base::rh_push_decimal_u64(continuity_input, shab.count.u64())
+        continuity_input.push(58)
+        continuity_input.extend(bytes_view(shab))
+        continuity_input
     window_start: i64 =
         if full:
             0
@@ -6394,12 +6413,28 @@ def rh_do_continuity(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.
     if not Base::rh_io_write(cjp, body):
         rh_cli_err("cannot write continuity.json")
         return 4
+    continuity_configuration: mutable darray[u8] =
+        continuity_configuration: mutable darray[u8] = []
+        Base::rh_push_text(continuity_configuration, "rh-continuity/1;window-days=")
+        Base::rh_push_decimal_i64(continuity_configuration, days)
+        Base::rh_push_text(continuity_configuration, ";full-history=")
+        Base::rh_push_text(continuity_configuration, "true") if full else Base::rh_push_text(continuity_configuration, "false")
+        Base::rh_push_text(continuity_configuration, ";min-active-months=6;min-span-months=6;recent-required=false")
+        continuity_configuration.push(0)
+        continuity_configuration
+    continuity_configuration_ptr: cstr = (&continuity_configuration[0]).cast[cstr] can Unsafe.PointerCast
+    if not AdapterTransformationCli::rh_write_sidecar(continuity_input, body, "continuity", "rh-continuity/1", continuity_configuration_ptr, "{}", cjp):
+        rh_cli_err("cannot write continuity transformation report")
+        return 4
     mbody: mutable darray[u8] = []
     Continuity::rh_continuity_metrics_write(mbody, identity_rev, n_actors, persistent, persistent_24, active3, active6, active9, event_share_num, event_share_den, tenure_days, retained, eligible, censored, unobservable, retained_365, eligible_365, censored_365, unobservable_365, returning_after_gap, first_seen_supported, hhi_n, hhi_d, eff_n, eff_d, fifty, eighty, top_n, top_d, top3_n, top3_d, top5_n, top5_d, gini_n, gini_d)
     mbody.push(10)
     cmp: cstr = (&cm[0]).cast[cstr] can Unsafe.PointerCast
     if not Base::rh_io_write(cmp, mbody):
         rh_cli_err("cannot write continuity-metrics.json")
+        return 4
+    if not AdapterTransformationCli::rh_write_sidecar(continuity_input, mbody, "continuity", "rh-continuity-metrics/1", continuity_configuration_ptr, "{}", cmp):
+        rh_cli_err("cannot write continuity-metrics transformation report")
         return 4
     done: mutable darray[u8] =
         done: mutable darray[u8] = []

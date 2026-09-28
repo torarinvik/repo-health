@@ -42,6 +42,26 @@ echo "[continuity] full-history scan -> observed retention"
 "$ROOT/build/rh_cli" continuity --bundle "$T/full/bundle.manifest" --out "$T/full-cont" >/dev/null || fail "continuity failed"
 CJ="$T/full-cont/continuity.json"; CM="$T/full-cont/continuity-metrics.json"
 [[ -f "$CJ" && -f "$CM" ]] || fail "continuity outputs missing"
+python3 - "$T/full/bundle.manifest" "$T/full/evidence/git-log.bin" "$CJ" "$CM" <<'PY'
+import hashlib, json, pathlib, sys
+manifest, log, continuity, metrics = map(pathlib.Path, sys.argv[1:])
+raw_manifest, raw_log = manifest.read_bytes(), log.read_bytes()
+raw_shallow = (manifest.parent / "evidence/git-shallow.txt").read_bytes() if (manifest.parent / "evidence/git-shallow.txt").exists() else b""
+source = (b"rh-continuity-input/1\nmanifest:" + str(len(raw_manifest)).encode() + b":" + raw_manifest
+          + b"\nlog:" + str(len(raw_log)).encode() + b":" + raw_log
+          + b"\nshallow-present:" + (b"1\n" if raw_shallow else b"0\n")
+          + str(len(raw_shallow)).encode() + b":" + raw_shallow)
+configuration = b"rh-continuity/1;window-days=365;full-history=true;min-active-months=6;min-span-months=6;recent-required=false"
+for output, schema in ((continuity, "rh-continuity/1"), (metrics, "rh-continuity-metrics/1")):
+    report_path = pathlib.Path(str(output) + ".transformations.json")
+    report = json.loads(report_path.read_bytes())
+    assert report["schema"] == "rh-adapter-transformation-report/1", report
+    assert report["adapter"] == "continuity" and report["output_schema"] == schema, report
+    assert report["source_input_sha256"] == hashlib.sha256(source).hexdigest(), report
+    assert report["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), report
+    assert report["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), report
+print("[continuity] transformation reports bind retained evidence, configuration, and outputs")
+PY
 grep -q '"schema":"rh-continuity/1"' "$CJ" || fail "missing schema"
 grep -q '"key":"persistence.retained_90d"' "$CM" || fail "missing metric key"
 grep -q '"status":"observed"' "$CM" || fail "expected observed retention"
