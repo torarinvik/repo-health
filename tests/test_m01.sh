@@ -52,7 +52,11 @@ assert default_revisions["quality_dimensions"] == {
     "validity":"valid", "provenance":"evidence_backed",
 }, default_revisions
 for metric in d["metrics"]:
-    assert isinstance(metric.get("evidence"), list) and metric["evidence"], metric
+    assert isinstance(metric.get("evidence"), list), metric
+    if metric["status"] == "error":
+        assert metric["reason"] == "invalid-observation-contract" and not metric["evidence"], metric
+    else:
+        assert metric["evidence"], metric
     assert set(metric.get("quality_dimensions", {})) == {
         "completeness", "freshness", "validity", "provenance"
     }, metric
@@ -192,6 +196,8 @@ for x in d["metrics"]:
     assert (x["status"] == "stale") == (quality["freshness"] == "stale"), (x, quality)
     assert x["status"] != "observed" or quality["validity"] != "invalid", (x, quality)
     evidence = x["evidence"]
+    if x["status"] == "error":
+        assert x.get("reason") == "invalid-observation-contract" and not evidence, x
     assert all(link in evidence_objects for link in evidence), x
     assert len(evidence) == len(set(evidence)), x
     assert quality["provenance"] != "evidence_backed" or evidence, x
