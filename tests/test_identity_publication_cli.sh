@@ -19,9 +19,10 @@ cat > "$T/input.json" <<'JSON'
 JSON
 
 "$ROOT/build/rh_cli" identity-publish --input "$T/input.json" --out "$T/out.json" >/dev/null || fail "publication run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
+python3 - "$T/input.json" "$T/out.json" <<'PY'
+import hashlib, json, pathlib, sys
+source, output = map(pathlib.Path, sys.argv[1:])
+d = json.loads(output.read_bytes())
 assert d["schema"] == "rh-identity-publication-result/1", d
 assert d["project_id"] == "example-parser", d
 assert d["publication_scope"] == "project" and d["raw_identity"] == "restricted", d
@@ -33,18 +34,25 @@ assert d["actor_kind_observation_times"] == {"observed": 4, "unknown": 1}, d
 assert d["actor_kind_evidence_references"] == {"present": 4, "unknown": 1}, d
 assert d["corrections"] == {"open": 1, "accepted": 1, "rejected": 1, "withdrawn": 1}, d
 assert d["correction_channel"] == "project-owner-review" and d["personal_leaderboard"] is False, d
-text = open(sys.argv[1]).read()
+text = output.read_text()
 for secret in ("Alice", "account-1", "alice@example", "source_instance", "native_object_id", "cluster_id_by_actor"):
     assert secret not in text, (secret, text)
 for secret in ("1700000000", "1700000400", "private:evidence-path-01", "private:evidence-path-05"):
     assert secret not in text, (secret, text)
 assert "project-scoped aggregates only" in d["note"], d
+tr = json.loads(pathlib.Path(str(output) + ".transformations.json").read_bytes())
+assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "restricted-identity-publication", tr
+assert tr["source_input_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/restricted-identity-publication/1").hexdigest(), tr
+assert {f["state"] for f in tr["fields"]} == {"transformed", "preserved", "discarded", "unknown"}, tr
 print("[identity-publication] restricted raw identity + aggregate contract OK")
 PY
 
 echo "[identity-publication] determinism"
 "$ROOT/build/rh_cli" identity-publish --input "$T/input.json" --out "$T/out-2.json" >/dev/null || fail "repeat publication"
 cmp -s "$T/out.json" "$T/out-2.json" || fail "publication output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out-2.json.transformations.json" || fail "publication sidecar not deterministic"
 
 cat > "$T/no-kinds.json" <<'JSON'
 {"schema":"rh-identity-publication-input/1","project_id":"no-kinds","publication_scope":"public","actor_count":2,"links":[]}
