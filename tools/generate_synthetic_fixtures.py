@@ -27,16 +27,25 @@ def git(repo: Path, *args: str, env: dict[str, str] | None = None) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, env=process_env, stdout=subprocess.DEVNULL)
 
 
-def generate_history(root: Path) -> None:
+def generate_history(root: Path, commit_count: int) -> None:
     repo = root / "history" / "repo"
     repo.mkdir(parents=True)
     git(repo, "init", "-q", "-b", "main")
-    commits = (
+    commit_templates = (
         ("Alice", "alice@example.test", "2024-03-10T12:00:00Z", "first", "one\n", "a.txt"),
         ("Bob", "bob@example.test", "2024-06-15T12:00:00Z", "second", "two\n", "b.txt"),
         ("Bob", "bob@example.test", "2025-01-05T12:00:00Z", "third", "three\n", "a.txt"),
+        ("Alice", "alice@example.test", "2025-04-05T12:00:00Z", "fourth", "four\n", "c.txt"),
+        ("Bob", "bob@example.test", "2025-07-05T12:00:00Z", "fifth", "five\n", "b.txt"),
+        ("Bob", "bob@example.test", "2025-10-05T12:00:00Z", "sixth", "six\n", "a.txt"),
+        ("Alice", "alice@example.test", "2026-01-05T12:00:00Z", "seventh", "seven\n", "c.txt"),
+        ("Bob", "bob@example.test", "2026-03-05T12:00:00Z", "eighth", "eight\n", "b.txt"),
+        ("Bob", "bob@example.test", "2026-05-05T12:00:00Z", "ninth", "nine\n", "a.txt"),
+        ("Alice", "alice@example.test", "2026-06-05T12:00:00Z", "tenth", "ten\n", "c.txt"),
+        ("Bob", "bob@example.test", "2026-07-05T12:00:00Z", "eleventh", "eleven\n", "b.txt"),
+        ("Bob", "bob@example.test", "2026-09-05T12:00:00Z", "twelfth", "twelve\n", "a.txt"),
     )
-    for name, email, timestamp, subject, contents, filename in commits:
+    for name, email, timestamp, subject, contents, filename in commit_templates[:commit_count]:
         target = repo / filename
         target.write_text(contents, encoding="utf-8")
         git(repo, "add", filename)
@@ -102,14 +111,18 @@ def generate_roles(root: Path) -> None:
     write_json(root / "roles" / "input.json", roles)
 
 
-def generate(root: Path) -> None:
+def generate(root: Path, history_commits: int = 3) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    generate_history(root)
+    generate_history(root, history_commits)
     generate_graph(root)
     generate_roles(root)
     # These are independent expected results, intentionally literal.
     write_json(root / "expected.json", {
-        "history": {"commits": 3, "distinct_authors": 2, "active_months": 3},
+        "history": {
+            "commits": history_commits,
+            "distinct_authors": 1 if history_commits == 1 else 2,
+            "active_months": history_commits,
+        },
         "graph": {
             "nodes": 5,
             "edges": 6,
@@ -135,8 +148,10 @@ def generate(root: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path, help="directory to populate with generated fixtures")
+    parser.add_argument("--history-commits", type=int, choices=range(1, 13), default=3,
+                        help="fixed history size from 1 to 12 commits (default: 3)")
     args = parser.parse_args()
-    generate(args.out)
+    generate(args.out, args.history_commits)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,18 @@ cmp "$T/first/roles/input.json" "$T/second/roles/input.json" || fail "role event
 git -C "$T/first/history/repo" rev-list --all > "$T/first-commits"
 git -C "$T/second/history/repo" rev-list --all > "$T/second-commits"
 cmp "$T/first-commits" "$T/second-commits" || fail "history commit IDs not deterministic"
+python3 "$ROOT/tools/generate_synthetic_fixtures.py" --out "$T/single" --history-commits 1 || fail "generate single-commit scenario"
+python3 "$ROOT/tools/generate_synthetic_fixtures.py" --out "$T/multi" --history-commits 5 || fail "generate multi-commit scenario"
+if python3 "$ROOT/tools/generate_synthetic_fixtures.py" --out "$T/invalid" --history-commits 13 >/dev/null 2>&1; then
+  fail "out-of-bound scenario size accepted"
+fi
+python3 - "$T/single/expected.json" "$T/multi/expected.json" <<'PY'
+import json, sys
+single, multi = (json.load(open(path))["history"] for path in sys.argv[1:])
+assert single == {"commits": 1, "distinct_authors": 1, "active_months": 1}, single
+assert multi == {"commits": 5, "distinct_authors": 2, "active_months": 5}, multi
+print("[synthetic] parameterized history expectations OK")
+PY
 
 bash "$ROOT/tools/build.sh" >/dev/null
 CLI="$ROOT/build/rh_cli"
@@ -21,8 +33,10 @@ CLI="$ROOT/build/rh_cli"
 "$CLI" snapshot --input "$T/first/graph/input.json" --out "$T/graph-result.json" >/dev/null || fail "snapshot generated graph"
 "$CLI" index --input "$T/first/graph/input.json" --out "$T/graph-index.json" >/dev/null || fail "index generated graph"
 "$CLI" roles --input "$T/first/roles/input.json" --out "$T/roles-result.json" >/dev/null || fail "analyze generated role events"
+"$CLI" scan --repo "$T/single/history/repo" --out "$T/single-history-report" --window-days 36500 >/dev/null || fail "scan single-commit history"
+"$CLI" scan --repo "$T/multi/history/repo" --out "$T/multi-history-report" --window-days 36500 >/dev/null || fail "scan multi-commit history"
 
-python3 - "$T/first/expected.json" "$T/history-report/report.json" "$T/graph-result.json" "$T/graph-index.json" "$T/roles-result.json" <<'PY'
+python3 - "$T/first/expected.json" "$T/history-report/report.json" "$T/graph-result.json" "$T/graph-index.json" "$T/roles-result.json" "$T/single/expected.json" "$T/single-history-report/report.json" "$T/multi/expected.json" "$T/multi-history-report/report.json" <<'PY'
 import json, sys
 expected = json.load(open(sys.argv[1]))
 report = json.load(open(sys.argv[2]))
@@ -50,6 +64,13 @@ assert roles["action_events_by_actor_type"]["release"]["human"] == expected["rol
 assert roles["action_events_by_actor_type"]["review"]["human"] == expected["roles"]["review_events"], roles
 assert [query["declared_role"] for query in roles["queries"][:2]] == expected["roles"]["effective_boundary"], roles
 assert [query["declared_role"] for query in roles["queries"][2:]] == expected["roles"]["revocation_boundary"], roles
+for expected_path, report_path in ((sys.argv[6], sys.argv[7]), (sys.argv[8], sys.argv[9])):
+    history_expected = json.load(open(expected_path))["history"]
+    history_report = json.load(open(report_path))
+    history_metrics = {metric["key"]: metric for metric in history_report["metrics"]}
+    assert history_metrics["history.commit_count"]["value"] == history_expected["commits"], history_metrics
+    assert history_metrics["contributors.raw_identity_count"]["value"] == history_expected["distinct_authors"], history_metrics
+    assert history_metrics["activity.active_months"]["value"] == history_expected["active_months"], history_metrics
 print("[synthetic] history, graph, role events match independent expectations")
 PY
 
