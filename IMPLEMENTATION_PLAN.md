@@ -1063,6 +1063,15 @@ This improves offline replay and validation only: live `--repo` collection
 still requires controlled-instance authorization, query/response, and actual
 cursor-continuation validation.
 
+The source-review gate also applies before live access is enabled. The
+`sourcehut` entry in `ops/source-review-register.json` records the documented
+read scopes and commit-signature personal-data fields, but grants no live
+collection capability. SourceHut's published automated-access policy and
+later terms announcement leave the fit of repo-health's intended purpose and
+the current terms unconfirmed; API scopes alone do not establish permission.
+Re-review current terms and obtain a source-specific purpose decision before
+any live collector work.
+
 ### 13.6 Ecosystem parser admission
 
 For each package ecosystem, document name normalization, version ordering, prerelease behavior, constraints, aliases, registry identity, optional/platform conditions, local/path dependencies, and lockfile guarantees. The current bounded admission set includes Cargo, npm package/shrinkwrap, pnpm v9.0 and Yarn Classic v1 lockfiles, PyPI requirements/PEP 621, Go modules, RubyGems, Composer, NuGet `packages.config`, and Maven `pom.xml`. Pnpm is limited to one root importer; exact locked versions map through snapshot keys, peer-specific paths remain separate graph nodes, and workspace/Git/path conditions stay unresolved. It fails closed on other pnpm revisions, multiple importers, unknown fields, and unsupported constructs. Yarn resolves only exact name/range selectors from v1, rejects Berry revisions and aliases, and is used only when the npm and pnpm lockfiles are absent. Node lock selection prefers npm shrinkwrap, npm package lock, pnpm, then Yarn. NuGet IDs compare case-insensitively with punctuation preserved, while Maven coordinates use exact `groupId:artifactId` names. Exact versions resolve to registry nodes, and range/property syntax remains unresolved with an unsupported-range metric.

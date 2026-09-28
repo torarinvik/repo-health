@@ -41,7 +41,7 @@ for p in sorted(glob.glob(sys.argv[1] + "/*.json")):
     assert isinstance(d["capabilities"], dict), p
     assert datetime.date.fromisoformat(d["contract_checked_at"]).isoformat() == d["contract_checked_at"], p
     assert isinstance(d["source_docs"], list) and all(isinstance(u, str) and u.startswith("https://") for u in d["source_docs"]), p
-assert set(seen) == {"generic-git", "github", "gitlab", "forgejo", "gitea", "bitbucket", "mercurial", "subversion", "fossil", "release-feed"}, seen
+assert set(seen) == {"generic-git", "github", "gitlab", "forgejo", "gitea", "bitbucket", "mercurial", "subversion", "fossil", "sourcehut", "release-feed"}, seen
 assert seen["mercurial"] != seen["subversion"] and seen["subversion"] != seen["fossil"], "native-vcs manifests must be separate"
 assert seen["forgejo"] != seen["gitea"], "forgejo/gitea must be separate manifests"
 print("[m02] manifests OK:", ", ".join(sorted(seen)))

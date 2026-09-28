@@ -43,7 +43,7 @@ assert len(fx["planned_ids"]) == fx["planned"], fx
 assert d["fixtures"]["note"].startswith("F001-F040")
 assert len(d["supported_sources"]) >= 5
 for s in d["supported_sources"]:
-    assert s["capabilities"], ("source without capabilities", s["id"])
+    assert s["capabilities"] or s["unauthorized"], ("empty source scope without an explicit restriction", s["id"])
     assert "unauthorized" in s and "unsupported" in s
 assert d["limitations"], "limitations must be stated"
 perf = d["performance"]

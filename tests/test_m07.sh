@@ -137,8 +137,9 @@ for s in d["sources"]:
         assert k in s, ("missing field", s.get("id"), k)
     assert s["id"] not in ids, "duplicate source id"
     ids.add(s["id"])
-    assert s["capabilities"], ("no declared capabilities", s["id"])
-    assert isinstance(s["retention_days"], int) and s["retention_days"] > 0
+    assert isinstance(s["capabilities"], list) and isinstance(s["unauthorized"], list), s["id"]
+    assert s["capabilities"] or s["unauthorized"], ("empty scope without an explicit restriction", s["id"])
+    assert isinstance(s["retention_days"], int) and s["retention_days"] >= 0
     assert s["redistribution"] in ("none", "metadata_only", "full"), s["id"]
     assert s["terms_reviewed_at"], s["id"]
 # GitHub traffic must be explicitly unauthorized, not silently scraped (P01).

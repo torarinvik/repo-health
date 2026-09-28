@@ -61,6 +61,16 @@ grep -q "SemVer rules must NOT be applied here" "$ROOT/src/rh_pep440.elisa" || f
 grep -q "at most eight segments, eight text characters per segment" "$ROOT/src/rh_pep440.elisa" || fail "pep440 local-version bounds not declared"
 
 echo "[m08] rights register records the mercurial source"
+python3 - "$ROOT/connectors/manifests/sourcehut.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["connector_id"] == "sourcehut", d
+assert d["auth_scopes"] == ["REPOSITORIES:RO", "OBJECTS:RO"], d
+assert d["capabilities"]["history"] == "unsupported", d
+assert "live-disabled" in d["history_limits"] and "purpose and terms compatibility have not been established" in d["note"], d
+assert "2025-04-15-you-cannot-have-our-users-data" in d["source_docs"][1], d
+print("[m08] SourceHut manifest keeps live collection disabled")
+PY
 python3 - "$ROOT/ops/source-review-register.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -82,6 +92,11 @@ assert "reviews" in sv[0]["unauthorized"], sv[0]
 fo = [s for s in d["sources"] if s["id"] == "fossil"]
 assert len(fo) == 1, "fossil missing from register"
 assert fo[0]["kind"] == "vcs" and "changes" in fo[0]["capabilities"], fo[0]
+sh = [s for s in d["sources"] if s["id"] == "sourcehut"]
+assert len(sh) == 1, "sourcehut missing from register"
+assert sh[0]["capabilities"] == [] and sh[0]["redistribution"] == "none", sh[0]
+assert "live_public_history_collection_pending_purpose_and_current_terms_review" in sh[0]["unauthorized"], sh[0]
+assert "technical scopes do not establish terms permission" in sh[0]["notes"], sh[0]
 print("[m08] register OK")
 PY
 
