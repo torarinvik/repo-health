@@ -589,8 +589,12 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if Base::rh_io_read(repjp, report_bytes) < 0:
         rh_cli_err("cannot read expected report output")
         return 4
+    markdown_bytes: mutable darray[u8] = []
+    if Base::rh_io_read(repmp, markdown_bytes) < 0:
+        rh_cli_err("cannot read expected markdown output")
+        return 4
     manp: cstr = (&manf[0]).cast[cstr] can Unsafe.PointerCast
-    if not Report::rh_write_manifest(manp, repo, &snap, &ctx, logb, defaultb, shab, filesb, git_version_bytes, partb, report_bytes):
+    if not Report::rh_write_manifest(manp, repo, &snap, &ctx, logb, defaultb, shab, filesb, git_version_bytes, partb, report_bytes, markdown_bytes):
         rh_cli_err("cannot write bundle.manifest")
         return 4
     done: mutable darray[u8] =
@@ -628,6 +632,10 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     pinned: mutable u64 = 0
     if not Report::rh_manifest_digest(manb, &pinned):
         rh_cli_err("manifest has no parseable digest (fails closed)")
+        return 4
+    bundle_version: i64 = Report::rh_report_manifest_bundle_version(manb)
+    if bundle_version < 1:
+        rh_cli_err("manifest has an unsupported or inconsistent bundle schema")
         return 4
     ok_commits: mutable i64 = 0
     want_commits: i64 = Report::rh_report_manifest_int(manb, "commits: ", &ok_commits)
@@ -792,6 +800,24 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     if report_integrity < 0:
         rh_cli_err("bundled expected report digest mismatch")
         return 5
+    expected_markdown_path: mutable darray[u8] = []
+    has_markdown_dir: bool = rh_dirname(bundle, expected_markdown_path)
+    if has_markdown_dir:
+        expected_markdown_path.push(47)
+    Base::rh_push_text(expected_markdown_path, "report.md")
+    expected_markdown_path.push(0)
+    expected_markdownp: cstr = (&expected_markdown_path[0]).cast[cstr] can Unsafe.PointerCast
+    expected_markdown: mutable darray[u8] = []
+    if Base::rh_io_read(expected_markdownp, expected_markdown) < 0:
+        rh_cli_err("cannot read bundled expected markdown")
+        return 4
+    markdown_integrity: i64 = 1 if bundle_version == 1 else Report::rh_manifest_sha256_matches(manb, "expected-output-sha256-report.md", expected_markdown)
+    if markdown_integrity == 0:
+        rh_cli_err("bundle has no unique expected markdown digest")
+        return 4
+    if markdown_integrity < 0:
+        rh_cli_err("bundled expected markdown digest mismatch")
+        return 5
     window_start: i64 =
         if full:
             0
@@ -869,6 +895,12 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     if not report_regenerated:
         rh_cli_err("retained report differs from report regenerated from evidence")
         return 5
+    regenerated_markdown: mutable darray[u8] = []
+    Report::rh_report_markdown(repo, &snap, &ctx, regenerated_markdown)
+    markdown_regenerated: bool = regenerated_markdown.count == expected_markdown.count and Base::rh_bytes_equal_span(regenerated_markdown, 0, regenerated_markdown.count.i64(), expected_markdown, 0, expected_markdown.count.i64())
+    if not markdown_regenerated:
+        rh_cli_err("retained markdown differs from markdown regenerated from evidence")
+        return 5
     if Git::rh_ensure_dir(out) != 0:
         rh_cli_err("cannot create output directory")
         return 4
@@ -884,7 +916,7 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
         rb
     verified: bool =
         counts_match: bool = snap.commits == want_commits and snap.rejected == want_rejected
-        snap.digest == pinned and counts_match and report_regenerated
+        snap.digest == pinned and counts_match and report_regenerated and markdown_regenerated
     if verified:
         Base::rh_push_text(rb, "true")
     else:
@@ -901,6 +933,14 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     repp: cstr = (&rep[0]).cast[cstr] can Unsafe.PointerCast
     if not Base::rh_io_write(repp, rb):
         rh_cli_err("cannot write replay.json")
+        return 4
+    replay_markdown_path: mutable darray[u8] = []
+    if not rh_out_path(out, "report.md", replay_markdown_path):
+        rh_cli_err("cannot stage replay markdown path")
+        return 4
+    replay_markdownp: cstr = (&replay_markdown_path[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(replay_markdownp, regenerated_markdown):
+        rh_cli_err("cannot write regenerated report.md")
         return 4
     verdict: mutable darray[u8] = []
     if verified:

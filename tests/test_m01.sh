@@ -79,9 +79,10 @@ python3 - "$T/rep-fix2" <<'PY'
 import hashlib, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 manifest = (root / "bundle.manifest").read_text()
+assert manifest.startswith("repo-health-bundle-manifest 2\n")
 assert (root / "evidence/emails.uniq").read_bytes() == b"alice@example.com\nbob@example.com\n"
 for metadata in (
-    "bundle-schema: rh-evidence-bundle/1",
+    "bundle-schema: rh-evidence-bundle/2",
     "report-schema: repo-health-m01/1.0.0",
     "rights-status: not-assessed",
     "retention-class: user-controlled-local",
@@ -97,6 +98,8 @@ for rel in ("evidence/git-default-count.txt", "evidence/git-files.txt",
     assert manifest.count(key + expected) == 1, key
 expected = hashlib.sha256((root / "report.json").read_bytes()).hexdigest()
 assert manifest.count("expected-output-sha256-report.json: " + expected) == 1
+expected = hashlib.sha256((root / "report.md").read_bytes()).hexdigest()
+assert manifest.count("expected-output-sha256-report.md: " + expected) == 1
 print("[m01] evidence manifest hashes and metadata OK")
 PY
 python3 - "$T/rep-fix2/report.json" <<'EOF'
@@ -261,7 +264,27 @@ import json; d = json.load(open('$T/replay-fix2/replay.json'))
 assert d['verified'] is True, d
 m = {x['key']: x for x in d['metrics']}
 assert m['coverage.replay_match_share']['value'] == {'num': 1, 'den': 1}, m
+assert open('$T/replay-fix2/report.md', 'rb').read() == open('$T/rep-fix2/report.md', 'rb').read()
 print('[m01] replay verified OK')"
+cp -R "$T/rep-fix2" "$T/rep-legacy-v1"
+python3 - "$T/rep-legacy-v1/bundle.manifest" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+manifest = path.read_text().replace("repo-health-bundle-manifest 2\n", "repo-health-bundle-manifest 1\n", 1).replace("bundle-schema: rh-evidence-bundle/2\n", "bundle-schema: rh-evidence-bundle/1\n", 1)
+manifest = "\n".join(line for line in manifest.splitlines() if not line.startswith("expected-output-sha256-report.md: ")) + "\n"
+path.write_text(manifest)
+PY
+"$CLI" replay --bundle "$T/rep-legacy-v1/bundle.manifest" --out "$T/replay-legacy-v1" >/dev/null || fail "legacy v1 replay"
+cmp "$T/rep-legacy-v1/report.md" "$T/replay-legacy-v1/report.md" || fail "legacy v1 markdown regeneration"
+echo "[m01] version-1 bundles replay with regenerated Markdown"
+cp "$T/rep-fix2/bundle.manifest" "$T/inconsistent-schema.manifest"
+python3 - "$T/inconsistent-schema.manifest" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+path.write_text(path.read_text().replace("bundle-schema: rh-evidence-bundle/2", "bundle-schema: rh-evidence-bundle/1", 1))
+PY
+expect 4 "$CLI" replay --bundle "$T/inconsistent-schema.manifest" --out "$T/replay-inconsistent-schema"
+echo "[m01] inconsistent bundle header/schema rejected"
 mv "$T/rep-fix2/evidence/git-files.txt" "$T/rep-fix2/evidence/git-files.missing"
 expect 4 "$CLI" replay --bundle "$T/rep-fix2/bundle.manifest" --out "$T/replay-missing-files"
 mv "$T/rep-fix2/evidence/git-files.missing" "$T/rep-fix2/evidence/git-files.txt"
@@ -283,6 +306,20 @@ manifest_path.write_text(manifest.replace(old, new, 1))
 PY
 expect 5 "$CLI" replay --bundle "$T/rep-forged-report/bundle.manifest" --out "$T/replay-forged-report"
 echo "[m01] replay regenerates report despite rebound digest OK"
+# Rebinding altered Markdown must not bypass regeneration from retained evidence.
+cp -R "$T/rep-fix2" "$T/rep-forged-markdown"
+python3 - "$T/rep-forged-markdown/report.md" "$T/rep-forged-markdown/bundle.manifest" <<'PY'
+import hashlib, pathlib, sys
+report_path, manifest_path = map(pathlib.Path, sys.argv[1:])
+report_bytes = report_path.read_bytes() + b"\nforged summary\n"
+report_path.write_bytes(report_bytes)
+manifest = manifest_path.read_text()
+old = next(line for line in manifest.splitlines() if line.startswith("expected-output-sha256-report.md: "))
+new = "expected-output-sha256-report.md: " + hashlib.sha256(report_bytes).hexdigest()
+manifest_path.write_text(manifest.replace(old, new, 1))
+PY
+expect 5 "$CLI" replay --bundle "$T/rep-forged-markdown/bundle.manifest" --out "$T/replay-forged-markdown"
+echo "[m01] replay regenerates Markdown despite rebound digest OK"
 # determinism: scan twice, same digest
 "$CLI" scan --repo "$T/fix2" --out "$T/rep-fix2b" --window-days 36500 >/dev/null || fail "rescan"
 a="$(grep digest-fnv1a64 "$T/rep-fix2/bundle.manifest")"; b="$(grep digest-fnv1a64 "$T/rep-fix2b/bundle.manifest")"
