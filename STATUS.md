@@ -588,6 +588,10 @@ representatives; mapping endpoints outside the graph fail closed, and any
 private member makes its complete accepted group private. The bridge,
 time-cutoff, and private-group cases are covered in
 `tests/test_downstream_cli.sh`. No new metric keys are published.
+Each downstream report now has a transformation sidecar binding the exact
+graph, optional intrinsic/mapping documents, manual assertions, private-node
+exclusions, and projection/resource configuration to the report bytes; the
+CLI test independently checks those digests and the selected output schema.
 
 **M06 scope (in progress):** implemented — four-valued policy evaluator
 with an explicit lattice (deny > unknown > warn > allow) so unknown can
