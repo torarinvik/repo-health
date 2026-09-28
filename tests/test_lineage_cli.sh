@@ -19,6 +19,7 @@ d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-lineage-result/1", d
 assert d["lineage"]["source"] == "github" and d["lineage"]["native_object_id"] == "issue-42", d
 assert d["times"]["event_time"] is None and d["times"]["updated_at"] == 1700000010, d
+assert d["times"]["valid_from"] == 1699999800 and d["times"]["valid_until"] == 1700001000, d
 assert d["collection"]["coverage"]["state"] == "partial", d
 assert d["assessment"]["delivery"]["id"] == "delivery-42", d
 assert d["assessment"]["origin"]["original_run"] == "assessment-17", d
@@ -42,6 +43,8 @@ for field in (
     "assessment_original_run", "assessment_original_time", "assessment_result_digest",
 ):
     document.pop(field)
+document.pop("valid_from")
+document.pop("valid_until")
 json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
 PY
 "$ROOT/build/rh_cli" lineage --input "$T/incomplete-identity.json" --out "$T/incomplete-identity-result.json" >/dev/null || fail "incomplete origin identity should remain observable"
@@ -54,6 +57,8 @@ assert assessment["origin"] == {
     "tool": None, "tool_version": None, "subject_revision": None,
     "original_run": None, "original_time": None, "result_digest": None,
 }, assessment
+assert json.load(open(sys.argv[1]))["times"]["valid_from"] is None
+assert json.load(open(sys.argv[1]))["times"]["valid_until"] is None
 print("[lineage] incomplete origin identity remains possible duplicate")
 PY
 
@@ -71,6 +76,8 @@ sed 's/"class":"modeled"/"class":"unknown"/' "$T/in.json" > "$T/bad-class.json"
 "$ROOT/build/rh_cli" lineage --input "$T/bad-class.json" --out "$T/x" >/dev/null 2>&1; rc_class=$?
 sed 's/"event_time":null/"event_time":-1/' "$T/in.json" > "$T/bad-time.json"
 "$ROOT/build/rh_cli" lineage --input "$T/bad-time.json" --out "$T/x" >/dev/null 2>&1; rc_time=$?
+sed 's/"valid_until":1700001000/"valid_until":1699999800/' "$T/in.json" > "$T/bad-valid-interval.json"
+"$ROOT/build/rh_cli" lineage --input "$T/bad-valid-interval.json" --out "$T/x" >/dev/null 2>&1; rc_valid_interval=$?
 sed 's/"assessment_tool":"repo-health"/"assessment_tool":7/' "$T/in.json" > "$T/bad-assessment-tool.json"
 "$ROOT/build/rh_cli" lineage --input "$T/bad-assessment-tool.json" --out "$T/x" >/dev/null 2>&1; rc_tool=$?
 sed 's/"assessment_result_digest":"[0-9a-f]*/"assessment_result_digest":"BAD/' "$T/in.json" > "$T/bad-assessment-digest.json"
@@ -94,7 +101,7 @@ open(sys.argv[2], "w").write(payload.replace(needle, needle + ',"state":"discard
 PY
 "$ROOT/build/rh_cli" lineage --input "$T/duplicate-transformation-state.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate_state=$?
 set -e
-[[ "$rc_coverage" -eq 4 && "$rc_digest" -eq 4 && "$rc_state" -eq 4 && "$rc_class" -eq 4 && "$rc_time" -eq 4 && "$rc_tool" -eq 4 && "$rc_assessment_digest" -eq 4 && "$rc_revision" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_duplicate_state" -eq 4 ]] || fail "invalid lineage must exit 4 (got $rc_coverage/$rc_digest/$rc_state/$rc_class/$rc_time/$rc_tool/$rc_assessment_digest/$rc_revision/$rc_duplicate/$rc_duplicate_state)"
+[[ "$rc_coverage" -eq 4 && "$rc_digest" -eq 4 && "$rc_state" -eq 4 && "$rc_class" -eq 4 && "$rc_time" -eq 4 && "$rc_valid_interval" -eq 4 && "$rc_tool" -eq 4 && "$rc_assessment_digest" -eq 4 && "$rc_revision" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_duplicate_state" -eq 4 ]] || fail "invalid lineage must exit 4 (got $rc_coverage/$rc_digest/$rc_state/$rc_class/$rc_time/$rc_valid_interval/$rc_tool/$rc_assessment_digest/$rc_revision/$rc_duplicate/$rc_duplicate_state)"
 echo "[lineage] duplicate root and nested object keys rejected"
 python3 - "$T/in.json" "$T/duplicate-ref.json" "$T/over-bound-refs.json" "$T/over-bound-transformations.json" "$T/over-bound-metrics.json" <<'PY'
 import json, sys
