@@ -33,6 +33,16 @@ assert d["calibration"]["alert_burden"] == {"num": 1, "den": 10}, d
 assert "cannot change default policy decisions" in d["note"], d
 print("[forecast] split + exact calibration evidence OK")
 PY
+python3 - "$T/in.json" "$T/out.json" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, pathlib, sys
+source, output, sidecar = map(pathlib.Path, sys.argv[1:])
+d = json.loads(sidecar.read_text())
+assert d["adapter"] == "forecast-evaluation-evidence", d
+assert d["source_input_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest(), d
+assert d["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), d
+assert d["fields"][-1]["state"] == "unsupported", d
+print("[forecast] exact-byte transformation lineage OK")
+PY
 
 echo "[forecast] determinism + invalid split/score/baseline fail closed"
 "$ROOT/build/rh_cli" forecast --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"

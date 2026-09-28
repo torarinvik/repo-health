@@ -29,6 +29,16 @@ assert d["limitations"] == ["observational selection", "short horizon"], d
 assert "do not establish causal benefit" in d["note"], d
 print("[intervention] design + outcome evidence OK")
 PY
+python3 - "$T/in.json" "$T/out.json" "$T/out.json.transformations.json" <<'PY'
+import hashlib, json, pathlib, sys
+source, output, sidecar = map(pathlib.Path, sys.argv[1:])
+d = json.loads(sidecar.read_text())
+assert d["adapter"] == "intervention-evaluation-evidence", d
+assert d["source_input_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest(), d
+assert d["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), d
+assert d["fields"][-1]["state"] == "unsupported", d
+print("[intervention] exact-byte transformation lineage OK")
+PY
 
 echo "[intervention] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" intervention --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"

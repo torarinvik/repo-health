@@ -1206,7 +1206,7 @@ Use temporal splits, project-family separation, censoring, and data available at
 
 A forecast is a model result with a horizon and population—not a fact that the project will fail. It cannot silently change default policy decisions.
 
-**Current repository checkpoint:** `rh_cli forecast` consumes `rh-forecast-input/2` and emits `rh-forecast-result/2`. The envelope requires an observable binary outcome, temporal/family-separated/censoring-aware split declarations, and exact model and baseline Brier scores with a matching submitted cohort identifier and sample count. It validates captured evaluation evidence; it does not train the model or independently verify the supplied split membership or cohort identity, and remains opt-in and separate from policy.
+**Current repository checkpoint:** `rh_cli forecast` consumes `rh-forecast-input/2` and emits `rh-forecast-result/2`. The envelope requires an observable binary outcome, temporal/family-separated/censoring-aware split declarations, and exact model and baseline Brier scores with a matching submitted cohort identifier and sample count. It validates captured evaluation evidence; it does not train the model or independently verify the supplied split membership or cohort identity, and remains opt-in and separate from policy. A digest-bound transformation sidecar retains exact input/output hashes and the pinned evaluation mapping, with a regression that recomputes both hashes.
 
 `rh_cli experimental` also emits a digest-bound transformation report for exact input/output bytes and the pinned evaluation configuration, mapping admissibility decisions, horizon/censoring calculations, and retained exclusion reasons.
 
@@ -1234,7 +1234,7 @@ Dynamic execution uses a separately approved sandbox and budget. No benchmark pl
 
 The graph can identify support opportunities and track subsequent observations. Estimating the causal benefit of funding or maintenance work requires an evaluation design beyond before/after counts.
 
-Record intervention scope, selection rationale, baseline, comparison approach, outcomes, and limitations. Do not advertise a precise number of prevented incidents from a maintenance dashboard alone.
+Record intervention scope, selection rationale, baseline, comparison approach, outcomes, and limitations. Do not advertise a precise number of prevented incidents from a maintenance dashboard alone. `rh_cli intervention` emits `rh-intervention-result/1` and a digest-bound exact-input/output transformation sidecar; its field map explicitly marks causal-effect and prevented-incident claims unsupported.
 
 ### 16.7 Exit gate
 
