@@ -40,6 +40,24 @@ assert p["visible_edge_count"] == 2, p
 assert d["direct_count"] == 2 and {n["id"] for n in d["direct"]} == {1, 4}, d
 print("[downstream] explicit projection OK")
 PY
+python3 - "$T/temporal.json" "$T/time-a/downstream.json" <<'PY'
+import hashlib, json, pathlib, sys
+graph, output = map(pathlib.Path, sys.argv[1:])
+raw_graph = graph.read_bytes()
+source = (b"rh-downstream-input/1\ngraph:" + str(len(raw_graph)).encode() + b":" + raw_graph
+          + b"\nintrinsics-present:0\n0:\nmapping-present:0\n0:\nprivate-ids:0\nassertions:0")
+configuration = (b"repo-health/downstream/1;subject=0;max-nodes=1000;max-depth=32;unavailable=-1;has-unavailable=false;"
+                 b"scope=1;platform=1;valid-as-of=300;known-as-of=350;identity-revision=0;mapping-revision=0;"
+                 b"snapshot-enabled=false;schema-version=2")
+report = json.loads(pathlib.Path(str(output) + ".transformations.json").read_bytes())
+assert report["schema"] == "rh-adapter-transformation-report/1" and report["adapter"] == "downstream-projection", report
+assert report["output_schema"] == "rh-downstream/2", report
+assert report["source_input_sha256"] == hashlib.sha256(source).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), report
+assert {field["state"] for field in report["fields"]} == {"transformed", "preserved", "unknown", "discarded"}, report
+print("[downstream] transformation report binds graph, filters, and exact result")
+PY
 "$ROOT/build/rh_cli" downstream --graph "$T/temporal.json" --subject 0 --out "$T/time-b" --valid-as-of 300 --known-as-of 450 >/dev/null || fail "later-known projection run"
 python3 - "$T/time-b/downstream.json" <<'PY'
 import json, sys

@@ -6653,6 +6653,7 @@ def rh_do_downstream(graph: cstr, subject: i64, out: cstr, snapshot_root: cstr, 
         if Base::rh_io_read(ipp, intr_raw) < 0:
             rh_cli_err("downstream: cannot read intrinsics file")
             return 4
+    mapping_raw: mutable darray[u8] = []
     mapping_revision: mutable i64 = 0
     if has_mapping:
         mp: mutable darray[u8] =
@@ -6661,7 +6662,6 @@ def rh_do_downstream(graph: cstr, subject: i64, out: cstr, snapshot_root: cstr, 
             mp.push(0)
             mp
         mpp: cstr = (&mp[0]).cast[cstr] can Unsafe.PointerCast
-        mapping_raw: mutable darray[u8] = []
         if Base::rh_io_read(mpp, mapping_raw) < 0:
             rh_cli_err("downstream: cannot read mapping file")
             return 4
@@ -6711,6 +6711,75 @@ def rh_do_downstream(graph: cstr, subject: i64, out: cstr, snapshot_root: cstr, 
     opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
     if not Base::rh_io_write(opp, body):
         rh_cli_err("downstream: cannot write downstream.json")
+        return 4
+    transformation_input: mutable darray[u8] =
+        transformation_input: mutable darray[u8] = []
+        Base::rh_push_text(transformation_input, "rh-downstream-input/1\ngraph:")
+        Base::rh_push_decimal_u64(transformation_input, raw.count.u64())
+        transformation_input.push(58)
+        transformation_input.extend(bytes_view(raw))
+        Base::rh_push_text(transformation_input, "\nintrinsics-present:")
+        Base::rh_push_text(transformation_input, "1\n") if has_intr else Base::rh_push_text(transformation_input, "0\n")
+        Base::rh_push_decimal_u64(transformation_input, intr_raw.count.u64())
+        transformation_input.push(58)
+        transformation_input.extend(bytes_view(intr_raw))
+        Base::rh_push_text(transformation_input, "\nmapping-present:")
+        Base::rh_push_text(transformation_input, "1\n") if has_mapping else Base::rh_push_text(transformation_input, "0\n")
+        Base::rh_push_decimal_u64(transformation_input, mapping_raw.count.u64())
+        transformation_input.push(58)
+        transformation_input.extend(bytes_view(mapping_raw))
+        Base::rh_push_text(transformation_input, "\nprivate-ids:")
+        Base::rh_push_decimal_u64(transformation_input, private_ids.count.u64())
+        while private_index < private_ids.count |private_index: usize = 0, private_ids, transformation_input|:
+            transformation_input.push(44)
+            Base::rh_push_decimal_i64(transformation_input, private_ids[private_index])
+            private_index <- private_index + 1
+        Base::rh_push_text(transformation_input, "\nassertions:")
+        Base::rh_push_decimal_u64(transformation_input, asserts.count.u64())
+        while assertion_index < asserts.count |assertion_index: usize = 0, asserts, transformation_input|:
+            assertion: Graph::RhAssertion = asserts[assertion_index]
+            transformation_input.push(10)
+            Base::rh_push_decimal_i64(transformation_input, assertion.a)
+            transformation_input.push(44)
+            Base::rh_push_decimal_i64(transformation_input, assertion.b)
+            transformation_input.push(44)
+            Base::rh_push_decimal_i64(transformation_input, assertion.state.i64())
+            assertion_index <- assertion_index + 1
+        transformation_input
+    transformation_configuration: mutable darray[u8] =
+        transformation_configuration: mutable darray[u8] = []
+        Base::rh_push_text(transformation_configuration, "repo-health/downstream/1;subject=")
+        Base::rh_push_decimal_i64(transformation_configuration, subject)
+        Base::rh_push_text(transformation_configuration, ";max-nodes=")
+        Base::rh_push_decimal_i64(transformation_configuration, max_nodes)
+        Base::rh_push_text(transformation_configuration, ";max-depth=")
+        Base::rh_push_decimal_i64(transformation_configuration, max_depth)
+        Base::rh_push_text(transformation_configuration, ";unavailable=")
+        Base::rh_push_decimal_i64(transformation_configuration, unavailable)
+        Base::rh_push_text(transformation_configuration, ";has-unavailable=")
+        Base::rh_push_text(transformation_configuration, "true") if has_unavailable else Base::rh_push_text(transformation_configuration, "false")
+        Base::rh_push_text(transformation_configuration, ";scope=")
+        Base::rh_push_decimal_u64(transformation_configuration, scope_filter.u64())
+        Base::rh_push_text(transformation_configuration, ";platform=")
+        Base::rh_push_decimal_i64(transformation_configuration, platform_filter)
+        Base::rh_push_text(transformation_configuration, ";valid-as-of=")
+        Base::rh_push_decimal_i64(transformation_configuration, valid_as_of)
+        Base::rh_push_text(transformation_configuration, ";known-as-of=")
+        Base::rh_push_decimal_i64(transformation_configuration, known_as_of)
+        Base::rh_push_text(transformation_configuration, ";identity-revision=")
+        Base::rh_push_decimal_i64(transformation_configuration, identity_revision)
+        Base::rh_push_text(transformation_configuration, ";mapping-revision=")
+        Base::rh_push_decimal_i64(transformation_configuration, mapping_revision)
+        Base::rh_push_text(transformation_configuration, ";snapshot-enabled=")
+        Base::rh_push_text(transformation_configuration, "true") if has_snapshot else Base::rh_push_text(transformation_configuration, "false")
+        Base::rh_push_text(transformation_configuration, ";schema-version=")
+        Base::rh_push_decimal_i64(transformation_configuration, schema_version)
+        transformation_configuration.push(0)
+        transformation_configuration
+    transformation_configuration_ptr: cstr = (&transformation_configuration[0]).cast[cstr] can Unsafe.PointerCast
+    downstream_schema: cstr = "rh-downstream/2" if schema_version == 2 else "rh-downstream/1"
+    if not AdapterTransformationCli::rh_write_sidecar(transformation_input, body, "downstream-projection", downstream_schema, transformation_configuration_ptr, "[{\"source\":\"dependency graph and optional intrinsic metrics\",\"target\":\"bounded downstream population and metric coverage\",\"state\":\"transformed\"},{\"source\":\"reviewed mapping assertions and explicit mirror pairs\",\"target\":\"canonical project traversal\",\"state\":\"transformed\"},{\"source\":\"private-node exclusions and temporal/scope filters\",\"target\":\"public bounded graph projection\",\"state\":\"preserved\"},{\"source\":\"unseen dependents past node/depth limits\",\"target\":\"truncation coverage\",\"state\":\"unknown\"},{\"source\":\"provider-specific fields outside canonical graph\",\"target\":\"downstream report\",\"state\":\"discarded\"}]", opp):
+        rh_cli_err("downstream: cannot write transformation report")
         return 4
     rh_cli_out("downstream: ok")
     0
