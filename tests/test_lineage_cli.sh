@@ -14,6 +14,12 @@ rm -rf "$T"; mkdir -p "$T"
 cp "$ROOT/fixtures/lineage/input.json" "$T/in.json"
 "$ROOT/build/rh_cli" lineage --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "lineage run"
 cmp -s "$T/out.json" "$ROOT/fixtures/lineage/result.json" || fail "lineage result differs from the checked-in golden"
+python3 - "$T/in.json" "$T/pretty-input.json" <<'PY'
+import json, sys
+json.dump(json.load(open(sys.argv[1])), open(sys.argv[2], "w"), indent=2)
+PY
+"$ROOT/build/rh_cli" lineage --input "$T/pretty-input.json" --out "$T/pretty-output.json" >/dev/null || fail "pretty-printed lineage run"
+cmp -s "$T/out.json" "$T/pretty-output.json" || fail "lineage serialization depends on observation input formatting"
 python3 - "$T/out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
