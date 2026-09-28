@@ -416,17 +416,9 @@ assert "blob-derived metrics | partial" in md, md
 print("[m01] F004 partial-clone blob-partial OK")
 EOF
 echo "[m01] retained tree marks unavailable blob sizes as partial missing objects"
-REAL_GIT="$(command -v git)"
-mkdir -p "$T/git-shim"
-cat > "$T/git-shim/git" <<EOF
-#!/usr/bin/env sh
-case "\$*" in
-  *"ls-tree -r -l -z HEAD"*) printf '100644 blob 0123456789012345678901234567890123456789       -\\tmissing.c\\0' ;;
-  *) exec "$REAL_GIT" "\$@" ;;
-esac
-EOF
-chmod +x "$T/git-shim/git"
-PATH="$T/git-shim:$PATH" "$CLI" scan --repo "$T/partial" --out "$T/rep-missing-object" --window-days 36500 >/dev/null || fail "missing object scan"
+blob_id="$(git -C "$T/partial" rev-parse HEAD:f)"
+rm "$T/partial/.git/objects/${blob_id:0:2}/${blob_id:2}"
+"$CLI" scan --repo "$T/partial" --out "$T/rep-missing-object" --window-days 36500 >/dev/null || fail "missing object scan"
 python3 - "$T/rep-missing-object/report.json" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))

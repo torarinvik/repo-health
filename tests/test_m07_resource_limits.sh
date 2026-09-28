@@ -61,7 +61,8 @@ PY
 echo "[limits] fetch caps are declared"
 grep -q "RH_FETCH_MAX_BYTES" "$ROOT/src/rh_git.elisa" || fail "fetch byte cap missing"
 grep -q "RH_FETCH_MAX_SECS" "$ROOT/src/rh_git.elisa" || fail "fetch time cap missing"
-grep -q -- "--max-redirs 0" "$ROOT/src/rh_git.elisa" || fail "redirect cap missing"
+grep -q -- 'rh_append_arg(args, "--max-redirs")' "$ROOT/src/rh_git.elisa" || fail "redirect cap option missing"
+grep -q -- 'rh_append_arg(args, "0")' "$ROOT/src/rh_git.elisa" || fail "redirect cap value missing"
 echo "[limits] fetch caps OK"
 
 echo "test_m07_resource_limits OK"

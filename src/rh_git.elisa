@@ -6,8 +6,8 @@ module Git:
         # rh_git.elisa — safe Git acquisition (M01-01/02/03).
         #
         # M01-01: rh_url_kind classifies local paths, public https remotes, and
-        # everything else (unsupported). The Git log capture uses the bounded
-        # argv process bridge; other collectors still migrate in follow-up work.
+        # everything else (unsupported). All Git, VCS, resolver, and transport
+        # subprocesses use the bounded argv process bridge.
         # M01-03: acquisition uses plumbing only
         # (`log --format`, `rev-parse`); never checkout/clone-with-hooks/archive,
         # so no source-provided command ever runs (S001). Bounded by default
@@ -22,6 +22,122 @@ module Git:
 
         const RH_DEFAULT_MAX_COMMITS: i64 = 20000
 
+        def rh_append_parent_env(env: mutable darray[u8]&, key: u8&, name: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            value: u8&? = getenv(name)
+            return if value == null
+            path: cstr = value.cast[cstr] can Unsafe.PointerCast
+            return if Base::rh_cstr_len_c(path) > 4096
+            Base::rh_push_text(env, key)
+            env.push(61)
+            Base::rh_push_cstr(env, path)
+            env.push(0)
+
+        def rh_process_env() -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            env: mutable darray[u8] = []
+            path: u8&? = getenv("PATH")
+            use_parent_path: mutable bool = false
+            if path != null:
+                path_ptr: cstr = path.cast[cstr] can Unsafe.PointerCast
+                use_parent_path <- Base::rh_cstr_len_c(path_ptr) <= 4096
+            if use_parent_path:
+                Git::rh_append_parent_env(env, "PATH", "PATH")
+            else:
+                Process::rh_append_arg(env, "PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
+            Process::rh_append_arg(env, "LC_ALL=C")
+            Process::rh_append_arg(env, "GIT_CONFIG_NOSYSTEM=1")
+            Process::rh_append_arg(env, "GIT_CONFIG_GLOBAL=/dev/null")
+            Process::rh_append_arg(env, "GIT_TERMINAL_PROMPT=0")
+            Git::rh_append_parent_env(env, "RH_HG_FIXTURE", "RH_HG_FIXTURE")
+            Git::rh_append_parent_env(env, "RH_SVN_FIXTURE", "RH_SVN_FIXTURE")
+            Git::rh_append_parent_env(env, "RH_FOSSIL_FIXTURE", "RH_FOSSIL_FIXTURE")
+            Git::rh_append_parent_env(env, "RH_TEST_SYSTEM_PYTHON", "RH_TEST_SYSTEM_PYTHON")
+            Git::rh_append_parent_env(env, "RH_TEST_DNS_ADDRESSES", "RH_TEST_DNS_ADDRESSES")
+            env.push(0)
+            env
+
+        def rh_transport_env() -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            base_env: mutable darray[u8] = Git::rh_process_env()
+            env: mutable darray[u8] = []
+            for index in 0..<(base_env.count - 1) |index: usize = 0, base_env, env|:
+                env.push(base_env[index])
+            Git::rh_append_parent_env(env, "RH_CURL_BODY", "RH_CURL_BODY")
+            Git::rh_append_parent_env(env, "RH_CURL_COLLABORATORS_PAGE1", "RH_CURL_COLLABORATORS_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_COLLABORATORS_PAGE2", "RH_CURL_COLLABORATORS_PAGE2")
+            Git::rh_append_parent_env(env, "RH_CURL_COLLABORATORS_PAGE3", "RH_CURL_COLLABORATORS_PAGE3")
+            Git::rh_append_parent_env(env, "RH_CURL_CONFIG_LOG", "RH_CURL_CONFIG_LOG")
+            Git::rh_append_parent_env(env, "RH_CURL_GITLAB_ISSUES", "RH_CURL_GITLAB_ISSUES")
+            Git::rh_append_parent_env(env, "RH_CURL_GITLAB_ISSUES_PAGE2", "RH_CURL_GITLAB_ISSUES_PAGE2")
+            Git::rh_append_parent_env(env, "RH_CURL_GITLAB_MERGE_REQUESTS", "RH_CURL_GITLAB_MERGE_REQUESTS")
+            Git::rh_append_parent_env(env, "RH_CURL_GITLAB_MERGE_REQUESTS_PAGE2", "RH_CURL_GITLAB_MERGE_REQUESTS_PAGE2")
+            Git::rh_append_parent_env(env, "RH_CURL_GITLAB_PAGE1", "RH_CURL_GITLAB_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_GITLAB_PAGE2", "RH_CURL_GITLAB_PAGE2")
+            Git::rh_append_parent_env(env, "RH_CURL_GITLAB_RELEASES", "RH_CURL_GITLAB_RELEASES")
+            Git::rh_append_parent_env(env, "RH_CURL_GITLAB_RELEASES_PAGE2", "RH_CURL_GITLAB_RELEASES_PAGE2")
+            Git::rh_append_parent_env(env, "RH_CURL_HTTP_STATUS", "RH_CURL_HTTP_STATUS")
+            Git::rh_append_parent_env(env, "RH_CURL_ISSUES_PAGE1", "RH_CURL_ISSUES_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_LOG", "RH_CURL_LOG")
+            Git::rh_append_parent_env(env, "RH_CURL_PAGE2", "RH_CURL_PAGE2")
+            Git::rh_append_parent_env(env, "RH_CURL_PAGE3", "RH_CURL_PAGE3")
+            Git::rh_append_parent_env(env, "RH_CURL_PULLS_PAGE1", "RH_CURL_PULLS_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_RELEASES_PAGE1", "RH_CURL_RELEASES_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_REPO_PULLS_PAGE1", "RH_CURL_REPO_PULLS_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_REPO_PULLS_PAGE2", "RH_CURL_REPO_PULLS_PAGE2")
+            Git::rh_append_parent_env(env, "RH_CURL_REPO_REVIEW_7_PAGE1", "RH_CURL_REPO_REVIEW_7_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_REPO_REVIEW_7_PAGE2", "RH_CURL_REPO_REVIEW_7_PAGE2")
+            Git::rh_append_parent_env(env, "RH_CURL_REPO_REVIEW_8_PAGE1", "RH_CURL_REPO_REVIEW_8_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_REPO_REVIEW_9_PAGE1", "RH_CURL_REPO_REVIEW_9_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_REVIEWS_PAGE1", "RH_CURL_REVIEWS_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_STATUS", "RH_CURL_STATUS")
+            Git::rh_append_parent_env(env, "RH_GLP_ISSUES_BODY", "RH_GLP_ISSUES_BODY")
+            Git::rh_append_parent_env(env, "RH_GLP_ISSUES_HTTP", "RH_GLP_ISSUES_HTTP")
+            Git::rh_append_parent_env(env, "RH_GLP_MERGE_REQUESTS_BODY", "RH_GLP_MERGE_REQUESTS_BODY")
+            Git::rh_append_parent_env(env, "RH_GLP_MERGE_REQUESTS_HTTP", "RH_GLP_MERGE_REQUESTS_HTTP")
+            Git::rh_append_parent_env(env, "RH_GLP_RELEASES_BODY", "RH_GLP_RELEASES_BODY")
+            Git::rh_append_parent_env(env, "RH_GLP_RELEASES_HTTP", "RH_GLP_RELEASES_HTTP")
+            Git::rh_append_parent_env(env, "RH_BITBUCKET_BODY", "RH_BITBUCKET_BODY")
+            Git::rh_append_parent_env(env, "RH_TEST_CURL_LOG", "RH_TEST_CURL_LOG")
+            Git::rh_append_parent_env(env, "RH_PROBE_ARRAY_BODY", "RH_PROBE_ARRAY_BODY")
+            Git::rh_append_parent_env(env, "RH_PROBE_BODY", "RH_PROBE_BODY")
+            Git::rh_append_parent_env(env, "RH_PROBE_COLLABORATORS_BODY", "RH_PROBE_COLLABORATORS_BODY")
+            Git::rh_append_parent_env(env, "RH_PROBE_CURL_ARGS", "RH_PROBE_CURL_ARGS")
+            Git::rh_append_parent_env(env, "RH_PROBE_CURL_CONFIG", "RH_PROBE_CURL_CONFIG")
+            Git::rh_append_parent_env(env, "RH_PROBE_HTTP", "RH_PROBE_HTTP")
+            Git::rh_append_parent_env(env, "RH_PROBE_ISSUES_BODY", "RH_PROBE_ISSUES_BODY")
+            Git::rh_append_parent_env(env, "RH_PROBE_ISSUES_HTTP", "RH_PROBE_ISSUES_HTTP")
+            Git::rh_append_parent_env(env, "RH_PROBE_PULLS_BODY", "RH_PROBE_PULLS_BODY")
+            Git::rh_append_parent_env(env, "RH_PROBE_PULLS_HTTP", "RH_PROBE_PULLS_HTTP")
+            Git::rh_append_parent_env(env, "RH_PROBE_RELEASES_BODY", "RH_PROBE_RELEASES_BODY")
+            Git::rh_append_parent_env(env, "RH_PROBE_RELEASES_HTTP", "RH_PROBE_RELEASES_HTTP")
+            Git::rh_append_parent_env(env, "RH_PROBE_REVIEW_BODY", "RH_PROBE_REVIEW_BODY")
+            Git::rh_append_parent_env(env, "RH_PROBE_REVIEW_HTTP", "RH_PROBE_REVIEW_HTTP")
+            Git::rh_append_parent_env(env, "RH_PROBE_TRAFFIC_HTTP", "RH_PROBE_TRAFFIC_HTTP")
+            Git::rh_append_parent_env(env, "RH_PROBE_COLLABORATORS_HTTP", "RH_PROBE_COLLABORATORS_HTTP")
+            Git::rh_append_parent_env(env, "RH_BITBUCKET_HTTP", "RH_BITBUCKET_HTTP")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_HTTP", "OSV_QUERY_FAKE_HTTP")
+            Git::rh_append_parent_env(env, "OSV_QUERY_CAPTURE", "OSV_QUERY_CAPTURE")
+            Git::rh_append_parent_env(env, "OSV_QUERY_REQUEST_CAPTURE", "OSV_QUERY_REQUEST_CAPTURE")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_RESPONSE", "OSV_QUERY_FAKE_RESPONSE")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_ENDPOINT", "OSV_QUERY_FAKE_ENDPOINT")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_VULN_RESPONSE", "OSV_QUERY_FAKE_VULN_RESPONSE")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_VULN_HTTP", "OSV_QUERY_FAKE_VULN_HTTP")
+            Git::rh_append_parent_env(env, "OSV_QUERY_PAGE1", "OSV_QUERY_PAGE1")
+            Git::rh_append_parent_env(env, "OSV_QUERY_PAGE2", "OSV_QUERY_PAGE2")
+            Git::rh_append_parent_env(env, "OSV_QUERY_PAGE3", "OSV_QUERY_PAGE3")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_PAGE2_RESPONSE", "OSV_QUERY_FAKE_PAGE2_RESPONSE")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_PAGE2_HTTP", "OSV_QUERY_FAKE_PAGE2_HTTP")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_PAGE3_RESPONSE", "OSV_QUERY_FAKE_PAGE3_RESPONSE")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_PAGE3_HTTP", "OSV_QUERY_FAKE_PAGE3_HTTP")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_PAGE4_RESPONSE", "OSV_QUERY_FAKE_PAGE4_RESPONSE")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_PAGE4_HTTP", "OSV_QUERY_FAKE_PAGE4_HTTP")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_BATCH_PAGE2_RESPONSE", "OSV_QUERY_FAKE_BATCH_PAGE2_RESPONSE")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_BATCH_PAGE3_RESPONSE", "OSV_QUERY_FAKE_BATCH_PAGE3_RESPONSE")
+            Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_BATCH_PAGE4_RESPONSE", "OSV_QUERY_FAKE_BATCH_PAGE4_RESPONSE")
+            Git::rh_append_parent_env(env, "ECOSYSTEM_LOOKUP_CURL_CAPTURE", "ECOSYSTEM_LOOKUP_CURL_CAPTURE")
+            Git::rh_append_parent_env(env, "ECOSYSTEM_LOOKUP_FAKE_BODY", "ECOSYSTEM_LOOKUP_FAKE_BODY")
+            Git::rh_append_parent_env(env, "ECOSYSTEM_LOOKUP_FAKE_HTTP", "ECOSYSTEM_LOOKUP_FAKE_HTTP")
+            env.push(0)
+            env
+
         def rh_url_kind(url: cstr) -> u8 can[Memory.Allocate, Abort.Panic]:
             return RH_URL_UNSUPPORTED if Base::rh_cstr_len_c(url) == 0
             return RH_URL_HTTPS if Base::rh_cstr_starts_with(url, "https://")
@@ -29,11 +145,8 @@ module Git:
             return RH_URL_UNSUPPORTED if Base::rh_cstr_starts_with(url, "git@")
             RH_URL_LOCAL
 
-        # Strict allowlist for anything interpolated into a system() command:
-        # [A-Za-z0-9] / . : _ - + only. Everything else (quotes, whitespace,
-        # shell metacharacters, '@', non-ASCII) is rejected. Notably '@' is
-        # rejected everywhere: forge https URLs never need it, and it closes the
-        # userinfo-smuggling class (S003).
+        # Restrict repository and evidence paths to a portable byte alphabet;
+        # transport URLs have their own semantic policy below.
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_byte_allowed(b: u8) -> bool:
             return true if b >= 48 and b <= 57
@@ -64,14 +177,6 @@ module Git:
             Base::rh_push_text(out, name)
             out.push(0)
             true
-
-        # Append a single-quoted shell arg (content pre-validated by rh_arg_safe;
-        # quoting is belt-and-braces since the charset cannot break out).
-        # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_push_quoted(cmd: mutable darray[u8]&, arg: cstr) -> void can[Memory.Allocate, Abort.Panic]:
-            cmd.push(39)
-            Base::rh_push_cstr(cmd, arg)
-            cmd.push(39)
 
         # Retain raw author fields and Git's project-local .mailmap result in one
         # pinned log record. Global/system mailmap configuration and configured
@@ -106,12 +211,7 @@ module Git:
                 for i in 0..<limit.count |i, limit, args|:
                     args.push(limit[i])
             args.push(0)
-            env: mutable darray[u8] = []
-            Process::rh_append_arg(env, "PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
-            Process::rh_append_arg(env, "LC_ALL=C")
-            Process::rh_append_arg(env, "GIT_CONFIG_NOSYSTEM=1")
-            Process::rh_append_arg(env, "GIT_CONFIG_GLOBAL=/dev/null")
-            env.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
             Process::rh_run("/usr/bin/git", args, env, out_file, err_file).i64()
 
         # Run: git -C '<repo>' rev-list --count HEAD > '<out>' 2> '<err>'.
@@ -121,17 +221,16 @@ module Git:
             return -1 if not rh_arg_safe(repo)
             return -1 if not rh_arg_safe(out_file)
             return -1 if not rh_arg_safe(err_file)
-            cmd: mutable darray[u8] =
-                cmd: mutable darray[u8] = []
-                Base::rh_push_text(cmd, "git -C ")
-                rh_push_quoted(cmd, repo)
-                Base::rh_push_text(cmd, " rev-list --count HEAD > ")
-                rh_push_quoted(cmd, out_file)
-                Base::rh_push_text(cmd, " 2> ")
-                rh_push_quoted(cmd, err_file)
-                cmd.push(0)
-                cmd
-            system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "git")
+            Process::rh_append_arg(args, "-C")
+            Process::rh_append_arg(args, repo.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "rev-list")
+            Process::rh_append_arg(args, "--count")
+            Process::rh_append_arg(args, "HEAD")
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            Process::rh_run("/usr/bin/git", args, env, out_file, err_file).i64()
 
         # Run: git -C '<repo>' -c core.quotepath=false ls-tree -r -l -z HEAD.
         # NUL-delimited long records retain blob sizes alongside paths so source
@@ -140,34 +239,35 @@ module Git:
             return -1 if not rh_arg_safe(repo)
             return -1 if not rh_arg_safe(out_file)
             return -1 if not rh_arg_safe(err_file)
-            cmd: mutable darray[u8] =
-                cmd: mutable darray[u8] = []
-                Base::rh_push_text(cmd, "git -c core.quotepath=false -C ")
-                rh_push_quoted(cmd, repo)
-                Base::rh_push_text(cmd, " ls-tree -r -l -z HEAD > ")
-                rh_push_quoted(cmd, out_file)
-                Base::rh_push_text(cmd, " 2> ")
-                rh_push_quoted(cmd, err_file)
-                cmd.push(0)
-                cmd
-            system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "git")
+            Process::rh_append_arg(args, "-c")
+            Process::rh_append_arg(args, "core.quotepath=false")
+            Process::rh_append_arg(args, "-C")
+            Process::rh_append_arg(args, repo.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "ls-tree")
+            Process::rh_append_arg(args, "-r")
+            Process::rh_append_arg(args, "-l")
+            Process::rh_append_arg(args, "-z")
+            Process::rh_append_arg(args, "HEAD")
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            Process::rh_run("/usr/bin/git", args, env, out_file, err_file).i64()
 
         # Run: git -C '<repo>' rev-parse --is-shallow-repository > '<out>' 2> '<err>'
         def rh_run_git_shallow(repo: cstr, out_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             return -1 if not rh_arg_safe(repo)
             return -1 if not rh_arg_safe(out_file)
             return -1 if not rh_arg_safe(err_file)
-            cmd: mutable darray[u8] =
-                cmd: mutable darray[u8] = []
-                Base::rh_push_text(cmd, "git -C ")
-                rh_push_quoted(cmd, repo)
-                Base::rh_push_text(cmd, " rev-parse --is-shallow-repository > ")
-                rh_push_quoted(cmd, out_file)
-                Base::rh_push_text(cmd, " 2> ")
-                rh_push_quoted(cmd, err_file)
-                cmd.push(0)
-                cmd
-            system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "git")
+            Process::rh_append_arg(args, "-C")
+            Process::rh_append_arg(args, repo.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "rev-parse")
+            Process::rh_append_arg(args, "--is-shallow-repository")
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            Process::rh_run("/usr/bin/git", args, env, out_file, err_file).i64()
 
         # Run: git -C '<repo>' config --get extensions.partialClone > '<out>'
         # 2> '<err>'. A configured partial clone may be missing blobs, so
@@ -178,17 +278,16 @@ module Git:
             return -1 if not rh_arg_safe(repo)
             return -1 if not rh_arg_safe(out_file)
             return -1 if not rh_arg_safe(err_file)
-            cmd: mutable darray[u8] =
-                cmd: mutable darray[u8] = []
-                Base::rh_push_text(cmd, "git -C ")
-                rh_push_quoted(cmd, repo)
-                Base::rh_push_text(cmd, " config --get extensions.partialClone > ")
-                rh_push_quoted(cmd, out_file)
-                Base::rh_push_text(cmd, " 2> ")
-                rh_push_quoted(cmd, err_file)
-                cmd.push(0)
-                cmd
-            system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "git")
+            Process::rh_append_arg(args, "-C")
+            Process::rh_append_arg(args, repo.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "config")
+            Process::rh_append_arg(args, "--get")
+            Process::rh_append_arg(args, "extensions.partialClone")
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            Process::rh_run("/usr/bin/git", args, env, out_file, err_file).i64()
 
         # Run: git -C '<repo>' rev-parse --verify --quiet HEAD (0 iff the repo has
         # at least one commit). Distinguishes observed-empty history (F001) from a
@@ -196,49 +295,43 @@ module Git:
         def rh_run_git_head(repo: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             return -1 if not rh_arg_safe(repo)
             return -1 if not rh_arg_safe(err_file)
-            headrc: i64 =
-                cmd: mutable darray[u8] =
-                    cmd: mutable darray[u8] = []
-                    Base::rh_push_text(cmd, "git -C ")
-                    rh_push_quoted(cmd, repo)
-                    Base::rh_push_text(cmd, " rev-parse --verify --quiet HEAD -- > /dev/null 2> ")
-                    rh_push_quoted(cmd, err_file)
-                    cmd.push(0)
-                    cmd
-                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
-                block_result
-            headrc
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "git")
+            Process::rh_append_arg(args, "-C")
+            Process::rh_append_arg(args, repo.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "rev-parse")
+            Process::rh_append_arg(args, "--verify")
+            Process::rh_append_arg(args, "--quiet")
+            Process::rh_append_arg(args, "HEAD")
+            Process::rh_append_arg(args, "--")
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            Process::rh_run("/usr/bin/git", args, env, "/dev/null", err_file).i64()
 
         # Run: git --version > '<out>' 2> '<err>' (evidence capture, M01-05).
         def rh_run_git_version(out_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             return -1 if not rh_arg_safe(out_file)
             return -1 if not rh_arg_safe(err_file)
-            bound: i64 =
-                cmd: mutable darray[u8] =
-                    cmd: mutable darray[u8] = []
-                    Base::rh_push_text(cmd, "git --version > ")
-                    rh_push_quoted(cmd, out_file)
-                    Base::rh_push_text(cmd, " 2> ")
-                    rh_push_quoted(cmd, err_file)
-                    cmd.push(0)
-                    cmd
-                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
-                block_result
-            bound
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "git")
+            Process::rh_append_arg(args, "--version")
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            Process::rh_run("/usr/bin/git", args, env, out_file, err_file).i64()
 
         # Run: mkdir -p '<dir>' (evidence/report tree setup; path pre-validated).
         def rh_ensure_dir(dir: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             return -1 if not rh_arg_safe(dir)
-            made: i64 =
-                cmd: mutable darray[u8] =
-                    cmd: mutable darray[u8] = []
-                    Base::rh_push_text(cmd, "mkdir -p ")
-                    rh_push_quoted(cmd, dir)
-                    cmd.push(0)
-                    cmd
-                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
-                block_result
-            made
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "mkdir")
+            Process::rh_append_arg(args, "-p")
+            Process::rh_append_arg(args, dir.cast[u8&] can Unsafe.PointerCast)
+            args.push(0)
+            env: mutable darray[u8] = []
+            Process::rh_append_arg(env, "PATH=/usr/bin:/bin")
+            Process::rh_append_arg(env, "LC_ALL=C")
+            env.push(0)
+            Process::rh_run("/bin/mkdir", args, env, "/dev/null", "/dev/null")
 
         # Run: sort -u '<src>' -o '<dst>' (identity dedup; POSIX sort, no hashing
         # of personhood implied — raw strings in, unique raw strings out).
@@ -246,20 +339,18 @@ module Git:
             return -1 if not rh_arg_safe(src_file)
             return -1 if not rh_arg_safe(dst_file)
             return -1 if not rh_arg_safe(err_file)
-            sorted: i64 =
-                cmd: mutable darray[u8] =
-                    cmd: mutable darray[u8] = []
-                    Base::rh_push_text(cmd, "sort -u ")
-                    rh_push_quoted(cmd, src_file)
-                    Base::rh_push_text(cmd, " -o ")
-                    rh_push_quoted(cmd, dst_file)
-                    Base::rh_push_text(cmd, " 2> ")
-                    rh_push_quoted(cmd, err_file)
-                    cmd.push(0)
-                    cmd
-                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
-                block_result
-            sorted
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "sort")
+            Process::rh_append_arg(args, "-u")
+            Process::rh_append_arg(args, src_file.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "-o")
+            Process::rh_append_arg(args, dst_file.cast[u8&] can Unsafe.PointerCast)
+            args.push(0)
+            env: mutable darray[u8] = []
+            Process::rh_append_arg(env, "PATH=/usr/bin:/bin")
+            Process::rh_append_arg(env, "LC_ALL=C")
+            env.push(0)
+            Process::rh_run("/usr/bin/sort", args, env, "/dev/null", err_file)
 
         # Native M08 history adapters use fixed machine-oriented output formats and
         # the same path allowlist as the Git runner. Each command writes raw source
@@ -269,49 +360,49 @@ module Git:
             return -1 if not rh_arg_safe(repo)
             return -1 if not rh_arg_safe(out_file)
             return -1 if not rh_arg_safe(err_file)
-            cmd: mutable darray[u8] =
-                cmd: mutable darray[u8] = []
-                Base::rh_push_text(cmd, "hg --cwd ")
-                rh_push_quoted(cmd, repo)
-                Base::rh_push_text(cmd, " log -Tjson --limit=20000 > ")
-                rh_push_quoted(cmd, out_file)
-                Base::rh_push_text(cmd, " 2> ")
-                rh_push_quoted(cmd, err_file)
-                cmd.push(0)
-                cmd
-            system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "hg")
+            Process::rh_append_arg(args, "--cwd")
+            Process::rh_append_arg(args, repo.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "log")
+            Process::rh_append_arg(args, "-Tjson")
+            Process::rh_append_arg(args, "--limit=20000")
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            Process::rh_run("hg", args, env, out_file, err_file).i64()
 
         def rh_run_svn_log(repo: cstr, out_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             return -1 if not rh_arg_safe(repo)
             return -1 if not rh_arg_safe(out_file)
             return -1 if not rh_arg_safe(err_file)
-            cmd: mutable darray[u8] =
-                cmd: mutable darray[u8] = []
-                Base::rh_push_text(cmd, "svn log --xml -v --limit 20000 ")
-                rh_push_quoted(cmd, repo)
-                Base::rh_push_text(cmd, " > ")
-                rh_push_quoted(cmd, out_file)
-                Base::rh_push_text(cmd, " 2> ")
-                rh_push_quoted(cmd, err_file)
-                cmd.push(0)
-                cmd
-            system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "svn")
+            Process::rh_append_arg(args, "log")
+            Process::rh_append_arg(args, "--xml")
+            Process::rh_append_arg(args, "-v")
+            Process::rh_append_arg(args, "--limit")
+            Process::rh_append_arg(args, "20000")
+            Process::rh_append_arg(args, repo.cast[u8&] can Unsafe.PointerCast)
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            Process::rh_run("svn", args, env, out_file, err_file).i64()
 
         def rh_run_fossil_timeline(repo: cstr, out_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             return -1 if not rh_arg_safe(repo)
             return -1 if not rh_arg_safe(out_file)
             return -1 if not rh_arg_safe(err_file)
-            cmd: mutable darray[u8] =
-                cmd: mutable darray[u8] = []
-                Base::rh_push_text(cmd, "fossil timeline -R ")
-                rh_push_quoted(cmd, repo)
-                Base::rh_push_text(cmd, " -F '%H|%a|%d|%b|%p|%t|%c' -n 20000 > ")
-                rh_push_quoted(cmd, out_file)
-                Base::rh_push_text(cmd, " 2> ")
-                rh_push_quoted(cmd, err_file)
-                cmd.push(0)
-                cmd
-            system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "fossil")
+            Process::rh_append_arg(args, "timeline")
+            Process::rh_append_arg(args, "-R")
+            Process::rh_append_arg(args, repo.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "-F")
+            Process::rh_append_arg(args, "%H|%a|%d|%b|%p|%t|%c")
+            Process::rh_append_arg(args, "-n")
+            Process::rh_append_arg(args, "20000")
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            Process::rh_run("fossil", args, env, out_file, err_file).i64()
 
         # --- Fetch policy (S002/S003). Two layers, both must pass before any
         # network/file access:
@@ -323,9 +414,8 @@ module Git:
         # DNS is checked by rh_prepare_https_pin before an HTTPS request: the
         # complete resolver answer set is vetted and passed to curl --resolve.
         # This URL-only guard remains side-effect free.
-        # (2) rh_fetch_arg_safe: shell safety for the system() runner. Single
-        # quotes wrap the URL, so only the quote itself plus backtick, dollar,
-        # backslash, controls, and DEL can break out — all rejected.
+        # (2) rh_fetch_arg_safe rejects controls and shell-like delimiter bytes
+        # from transport URLs, preserving a small, auditable public URL surface.
         def rh_fetch_arg_safe(s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
             n: usize = Base::rh_cstr_len_c(s)
             return false if n == 0
@@ -665,31 +755,28 @@ module Git:
             resolved_ptr: cstr = (&resolved_file[0]).cast[cstr] can Unsafe.PointerCast
             _ = remove_file(resolved_ptr)
 
-            resolve_status: i64 =
-                cmd: mutable darray[u8] =
-                    cmd: mutable darray[u8] = []
-                    Base::rh_push_text(cmd, "python3 -I -S -c '")
-                    Base::rh_push_text(cmd, "import socket, sys, threading\n")
-                    Base::rh_push_text(cmd, "answers = []; failures = []\n")
-                    Base::rh_push_text(cmd, "def resolve():\n")
-                    Base::rh_push_text(cmd, "    try: answers.extend(socket.getaddrinfo(sys.argv[1], 443, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP))\n")
-                    Base::rh_push_text(cmd, "    except Exception as error: failures.append(error)\n")
-                    Base::rh_push_text(cmd, "worker = threading.Thread(target=resolve, daemon=True)\n")
-                    Base::rh_push_text(cmd, "worker.start(); worker.join(10)\n")
-                    Base::rh_push_text(cmd, "if worker.is_alive() or failures: raise SystemExit(1)\n")
-                    Base::rh_push_text(cmd, "addresses = list(dict.fromkeys(answer[4][0] for answer in answers))\n")
-                    Base::rh_push_text(cmd, "if not addresses or len(addresses) > 32: raise SystemExit(1)\n")
-                    Base::rh_push_text(cmd, "sys.stdout.write(\"\\n\".join(addresses) + \"\\n\")\n")
-                    Base::rh_push_text(cmd, "' ")
-                    rh_push_quoted(cmd, host_ptr)
-                    Base::rh_push_text(cmd, " > ")
-                    rh_push_quoted(cmd, resolved_ptr)
-                    Base::rh_push_text(cmd, " 2> ")
-                    rh_push_quoted(cmd, err_file)
-                    cmd.push(0)
-                    cmd
-                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
-                block_result
+            script: mutable darray[u8] = []
+            Base::rh_push_text(script, "import socket, sys, threading\n")
+            Base::rh_push_text(script, "answers = []; failures = []\n")
+            Base::rh_push_text(script, "def resolve():\n")
+            Base::rh_push_text(script, "    try: answers.extend(socket.getaddrinfo(sys.argv[1], 443, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP))\n")
+            Base::rh_push_text(script, "    except Exception as error: failures.append(error)\n")
+            Base::rh_push_text(script, "worker = threading.Thread(target=resolve, daemon=True)\n")
+            Base::rh_push_text(script, "worker.start(); worker.join(10)\n")
+            Base::rh_push_text(script, "if worker.is_alive() or failures: raise SystemExit(1)\n")
+            Base::rh_push_text(script, "addresses = list(dict.fromkeys(answer[4][0] for answer in answers))\n")
+            Base::rh_push_text(script, "if not addresses or len(addresses) > 32: raise SystemExit(1)\n")
+            Base::rh_push_text(script, "sys.stdout.write(\"\\n\".join(addresses) + \"\\n\")\n")
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "python3")
+            Process::rh_append_arg(args, "-I")
+            Process::rh_append_arg(args, "-S")
+            Process::rh_append_arg(args, "-c")
+            Process::rh_append_arg_bytes(args, script)
+            Process::rh_append_arg(args, host_ptr.cast[u8&] can Unsafe.PointerCast)
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            resolve_status: i32 = Process::rh_run("python3", args, env, resolved_ptr, err_file)
             if resolve_status != 0:
                 _ = remove_file(resolved_ptr)
                 return false
@@ -729,37 +816,57 @@ module Git:
 
         # Assemble the fixed transport policy in one private helper so the
         # public operation only validates, prepares the pin, and runs it.
-        def rh_https_get_command(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&, max_secs: i64, api_kind: i64, api_auth: bool) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-            cmd: mutable darray[u8] = []
-            if api_auth and api_kind == 1:
-                Base::rh_push_text(cmd, "printf '%s\\n' \"header = \\\"Authorization: Bearer $RH_GITHUB_TOKEN\\\"\" | ")
-            elif api_auth and api_kind == 2:
-                Base::rh_push_text(cmd, "printf '%s\\n' \"header = \\\"PRIVATE-TOKEN: $RH_GITLAB_TOKEN\\\"\" | ")
-            Base::rh_push_text(cmd, "curl --disable")
-            Base::rh_push_text(cmd, " --config -") if api_auth
-            Base::rh_push_text(cmd, " -sS --noproxy '*' --proto '=https,file' --max-redirs 0")
+        def rh_https_get_args(args: mutable darray[u8]&, input: mutable darray[u8]&, url: cstr, body_file: cstr, pin: darray[u8]&, max_secs: i64, api_kind: i64, api_auth: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            Process::rh_append_arg(args, "curl")
+            Process::rh_append_arg(args, "--disable")
+            if api_auth:
+                Process::rh_append_arg(args, "--config")
+                Process::rh_append_arg(args, "-")
+                if api_kind == 1:
+                    token: u8&? = getenv("RH_GITHUB_TOKEN")
+                    return if token == null
+                    Base::rh_push_text(input, "header = \"Authorization: Bearer ")
+                    Base::rh_push_cstr(input, token.cast[cstr] can Unsafe.PointerCast)
+                    Base::rh_push_text(input, "\"\n")
+                elif api_kind == 2:
+                    token: u8&? = getenv("RH_GITLAB_TOKEN")
+                    return if token == null
+                    Base::rh_push_text(input, "header = \"PRIVATE-TOKEN: ")
+                    Base::rh_push_cstr(input, token.cast[cstr] can Unsafe.PointerCast)
+                    Base::rh_push_text(input, "\"\n")
+            Process::rh_append_arg(args, "-sS")
+            Process::rh_append_arg(args, "--noproxy")
+            Process::rh_append_arg(args, "*")
+            Process::rh_append_arg(args, "--proto")
+            Process::rh_append_arg(args, "=https,file")
+            Process::rh_append_arg(args, "--max-redirs")
+            Process::rh_append_arg(args, "0")
             if pin.count > 0:
-                Base::rh_push_text(cmd, " --resolve ")
-                rh_push_quoted(cmd, (&pin[0]).cast[cstr] can Unsafe.PointerCast)
-            Base::rh_push_text(cmd, " --max-time ")
-            Base::rh_push_decimal_i64(cmd, max_secs)
-            Base::rh_push_text(cmd, " --max-filesize ")
-            Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_BYTES)
-            Base::rh_push_text(cmd, " -H 'User-Agent: repo-health/0.2.0 (+https://github.com/torarinvik/repo-health/issues)' -H 'Accept: application/json'")
+                Process::rh_append_arg(args, "--resolve")
+                Process::rh_append_arg(args, (&pin[0]).cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "--max-time")
+            seconds: mutable darray[u8] = []
+            Base::rh_push_decimal_i64(seconds, max_secs)
+            Process::rh_append_arg_bytes(args, seconds)
+            Process::rh_append_arg(args, "--max-filesize")
+            size: mutable darray[u8] = []
+            Base::rh_push_decimal_i64(size, RH_FETCH_MAX_BYTES)
+            Process::rh_append_arg_bytes(args, size)
+            Process::rh_append_arg(args, "-H")
+            Process::rh_append_arg(args, "User-Agent: repo-health/0.2.0 (+https://github.com/torarinvik/repo-health/issues)")
+            Process::rh_append_arg(args, "-H")
+            Process::rh_append_arg(args, "Accept: application/json")
             if api_kind == 1:
-                Base::rh_push_text(cmd, " -H 'X-GitHub-Api-Version: ")
-                Base::rh_push_text(cmd, RH_GITHUB_REST_API_VERSION)
-                cmd.push(39)
-            Base::rh_push_text(cmd, " -o ")
-            rh_push_quoted(cmd, body_file)
-            Base::rh_push_text(cmd, " -w '%{http_code}' > ")
-            rh_push_quoted(cmd, code_file)
-            Base::rh_push_text(cmd, " 2> ")
-            rh_push_quoted(cmd, err_file)
-            Base::rh_push_text(cmd, " ")
-            rh_push_quoted(cmd, url)
-            cmd.push(0)
-            cmd
+                header: mutable darray[u8] = []
+                Base::rh_push_text(header, "X-GitHub-Api-Version: ")
+                Base::rh_push_text(header, RH_GITHUB_REST_API_VERSION)
+                Process::rh_append_arg(args, "-H")
+                Process::rh_append_arg_bytes(args, header)
+            Process::rh_append_arg(args, "-o")
+            Process::rh_append_arg(args, body_file.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "-w")
+            Process::rh_append_arg(args, "%{http_code}")
+            Process::rh_append_arg(args, url.cast[u8&] can Unsafe.PointerCast)
 
         def rh_run_https_get_with_timeout(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64, api_kind: i64) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if max_secs <= 0 or max_secs > RH_FETCH_MAX_SECS
@@ -774,42 +881,50 @@ module Git:
             pin: mutable darray[u8] = []
             if Base::rh_cstr_starts_with(url, "https://"):
                 return -1 if not rh_prepare_https_pin(url, err_file, pin)
-            transport: i64 =
-                cmd: mutable darray[u8] = rh_https_get_command(url, body_file, code_file, err_file, pin, max_secs, api_kind, api_auth)
-                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
-                block_result
-            transport
+            args: mutable darray[u8] = []
+            input: mutable darray[u8] = []
+            rh_https_get_args(args, input, url, body_file, pin, max_secs, api_kind, api_auth)
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_transport_env()
+            Process::rh_run_with_input_timeout("curl", args, env, input, code_file, err_file, ((max_secs + 2) * 1000).i32()).i64()
 
         # Build the one permitted JSON POST request. The URL is not a caller
         # argument: the public wrapper below fixes it to OSV's query endpoint.
-        def rh_osv_post_command(url: cstr, request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr, pin: darray[u8]&) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-            cmd: mutable darray[u8] = []
-            Base::rh_push_text(cmd, "curl --disable -sS --noproxy '*' --proto '=https' --max-redirs 0")
-            Base::rh_push_text(cmd, " --resolve ")
-            rh_push_quoted(cmd, (&pin[0]).cast[cstr] can Unsafe.PointerCast)
-            Base::rh_push_text(cmd, " --max-time ")
-            Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_SECS)
-            Base::rh_push_text(cmd, " --max-filesize ")
-            Base::rh_push_decimal_i64(cmd, RH_FETCH_MAX_BYTES)
-            Base::rh_push_text(cmd, " -H 'User-Agent: repo-health/0.2.0 (+https://github.com/torarinvik/repo-health/issues)' -H 'Content-Type: application/json' --data-binary ")
+        def rh_osv_post_args(args: mutable darray[u8]&, url: cstr, request_file: cstr, body_file: cstr, pin: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            Process::rh_append_arg(args, "curl")
+            Process::rh_append_arg(args, "--disable")
+            Process::rh_append_arg(args, "-sS")
+            Process::rh_append_arg(args, "--noproxy")
+            Process::rh_append_arg(args, "*")
+            Process::rh_append_arg(args, "--proto")
+            Process::rh_append_arg(args, "=https")
+            Process::rh_append_arg(args, "--max-redirs")
+            Process::rh_append_arg(args, "0")
+            Process::rh_append_arg(args, "--resolve")
+            Process::rh_append_arg(args, (&pin[0]).cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "--max-time")
+            seconds: mutable darray[u8] = []
+            Base::rh_push_decimal_i64(seconds, RH_FETCH_MAX_SECS)
+            Process::rh_append_arg_bytes(args, seconds)
+            Process::rh_append_arg(args, "--max-filesize")
+            size: mutable darray[u8] = []
+            Base::rh_push_decimal_i64(size, RH_FETCH_MAX_BYTES)
+            Process::rh_append_arg_bytes(args, size)
+            Process::rh_append_arg(args, "-H")
+            Process::rh_append_arg(args, "User-Agent: repo-health/0.2.0 (+https://github.com/torarinvik/repo-health/issues)")
+            Process::rh_append_arg(args, "-H")
+            Process::rh_append_arg(args, "Content-Type: application/json")
+            Process::rh_append_arg(args, "--data-binary")
             request_arg: mutable darray[u8] = []
             request_arg.push(64)
             Base::rh_push_cstr(request_arg, request_file)
-            request_arg.push(0)
-            rh_push_quoted(cmd, (&request_arg[0]).cast[cstr] can Unsafe.PointerCast)
-            Base::rh_push_text(cmd, " -o ")
-            rh_push_quoted(cmd, body_file)
-            Base::rh_push_text(cmd, " -w '%{http_code}' > ")
-            rh_push_quoted(cmd, code_file)
-            Base::rh_push_text(cmd, " 2> ")
-            rh_push_quoted(cmd, err_file)
-            Base::rh_push_text(cmd, " ")
-            rh_push_quoted(cmd, url)
-            cmd.push(0)
-            cmd
+            Process::rh_append_arg_bytes(args, request_arg)
+            Process::rh_append_arg(args, "-o")
+            Process::rh_append_arg(args, body_file.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "-w")
+            Process::rh_append_arg(args, "%{http_code}")
+            Process::rh_append_arg(args, url.cast[u8&] can Unsafe.PointerCast)
 
-        # Shared private transport for the two fixed OSV POST operations. The
-        # only endpoint values are supplied by public wrappers below.
         def rh_run_osv_post(url: cstr, request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if not rh_arg_safe(request_file)
             return -1 if not rh_arg_safe(body_file)
@@ -818,11 +933,11 @@ module Git:
             return -1 if not rh_fetch_guard(url)
             pin: mutable darray[u8] = []
             return -1 if not rh_prepare_https_pin(url, err_file, pin)
-            transport: i64 =
-                cmd: mutable darray[u8] = rh_osv_post_command(url, request_file, body_file, code_file, err_file, pin)
-                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
-                block_result
-            transport
+            args: mutable darray[u8] = []
+            rh_osv_post_args(args, url, request_file, body_file, pin)
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_transport_env()
+            Process::rh_run_with_timeout("curl", args, env, code_file, err_file, ((RH_FETCH_MAX_SECS + 2) * 1000).i32()).i64()
 
     public:
         # Run a bounded HTTPS/file fetch for forge APIs (M02-05 transport).
@@ -897,18 +1012,20 @@ module Git:
             return -1 if not rh_arg_safe(url)
             return -1 if not rh_arg_safe(dest)
             return -1 if not rh_arg_safe(err_file)
-            cloned: i64 =
-                cmd: mutable darray[u8] = []
-                Base::rh_push_text(cmd, "git -c protocol.ext.allow=never -c protocol.file.allow=never clone --bare --no-checkout --filter=blob:none")
-                if not full_history:
-                    Base::rh_push_text(cmd, " --depth=5000")
-                Base::rh_push_text(cmd, " ")
-                rh_push_quoted(cmd, url)
-                Base::rh_push_text(cmd, " ")
-                rh_push_quoted(cmd, dest)
-                Base::rh_push_text(cmd, " 2> ")
-                rh_push_quoted(cmd, err_file)
-                cmd.push(0)
-                block_result: i64 = system((&cmd[0]).cast[cstr] can Unsafe.PointerCast).i64()
-                block_result
-            cloned
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "git")
+            Process::rh_append_arg(args, "-c")
+            Process::rh_append_arg(args, "protocol.ext.allow=never")
+            Process::rh_append_arg(args, "-c")
+            Process::rh_append_arg(args, "protocol.file.allow=never")
+            Process::rh_append_arg(args, "clone")
+            Process::rh_append_arg(args, "--bare")
+            Process::rh_append_arg(args, "--no-checkout")
+            Process::rh_append_arg(args, "--filter=blob:none")
+            if not full_history:
+                Process::rh_append_arg(args, "--depth=5000")
+            Process::rh_append_arg(args, url.cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, dest.cast[u8&] can Unsafe.PointerCast)
+            args.push(0)
+            env: mutable darray[u8] = Git::rh_process_env()
+            Process::rh_run("/usr/bin/git", args, env, "/dev/null", err_file).i64()

@@ -4,15 +4,17 @@
 
 1. **CLI argument boundary** — untrusted: repository URL/path, output
    directory. Trusted after `rh_git` validation (allowlist + kind check).
-2. **Subprocess boundary** — the retained Git-log capture now uses the
-   `rh_process` POSIX spawn bridge: fixed `/usr/bin/git`, NUL-delimited argv,
-   explicit child environment, output-file redirection, and a 120-second
-   timeout. Its test proves shell metacharacters in an argument stay literal.
-   The remaining Git helpers still use `system(3)` and retain the stricter
-   allowlist below until migrated: only `[A-Za-z0-9/_:.@-]` bytes are accepted
-   in interpolated user arguments; shell metacharacters, whitespace, and
-   backslashes reject with exit 3. Internal flags are constants. The bridge
-   does not yet enforce an output-byte limit or process-tree cancellation.
+2. **Subprocess boundary** — Git acquisition, native VCS collectors, DNS
+   resolution, and curl transport use the `rh_process` POSIX spawn bridge with
+   NUL-delimited argv/env, explicit child environments, separate output-file
+   redirection, bounded optional stdin, and a wall-clock timeout. Its tests
+   prove shell metacharacters stay literal, byte-vector arguments preserve
+   their boundaries, and transport credentials travel through stdin rather
+   than argv or retained files. The process runner does not yet enforce a
+   generic output-byte cap, bound stdin delivery by the timeout, limit child
+   memory/process creation, or cancel process groups. `system(3)` remains only
+   in a store-test helper; production subprocess call sites in `rh_git` have
+   migrated. Individual fetchers retain their own byte limits.
 3. **No server endpoint** scans arbitrary server paths (M01-01): this CLI is
    local-only; there is no network listener in M00/M01.
 4. **No source-code execution** (S001): repositories are read with
