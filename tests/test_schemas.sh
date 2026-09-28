@@ -12,6 +12,15 @@ out="$(bash "$ROOT/tools/schema-check.sh")" || fail "schema-check"
 echo "$out"
 
 echo "[schemas] schemas are versioned and cover the named families"
+python3 - "$ROOT/schemas/evidence-bundle-manifest.spec.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-evidence-bundle-manifest-schema/1", d
+assert set(d["versions"]) == {"1", "2"}, d
+assert "expected-output-sha256-report.md" in d["versions"]["2"]["expected_outputs"], d
+assert "expected-output-sha256-report.md" in d["versions"]["1"]["optional_outputs"], d
+print("[schemas] evidence bundle text manifest contract is versioned")
+PY
 python3 - "$ROOT" <<'PY'
 import glob, json, os, sys
 root = sys.argv[1]

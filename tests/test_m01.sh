@@ -102,6 +102,17 @@ expected = hashlib.sha256((root / "report.md").read_bytes()).hexdigest()
 assert manifest.count("expected-output-sha256-report.md: " + expected) == 1
 print("[m01] evidence manifest hashes and metadata OK")
 PY
+python3 "$ROOT/tools/evidence-manifest-check.py" "$T/rep-fix2/bundle.manifest" >/dev/null || fail "manifest version-2 contract check"
+cp "$T/rep-fix2/bundle.manifest" "$T/bad-manifest-order.txt"
+python3 - "$T/bad-manifest-order.txt" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]); rows = p.read_text().splitlines(); rows[2], rows[3] = rows[3], rows[2]; p.write_text("\n".join(rows) + "\n")
+PY
+if python3 "$ROOT/tools/evidence-manifest-check.py" "$T/bad-manifest-order.txt" >/dev/null 2>&1; then fail "manifest schema accepted noncanonical order"; fi
+cp "$T/rep-fix2/bundle.manifest" "$T/bad-manifest-unknown.txt"
+printf 'unreviewed-field: value\n' >> "$T/bad-manifest-unknown.txt"
+if python3 "$ROOT/tools/evidence-manifest-check.py" "$T/bad-manifest-unknown.txt" >/dev/null 2>&1; then fail "manifest schema accepted unknown field"; fi
+echo "[m01] independent manifest contract rejects noncanonical and unknown fields"
 python3 - "$T/rep-fix2/report.json" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -275,6 +286,7 @@ manifest = path.read_text().replace("repo-health-bundle-manifest 2\n", "repo-hea
 manifest = "\n".join(line for line in manifest.splitlines() if not line.startswith("expected-output-sha256-report.md: ")) + "\n"
 path.write_text(manifest)
 PY
+python3 "$ROOT/tools/evidence-manifest-check.py" "$T/rep-legacy-v1/bundle.manifest" >/dev/null || fail "manifest version-1 contract check"
 "$CLI" replay --bundle "$T/rep-legacy-v1/bundle.manifest" --out "$T/replay-legacy-v1" >/dev/null || fail "legacy v1 replay"
 cmp "$T/rep-legacy-v1/report.md" "$T/replay-legacy-v1/report.md" || fail "legacy v1 markdown regeneration"
 cmp "$T/rep-legacy-v1/report.json" "$T/replay-legacy-v1/report.json" || fail "legacy v1 JSON regeneration"
