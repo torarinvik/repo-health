@@ -1,0 +1,183 @@
+# rh_sourcehut_pages.elisa — bounded offline SourceHut GraphQL cursor chains.
+#
+# Validates a captured request/response chain before publishing its pages.
+# Live acquisition remains a separate controlled-instance admission step.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+include "./rh_sourcehut.elisa"
+
+module SourcehutPages:
+    private:
+        const RH_SOURCEHUT_CHAIN_MAX_BYTES: i64 = 67108864
+        const RH_SOURCEHUT_CHAIN_MAX_PAGES: i64 = 128
+        const RH_SOURCEHUT_CHAIN_MAX_COMMITS: i64 = 20000
+
+        def rh_shp_member(nodes: darray[Json::RhJsonNode]&,
+                          texts: darray[u8]&, object: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            Json::rh_json_obj_get(nodes, texts, object, key)
+
+        def rh_shp_copy_span(texts: darray[u8]&, start: i64, end: i64,
+                             out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            for index in start.usize()..<end.usize() |index: usize = start.usize(), texts, out|:
+                out.push(texts[index])
+
+        def rh_shp_digest_less(left: sview, right: sview) -> bool:
+            left_length: usize = sview_len(left)
+            right_length: usize = sview_len(right)
+            limit: usize = left_length if left_length < right_length else right_length
+            while index < limit |index: usize = 0, left, right|:
+                left_byte: u8 = sview_at(left, index)
+                right_byte: u8 = sview_at(right, index)
+                return left_byte < right_byte if left_byte != right_byte
+                index <- index + 1
+            left_length < right_length
+
+        def rh_shp_has_duplicate_digest(digests: darray[sview]&) -> bool:
+            duplicate: mutable bool = false
+            while index + 1 < digests.count and not duplicate |index: usize = 0, digests, duplicate|:
+                duplicate <- sview_eq(digests[index], digests[index + 1])
+                index <- index + 1
+            duplicate
+
+    public:
+        # Pages carry exact captured response JSON in `response_json` strings;
+        # request_cursor must equal the preceding response's continuation.
+        # A non-null cursor on the last supplied page remains partial.
+        def rh_sourcehut_page_chain_report(raw: darray[u8]&,
+                                           out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count.i64() <= 0 or raw.count.i64() > RH_SOURCEHUT_CHAIN_MAX_BYTES
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            schema_s: mutable i64 = -1
+            schema_e: mutable i64 = -1
+            schema: i64 = rh_shp_member(nodes, texts, root, "schema")
+            return -1 if not Json::rh_json_str_span(nodes, schema, &schema_s, &schema_e) or not Base::rh_bytes_equal_literal(texts, schema_s, schema_e, "rh-sourcehut-page-chain-input/1")
+            pages: i64 = rh_shp_member(nodes, texts, root, "pages")
+            return -1 if pages < 0 or nodes[pages.usize()].kind != Json::RH_JSON_ARR or nodes[pages.usize()].child_count < 1 or nodes[pages.usize()].child_count > RH_SOURCEHUT_CHAIN_MAX_PAGES
+            repository_id: mutable darray[u8] = []
+            repository_name: mutable darray[u8] = []
+            previous_cursor: mutable darray[u8] = []
+            next_cursor: mutable darray[u8] = []
+            id_digests: mutable darray[u8] = []
+            cursor_digests: mutable darray[u8] = []
+            normalized_pages: mutable darray[u8] = []
+            has_pages: mutable bool = false
+            total_bytes: mutable i64 = 0
+            total_commits: mutable i64 = 0
+            page_index: mutable i64 = 0
+            page: mutable i64 = nodes[pages.usize()].first_child
+            while page >= 0 |page, page_index, pages, nodes, texts, repository_id, repository_name, previous_cursor, next_cursor, id_digests, cursor_digests, normalized_pages, has_pages, total_bytes, total_commits, out|:
+                return -1 if nodes[page.usize()].kind != Json::RH_JSON_OBJ
+                request: i64 = rh_shp_member(nodes, texts, page, "request_cursor")
+                request_s: mutable i64 = -1
+                request_e: mutable i64 = -1
+                if page_index == 0:
+                    return -1 if request < 0 or nodes[request.usize()].kind != Json::RH_JSON_NULL
+                else:
+                    return -1 if request < 0 or not Json::rh_json_str_span(nodes, request, &request_s, &request_e) or request_s == request_e
+                    return -1 if not Base::rh_bytes_equal_span(texts, request_s, request_e, previous_cursor, 0, previous_cursor.count.i64())
+                response_idx: i64 = rh_shp_member(nodes, texts, page, "response_json")
+                response_s: mutable i64 = -1
+                response_e: mutable i64 = -1
+                return -1 if not Json::rh_json_str_span(nodes, response_idx, &response_s, &response_e) or response_s == response_e
+                response: mutable darray[u8] = []
+                rh_shp_copy_span(texts, response_s, response_e, response)
+                total_bytes <- total_bytes + response.count.i64()
+                return -1 if total_bytes > RH_SOURCEHUT_CHAIN_MAX_BYTES
+                normalized: mutable darray[u8] = []
+                return -1 if Sourcehut::rh_sourcehut_history_report(response, normalized) != 0
+                page_nodes: mutable darray[Json::RhJsonNode] = []
+                page_texts: mutable darray[u8] = []
+                normalized_root: i64 = Json::rh_json_parse(normalized, page_nodes, page_texts)
+                return -1 if normalized_root < 0
+                repo_id_idx: i64 = rh_shp_member(page_nodes, page_texts, normalized_root, "repository_id")
+                repo_name_idx: i64 = rh_shp_member(page_nodes, page_texts, normalized_root, "repository_name")
+                repo_id_s: mutable i64 = -1
+                repo_id_e: mutable i64 = -1
+                repo_name_s: mutable i64 = -1
+                repo_name_e: mutable i64 = -1
+                return -1 if not Json::rh_json_str_span(page_nodes, repo_id_idx, &repo_id_s, &repo_id_e) or not Json::rh_json_str_span(page_nodes, repo_name_idx, &repo_name_s, &repo_name_e)
+                if page_index == 0:
+                    rh_shp_copy_span(page_texts, repo_id_s, repo_id_e, repository_id)
+                    rh_shp_copy_span(page_texts, repo_name_s, repo_name_e, repository_name)
+                else:
+                    return -1 if not Base::rh_bytes_equal_span(page_texts, repo_id_s, repo_id_e, repository_id, 0, repository_id.count.i64()) or not Base::rh_bytes_equal_span(page_texts, repo_name_s, repo_name_e, repository_name, 0, repository_name.count.i64())
+                entries_idx: i64 = rh_shp_member(page_nodes, page_texts, normalized_root, "entries")
+                return -1 if entries_idx < 0 or page_nodes[entries_idx.usize()].kind != Json::RH_JSON_ARR
+                total_commits <- total_commits + page_nodes[entries_idx.usize()].child_count
+                return -1 if total_commits > RH_SOURCEHUT_CHAIN_MAX_COMMITS
+                while entry >= 0 |entry: i64 = page_nodes[entries_idx.usize()].first_child, page_nodes, page_texts, id_digests|:
+                    id_idx: i64 = rh_shp_member(page_nodes, page_texts, entry, "source_native_id")
+                    id_s: mutable i64 = -1
+                    id_e: mutable i64 = -1
+                    return -1 if not Json::rh_json_str_span(page_nodes, id_idx, &id_s, &id_e) or id_s == id_e
+                    id_bytes: mutable darray[u8] = []
+                    rh_shp_copy_span(page_texts, id_s, id_e, id_bytes)
+                    id_digest: mutable darray[u8] = []
+                    Sha256::rh_sha256(id_bytes, id_digest)
+                    return -1 if id_digest.count != 64
+                    id_digests.extend(bytes_view(id_digest))
+                    entry <- page_nodes[entry.usize()].next_sibling
+                if has_pages:
+                    normalized_pages.push(44)
+                Base::rh_push_text(normalized_pages, "{\"request_cursor\":")
+                if page_index == 0:
+                    Base::rh_push_text(normalized_pages, "null")
+                else:
+                    normalized_pages.push(34)
+                    Base::rh_json_escape(normalized_pages, texts, request_s.usize(), request_e.usize())
+                    normalized_pages.push(34)
+                Base::rh_push_text(normalized_pages, ",\"result\":")
+                normalized_pages.extend(bytes_view(normalized))
+                normalized_pages.push(125)
+                has_pages <- true
+                pagination: i64 = rh_shp_member(page_nodes, page_texts, normalized_root, "pagination")
+                cursor_idx: i64 = rh_shp_member(page_nodes, page_texts, pagination, "next_cursor")
+                next_cursor <- []
+                if cursor_idx >= 0 and page_nodes[cursor_idx.usize()].kind == Json::RH_JSON_STR:
+                    cursor_s: mutable i64 = -1
+                    cursor_e: mutable i64 = -1
+                    return -1 if not Json::rh_json_str_span(page_nodes, cursor_idx, &cursor_s, &cursor_e) or cursor_s == cursor_e
+                    rh_shp_copy_span(page_texts, cursor_s, cursor_e, next_cursor)
+                    cursor_bytes: mutable darray[u8] = []
+                    rh_shp_copy_span(page_texts, cursor_s, cursor_e, cursor_bytes)
+                    cursor_digest: mutable darray[u8] = []
+                    Sha256::rh_sha256(cursor_bytes, cursor_digest)
+                    return -1 if cursor_digest.count != 64
+                    cursor_digests.extend(bytes_view(cursor_digest))
+                previous_cursor <- []
+                previous_cursor.extend(bytes_view(next_cursor))
+                page_index <- page_index + 1
+                page <- nodes[page.usize()].next_sibling
+            id_views: mutable darray[sview] = []
+            while digest_start < id_digests.count |digest_start: usize = 0, id_digests, id_views|:
+                id_views.push(string_view_slice(bytes_view(id_digests), digest_start.i64(), (digest_start + 64).i64()))
+                digest_start <- digest_start + 64
+            sort[sview](id_views, rh_shp_digest_less)
+            return -1 if rh_shp_has_duplicate_digest(id_views)
+            cursor_views: mutable darray[sview] = []
+            while cursor_start < cursor_digests.count |cursor_start: usize = 0, cursor_digests, cursor_views|:
+                cursor_views.push(string_view_slice(bytes_view(cursor_digests), cursor_start.i64(), (cursor_start + 64).i64()))
+                cursor_start <- cursor_start + 64
+            sort[sview](cursor_views, rh_shp_digest_less)
+            return -1 if rh_shp_has_duplicate_digest(cursor_views)
+            Base::rh_push_text(out, "{\"schema\":\"rh-vcs-pages/1\",\"format\":\"sourcehut-git\",\"repository_id\":\"")
+            Base::rh_json_escape(out, repository_id, 0.usize(), repository_id.count)
+            Base::rh_push_text(out, "\",\"repository_name\":\"")
+            Base::rh_json_escape(out, repository_name, 0.usize(), repository_name.count)
+            Base::rh_push_text(out, "\",\"pages\":[")
+            out.extend(bytes_view(normalized_pages))
+            Base::rh_push_text(out, "],\"pagination\":{\"complete\":")
+            Base::rh_push_text(out, "true" if next_cursor.count == 0 else "false")
+            Base::rh_push_text(out, ",\"next_cursor\":")
+            if next_cursor.count == 0:
+                Base::rh_push_text(out, "null")
+            else:
+                out.push(34)
+                Base::rh_json_escape(out, next_cursor, 0.usize(), next_cursor.count)
+                out.push(34)
+            Base::rh_push_text(out, "},\"note\":\"captured SourceHut cursor chain is ordered and repository-scoped; a remaining cursor means the supplied history is incomplete\"}")
+            0

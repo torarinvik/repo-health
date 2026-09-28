@@ -39,7 +39,7 @@ for want in ("dep-graph", "canonical-repo", "backup-binding", "adapter-transform
              "release-packet", "release-signature", "continuity-metrics",
              "deps-metrics", "downstream-report", "downstream-temporal-report", "policy-result",
              "corrections-result", "inventory-observation",
-             "vcs-observation", "patch-report", "notify-result",
+             "vcs-observation", "vcs-page-chain-result", "patch-report", "notify-result",
              "query-result", "identity-result", "release-feed-result", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result",
              "identity-publication-result", "role-publication-result", "distribution-result", "rpm-spec-result", "archive-result", "homebrew-result",
              "registry-meta-result", "depsdev-enrichment", "findings-input", "findings-result", "resolution-instance", "parser-diff", "pep440-result",

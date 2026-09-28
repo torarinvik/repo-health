@@ -243,6 +243,64 @@ d = json.load(open(sys.argv[1]))
 assert d["pagination"] == {"complete": True, "next_cursor": None}, d
 print("[vcs] SourceHut null cursor is complete")
 PY
+python3 - "$T/sourcehut.json" "$T/sourcehut-chain.json" <<'PY'
+import json, sys
+source = json.load(open(sys.argv[1]))
+repository = source["data"]["repository"]
+commits = repository["log"]["results"]
+pages = []
+for index, commit in enumerate(commits):
+    response = {"data":{"repository":{
+        "rid":repository["rid"], "name":repository["name"],
+        "log":{"results":[commit], "cursor":"cursor-two" if index == 0 else None}}}}
+    pages.append({"request_cursor":None if index == 0 else "cursor-two",
+                  "response_json":json.dumps(response, separators=(",", ":"))})
+json.dump({"schema":"rh-sourcehut-page-chain-input/1", "pages":pages},
+          open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" vcs --format sourcehut-pages --input "$T/sourcehut-chain.json" --out "$T/sourcehut-chain.out" >/dev/null || fail "SourceHut cursor-chain run"
+python3 - "$T/sourcehut-chain.json" "$T/sourcehut-chain.out" "$T/sourcehut-chain.out.transformations.json" <<'PY'
+import hashlib, json, pathlib, sys
+source, output = map(pathlib.Path, sys.argv[1:3])
+d = json.loads(output.read_bytes())
+assert d["schema"] == "rh-vcs-pages/1" and d["format"] == "sourcehut-git", d
+assert d["repository_id"] == "opaque/repository-id" and d["repository_name"] == "sourcehut-demo", d
+assert len(d["pages"]) == 2 and d["pagination"] == {"complete":True,"next_cursor":None}, d
+assert [p["request_cursor"] for p in d["pages"]] == [None, "cursor-two"], d
+assert [p["result"]["entries"][0]["source_native_id"] for p in d["pages"]] == ["opaque-commit-1", "opaque-commit-2"], d
+assert d["pages"][0]["result"]["pagination"] == {"complete":False,"next_cursor":"cursor-two"}, d
+assert d["pages"][1]["result"]["pagination"] == {"complete":True,"next_cursor":None}, d
+tr = json.loads(pathlib.Path(sys.argv[3]).read_bytes())
+assert tr["output_schema"] == "rh-vcs-pages/1", tr
+assert tr["source_input_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/native-vcs/1:sourcehut-pages:captured-input").hexdigest(), tr
+print("[vcs] SourceHut captured cursor chain validates and preserves page boundaries")
+PY
+cp "$ROOT/fixtures/vcs/sourcehut-git-pages-input.json" "$T/sourcehut-pages-golden.input"
+"$ROOT/build/rh_cli" vcs --format sourcehut-pages --input "$T/sourcehut-pages-golden.input" --out "$T/sourcehut-pages-golden.out" >/dev/null || fail "SourceHut checked-in page-chain fixture run"
+cmp "$ROOT/fixtures/vcs/sourcehut-git-pages-result.json" "$T/sourcehut-pages-golden.out" || fail "SourceHut page-chain golden output mismatch"
+python3 - "$T/sourcehut-chain.json" "$T/sourcehut-chain-bad-cursor.json" "$T/sourcehut-chain-duplicate.json" "$T/sourcehut-chain-cursor-cycle.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+bad = json.loads(json.dumps(d)); bad["pages"][1]["request_cursor"] = "wrong-cursor"
+duplicate = json.loads(json.dumps(d))
+duplicate["pages"][1]["response_json"] = duplicate["pages"][1]["response_json"].replace("opaque-commit-2", "opaque-commit-1")
+cycle = json.loads(json.dumps(d))
+page = json.loads(cycle["pages"][1]["response_json"])
+page["data"]["repository"]["log"]["cursor"] = "cursor-two"
+cycle["pages"][1]["response_json"] = json.dumps(page, separators=(",", ":"))
+json.dump(bad, open(sys.argv[2], "w"), separators=(",", ":"))
+json.dump(duplicate, open(sys.argv[3], "w"), separators=(",", ":"))
+json.dump(cycle, open(sys.argv[4], "w"), separators=(",", ":"))
+PY
+for bad_chain in "$T/sourcehut-chain-bad-cursor.json" "$T/sourcehut-chain-duplicate.json" "$T/sourcehut-chain-cursor-cycle.json"; do
+  if "$ROOT/build/rh_cli" vcs --format sourcehut-pages --input "$bad_chain" --out "$bad_chain.out" >/dev/null 2>&1; then
+    fail "malformed or duplicate SourceHut page chain must fail closed"
+  fi
+  [[ ! -e "$bad_chain.out" ]] || fail "invalid SourceHut chain wrote output"
+done
+echo "[vcs] SourceHut cursor discontinuities and duplicate native IDs fail closed"
 
 echo "[vcs] native --repo collection retains source and stderr evidence"
 mkdir -p "$T/bin" "$T/repo"

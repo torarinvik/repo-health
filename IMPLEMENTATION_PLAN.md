@@ -1051,6 +1051,18 @@ authorization, query/response behavior, and cursor continuation before any
 live collector is enabled. Do not copy speculative endpoints or claim a
 complete repository history from one captured GraphQL page.
 
+Captured multi-page chains are also accepted by
+`rh_cli vcs --format sourcehut-pages --input` using the bounded
+`rh-sourcehut-page-chain-input/1` envelope. The adapter validates initial and
+continuation cursors, stable repository identity, duplicate native commit IDs,
+and repeated cursors, then emits `rh-vcs-pages/1` with each normalized page
+kept separate. Its aggregate completeness and cursor come from the last
+supplied page; it does not flatten page entries into a canonical history.
+Input and aggregate response sizes, page count, and commit count are bounded.
+This improves offline replay and validation only: live `--repo` collection
+still requires controlled-instance authorization, query/response, and actual
+cursor-continuation validation.
+
 ### 13.6 Ecosystem parser admission
 
 For each package ecosystem, document name normalization, version ordering, prerelease behavior, constraints, aliases, registry identity, optional/platform conditions, local/path dependencies, and lockfile guarantees. The current bounded admission set includes Cargo, npm package/shrinkwrap, pnpm v9.0 and Yarn Classic v1 lockfiles, PyPI requirements/PEP 621, Go modules, RubyGems, Composer, NuGet `packages.config`, and Maven `pom.xml`. Pnpm is limited to one root importer; exact locked versions map through snapshot keys, peer-specific paths remain separate graph nodes, and workspace/Git/path conditions stay unresolved. It fails closed on other pnpm revisions, multiple importers, unknown fields, and unsupported constructs. Yarn resolves only exact name/range selectors from v1, rejects Berry revisions and aliases, and is used only when the npm and pnpm lockfiles are absent. Node lock selection prefers npm shrinkwrap, npm package lock, pnpm, then Yarn. NuGet IDs compare case-insensitively with punctuation preserved, while Maven coordinates use exact `groupId:artifactId` names. Exact versions resolve to registry nodes, and range/property syntax remains unresolved with an unsupported-range metric.
