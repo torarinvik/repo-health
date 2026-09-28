@@ -125,7 +125,8 @@ int rh_process_run(const char *executable, const char *argv_flat,
     if (executable == NULL || argv_flat == NULL ||
         env_flat == NULL || input_length > 65536 ||
         (input_length > 0 && input_data == NULL) ||
-        max_output_bytes == 0 || timeout_ms < 1 || timeout_ms > 600000)
+        max_output_bytes == 0 || max_output_bytes > INT_MAX ||
+        timeout_ms < 1 || timeout_ms > 600000)
         return rh_process_result(code_out, RH_PROCESS_SETUP_ERROR, EINVAL);
 
     char **argv = rh_process_vector(argv_flat, 256);
