@@ -123,12 +123,39 @@ def generate_roles(root: Path, revoked_at: int) -> None:
     write_json(root / "roles" / "input.json", roles)
 
 
+def generate_identity(root: Path) -> None:
+    linked = {
+        "schema": "rh-identity-input/1",
+        "actor_count": 4,
+        "links": [
+            {"a": 0, "b": 1, "state": "accepted", "revision_added": 1},
+            {"a": 1, "b": 2, "state": "accepted", "revision_added": 2},
+            {"a": 2, "b": 3, "state": "accepted", "revision_added": 3},
+        ],
+    }
+    revoked = {
+        **linked,
+        "links": [*linked["links"][:-1],
+                  {"a": 2, "b": 3, "state": "revoked", "revision_added": 4}],
+    }
+    proposed = {
+        **linked,
+        "links": [linked["links"][0],
+                  {"a": 1, "b": 2, "state": "proposed", "revision_added": 2},
+                  linked["links"][2]],
+    }
+    write_json(root / "identity" / "linked-input.json", linked)
+    write_json(root / "identity" / "revoked-input.json", revoked)
+    write_json(root / "identity" / "proposed-input.json", proposed)
+
+
 def generate(root: Path, history_commits: int = 3, graph_chain_nodes: int = 4, role_revoked_at: int = 150) -> None:
     root.mkdir(parents=True, exist_ok=True)
     generate_history(root, history_commits)
     generate_graph(root)
     generate_graph_chain(root, graph_chain_nodes)
     generate_roles(root, role_revoked_at)
+    generate_identity(root)
     # These are independent expected results, intentionally literal.
     write_json(root / "expected.json", {
         "history": {
@@ -162,6 +189,11 @@ def generate(root: Path, history_commits: int = 3, graph_chain_nodes: int = 4, r
             "revoked_at": role_revoked_at,
             "effective_boundary": ["unknown", "owner"],
             "revocation_boundary": ["maintainer", "unknown"],
+        },
+        "identity": {
+            "linked": {"revision": 3, "clusters": [[0, 1, 2, 3]]},
+            "revoked": {"revision": 4, "clusters": [[0, 1, 2], [3]]},
+            "proposed": {"revision": 3, "clusters": [[0, 1], [2, 3]]},
         },
     })
 

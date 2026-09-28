@@ -12,6 +12,9 @@ cmp "$T/first/expected.json" "$T/second/expected.json" || fail "expected results
 cmp "$T/first/graph/input.json" "$T/second/graph/input.json" || fail "graph not deterministic"
 cmp "$T/first/graph/chain-input.json" "$T/second/graph/chain-input.json" || fail "chain graph not deterministic"
 cmp "$T/first/roles/input.json" "$T/second/roles/input.json" || fail "role events not deterministic"
+for scenario in linked revoked proposed; do
+  cmp "$T/first/identity/$scenario-input.json" "$T/second/identity/$scenario-input.json" || fail "identity $scenario scenario not deterministic"
+done
 git -C "$T/first/history/repo" rev-list --all > "$T/first-commits"
 git -C "$T/second/history/repo" rev-list --all > "$T/second-commits"
 cmp "$T/first-commits" "$T/second-commits" || fail "history commit IDs not deterministic"
@@ -53,6 +56,9 @@ CLI="$ROOT/build/rh_cli"
 "$CLI" snapshot --input "$T/first/graph/input.json" --out "$T/graph-result.json" >/dev/null || fail "snapshot generated graph"
 "$CLI" index --input "$T/first/graph/input.json" --out "$T/graph-index.json" >/dev/null || fail "index generated graph"
 "$CLI" roles --input "$T/first/roles/input.json" --out "$T/roles-result.json" >/dev/null || fail "analyze generated role events"
+for scenario in linked revoked proposed; do
+  "$CLI" identity --input "$T/first/identity/$scenario-input.json" --out "$T/identity-$scenario.json" >/dev/null || fail "analyze generated identity $scenario scenario"
+done
 "$CLI" snapshot --input "$T/first/graph/chain-input.json" --out "$T/chain-result.json" >/dev/null || fail "snapshot generated chain graph"
 "$CLI" index --input "$T/first/graph/chain-input.json" --out "$T/chain-index.json" >/dev/null || fail "index generated chain graph"
 "$CLI" roles --input "$T/graph-role-variant/roles/input.json" --out "$T/variant-roles-result.json" >/dev/null || fail "analyze parameterized role scenario"
@@ -66,7 +72,7 @@ CLI="$ROOT/build/rh_cli"
 "$CLI" roles --input "$T/min-graph-role/roles/input.json" --out "$T/min-roles-result.json" >/dev/null || fail "analyze minimum revocation boundary"
 "$CLI" roles --input "$T/max-graph-role/roles/input.json" --out "$T/max-roles-result.json" >/dev/null || fail "analyze maximum revocation boundary"
 
-python3 - "$T/first/expected.json" "$T/history-report/report.json" "$T/graph-result.json" "$T/graph-index.json" "$T/roles-result.json" "$T/single/expected.json" "$T/single-history-report/report.json" "$T/multi/expected.json" "$T/multi-history-report/report.json" "$T/chain-result.json" "$T/chain-index.json" "$T/variant-roles-result.json" "$T/max-history/expected.json" "$T/max-history-report/report.json" "$T/min-graph-role/expected.json" "$T/min-chain-result.json" "$T/min-chain-index.json" "$T/min-roles-result.json" "$T/max-graph-role/expected.json" "$T/max-chain-result.json" "$T/max-chain-index.json" "$T/max-roles-result.json" <<'PY'
+python3 - "$T/first/expected.json" "$T/history-report/report.json" "$T/graph-result.json" "$T/graph-index.json" "$T/roles-result.json" "$T/single/expected.json" "$T/single-history-report/report.json" "$T/multi/expected.json" "$T/multi-history-report/report.json" "$T/chain-result.json" "$T/chain-index.json" "$T/variant-roles-result.json" "$T/max-history/expected.json" "$T/max-history-report/report.json" "$T/min-graph-role/expected.json" "$T/min-chain-result.json" "$T/min-chain-index.json" "$T/min-roles-result.json" "$T/max-graph-role/expected.json" "$T/max-chain-result.json" "$T/max-chain-index.json" "$T/max-roles-result.json" "$T/identity-linked.json" "$T/identity-revoked.json" "$T/identity-proposed.json" <<'PY'
 import json, sys
 expected = json.load(open(sys.argv[1]))
 report = json.load(open(sys.argv[2]))
@@ -130,7 +136,12 @@ for expected_path, graph_path, index_path, roles_path in (
     assert chain_index["degree_summary"]["max_in_node"] == boundary["graph_chain"]["max_in_node"], chain_index
     boundary_roles = json.load(open(roles_path))
     assert [query["declared_role"] for query in boundary_roles["queries"][2:]] == boundary["roles"]["revocation_boundary"], boundary_roles
-print("[synthetic] history, graph, role events match independent expectations")
+for scenario, path in zip(("linked", "revoked", "proposed"), sys.argv[23:26]):
+    actual = json.load(open(path))
+    expected_identity = expected["identity"][scenario]
+    assert actual["identity_revision"] == expected_identity["revision"], actual
+    assert actual["clusters"] == expected_identity["clusters"], actual
+print("[synthetic] history, graph, role events, and identity ledgers match independent expectations")
 PY
 
 echo "test_synthetic_fixtures OK"
