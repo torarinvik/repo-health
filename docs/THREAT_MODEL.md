@@ -14,11 +14,11 @@
    their boundaries, and transport credentials travel through stdin rather
    than argv or retained files. The process runner does not yet enforce child memory/process creation. Its
    Elisa API returns typed exit, timeout, output-limit, setup-error, signal, and
-   I/O-error results; explicit compatibility adapters still map those results
-   to numeric statuses for the remaining HTTP transport APIs. No Elisa
-   source calls `system(3)`; subprocess call sites in `rh_git` use the bounded
-   process runner. Individual fetchers retain
-   their own byte limits.
+   I/O-error results. Typed HTTP-result APIs serve collection and CLI control
+   paths; explicitly named compatibility adapters still map results to numeric
+   statuses for probe/capture outputs that retain those fields. No Elisa source
+   calls `system(3)`; subprocess call sites in `rh_git` use the bounded process
+   runner. Individual fetchers retain their own byte limits.
 3. **No server endpoint** scans arbitrary server paths (M01-01): this CLI is
    local-only; there is no network listener in M00/M01.
 4. **No source-code execution** (S001): repositories are read with

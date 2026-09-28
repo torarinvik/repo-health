@@ -849,25 +849,28 @@ module Git:
             Process::rh_append_arg(args, "%{http_code}")
             Process::rh_append_arg(args, url.cast[u8&] can Unsafe.PointerCast)
 
-        def rh_run_https_get_with_timeout(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64, api_kind: i64) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            return -1 if max_secs <= 0 or max_secs > RH_FETCH_MAX_SECS
-            return -1 if not rh_fetch_guard(url)
-            return -1 if not rh_fetch_arg_safe(url)
-            return -1 if not rh_arg_safe(body_file)
-            return -1 if not rh_arg_safe(code_file)
-            return -1 if not rh_arg_safe(err_file)
+        def rh_run_https_get_with_timeout_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64, api_kind: i64) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return Process::rh_setup_error(22) if max_secs <= 0 or max_secs > RH_FETCH_MAX_SECS
+            return Process::rh_setup_error(22) if not rh_fetch_guard(url)
+            return Process::rh_setup_error(22) if not rh_fetch_arg_safe(url)
+            return Process::rh_setup_error(22) if not rh_arg_safe(body_file)
+            return Process::rh_setup_error(22) if not rh_arg_safe(code_file)
+            return Process::rh_setup_error(22) if not rh_arg_safe(err_file)
             api_auth_state: i64 = rh_github_api_auth_state(url) if api_kind == 1 else (rh_gitlab_api_auth_state(url) if api_kind == 2 else 0)
-            return -1 if api_auth_state < 0
+            return Process::rh_setup_error(22) if api_auth_state < 0
             api_auth: bool = api_auth_state == 1
             pin: mutable darray[u8] = []
             if Base::rh_cstr_starts_with(url, "https://"):
-                return -1 if not rh_prepare_https_pin(url, err_file, pin)
+                return Process::rh_setup_error(22) if not rh_prepare_https_pin(url, err_file, pin)
             args: mutable darray[u8] = []
             input: mutable darray[u8] = []
             rh_https_get_args(args, input, url, body_file, pin, max_secs, api_kind, api_auth)
             args.push(0)
             env: mutable darray[u8] = Git::rh_transport_env()
-            Process::rh_run_with_input_timeout_legacy("curl", args, env, input, code_file, err_file, ((max_secs + 2) * 1000).i32())
+            Process::rh_run_with_input_timeout("curl", args, env, input, code_file, err_file, ((max_secs + 2) * 1000).i32())
+
+        def rh_run_https_get_with_timeout_legacy(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64, api_kind: i64) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            Process::rh_legacy_status(Git::rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, max_secs, api_kind))
 
         # Build the one permitted JSON POST request. The URL is not a caller
         # argument: the public wrapper below fixes it to OSV's query endpoint.
@@ -906,19 +909,19 @@ module Git:
             Process::rh_append_arg(args, "%{http_code}")
             Process::rh_append_arg(args, url.cast[u8&] can Unsafe.PointerCast)
 
-        def rh_run_osv_post(url: cstr, request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            return -1 if not rh_arg_safe(request_file)
-            return -1 if not rh_arg_safe(body_file)
-            return -1 if not rh_arg_safe(code_file)
-            return -1 if not rh_arg_safe(err_file)
-            return -1 if not rh_fetch_guard(url)
+        def rh_run_osv_post_result(url: cstr, request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return Process::rh_setup_error(22) if not rh_arg_safe(request_file)
+            return Process::rh_setup_error(22) if not rh_arg_safe(body_file)
+            return Process::rh_setup_error(22) if not rh_arg_safe(code_file)
+            return Process::rh_setup_error(22) if not rh_arg_safe(err_file)
+            return Process::rh_setup_error(22) if not rh_fetch_guard(url)
             pin: mutable darray[u8] = []
-            return -1 if not rh_prepare_https_pin(url, err_file, pin)
+            return Process::rh_setup_error(22) if not rh_prepare_https_pin(url, err_file, pin)
             args: mutable darray[u8] = []
             rh_osv_post_args(args, url, request_file, body_file, pin)
             args.push(0)
             env: mutable darray[u8] = Git::rh_transport_env()
-            Process::rh_run_with_timeout_legacy("curl", args, env, code_file, err_file, ((RH_FETCH_MAX_SECS + 2) * 1000).i32())
+            Process::rh_run_with_timeout("curl", args, env, code_file, err_file, ((RH_FETCH_MAX_SECS + 2) * 1000).i32())
 
     public:
         # Run a bounded HTTPS/file fetch for forge APIs (M02-05 transport).
@@ -931,58 +934,67 @@ module Git:
         # auth is read from RH_GITHUB_TOKEN and sent only to api.github.com;
         # curl reads the header config from stdin, so the token is absent from
         # argv and retained files.
-        # Returns the curl process status (0 = transfer ran; the caller MUST read
-        # the code file: 200 = body usable, 000 = file-fixture transport with no
-        # HTTP status, anything else = upstream answer preserved as evidence).
-        # -1 on validation failure (nothing executed).
+        # Typed `*_result` entry points distinguish runner outcomes; callers MUST
+        # also read the code file (200 = body usable, 000 = file fixture, anything
+        # else = upstream answer retained as evidence). Explicit `*_legacy`
+        # adapters remain for probe records that persist numeric transport state.
         const RH_FETCH_MAX_BYTES: i64 = 8388608
         const RH_FETCH_MAX_SECS: i64 = 60
         const RH_OSV_VULNERABILITY_GET_MAX_SECS: i64 = 10
 
-        def rh_run_https_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 0)
+        def rh_run_https_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 0)
+
+        def rh_run_https_get_legacy(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            rh_run_https_get_with_timeout_legacy(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 0)
 
         # GitHub's REST API requires an explicit supported-version header for
         # stable interpretation. The endpoint remains caller-supplied under the
         # same HTTPS/DNS/redirect/size policy; optional bearer auth is scoped to
         # the exact api.github.com host.
-        def rh_run_github_api_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 1)
+        def rh_run_github_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 1)
+
+        def rh_run_github_api_get_legacy(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            rh_run_https_get_with_timeout_legacy(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 1)
 
         # GitLab API authentication uses a distinct header and exact host.
-        def rh_run_gitlab_api_get(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_run_gitlab_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return Process::rh_setup_error(22) if not Base::rh_cstr_starts_with(url, "https://gitlab.com/api/v4/")
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 2)
+
+        def rh_run_gitlab_api_get_legacy(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if not Base::rh_cstr_starts_with(url, "https://gitlab.com/api/v4/")
-            rh_run_https_get_with_timeout(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 2)
+            rh_run_https_get_with_timeout_legacy(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 2)
 
         # Run a single bounded JSON package/version query to OSV. The endpoint
         # is fixed here, so this POST cannot be redirected to a caller URL. DNS
         # answers are validated as a complete public set and pinned; curl config,
         # proxies, redirects, oversized bodies, and long hangs are rejected.
-        # Returns curl's process status; callers must separately require HTTP 200.
-        def rh_run_osv_query(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_osv_post("https://api.osv.dev/v1/query", request_file, body_file, code_file, err_file)
+        def rh_run_osv_query_result(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            rh_run_osv_post_result("https://api.osv.dev/v1/query", request_file, body_file, code_file, err_file)
 
         # Run a bounded ordered graph batch. Callers cannot choose the endpoint;
         # querybatch is kept separate because its response contains IDs only.
-        def rh_run_osv_query_batch(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_osv_post("https://api.osv.dev/v1/querybatch", request_file, body_file, code_file, err_file)
+        def rh_run_osv_query_batch_result(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            rh_run_osv_post_result("https://api.osv.dev/v1/querybatch", request_file, body_file, code_file, err_file)
 
         # Fetch one full OSV vulnerability by a validated ID from a prior
         # query/querybatch response. The endpoint host and route are fixed here;
         # the ID alphabet is restricted before it can enter the URL path.
-        def rh_run_osv_vulnerability_get(advisory_id: darray[u8]&, body_file: cstr, code_file: cstr, err_file: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            return -1 if advisory_id.count == 0 or advisory_id.count > 128
+        def rh_run_osv_vulnerability_get_result(advisory_id: darray[u8]&, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return Process::rh_setup_error(22) if advisory_id.count == 0 or advisory_id.count > 128
             while i < advisory_id.count |i: usize = 0, advisory_id|:
                 b: u8 = advisory_id[i]
                 valid: bool = (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 45 or b == 46 or b == 95
-                return -1 if not valid
+                return Process::rh_setup_error(22) if not valid
                 i <- i + 1
             url: mutable darray[u8] = []
             Base::rh_push_text(url, "https://api.osv.dev/v1/vulns/")
             url.extend(bytes_view(advisory_id))
             url.push(0)
             url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
-            rh_run_https_get_with_timeout(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS, 0)
+            rh_run_https_get_with_timeout_result(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS, 0)
 
         # Run a bounded bare clone for https remotes (M01-03): no worktree, no
         # checkout (so no smudge/clean filters, no hooks execute), blob-less and
