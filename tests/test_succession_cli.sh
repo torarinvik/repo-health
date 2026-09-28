@@ -41,6 +41,19 @@ assert metrics["succession.declared_handovers"]["value"] == 1, metrics
 assert metrics["succession.observed_activity_overlap_months"]["value"] == 3, metrics
 print("[succession] overlap OK")
 PY
+python3 - "$T/in.json" "$T/out.json" <<'PY'
+import hashlib, json, pathlib, sys
+source, output = map(pathlib.Path, sys.argv[1:])
+report = json.loads(pathlib.Path(str(output) + ".transformations.json").read_bytes())
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "declared-succession", report
+assert report["output_schema"] == "rh-continuity-metrics/1", report
+assert report["source_input_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/declared-succession/1").hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), report
+assert {item["state"] for item in report["fields"]} == {"transformed", "preserved", "unknown", "discarded"}, report
+print("[succession] transformation report binds input, configuration, output, and field states")
+PY
 
 echo "[succession] explicit follow-up reports activity and right censoring"
 python3 - "$T/follow-up.json" <<'PY'
