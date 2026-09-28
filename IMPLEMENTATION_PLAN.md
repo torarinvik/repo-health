@@ -1029,7 +1029,15 @@ support dated activity metrics; continue to use native `hg log -Tjson` when
 dates are required. See the [hg.sr.ht API
 schema](https://docs.sourcehut.org/hg.sr.ht/).
 
-The remaining SourceHut gate is a controlled-instance validation of actual
+`src/rh_sourcehut.elisa` now normalizes bounded captured `git.sr.ht` GraphQL
+history pages through `rh_cli vcs --format sourcehut --input`. It preserves
+opaque repository and commit IDs, separate author and committer signatures
+and UTC timestamps, parent counts, and the exact continuation cursor; a
+non-null cursor explicitly marks the page incomplete. The fixture and golden
+`rh-vcs/1` output are schema-checked, and the VCS test verifies deterministic
+bytes, transformation digests, complete/null-cursor handling, and fail-closed
+malformed timestamps and GraphQL errors. Live `--repo` collection remains
+disabled. The remaining gate is controlled-instance validation of actual
 authorization, query/response behavior, and cursor continuation before any
 live collector is enabled. Do not copy speculative endpoints or claim a
 complete repository history from one captured GraphQL page.

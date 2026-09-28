@@ -1,0 +1,141 @@
+# rh_sourcehut.elisa — captured git.sr.ht GraphQL history adapter.
+#
+# This module consumes one documented repository.log page. It preserves
+# SourceHut's opaque resource/object IDs, the authored and committed timestamps,
+# and continuation state; a non-null cursor is never labeled complete.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_temporal.elisa"
+
+module Sourcehut:
+    private:
+        const RH_SOURCEHUT_MAX_BYTES: i64 = 16777216
+        const RH_SOURCEHUT_MAX_COMMITS: i64 = 20000
+
+        def rh_sourcehut_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            Json::rh_json_obj_get(nodes, texts, object, key)
+
+        def rh_sourcehut_required_span(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = rh_sourcehut_member(nodes, texts, object, key)
+            return false if idx < 0 or not Json::rh_json_str_span(nodes, idx, &start_out[0], &end_out[0])
+            true
+
+        def rh_sourcehut_is(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_sourcehut_time(texts: darray[u8]&, start: i64, end: i64, instant_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start < 0 or end - start != 20
+            return false if texts[(start + 4).usize()] != 45 or texts[(start + 7).usize()] != 45 or texts[(start + 10).usize()] != 84 or texts[(start + 13).usize()] != 58 or texts[(start + 16).usize()] != 58 or texts[(start + 19).usize()] != 90
+            year_ok: mutable i64 = 0
+            year: i64 = Base::rh_parse_i64(texts, start.usize(), (start + 4).usize(), &year_ok)
+            month_ok: mutable i64 = 0
+            month: i64 = Base::rh_parse_i64(texts, (start + 5).usize(), (start + 7).usize(), &month_ok)
+            day_ok: mutable i64 = 0
+            day: i64 = Base::rh_parse_i64(texts, (start + 8).usize(), (start + 10).usize(), &day_ok)
+            hour_ok: mutable i64 = 0
+            hour: i64 = Base::rh_parse_i64(texts, (start + 11).usize(), (start + 13).usize(), &hour_ok)
+            minute_ok: mutable i64 = 0
+            minute: i64 = Base::rh_parse_i64(texts, (start + 14).usize(), (start + 16).usize(), &minute_ok)
+            second_ok: mutable i64 = 0
+            second: i64 = Base::rh_parse_i64(texts, (start + 17).usize(), (start + 19).usize(), &second_ok)
+            return false if year_ok == 0 or month_ok == 0 or day_ok == 0 or hour_ok == 0 or minute_ok == 0 or second_ok == 0
+            Temporal::rh_unix_from_civil_time_checked(year, month, day, hour, minute, second, 0, &instant_out[0])
+
+        def rh_sourcehut_emit(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_json_escape(out, texts, start.usize(), end.usize())
+
+        def rh_sourcehut_signature(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, signature: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if signature < 0 or nodes[signature.usize()].kind != Json::RH_JSON_OBJ
+            name_s: mutable i64 = -1
+            name_e: mutable i64 = -1
+            email_s: mutable i64 = -1
+            email_e: mutable i64 = -1
+            time_s: mutable i64 = -1
+            time_e: mutable i64 = -1
+            return false if not rh_sourcehut_required_span(nodes, texts, signature, "name", &name_s, &name_e) or not rh_sourcehut_required_span(nodes, texts, signature, "email", &email_s, &email_e) or not rh_sourcehut_required_span(nodes, texts, signature, "time", &time_s, &time_e)
+            utc: mutable i64 = 0
+            return false if not rh_sourcehut_time(texts, time_s, time_e, &utc)
+            Base::rh_push_text(out, "{\"name\":\"")
+            rh_sourcehut_emit(out, texts, name_s, name_e)
+            Base::rh_push_text(out, "\",\"email\":\"")
+            rh_sourcehut_emit(out, texts, email_s, email_e)
+            Base::rh_push_text(out, "\",\"time\":\"")
+            rh_sourcehut_emit(out, texts, time_s, time_e)
+            Base::rh_push_text(out, "\",\"utc\":")
+            Base::rh_push_decimal_i64(out, utc)
+            out.push(125)
+            true
+
+    public:
+        # Normalize one GraphQL response page. Errors, missing repository
+        # scope, malformed records, invalid timestamps, and oversized pages
+        # fail closed; cursor presence remains an explicit partial result.
+        def rh_sourcehut_history_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count.i64() <= 0 or raw.count.i64() > RH_SOURCEHUT_MAX_BYTES
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            return -1 if rh_sourcehut_member(nodes, texts, root, "errors") >= 0
+            data: i64 = rh_sourcehut_member(nodes, texts, root, "data")
+            repository: i64 = rh_sourcehut_member(nodes, texts, data, "repository")
+            return -1 if data < 0 or repository < 0 or nodes[data.usize()].kind != Json::RH_JSON_OBJ or nodes[repository.usize()].kind != Json::RH_JSON_OBJ
+            repository_id_s: mutable i64 = -1
+            repository_id_e: mutable i64 = -1
+            repository_name_s: mutable i64 = -1
+            repository_name_e: mutable i64 = -1
+            return -1 if not rh_sourcehut_required_span(nodes, texts, repository, "rid", &repository_id_s, &repository_id_e) or not rh_sourcehut_required_span(nodes, texts, repository, "name", &repository_name_s, &repository_name_e)
+            return -1 if repository_id_s == repository_id_e or repository_name_s == repository_name_e
+            log: i64 = rh_sourcehut_member(nodes, texts, repository, "log")
+            results: i64 = rh_sourcehut_member(nodes, texts, log, "results")
+            cursor: i64 = rh_sourcehut_member(nodes, texts, log, "cursor")
+            return -1 if log < 0 or nodes[log.usize()].kind != Json::RH_JSON_OBJ or results < 0 or nodes[results.usize()].kind != Json::RH_JSON_ARR or cursor < 0
+            commit_count: i64 = nodes[results.usize()].child_count
+            return -1 if commit_count < 0 or commit_count > RH_SOURCEHUT_MAX_COMMITS
+            cursor_null: bool = nodes[cursor.usize()].kind == Json::RH_JSON_NULL
+            cursor_s: mutable i64 = -1
+            cursor_e: mutable i64 = -1
+            if not cursor_null:
+                return -1 if not Json::rh_json_str_span(nodes, cursor, &cursor_s, &cursor_e) or cursor_s == cursor_e
+            Base::rh_push_text(out, "{\"schema\":\"rh-vcs/1\",\"format\":\"sourcehut-git\",\"repository_id\":\"")
+            rh_sourcehut_emit(out, texts, repository_id_s, repository_id_e)
+            Base::rh_push_text(out, "\",\"repository_name\":\"")
+            rh_sourcehut_emit(out, texts, repository_name_s, repository_name_e)
+            Base::rh_push_text(out, "\",\"entries\":[")
+            while commit >= 0 |commit: i64 = nodes[results.usize()].first_child, index: i64 = 0, nodes, texts, out, results|:
+                return -1 if nodes[commit.usize()].kind != Json::RH_JSON_OBJ
+                type_s: mutable i64 = -1
+                type_e: mutable i64 = -1
+                id_s: mutable i64 = -1
+                id_e: mutable i64 = -1
+                message_s: mutable i64 = -1
+                message_e: mutable i64 = -1
+                return -1 if not rh_sourcehut_required_span(nodes, texts, commit, "type", &type_s, &type_e) or not rh_sourcehut_is(texts, type_s, type_e, "COMMIT") or not rh_sourcehut_required_span(nodes, texts, commit, "id", &id_s, &id_e) or id_s == id_e or not rh_sourcehut_required_span(nodes, texts, commit, "message", &message_s, &message_e)
+                parents: i64 = rh_sourcehut_member(nodes, texts, commit, "parents")
+                return -1 if parents < 0 or nodes[parents.usize()].kind != Json::RH_JSON_ARR
+                if index > 0:
+                    out.push(44)
+                Base::rh_push_text(out, "{\"source_native_id\":\"")
+                rh_sourcehut_emit(out, texts, id_s, id_e)
+                Base::rh_push_text(out, "\",\"author\":")
+                return -1 if not rh_sourcehut_signature(nodes, texts, rh_sourcehut_member(nodes, texts, commit, "author"), out)
+                Base::rh_push_text(out, ",\"committer\":")
+                return -1 if not rh_sourcehut_signature(nodes, texts, rh_sourcehut_member(nodes, texts, commit, "committer"), out)
+                Base::rh_push_text(out, ",\"message\":\"")
+                rh_sourcehut_emit(out, texts, message_s, message_e)
+                Base::rh_push_text(out, "\",\"parent_count\":")
+                Base::rh_push_decimal_i64(out, nodes[parents.usize()].child_count)
+                out.push(125)
+                index <- index + 1
+                commit <- nodes[commit.usize()].next_sibling
+            Base::rh_push_text(out, "],\"pagination\":{\"complete\":")
+            Base::rh_push_text(out, "true" if cursor_null else "false")
+            Base::rh_push_text(out, ",\"next_cursor\":")
+            if cursor_null:
+                Base::rh_push_text(out, "null")
+            else:
+                out.push(34)
+                rh_sourcehut_emit(out, texts, cursor_s, cursor_e)
+                out.push(34)
+            Base::rh_push_text(out, "},\"note\":\"SourceHut IDs are source-native; author and committer times are separate; a non-null cursor means this page is incomplete\"}")
+            0

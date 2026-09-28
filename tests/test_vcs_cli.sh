@@ -208,6 +208,41 @@ assert len(d["entries"]) == 1 and d["entries"][0]["has_date"] is False and d["en
 print("[vcs] fossil impossible calendar date remains unknown")
 PY
 
+echo "[vcs] SourceHut GraphQL page keeps native identity, authored/committed time, and cursor completeness"
+cp "$ROOT/fixtures/vcs/sourcehut-git-page.json" "$T/sourcehut.json"
+"$ROOT/build/rh_cli" vcs --format sourcehut --input "$T/sourcehut.json" --out "$T/sourcehut.out" >/dev/null || fail "SourceHut run"
+cmp "$ROOT/fixtures/vcs/sourcehut-git-page-result.json" "$T/sourcehut.out" || fail "SourceHut golden output mismatch"
+python3 - "$T/sourcehut.out" "$T/sourcehut.json" "$T/sourcehut.out.transformations.json" <<'PY'
+import hashlib, json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == "rh-vcs/1" and d["format"] == "sourcehut-git", d
+assert d["repository_id"] == "opaque/repository-id" and d["repository_name"] == "sourcehut-demo", d
+assert len(d["entries"]) == 2, d
+a, b = d["entries"]
+assert a["source_native_id"] == "opaque-commit-1" and a["author"]["utc"] == 1609459200, a
+assert a["committer"]["utc"] == 1609459260 and a["message"] == 'first "change"' and a["parent_count"] == 0, a
+assert b["author"]["utc"] == 1609556645 and b["parent_count"] == 1, b
+assert d["pagination"] == {"complete": False, "next_cursor": "opaque cursor/next"}, d
+assert "source-native" in d["note"] and "incomplete" in d["note"], d["note"]
+tr = json.load(open(sys.argv[3]))
+assert tr["output_schema"] == "rh-vcs/1" and tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
+assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/native-vcs/1:sourcehut:captured-input").hexdigest(), tr
+print("[vcs] SourceHut native IDs, separate time axes, page cursor, and transformation binding OK")
+PY
+python3 - "$T/sourcehut.json" "$T/sourcehut-complete.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["data"]["repository"]["log"]["cursor"] = None
+json.dump(d, open(sys.argv[2], "w"))
+PY
+"$ROOT/build/rh_cli" vcs --format sourcehut --input "$T/sourcehut-complete.json" --out "$T/sourcehut-complete.out" >/dev/null || fail "SourceHut complete-page run"
+python3 - "$T/sourcehut-complete.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["pagination"] == {"complete": True, "next_cursor": None}, d
+print("[vcs] SourceHut null cursor is complete")
+PY
+
 echo "[vcs] native --repo collection retains source and stderr evidence"
 mkdir -p "$T/bin" "$T/repo"
 cat > "$T/bin/hg" <<'SH'
@@ -248,6 +283,14 @@ printf 'not json' > "$T/notjson.json"
 "$ROOT/build/rh_cli" vcs --format hg --input "$T/notjson.json" --out "$T/x" >/dev/null 2>&1; rc_json=$?
 printf '{"a":1}' > "$T/obj.json"
 "$ROOT/build/rh_cli" vcs --format hg --input "$T/obj.json" --out "$T/x" >/dev/null 2>&1; rc_shape=$?
+python3 - "$T/sourcehut.json" "$T/sourcehut-bad-time.json" "$T/sourcehut-errors.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["data"]["repository"]["log"]["results"][0]["author"]["time"] = "2021-02-30T00:00:00Z"
+json.dump(d, open(sys.argv[2], "w"))
+json.dump({"errors": [{"message": "forbidden"}], "data": None}, open(sys.argv[3], "w"))
+PY
+"$ROOT/build/rh_cli" vcs --format sourcehut --input "$T/sourcehut-bad-time.json" --out "$T/sourcehut-bad-time.out" >/dev/null 2>&1; rc_sourcehut_time=$?
+"$ROOT/build/rh_cli" vcs --format sourcehut --input "$T/sourcehut-errors.json" --out "$T/sourcehut-errors.out" >/dev/null 2>&1; rc_sourcehut_errors=$?
 "$ROOT/build/rh_cli" vcs --format cvs --input "$T/hg.json" --out "$T/x" >/dev/null 2>&1; rc_fmt=$?
 "$ROOT/build/rh_cli" vcs --format hg --input "$T/nope.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 "$ROOT/build/rh_cli" vcs --format hg --out "$T/x" >/dev/null 2>&1; rc_neither=$?
@@ -256,6 +299,9 @@ printf '{"a":1}' > "$T/obj.json"
 set -e
 [[ "$rc_json" -eq 4 ]] || fail "invalid JSON must exit 4 (got $rc_json)"
 [[ "$rc_shape" -eq 4 ]] || fail "wrong-shape JSON must exit 4 (got $rc_shape)"
+[[ "$rc_sourcehut_time" -eq 4 ]] || fail "invalid SourceHut calendar time must exit 4 (got $rc_sourcehut_time)"
+[[ "$rc_sourcehut_errors" -eq 4 ]] || fail "GraphQL errors must exit 4 (got $rc_sourcehut_errors)"
+[[ ! -e "$T/sourcehut-bad-time.out" && ! -e "$T/sourcehut-errors.out" ]] || fail "failed SourceHut page must not publish a partial report"
 [[ "$rc_fmt" -eq 3 ]] || fail "unknown format must exit 3 (got $rc_fmt)"
 [[ "$rc_missing" -eq 4 ]] || fail "missing input must exit 4 (got $rc_missing)"
 [[ "$rc_neither" -eq 2 ]] || fail "missing input/repo must exit 2 (got $rc_neither)"
