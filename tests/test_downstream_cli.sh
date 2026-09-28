@@ -432,6 +432,9 @@ d = json.load(open(sys.argv[1]))
 assert d["scenario"] is not None, d
 assert d["scenario"]["unavailable"] == 2, d["scenario"]
 assert "affected_count" in d["scenario"], d["scenario"]
+assert {n["id"] for n in d["scenario"]["affected"]} == {2}, d["scenario"]
+scenario_paths = {w["target"]: w["path"] for w in d["scenario"]["path_witnesses"]["items"]}
+assert scenario_paths == {2: [4, 2]}, d["scenario"]
 metrics = {m["key"]: m for m in d["metrics"]}
 assert metrics["graph.scenario_affected_count"]["value"] == d["scenario"]["affected_count"], metrics
 print("[downstream] scenario OK")

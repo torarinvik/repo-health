@@ -476,10 +476,15 @@ module Graph:
                 total <- total + 1 if cyclic
             total
 
-        # Scenario: unique dependents that would lose their path to `subject` if
-        # `unavailable` were removed. Recomputed over the same projection (a
-        # hypothetical, and labeled as such by the caller's report layer).
-        def rh_scenario_unavailable(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subject: i64, unavailable: i64, p: RhProjection&, out_nodes: mutable darray[i64]&, trunc_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        # Report baseline dependents disconnected by removing `unavailable`.
+        # Both traversals use the same projection and budgets; either truncated
+        # traversal makes the scenario incomplete.
+        def rh_scenario_unavailable_internal(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subject: i64, unavailable: i64, p: RhProjection&, out_nodes: mutable darray[i64]&, trunc_out: mutable i64&, parents_out: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            trunc_out[0] <- 0
+            baseline: mutable darray[i64] = []
+            baseline_parents: mutable darray[i64] = []
+            baseline_truncated: mutable i64 = 0
+            _ = rh_transitive_dependents_with_parents(edges, vis, subject, p, baseline, &baseline_truncated, baseline_parents)
             filtered: mutable darray[RhGraphEdge] = []
             while i < edges.count |i: usize = 0, edges, filtered, unavailable|:
                 ed: RhGraphEdge = edges[i]
@@ -487,4 +492,23 @@ module Graph:
                 continue if ed.from == unavailable
                 continue if ed.dst == unavailable
                 filtered.push(ed)
-            rh_transitive_dependents(filtered, vis, subject, p, out_nodes, trunc_out)
+            remaining: mutable darray[i64] = []
+            remaining_truncated: mutable i64 = 0
+            _ = rh_transitive_dependents(filtered, vis, subject, p, remaining, &remaining_truncated)
+            trunc_out[0] <- 1 if baseline_truncated == 1 or remaining_truncated == 1
+            while i < baseline_parents.count |i: usize = 0, baseline_parents, parents_out|:
+                parents_out.push(baseline_parents[i])
+                i <- i + 1
+            while i < baseline.count |i: usize = 0, baseline, remaining, out_nodes|:
+                dependent: i64 = baseline[i]
+                i <- i + 1
+                continue if rh_contains(remaining, dependent)
+                out_nodes.push(dependent)
+            out_nodes.count.i64()
+
+        def rh_scenario_unavailable(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subject: i64, unavailable: i64, p: RhProjection&, out_nodes: mutable darray[i64]&, trunc_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            parents: mutable darray[i64] = []
+            rh_scenario_unavailable_internal(edges, vis, subject, unavailable, p, out_nodes, trunc_out, parents)
+
+        def rh_scenario_unavailable_with_parents(edges: darray[RhGraphEdge]&, vis: darray[u8]&, subject: i64, unavailable: i64, p: RhProjection&, out_nodes: mutable darray[i64]&, trunc_out: mutable i64&, parents_out: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            rh_scenario_unavailable_internal(edges, vis, subject, unavailable, p, out_nodes, trunc_out, parents_out)
