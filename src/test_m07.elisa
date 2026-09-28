@@ -10,6 +10,7 @@ include "./rh_json.elisa"
 include "./rh_package.elisa"
 include "./rh_privacy.elisa"
 include "./rh_archive.elisa"
+include "./rh_sourcehut.elisa"
 
 def t7check(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     return if cond
@@ -275,6 +276,37 @@ def check_archive_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.P
             fuzzed.push(alphabet[choice])
             pos <- pos + 1
         check_archive_fuzz_case(fuzzed, fails)
+        trial <- trial + 1
+    return
+
+def check_sourcehut_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    bounded_result: bool =
+        output: mutable darray[u8] = []
+        parsed: i64 = Sourcehut::rh_sourcehut_history_report(raw, output)
+        (parsed == -1 or parsed == 0) and output.count.i64() <= raw.count.i64() * 8 + 4096
+    t7check(bounded_result, "sourcehut-fuzz-bounds", fails)
+    return
+
+def check_sourcehut_fuzz(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    corpus: mutable darray[u8] = []
+    Base::rh_push_text(corpus, "{\"data\":{\"repository\":{\"rid\":\"r1\",\"name\":\"demo\",\"log\":{\"results\":[{\"type\":\"COMMIT\",\"id\":\"c1\",\"author\":{\"name\":\"Ada\",\"email\":\"ada@example.org\",\"time\":\"2021-01-01T00:00:00Z\"},\"committer\":{\"name\":\"Ada\",\"email\":\"ada@example.org\",\"time\":\"2021-01-01T00:00:00Z\"},\"message\":\"change\",\"parents\":[]}],\"cursor\":null}}}}")
+    output: mutable darray[u8] = []
+    parsed: i64 = Sourcehut::rh_sourcehut_history_report(corpus, output)
+    t7check(parsed == 0 and m7_contains(output, "sourcehut-git"), "sourcehut-fuzz-valid-seed", fails)
+    while trial < 96 |trial: i64 = 0, rng: i64 = 173205, corpus, fails|:
+        fuzzed: mutable darray[u8] = []
+        while copied < corpus.count |copied: usize = 0, corpus, fuzzed|:
+            fuzzed.push(corpus[copied])
+            copied <- copied + 1
+        rng <- (rng * 48271) % 2147483647
+        edits: i64 = 1 + rng % 5
+        while edit < edits |edit: i64 = 0, rng, fuzzed|:
+            rng <- (rng * 48271) % 2147483647
+            pos: usize = (rng % fuzzed.count.i64()).usize()
+            rng <- (rng * 48271) % 2147483647
+            fuzzed[pos] <- (rng % 128).u8()
+            edit <- edit + 1
+        check_sourcehut_fuzz_case(fuzzed, fails)
         trial <- trial + 1
     return
 
@@ -1018,6 +1050,7 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check_addr_guard(&fails)
     check_json_hardening(&fails)
     check_json_fuzz(&fails)
+    check_sourcehut_fuzz(&fails)
     check_cargo_fuzz(&fails)
     check_archive_fuzz(&fails)
     check_npm_fuzz(&fails)
