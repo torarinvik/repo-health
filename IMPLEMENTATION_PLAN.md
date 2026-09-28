@@ -1007,9 +1007,32 @@ At least one non-PR workflow must preserve review/proposal semantics without dem
 
 ### 13.5 SourceHut validation task
 
-The SourceHut manual could not be retrieved during document preparation. Its native API work therefore begins with a fresh official-documentation and controlled-instance validation task. Generic Git/Mercurial coverage can proceed independently.
+The official GraphQL schemas are now published at
+[`docs.sourcehut.org`](https://docs.sourcehut.org/). The `git.sr.ht` schema
+documents a read-only `repository(rid: ID!)` query whose `log(cursor, rev)`
+field returns cursor-paged commits. Each commit exposes a source-native object
+ID, message, parents, and author/committer signatures; signatures include a
+UTC `Time` field in `%Y-%m-%dT%H:%M:%SZ` form. This is sufficient to design a
+bounded Git-history adapter without treating SourceHut object IDs as another
+provider's identifiers. The schema marks repository and revision reads with
+the `REPOSITORIES:RO` and `REVISIONS:RO` scopes; implementation must keep
+authentication host-scoped and must not assume anonymous access. The API's
+cursor is continuation state, so a page limit or remaining cursor must stay
+explicit rather than being called complete. See the [git.sr.ht API
+schema](https://docs.sourcehut.org/git.sr.ht/) and the official
+[GraphQL documentation announcement](https://sourcehut.org/blog/2025-03-27-announcing-docs-sourcehut-org/).
 
-Do not copy speculative endpoint names into implementation tasks and then treat them as contractual APIs.
+The separate `hg.sr.ht` schema documents `repository(rid)` and
+`log(cursor, rev)`, but its `Revision` type exposes ID, branch, tags, author,
+and description without a commit timestamp. That endpoint alone cannot
+support dated activity metrics; continue to use native `hg log -Tjson` when
+dates are required. See the [hg.sr.ht API
+schema](https://docs.sourcehut.org/hg.sr.ht/).
+
+The remaining SourceHut gate is a controlled-instance validation of actual
+authorization, query/response behavior, and cursor continuation before any
+live collector is enabled. Do not copy speculative endpoints or claim a
+complete repository history from one captured GraphQL page.
 
 ### 13.6 Ecosystem parser admission
 
