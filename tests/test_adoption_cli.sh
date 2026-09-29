@@ -12,13 +12,13 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-adoption-input/1","cutoff":1000,"adoptions":[{"first_seen":0,"confirmed_introduction":null,"confirmed_removal":null,"last_seen":900,"first_version_ord":1001001,"latest_version_ord":2000001,"supported_major":2},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":null,"last_seen":850,"first_version_ord":1001001,"latest_version_ord":1001000,"supported_major":2},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":500,"last_seen":500,"first_version_ord":1001001,"latest_version_ord":1001001,"supported_major":1},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":500},{"first_seen":null,"confirmed_introduction":0,"confirmed_removal":null,"last_seen":900}]}
+{"schema":"rh-adoption-input/2","cutoff":1000,"support_assertion":{"supported_major":2,"source":"fixture/support-policy","reviewer_id":77,"reviewed_at":500,"evidence_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"adoptions":[{"first_seen":0,"confirmed_introduction":null,"confirmed_removal":null,"last_seen":900,"first_version_ord":1001001,"latest_version_ord":2000001},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":null,"last_seen":850,"first_version_ord":1001001,"latest_version_ord":1001000},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":500,"last_seen":500,"first_version_ord":1001001,"latest_version_ord":1001001},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":500},{"first_seen":null,"confirmed_introduction":0,"confirmed_removal":null,"last_seen":900}]}
 JSON
 "$ROOT/build/rh_cli" adoption --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "adoption run"
 python3 - "$T/out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema"] == "rh-adoption-result/1", d
+assert d["schema"] == "rh-adoption-result/2", d
 assert d["cutoff"] == 1000, d
 assert [a["status"] for a in d["adoptions"]] == ["first_seen_only", "confirmed_introduced", "confirmed_removal", "unknown", "confirmed_removal", "confirmed_introduced"], d
 assert d["adoptions"][0]["duration_censored"] is True, d
@@ -56,7 +56,7 @@ assert metrics["adoption.confirmed_removal_count"]["value"] == 2, metrics
 for key, value in {
     "adoption.observed_upgrade_count": 1,
     "adoption.version_comparison_count": 3,
-    "adoption.supported_line_adoption_count": 2,
+    "adoption.supported_line_adoption_count": 1,
     "adoption.supported_line_assessed_count": 3,
     "adoption.duration_confirmed_count": 1,
     "adoption.duration_right_censored_count": 2,
@@ -65,7 +65,7 @@ for key, value in {
     assert metrics[key]["status"] == "observed" and metrics[key]["value"] == value, (key, metrics[key])
 assert metrics["downstream_condition.supported_version_adoption_share"] == {
     "key": "downstream_condition.supported_version_adoption_share",
-    "version": "1.0.0", "status": "observed", "value": {"num": 2, "den": 3},
+    "version": "1.0.0", "status": "observed", "value": {"num": 1, "den": 3},
     "evidence": ["adoption-input"],
     "quality_dimensions": {
         "completeness": "complete", "freshness": "unknown",
@@ -73,6 +73,7 @@ assert metrics["downstream_condition.supported_version_adoption_share"] == {
     }
 }, metrics["downstream_condition.supported_version_adoption_share"]
 assert d["evidence_counts"] == {"version_comparison": 3, "version_comparison_unknown": 3, "supported_line_assessed": 3, "supported_line_unknown": 3}, d
+assert d["support_assertion"] == {"status": "accepted", "supported_major": 2, "source": "fixture/support-policy", "reviewer_id": 77, "reviewed_at": 500, "evidence_sha256": "a" * 64}, d
 assert d["duration_counts"] == {"confirmed": 1, "right_censored": 2, "unknown": 3}, d
 assert d["upgrade_lag_counts"] == {"observed": 0, "right_censored": 0, "unknown": 6}, d
 assert metrics["adoption.confirmed_duration_distribution"]["value"] == {
@@ -241,6 +242,19 @@ cat > "$T/ambiguous-coverage.json" <<'JSON'
 JSON
 if "$ROOT/build/rh_cli" adoption --input "$T/ambiguous-coverage.json" --out "$T/ambiguous-coverage.out" >/dev/null 2>&1; then fail "mixed snapshot coverage sources were accepted"; fi
 
+cat > "$T/future-support.json" <<'JSON'
+{"schema":"rh-adoption-input/2","cutoff":1000,"support_assertion":{"supported_major":2,"source":"fixture/support-policy","reviewer_id":77,"reviewed_at":1500,"evidence_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"adoptions":[{"first_seen":0,"confirmed_introduction":null,"confirmed_removal":null,"last_seen":900,"first_version_ord":1001001,"latest_version_ord":2000001}]}
+JSON
+"$ROOT/build/rh_cli" adoption --input "$T/future-support.json" --out "$T/future-support.out" >/dev/null || fail "future support assertion remains unknown"
+python3 - "$T/future-support.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["support_assertion"] == {"status": "unknown", "supported_major": None, "reason": "support-assertion-reviewed-after-cutoff"}, d
+assert d["adoptions"][0]["supported_line"] is None, d
+assert d["evidence_counts"]["supported_line_assessed"] == 0, d
+assert d["evidence_counts"]["supported_line_unknown"] == 1, d
+PY
+
 echo "[adoption] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" adoption --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "adoption output not deterministic"
@@ -257,6 +271,15 @@ printf '{"schema":"rh-adoption-input/1","cutoff":1,"adoptions":[{"first_seen":nu
 "$ROOT/build/rh_cli" adoption --input "$T/missing.json" --out "$T/x" >/dev/null 2>&1; rc_missing=$?
 set -e
 [[ "$rc_order" -eq 4 && "$rc_cutoff" -eq 4 && "$rc_last" -eq 4 && "$rc_version" -eq 4 && "$rc_missing" -eq 4 ]] || fail "invalid adoption must exit 4 (got $rc_order/$rc_cutoff/$rc_last/$rc_version/$rc_missing)"
+printf '{"schema":"rh-adoption-input/2","cutoff":1000,"adoptions":[]}' > "$T/missing-support.json"
+set +e
+"$ROOT/build/rh_cli" adoption --input "$T/missing-support.json" --out "$T/x" >/dev/null 2>&1; rc_support_missing=$?
+printf '{"schema":"rh-adoption-input/1","cutoff":1000,"adoptions":[{"supported_major":2}]}' > "$T/legacy-support.json"
+"$ROOT/build/rh_cli" adoption --input "$T/legacy-support.json" --out "$T/x" >/dev/null 2>&1; rc_legacy_support=$?
+printf '{"schema":"rh-adoption-input/2","cutoff":1000,"support_assertion":{"supported_major":2,"source":"x","reviewer_id":1,"reviewed_at":0,"evidence_sha256":"bad"},"adoptions":[]}' > "$T/bad-support.json"
+"$ROOT/build/rh_cli" adoption --input "$T/bad-support.json" --out "$T/x" >/dev/null 2>&1; rc_bad_support=$?
+set -e
+[[ "$rc_support_missing" -eq 4 && "$rc_legacy_support" -eq 4 && "$rc_bad_support" -eq 4 ]] || fail "invalid support assertions must exit 4"
 
 command -v cc >/dev/null 2>&1 || fail "C compiler unavailable for fake PostgreSQL"
 if [[ "$(uname -s)" == "Darwin" ]]; then
