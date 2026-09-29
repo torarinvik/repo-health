@@ -12,7 +12,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-population-input/1","focal_package":"acme-core","version_policy":"latest-published","discovery_source":"local-reverse-index","discovery_mode":"historical","discovery_as_of":1700000000,"page_limit":100,"truncated":true,"provider_status":"rate_limit","replay_attempts":2,"mapping_revision":4,"deduplication_unit":"accepted-project-family","metric_definitions":[{"key":"history.months_active","version":"1"},{"key":"review.coverage","version":"2"}],"dependents":[{"id":"repo-a","family":"family-a","package":"acme-core","version":"1.2.0","relation":"direct","published_packages":["acme-core","acme-cli"],"path_witness":["app","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"observed","value":12,"policy":"pass"},{"key":"review.coverage","version":"2","status":"unknown","value":null,"policy":"unknown"}]},{"id":"repo-b","family":"family-a","package":"acme-core","version":"1.1.0","relation":"transitive","path_witness":["tool","dep","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"partial","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":3,"policy":"fail"}]},{"id":"repo-c","family":"family-c","package":"acme-core","version":"1.0.0","relation":"direct","path_witness":["service","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"unavailable","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":5,"policy":"pass"}]}],"unresolved":[{"package":"unknown-pkg","reason":"mapping review required"}]}
+{"schema":"rh-population-input/1","focal_package":"acme-core","version_policy":"latest-published","discovery_source":"local-reverse-index","discovery_mode":"historical","discovery_context":"cargo registry snapshot; focal release 1.2.0","discovery_as_of":1700000000,"page_limit":100,"truncated":true,"provider_status":"rate_limit","replay_attempts":2,"mapping_revision":4,"deduplication_unit":"accepted-project-family","metric_definitions":[{"key":"history.months_active","version":"1"},{"key":"review.coverage","version":"2"}],"dependents":[{"id":"repo-a","family":"family-a","package":"acme-core","version":"1.2.0","relation":"direct","published_packages":["acme-core","acme-cli"],"path_witness":["app","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"observed","value":12,"policy":"pass"},{"key":"review.coverage","version":"2","status":"unknown","value":null,"policy":"unknown"}]},{"id":"repo-b","family":"family-a","package":"acme-core","version":"1.1.0","relation":"transitive","path_witness":["tool","dep","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"partial","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":3,"policy":"fail"}]},{"id":"repo-c","family":"family-c","package":"acme-core","version":"1.0.0","relation":"direct","path_witness":["service","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"unavailable","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":5,"policy":"pass"}]}],"unresolved":[{"package":"unknown-pkg","reason":"mapping review required"}]}
 JSON
 "$ROOT/build/rh_cli" population --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "population run"
 python3 - "$T/out.json" "$T/in.json" <<'PY'
@@ -20,6 +20,7 @@ import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-population-result/1", d
 assert d["discovery"]["truncated"] is True and d["discovery"]["page_limit"] == 100, d
+assert d["discovery"]["context"] == "cargo registry snapshot; focal release 1.2.0", d
 assert d["discovery"]["provider_status"] == "rate_limit" and d["discovery"]["replay_attempts"] == 2, d
 assert d["population"] == {"selected_dependents": 3, "distinct_families": 2, "unresolved": 1}, d
 summary = {m["key"]: m for m in d["summary_metrics"]}
@@ -114,6 +115,8 @@ echo "[population] determinism + malformed input fails closed"
 cmp -s "$T/out.json" "$T/out2.json" || fail "population output not deterministic"
 cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "population transformation report not deterministic"
 set +e
+sed 's/"discovery_context":"cargo registry snapshot; focal release 1.2.0",//' "$T/in.json" > "$T/missing-context.json"
+"$ROOT/build/rh_cli" population --input "$T/missing-context.json" --out "$T/x" >/dev/null 2>&1; rc_context=$?
 sed 's/"truncated":true/"truncated":"yes"/' "$T/in.json" > "$T/bad-bool.json"
 "$ROOT/build/rh_cli" population --input "$T/bad-bool.json" --out "$T/x" >/dev/null 2>&1; rc_bool=$?
 sed 's/"mapping_revision":4/"mapping_revision":-1/' "$T/in.json" > "$T/bad-revision.json"
@@ -169,6 +172,6 @@ PY
 "$ROOT/build/rh_cli" population --input "$T/bad-metric-cap.json" --out "$T/x" >/dev/null 2>&1; rc_metric_cap=$?
 "$ROOT/build/rh_cli" population --input "$T/bad-unresolved-cap.json" --out "$T/x" >/dev/null 2>&1; rc_unresolved_cap=$?
 set -e
-[[ "$rc_bool" -eq 4 && "$rc_revision" -eq 4 && "$rc_path" -eq 4 && "$rc_path_target" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_value" -eq 4 && "$rc_policy_state" -eq 4 && "$rc_duplicate_root" -eq 4 && "$rc_duplicate_cell" -eq 4 && "$rc_provider" -eq 4 && "$rc_relation" -eq 4 && "$rc_path_relation" -eq 4 && "$rc_path_cycle" -eq 4 && "$rc_negative" -eq 4 && "$rc_overflow" -eq 4 && "$rc_dependent_cap" -eq 4 && "$rc_metric_cap" -eq 4 && "$rc_unresolved_cap" -eq 4 ]] || fail "invalid population must exit 4 (got $rc_bool/$rc_revision/$rc_path/$rc_path_target/$rc_duplicate/$rc_value/$rc_policy_state/$rc_duplicate_root/$rc_duplicate_cell/$rc_provider/$rc_relation/$rc_path_relation/$rc_path_cycle/$rc_negative/$rc_overflow/$rc_dependent_cap/$rc_metric_cap/$rc_unresolved_cap)"
+[[ "$rc_context" -eq 4 && "$rc_bool" -eq 4 && "$rc_revision" -eq 4 && "$rc_path" -eq 4 && "$rc_path_target" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_value" -eq 4 && "$rc_policy_state" -eq 4 && "$rc_duplicate_root" -eq 4 && "$rc_duplicate_cell" -eq 4 && "$rc_provider" -eq 4 && "$rc_relation" -eq 4 && "$rc_path_relation" -eq 4 && "$rc_path_cycle" -eq 4 && "$rc_negative" -eq 4 && "$rc_overflow" -eq 4 && "$rc_dependent_cap" -eq 4 && "$rc_metric_cap" -eq 4 && "$rc_unresolved_cap" -eq 4 ]] || fail "invalid population must exit 4 (got context=$rc_context, bool=$rc_bool, revision=$rc_revision)"
 
 echo "test_population_cli OK"
