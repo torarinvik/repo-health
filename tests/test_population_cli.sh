@@ -41,7 +41,7 @@ assert report["schema"] == "rh-adapter-transformation-report/1", report
 assert report["adapter"] == "focal-library-population", report
 assert report["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), report
 assert report["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), report
-assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/1").hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/2;dependents=1000;unresolved=1000;metrics=63").hexdigest(), report
 assert all(field["state"] in {"preserved", "transformed", "inferred", "discarded", "unsupported", "unknown"} for field in report["fields"]), report
 print("[population] bounded selection + per-metric coverage + witnesses OK")
 PY
