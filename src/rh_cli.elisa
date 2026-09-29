@@ -112,6 +112,7 @@ include "./rh_adoption.elisa"
 include "./rh_lineage.elisa"
 include "./rh_assessment_dedup.elisa"
 include "./rh_population.elisa"
+include "./rh_intrinsics_build.elisa"
 include "./rh_ingest_conformance.elisa"
 include "./rh_snapshot_reconcile.elisa"
 include "./rh_postgres_report.elisa"
@@ -173,6 +174,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli resolution --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli parser-diff --native <file> --candidate <file> --out <file> [--native-parser N] [--candidate-parser N] [--config C] [--visibility public|private]")
     rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--snapshot-root <dir>] [--identity-revision <n>] [--mapping <file>] [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
+    rh_cli_err("       rh_cli intrinsics-build --input <rh-intrinsics-source-set/1> --out <rh-intrinsics/2>")
     rh_cli_err("            [--max-nodes N] [--max-depth D] [--scope all|normal|dev|optional|peer] [--platform N] [--valid-as-of EPOCH] [--known-as-of EPOCH]")
     rh_cli_err("       rh_cli policy --policy <file> --input <file> --out <dir> [--state <file> | --state-store <dir>] [--approver-keys <owner-only-file>]")
     rh_cli_err("       rh_cli correct --corrections <file> --out <dir> [--state <file> | --state-store <dir>] [--evidence-store <dir>] [--evidence-policy <file> --evidence-now <unix-seconds>] [--notify-template <file> --notify-now <unix-seconds>]")
@@ -3220,6 +3222,28 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 ppq <- ppq + 1
         return rh_cli_usage(2) if pi_idx < 0 or po_idx < 0
         return rh_do_population(slots[pi_idx], slots[po_idx])
+
+    if Base::rh_streq(cmd, "intrinsics-build"):
+        intrinsic_input_idx, intrinsic_output_idx =
+            while ii < argc |intrinsic_input_idx: i64 = -1, intrinsic_output_idx: i64 = -1, ii: i64 = 2, slots| -> intrinsic_input_idx, intrinsic_output_idx:
+                arg: u8& = slots[ii].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(arg, "--input"):
+                    if ii + 1 < argc:
+                        ii <- ii + 1
+                        intrinsic_input_idx <- ii
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(arg, "--out"):
+                    if ii + 1 < argc:
+                        ii <- ii + 1
+                        intrinsic_output_idx <- ii
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                ii <- ii + 1
+        return rh_cli_usage(2) if intrinsic_input_idx < 0 or intrinsic_output_idx < 0
+        return rh_do_intrinsics_build(slots[intrinsic_input_idx], slots[intrinsic_output_idx])
     if Base::rh_streq(cmd, "ingest"):
         ir_idx, ii_idx, io_idx, postgres_ingest =
             while iiq < argc |ir_idx: i64 = -1, ii_idx: i64 = -1, io_idx: i64 = -1, postgres_ingest: bool = false, iiq: i64 = 2, slots| -> ir_idx, ii_idx, io_idx, postgres_ingest:
@@ -10571,6 +10595,38 @@ def rh_do_population(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
         rh_cli_err("population: cannot write --out")
         return 4
     rh_cli_out("population: bounded downstream report emitted")
+    0
+
+# --- M05 independent intrinsic assembly path. ---
+# Joins per-project values from the continuity and role analyzers into the
+# bounded input consumed by downstream aggregation. Missing source coverage
+# remains null; the downstream graph and adoption report are never inputs.
+def rh_do_intrinsics_build(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected intrinsics-build argument (allowlist)")
+        return 3
+    input_buffer: mutable darray[u8] =
+        input_buffer: mutable darray[u8] = []
+        Base::rh_push_cstr(input_buffer, input_path)
+        input_buffer.push(0)
+        input_buffer
+    input_ptr: cstr = (&input_buffer[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(input_ptr, raw) < 0:
+        rh_cli_err("intrinsics-build: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if IntrinsicsBuild::rh_intrinsics_build_report(raw, body) != 0:
+        rh_cli_err("intrinsics-build: malformed or unsupported source set (fail closed)")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("intrinsics-build: cannot write --out")
+        return 4
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "independent-intrinsics-assembly", "rh-intrinsics/2", "repo-health/independent-intrinsics-assembly/1", "[{\"source\":\"dependent project identifier\",\"target\":\"intrinsic value row id\",\"state\":\"preserved\"},{\"source\":\"persistence.persistent_12m continuity metric\",\"target\":\"per-project persistent actor count\",\"state\":\"preserved\"},{\"source\":\"maintainer.observed_release_actors role metric\",\"target\":\"per-project distinct release actor count\",\"state\":\"preserved\"},{\"source\":\"maintainer.observed_review_actors role metric\",\"target\":\"per-project distinct review actor count\",\"state\":\"preserved\"},{\"source\":\"missing or unsupported source metric coverage\",\"target\":\"null metric observation\",\"state\":\"unknown\"},{\"source\":\"role declarations, permissions, and unrelated source metrics\",\"target\":\"intrinsic activity result\",\"state\":\"discarded\"},{\"source\":\"downstream graph and adoption measurements\",\"target\":\"intrinsic observations\",\"state\":\"unsupported\"}]", out_path):
+        rh_cli_err("intrinsics-build: cannot write transformation report")
+        return 4
+    rh_cli_out("intrinsics-build: independent per-dependent observations emitted")
     0
 
 # --- M02 PostgreSQL repository execution path. ---

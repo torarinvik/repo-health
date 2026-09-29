@@ -1,0 +1,169 @@
+# Assemble per-project intrinsic observations from independently computed
+# continuity and role reports. Downstream/adoption data never enters this path.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module IntrinsicsBuild:
+    private:
+        const RH_MAX_DEPENDENTS: i64 = 1000
+
+        struct RhIntrinsicRow:
+            mutable id: i64
+            mutable mask: i64
+            mutable persistence: i64
+            mutable release_actors: i64
+            mutable review_actors: i64
+
+        def rh_ib_text_eq(texts: darray[u8]&, start: i64, end: i64, value: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, value)
+
+        def rh_ib_string_is(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, value: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            string_node: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            start: mutable i64 = 0
+            end: mutable i64 = 0
+            Json::rh_json_str_span(nodes, string_node, &start, &end) and rh_ib_text_eq(texts, start, end, value)
+
+        def rh_ib_string(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, object, key), start_out, end_out)
+
+        def rh_ib_integer(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, object: i64, key: u8&, value_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            ok: mutable i64 = 0
+            value_out[0] <- Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, object, key), &ok)
+            ok == 1
+
+        def rh_ib_unique_object_keys(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if object < 0 or nodes[object.usize()].kind != Json::RH_JSON_OBJ
+            while key_node >= 0 |key_node: i64 = nodes[object.usize()].first_child, nodes, texts, object|:
+                return false if nodes[key_node.usize()].kind != Json::RH_JSON_STR
+                value_node: i64 = nodes[key_node.usize()].next_sibling
+                return false if value_node < 0
+                key_start: i64 = nodes[key_node.usize()].text_start
+                key_end: i64 = nodes[key_node.usize()].text_end
+                while other_key >= 0 |other_key: i64 = nodes[value_node.usize()].next_sibling, nodes, texts, key_start, key_end|:
+                    return false if nodes[other_key.usize()].kind != Json::RH_JSON_STR
+                    same: bool =
+                        other_end: mutable i64 = nodes[other_key.usize()].text_end
+                        other_start: mutable i64 = nodes[other_key.usize()].text_start
+                        end: mutable i64 = key_end
+                        start: mutable i64 = key_start
+                        if other_end - other_start == end - start:
+                            while j < (end - start).usize() |same: bool = true, j: usize = 0, texts, start, other_start| -> same:
+                                same <- false if texts[(start + j.i64()).usize()] != texts[(other_start + j.i64()).usize()]
+                                j <- j + 1
+                        else:
+                            false
+                    return false if same
+                    other_value: i64 = nodes[other_key.usize()].next_sibling
+                    return false if other_value < 0
+                    other_key <- nodes[other_value.usize()].next_sibling
+                key_node <- nodes[value_node.usize()].next_sibling
+            true
+
+        # Returns 1 for an exact observed scalar, 0 for a valid unavailable
+        # state, and -1 for malformed or ambiguous source metrics.
+        def rh_ib_metric(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, report: i64, expected_schema: u8&, metric_key: u8&, value_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if not rh_ib_string_is(nodes, texts, report, "schema", expected_schema)
+            metrics: i64 = Json::rh_json_obj_get(nodes, texts, report, "metrics")
+            return -1 if metrics < 0 or nodes[metrics.usize()].kind != Json::RH_JSON_ARR
+            found: mutable bool = false
+            result: mutable i64 = 0
+            while child >= 0 |child: i64 = nodes[metrics.usize()].first_child, nodes, raw, texts, metric_key, found, result, value_out|:
+                return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                key_start: mutable i64 = 0
+                key_end: mutable i64 = 0
+                if rh_ib_string(nodes, texts, child, "key", &key_start, &key_end) and rh_ib_text_eq(texts, key_start, key_end, metric_key):
+                    return -1 if not rh_ib_unique_object_keys(nodes, texts, child)
+                    return -1 if found
+                    found <- true
+                    status_start: mutable i64 = 0
+                    status_end: mutable i64 = 0
+                    return -1 if not rh_ib_string(nodes, texts, child, "status", &status_start, &status_end)
+                    if rh_ib_text_eq(texts, status_start, status_end, "observed"):
+                        return -1 if not rh_ib_integer(nodes, raw, texts, child, "value", &value_out[0]) or value_out[0] < 0
+                        result <- 1
+                    elif rh_ib_text_eq(texts, status_start, status_end, "partial") or rh_ib_text_eq(texts, status_start, status_end, "unsupported") or rh_ib_text_eq(texts, status_start, status_end, "not_applicable") or rh_ib_text_eq(texts, status_start, status_end, "stale") or rh_ib_text_eq(texts, status_start, status_end, "absent") or rh_ib_text_eq(texts, status_start, status_end, "error"):
+                        result <- 0
+                    else:
+                        return -1
+                child <- nodes[child.usize()].next_sibling
+            return 0 if not found
+            result
+
+    public:
+        # Input contains one independently calculated continuity report and one
+        # independently calculated roles report per dependent project.
+        def rh_intrinsics_build_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if out.count != 0
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse_large_bounded(raw, nodes, texts, 1500000)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ or nodes[root.usize()].child_count != 4
+            return -1 if not rh_ib_unique_object_keys(nodes, texts, root)
+            return -1 if not rh_ib_string_is(nodes, texts, root, "schema", "rh-intrinsics-source-set/1")
+            dependents: i64 = Json::rh_json_obj_get(nodes, texts, root, "dependents")
+            return -1 if dependents < 0 or nodes[dependents.usize()].kind != Json::RH_JSON_ARR
+            return -1 if nodes[dependents.usize()].child_count > RH_MAX_DEPENDENTS
+            rows: mutable darray[RhIntrinsicRow] = []
+            slots: mutable darray[i64] = []
+            slot_count: i64 = nodes[dependents.usize()].child_count.i64() * 2 + 1
+            while i < slot_count |i: i64 = 0, slots|:
+                slots.push(-1)
+                i <- i + 1
+            while item >= 0 |item: i64 = nodes[dependents.usize()].first_child, nodes, raw, texts, rows, slots, slot_count|:
+                return -1 if nodes[item.usize()].kind != Json::RH_JSON_OBJ or nodes[item.usize()].child_count != 6
+                return -1 if not rh_ib_unique_object_keys(nodes, texts, item)
+                id_value: mutable i64 = 0
+                return -1 if not rh_ib_integer(nodes, raw, texts, item, "id", &id_value) or id_value < 0
+                slot: mutable i64 = id_value % slot_count
+                while slots[slot.usize()] >= 0 and slots[slot.usize()] != id_value |slot: i64 = slot, slots, slot_count|:
+                    slot <- (slot + 1) % slot_count
+                return -1 if slots[slot.usize()] == id_value
+                slots[slot.usize()] <- id_value
+                continuity: i64 = Json::rh_json_obj_get(nodes, texts, item, "continuity_metrics")
+                roles: i64 = Json::rh_json_obj_get(nodes, texts, item, "roles")
+                return -1 if continuity < 0 or nodes[continuity.usize()].kind != Json::RH_JSON_OBJ
+                return -1 if not rh_ib_unique_object_keys(nodes, texts, continuity)
+                return -1 if roles < 0 or nodes[roles.usize()].kind != Json::RH_JSON_OBJ or not rh_ib_unique_object_keys(nodes, texts, roles)
+                release_count: mutable i64 = 0
+                review_count: mutable i64 = 0
+                release_result: i64 = rh_ib_metric(nodes, raw, texts, roles, "rh-roles-result/1", "maintainer.observed_release_actors", &release_count)
+                review_result: i64 = rh_ib_metric(nodes, raw, texts, roles, "rh-roles-result/1", "maintainer.observed_review_actors", &review_count)
+                return -1 if release_result < 0 or review_result < 0
+                persistence_count: mutable i64 = 0
+                persistence_result: i64 = rh_ib_metric(nodes, raw, texts, continuity, "rh-continuity-metrics/1", "persistence.persistent_12m", &persistence_count)
+                return -1 if persistence_result < 0
+                persistence_present: bool = persistence_result == 1
+                mask: mutable i64 = 0
+                mask <- mask | 1 if persistence_present
+                mask <- mask | 2 if release_result == 1
+                mask <- mask | 4 if review_result == 1
+                rows.push(RhIntrinsicRow{id: id_value, mask: mask, persistence: persistence_count, release_actors: release_count, review_actors: review_count})
+                item <- nodes[item.usize()].next_sibling
+            Base::rh_push_text(out, "{\"schema\":\"rh-intrinsics/2\",\"metrics\":[\"persistence.persistent_12m\",\"maintainer.observed_release_actors\",\"maintainer.observed_review_actors\"],\"values\":[")
+            while i < rows.count |i: usize = 0, rows, out|:
+                row: RhIntrinsicRow = rows[i]
+                if i > 0:
+                    out.push(44)
+                Base::rh_push_text(out, "{\"id\":")
+                Base::rh_push_decimal_i64(out, row.id)
+                Base::rh_push_text(out, ",\"mask\":")
+                Base::rh_push_decimal_i64(out, row.mask)
+                Base::rh_push_text(out, ",\"observations\":[")
+                if (row.mask & 1) != 0:
+                    Base::rh_push_decimal_i64(out, row.persistence)
+                else:
+                    Base::rh_push_text(out, "null")
+                out.push(44)
+                if (row.mask & 2) != 0:
+                    Base::rh_push_decimal_i64(out, row.release_actors)
+                else:
+                    Base::rh_push_text(out, "null")
+                out.push(44)
+                if (row.mask & 4) != 0:
+                    Base::rh_push_decimal_i64(out, row.review_actors)
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, "]}")
+                i <- i + 1
+            Base::rh_push_text(out, "]}")
+            0
