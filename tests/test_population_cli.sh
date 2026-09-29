@@ -18,7 +18,7 @@ JSON
 python3 - "$T/out.json" "$T/in.json" <<'PY'
 import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema"] == "rh-population-result/1", d
+assert d["schema"] == "rh-population-result/2", d
 assert d["discovery"]["truncated"] is True and d["discovery"]["page_limit"] == 100, d
 assert d["discovery"]["context"] == "cargo registry snapshot; focal release 1.2.0", d
 assert d["discovery"]["provider_status"] == "rate_limit" and d["discovery"]["replay_attempts"] == 2, d
@@ -34,6 +34,8 @@ by = {(m["key"], m["version"]): m for m in d["metrics"]}
 assert by[("history.months_active", "1")]["observed"] == 1, by
 assert by[("history.months_active", "1")]["partial"] == 1, by
 assert by[("history.months_active", "1")]["unavailable"] == 1, by
+assert by[("history.months_active", "1")]["coverage"] == {"observed": 1, "selected_dependents": 3}, by
+assert by[("review.coverage", "2")]["coverage"] == {"observed": 2, "selected_dependents": 3}, by
 assert by[("review.coverage", "2")]["distribution"] == {"count": 2, "sum": 8, "min": 3, "max": 5}, by
 assert by[("review.coverage", "2")]["policy_counts"] == {"pass": 1, "fail": 1, "unknown": 1}, by
 assert "counts projects once" in d["note"], d
@@ -43,7 +45,7 @@ assert report["adapter"] == "focal-library-population", report
 assert "context" in report["fields"][0]["target"], report
 assert report["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), report
 assert report["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), report
-assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/2;dependents=1000;unresolved=1000;metrics=63").hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/3;dependents=1000;unresolved=1000;metrics=63").hexdigest(), report
 assert all(field["state"] in {"preserved", "transformed", "inferred", "discarded", "unsupported", "unknown"} for field in report["fields"]), report
 print("[population] bounded selection + per-metric coverage + witnesses OK")
 PY
@@ -88,7 +90,7 @@ framed = (b"rh-population-identity-input/1\npopulation:" + str(len(population_ra
 assert sidecar["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), sidecar
 assert sidecar["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), sidecar
 assert sidecar["output_schema"] == "rh-population-result/2", sidecar
-assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/3;dependents=1000;unresolved=1000;metrics=63;identity-join=true").hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/4;dependents=1000;unresolved=1000;metrics=63;identity-join=true").hexdigest(), sidecar
 print("[population] canonical identity, unknown coverage, and input binding OK")
 PY
 python3 - "$T/identity-in.json" "$T/missing-node-key.json" "$T/unselected-node-key.json" "$T/duplicate-node-key.json" "$T/bad-downstream.json" <<'PY'
