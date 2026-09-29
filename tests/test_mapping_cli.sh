@@ -18,7 +18,7 @@ cat > "$T/graph.json" <<'JSON'
 {"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"iso","version":"1"},{"id":1,"name":"top","version":"1"},{"id":2,"name":"mid-a","version":"1"},{"id":3,"name":"mid-b","version":"1"},{"id":4,"name":"leaf","version":"1"}],"edges":[{"from":1,"to":2,"scope":"normal"},{"from":1,"to":3,"scope":"normal"},{"from":2,"to":4,"scope":"normal"},{"from":3,"to":4,"scope":"normal"}],"unresolved":[],"advisories":[]}
 JSON
 cat > "$T/mapping.json" <<'JSON'
-{"schema":"rh-mapping-input/1","revision":7,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"mirror","source":"operator","reviewed_at":100,"evidence":["review/1"]},{"a":1,"b":2,"state":"proposed","relation":"migration","source":"file","reviewed_at":101,"evidence":["map.md"]},{"a":4,"b":2,"state":"rejected","relation":"component","source":"provider","reviewed_at":102,"evidence":[]},{"a":0,"b":1,"state":"accepted","relation":"fork","source":"provider","reviewed_at":103,"evidence":["fork/1"]},{"a":1,"b":4,"state":"accepted","relation":"issue_tracker","source":"provider","reviewed_at":104,"evidence":["issue/1"]}]}
+{"schema":"rh-mapping-input/1","revision":7,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"mirror","source":"operator","reviewed_at":100,"reviewer_id":7,"evidence":["review/1"]},{"a":1,"b":2,"state":"proposed","relation":"migration","source":"file","reviewed_at":101,"evidence":["map.md"]},{"a":4,"b":2,"state":"rejected","relation":"component","source":"provider","reviewed_at":102,"evidence":[]},{"a":0,"b":1,"state":"accepted","relation":"fork","source":"provider","reviewed_at":103,"reviewer_id":8,"evidence":["fork/1"]},{"a":1,"b":4,"state":"accepted","relation":"issue_tracker","source":"provider","reviewed_at":104,"reviewer_id":9,"evidence":["issue/1"]}]}
 JSON
 "$ROOT/build/rh_cli" mapping --input "$T/mapping.json" --out "$T/mapping.out" >/dev/null || fail "mapping run"
 python3 - "$T/mapping.out" "$T/mapping.json" "$T/mapping.out.transformations.json" <<'PY'
@@ -28,6 +28,7 @@ assert d["schema"] == "rh-mapping-result/1", d
 assert d["revision"] == 7, d
 assert d["state_counts"] == {"proposed": 1, "accepted": 3, "rejected": 1, "revoked": 0}, d
 assert d["assertions"][0]["evidence_count"] == 1, d
+assert d["assertions"][0]["reviewer_id"] == 7, d
 assert d["assertions"][3]["relation"] == "fork" and d["assertions"][4]["relation"] == "issue_tracker", d
 assert "only accepted mirror/migration" in d["note"], d
 tr = json.load(open(sys.argv[3]))
@@ -59,9 +60,11 @@ printf '{"schema":"rh-mapping-input/2","revision":1,"assertions":[]}' > "$T/bad-
 "$ROOT/build/rh_cli" mapping --input "$T/bad-schema.json" --out "$T/x" >/dev/null 2>&1; rc_schema=$?
 printf '{"schema":"rh-mapping-input/1","revision":1,"assertions":[{"a":1,"b":2,"state":"accepted","relation":"mirror","source":"vibes","reviewed_at":1,"evidence":[]}]}' > "$T/bad-source.json"
 "$ROOT/build/rh_cli" mapping --input "$T/bad-source.json" --out "$T/x" >/dev/null 2>&1; rc_source=$?
+printf '{"schema":"rh-mapping-input/1","revision":1,"assertions":[{"a":1,"b":2,"state":"accepted","relation":"mirror","source":"operator","reviewed_at":1,"evidence":["evidence/1"]}]}' > "$T/bad-reviewer.json"
+"$ROOT/build/rh_cli" mapping --input "$T/bad-reviewer.json" --out "$T/x" >/dev/null 2>&1; rc_reviewer=$?
 printf 'not json' > "$T/notjson"
 "$ROOT/build/rh_cli" mapping --input "$T/notjson" --out "$T/x" >/dev/null 2>&1; rc_json=$?
 set -e
-[[ "$rc_schema" -eq 4 && "$rc_source" -eq 4 && "$rc_json" -eq 4 ]] || fail "invalid mapping must exit 4 (got $rc_schema/$rc_source/$rc_json)"
+[[ "$rc_schema" -eq 4 && "$rc_source" -eq 4 && "$rc_reviewer" -eq 4 && "$rc_json" -eq 4 ]] || fail "invalid mapping must exit 4 (got $rc_schema/$rc_source/$rc_reviewer/$rc_json)"
 
 echo "test_mapping_cli OK"
