@@ -13,6 +13,8 @@ module IntrinsicsBuild:
             mutable persistence: i64
             mutable release_actors: i64
             mutable review_actors: i64
+            mutable reviewed_merge_changes: i64
+            mutable linked_merge_changes: i64
 
         def rh_ib_text_eq(texts: darray[u8]&, start: i64, end: i64, value: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, start, end, value)
@@ -94,6 +96,30 @@ module IntrinsicsBuild:
             return 0 if not found
             result
 
+        def rh_ib_change_review_count(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, report: i64, field: u8&, value_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            review: i64 = Json::rh_json_obj_get(nodes, texts, report, "change_review")
+            return 0 if review < 0
+            return -1 if nodes[review.usize()].kind != Json::RH_JSON_OBJ or not rh_ib_unique_object_keys(nodes, texts, review)
+            status: mutable i64 = 0
+            status_end: mutable i64 = 0
+            return -1 if not rh_ib_string(nodes, texts, review, "status", &status, &status_end)
+            if rh_ib_text_eq(texts, status, status_end, "observed"):
+                return -1 if not rh_ib_integer(nodes, raw, texts, review, field, &value_out[0]) or value_out[0] < 0
+                1
+            elif rh_ib_text_eq(texts, status, status_end, "unknown"):
+                field_idx: i64 = Json::rh_json_obj_get(nodes, texts, review, field)
+                return -1 if field_idx >= 0 and nodes[field_idx.usize()].kind != Json::RH_JSON_NULL
+                0
+            elif rh_ib_text_eq(texts, status, status_end, "not_applicable"):
+                field_idx: i64 = Json::rh_json_obj_get(nodes, texts, review, field)
+                if field_idx >= 0 and nodes[field_idx.usize()].kind != Json::RH_JSON_NULL:
+                    return -1 if not rh_ib_integer(nodes, raw, texts, review, field, &value_out[0]) or value_out[0] < 0
+                    1
+                else:
+                    0
+            else:
+                -1
+
     public:
         # Input contains one independently calculated continuity report and one
         # independently calculated roles report per dependent project.
@@ -141,6 +167,11 @@ module IntrinsicsBuild:
                 release_result: i64 = rh_ib_metric(nodes, raw, texts, roles, "rh-roles-result/1", "maintainer.observed_release_actors", &release_count)
                 review_result: i64 = rh_ib_metric(nodes, raw, texts, roles, "rh-roles-result/1", "maintainer.observed_review_actors", &review_count)
                 return -1 if release_result < 0 or review_result < 0
+                reviewed_merge_count: mutable i64 = 0
+                linked_merge_count: mutable i64 = 0
+                reviewed_merge_result: i64 = rh_ib_change_review_count(nodes, raw, texts, roles, "numerator", &reviewed_merge_count)
+                linked_merge_result: i64 = rh_ib_change_review_count(nodes, raw, texts, roles, "denominator", &linked_merge_count)
+                return -1 if reviewed_merge_result < 0 or linked_merge_result < 0 or reviewed_merge_result == 1 and linked_merge_result != 1 or reviewed_merge_result == 1 and reviewed_merge_count > linked_merge_count
                 persistence_count: mutable i64 = 0
                 persistence_result: i64 = rh_ib_metric(nodes, raw, texts, continuity, "rh-continuity-metrics/1", "persistence.persistent_12m", &persistence_count)
                 return -1 if persistence_result < 0
@@ -149,9 +180,11 @@ module IntrinsicsBuild:
                 mask <- mask | 1 if persistence_present
                 mask <- mask | 2 if release_result == 1
                 mask <- mask | 4 if review_result == 1
-                rows.push(RhIntrinsicRow{id: id_value, mask: mask, persistence: persistence_count, release_actors: release_count, review_actors: review_count})
+                mask <- mask | 8 if reviewed_merge_result == 1
+                mask <- mask | 16 if linked_merge_result == 1
+                rows.push(RhIntrinsicRow{id: id_value, mask: mask, persistence: persistence_count, release_actors: release_count, review_actors: review_count, reviewed_merge_changes: reviewed_merge_count, linked_merge_changes: linked_merge_count})
                 item <- nodes[item.usize()].next_sibling
-            Base::rh_push_text(out, "{\"schema\":\"rh-intrinsics/2\",\"metrics\":[\"persistence.persistent_12m\",\"maintainer.observed_release_actors\",\"maintainer.observed_review_actors\"],\"values\":[")
+            Base::rh_push_text(out, "{\"schema\":\"rh-intrinsics/2\",\"metrics\":[\"persistence.persistent_12m\",\"maintainer.observed_release_actors\",\"maintainer.observed_review_actors\",\"maintainer.reviewed_merge_change_count\",\"maintainer.linked_merge_change_count\"],\"values\":[")
             while i < rows.count |i: usize = 0, rows, out|:
                 row: RhIntrinsicRow = rows[i]
                 if i > 0:
@@ -173,6 +206,16 @@ module IntrinsicsBuild:
                 out.push(44)
                 if (row.mask & 4) != 0:
                     Base::rh_push_decimal_i64(out, row.review_actors)
+                else:
+                    Base::rh_push_text(out, "null")
+                out.push(44)
+                if (row.mask & 8) != 0:
+                    Base::rh_push_decimal_i64(out, row.reviewed_merge_changes)
+                else:
+                    Base::rh_push_text(out, "null")
+                out.push(44)
+                if (row.mask & 16) != 0:
+                    Base::rh_push_decimal_i64(out, row.linked_merge_changes)
                 else:
                     Base::rh_push_text(out, "null")
                 Base::rh_push_text(out, "]}")

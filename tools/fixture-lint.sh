@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/fixture-lint.sh — verify the F001-F040 fixture catalog is honest.
+# tools/fixture-lint.sh — verify the F001-F041 fixture catalog is honest.
 # Every 'covered'/'partial' entry must point at a real token in the named
 # file; 'planned' entries must carry no evidence. A green test suite
 # therefore cannot imply fixture coverage that does not exist.
@@ -13,9 +13,9 @@ cat = json.load(open(root + "/fixtures/fixture-catalog.json"))
 assert cat["catalog_version"] == "rh-fixture-catalog/1"
 fx = cat["fixtures"]
 
-want = ["F%03d" % i for i in range(1, 41)]
+want = ["F%03d" % i for i in range(1, 42)]
 got = [f["id"] for f in fx]
-assert got == want, ("fixture ids must be exactly F001..F040 in order", got)
+assert got == want, ("fixture ids must be exactly F001..F041 in order", got)
 
 counts = {"covered": 0, "partial": 0, "planned": 0}
 for f in fx:

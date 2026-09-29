@@ -1082,13 +1082,13 @@ on the real execution path.
   key *and version* literal is mirrored and that exactly ten definitions are
   implemented; `test_oracles` exercises the v1/v2 distinction and the
   no-fallback rule. F038 moves from planned to covered.
-- F001-F040 fixture catalog and mechanical lint:
+- F001-F041 fixture catalog and mechanical lint:
   `fixtures/fixture-catalog.json` records every plan fixture with an honest
   `covered`/`partial`/`planned` status and a pointer to the test that
   proves it; `tools/fixture-lint.sh` fails when a `covered`/`partial` entry
   names a file or token that does not exist, so no green suite can imply
   coverage that is absent. `tests/test_fixtures.sh` runs the lint, enforces
-  all forty ordered ids, and asserts the security-critical fixtures are
+  all 41 ordered ids, and asserts the security-critical fixtures are
   covered while the unimplemented ones stay honestly `planned`. Current
   split: 28 covered, 4 partial, 8 planned. The release packet now embeds
   the same coverage summary.

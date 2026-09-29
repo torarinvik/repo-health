@@ -25,7 +25,9 @@ base = {"schema":"rh-roles-input/1", "observed_actions_window":window,
           {"actor_id":1,"actor_type":"bot","kind":"release","at":1700000015},
           {"actor_id":3,"actor_type":"bot","kind":"review","at":1700000020},
           {"actor_id":4,"actor_type":"human","kind":"review","at":1700000030},
-          {"actor_id":3,"actor_type":"human","kind":"review","at":1700000035}],
+          {"actor_id":3,"actor_type":"human","kind":"review","at":1700000035},
+          {"actor_id":5,"kind":"merge","at":1700000040,"change_id":"pr-10"},
+          {"actor_id":3,"kind":"review","at":1700000045,"change_id":"pr-10"}],
         "queries":[], "permission_queries":[]}
 (root / "roles-input.json").write_text(json.dumps(base))
 unsupported = {"schema":"rh-roles-input/1", "observed_actions_window":window,
@@ -59,16 +61,16 @@ import hashlib, json, sys
 source, output = sys.argv[1:]
 actual = json.load(open(output))
 assert actual["schema"] == "rh-intrinsics/2", actual
-assert actual["metrics"] == ["persistence.persistent_12m", "maintainer.observed_release_actors", "maintainer.observed_review_actors"], actual
+assert actual["metrics"] == ["persistence.persistent_12m", "maintainer.observed_release_actors", "maintainer.observed_review_actors", "maintainer.reviewed_merge_change_count", "maintainer.linked_merge_change_count"], actual
 assert actual["values"] == [
-    {"id": 1, "mask": 7, "observations": [1, 2, 2]},
-    {"id": 2, "mask": 1, "observations": [1, None, None]},
+    {"id": 1, "mask": 31, "observations": [1, 2, 2, 1, 1]},
+    {"id": 2, "mask": 1, "observations": [1, None, None, None, None]},
 ], actual
 report = json.load(open(output + ".transformations.json"))
 assert report["adapter"] == "independent-intrinsics-assembly", report
 assert report["source_input_sha256"] == hashlib.sha256(open(source, "rb").read()).hexdigest(), report
 assert report["normalized_output_sha256"] == hashlib.sha256(open(output, "rb").read()).hexdigest(), report
-assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/independent-intrinsics-assembly/1").hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/independent-intrinsics-assembly/2").hexdigest(), report
 roles = json.load(open(source))["dependents"][0]["roles"]
 assert roles["action_events_by_actor_type"]["release"]["human"] + roles["action_events_by_actor_type"]["release"]["bot"] + roles["action_events_by_actor_type"]["release"]["unknown"] == 3, roles
 print("[intrinsics-build] independent source reports yield exact values and explicit missing coverage")
@@ -87,18 +89,24 @@ assert {key: value["observed"] for key, value in coverage.items()} == {
     "persistence.persistent_12m": 2,
     "maintainer.observed_release_actors": 1,
     "maintainer.observed_review_actors": 1,
+    "maintainer.reviewed_merge_change_count": 1,
+    "maintainer.linked_merge_change_count": 1,
 }, coverage
 assert coverage["persistence.persistent_12m"]["distribution"] == [1, 1], coverage
 assert coverage["maintainer.observed_release_actors"]["distribution"] == [2], coverage
 assert coverage["maintainer.observed_review_actors"]["distribution"] == [2], coverage
+assert coverage["maintainer.reviewed_merge_change_count"]["distribution"] == [1], coverage
+assert coverage["maintainer.linked_merge_change_count"]["distribution"] == [1], coverage
 print("[intrinsics-build] downstream reports metric-specific denominators and distributions")
 PY
 
-python3 - "$T/source-set.json" "$T/duplicate.json" "$T/overflow.json" "$T/duplicate-key.json" "$T/window-mismatch.json" <<'PY'
+python3 - "$T/source-set.json" "$T/duplicate.json" "$T/overflow.json" "$T/duplicate-key.json" "$T/window-mismatch.json" "$T/bad-review-count.json" "$T/missing-review-denominator.json" <<'PY'
 import json, sys
 source = json.load(open(sys.argv[1]))
 duplicate = json.loads(json.dumps(source))
 overflow = json.loads(json.dumps(source))
+bad_review_count = json.loads(json.dumps(source))
+missing_review_denominator = json.loads(json.dumps(source))
 duplicate["dependents"].append(duplicate["dependents"][0])
 json.dump(duplicate, open(sys.argv[2], "w"), separators=(",", ":"))
 next(metric for metric in overflow["dependents"][0]["roles"]["metrics"]
@@ -110,13 +118,19 @@ open(sys.argv[4], "w").write(text)
 mismatch = json.loads(json.dumps(source))
 mismatch["dependents"][0]["roles"]["observed_actions_window"]["end"] += 1
 json.dump(mismatch, open(sys.argv[5], "w"), separators=(",", ":"))
+bad_review_count["dependents"][0]["roles"]["change_review"]["numerator"] = 2
+json.dump(bad_review_count, open(sys.argv[6], "w"), separators=(",", ":"))
+del missing_review_denominator["dependents"][0]["roles"]["change_review"]["denominator"]
+json.dump(missing_review_denominator, open(sys.argv[7], "w"), separators=(",", ":"))
 PY
 set +e
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/duplicate.json" --out "$T/invalid-duplicate.json" >/dev/null 2>&1; duplicate_rc=$?
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/overflow.json" --out "$T/invalid-overflow.json" >/dev/null 2>&1; overflow_rc=$?
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/duplicate-key.json" --out "$T/invalid-key.json" >/dev/null 2>&1; duplicate_key_rc=$?
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/window-mismatch.json" --out "$T/invalid-window.json" >/dev/null 2>&1; window_rc=$?
+"$ROOT/build/rh_cli" intrinsics-build --input "$T/bad-review-count.json" --out "$T/invalid-review-count.json" >/dev/null 2>&1; review_count_rc=$?
+"$ROOT/build/rh_cli" intrinsics-build --input "$T/missing-review-denominator.json" --out "$T/invalid-review-denominator.json" >/dev/null 2>&1; review_denominator_rc=$?
 set -e
-[[ "$duplicate_rc" -eq 4 && "$overflow_rc" -eq 4 && "$duplicate_key_rc" -eq 4 && "$window_rc" -eq 4 ]] || fail "malformed source sets must fail closed"
+[[ "$duplicate_rc" -eq 4 && "$overflow_rc" -eq 4 && "$duplicate_key_rc" -eq 4 && "$window_rc" -eq 4 && "$review_count_rc" -eq 4 && "$review_denominator_rc" -eq 4 ]] || fail "malformed source sets must fail closed"
 echo "[intrinsics-build] duplicate dependents/keys, mismatched windows, and out-of-range metric values fail closed"
 echo "test_intrinsics_build_cli OK"

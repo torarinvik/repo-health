@@ -57,7 +57,7 @@ sources = [{
     "retention_days": s["retention_days"],
 } for s in sorted(reg["sources"], key=lambda s: s["id"])]
 
-# --- fixture coverage from the F001-F040 catalog ------------------------
+# --- fixture coverage from the F001-F041 catalog ------------------------
 fixtures = json.loads(read(os.path.join(root, "fixtures", "fixture-catalog.json")))
 fix_counts = {"covered": 0, "partial": 0, "planned": 0}
 planned_ids = []
@@ -97,7 +97,7 @@ packet = {
         "partial": fix_counts["partial"],
         "planned": fix_counts["planned"],
         "planned_ids": planned_ids,
-        "note": "F001-F040; linted by tools/fixture-lint.sh",
+        "note": "F001-F041; linted by tools/fixture-lint.sh",
     },
     "verification": {
         "local_suite": "tools/check.sh",
@@ -125,7 +125,7 @@ packet = {
         "no independent threat-model review or opt-in pilot yet (M07-01, M07 beta)",
         "metric catalog is %d of a 360 target; breadth follows correctness (M09)" % len(metrics),
         "forge normalizers span GitHub, GitLab, Gitea, Forgejo and Bitbucket Cloud (captured payloads plus guarded --url transport with retained source/status/error evidence; no provider-specific auth or pagination); review workflows span mbox/patch series and Gerrit changes (fixtures, no live Gerrit); native VCS: Mercurial, Subversion and Fossil have bounded --repo collectors with retained source/stderr evidence (the local gate uses controlled shims because the tools are absent); non-PR workflow is subject-level patch-series grouping with trailer roles; release-only sources report releases/artifacts with guarded --url capture and no history; Python/PEP 440 version semantics and a bounded PEP 621 project-dependency subset are implemented; dependency parsers span Cargo, npm, PyPI, Go, RubyGems, Composer, NuGet packages.config and Maven pom.xml (declared-requirement subsets); registry enrichment includes a bounded PyPI project JSON adapter plus generic guarded URL capture; CycloneDX and SPDX 2.3 inventory inputs support guarded --url capture; restricted identity and role publications emit project aggregates without raw actor identifiers; bounded Debian and Homebrew distribution metadata plus archive metadata record declared versions, relations, identifiers, links, digests and capabilities without resolving dependencies or extracting bytes; provider-hosted auth, more distribution ecosystems, archive expansion and further inventory formats remain outside this packet (M08)",
-        "fixture coverage is %d covered / %d partial / %d planned of F001-F040 (all covered when the suite is green)"
+        "fixture coverage is %d covered / %d partial / %d planned of F001-F041 (all covered when the suite is green)"
         % (fix_counts["covered"], fix_counts["partial"], fix_counts["planned"]),
     ],
     "rights": "see ops/source-review-register.json; revalidate per connector before enabling",
@@ -143,7 +143,7 @@ md.append("## Catalog\n")
 md.append("- implemented metrics: **%d** (target 360; %d not yet defined)"
           % (len(metrics), len(missing)))
 md.append("- metric keys: " + ", ".join("`%s@%s`" % (m["key"], m["version"]) for m in metrics) + "\n")
-md.append("## Fixture coverage (F001-F040)\n")
+md.append("## Fixture coverage (F001-F041)\n")
 md.append("- covered: **%d**, partial: %d, planned: %d"
           % (fix_counts["covered"], fix_counts["partial"], fix_counts["planned"]))
 md.append("- planned ids: " + (", ".join(planned_ids) or "none") + "\n")
