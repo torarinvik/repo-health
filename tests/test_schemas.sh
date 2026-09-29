@@ -172,6 +172,23 @@ fi
 restore_lineage_result
 trap - EXIT
 echo "[schemas] result count observation payload type check OK"
+cp "$lineage_result_backup" "$lineage_result"
+trap restore_lineage_result EXIT
+python3 - "$lineage_result" <<'PY'
+import json, sys
+path = sys.argv[1]
+document = json.load(open(path))
+document["future_field"] = "must-not-disappear"
+json.dump(document, open(path, "w"), separators=(",", ":"))
+PY
+if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+  restore_lineage_result
+  trap - EXIT
+  fail "result schema accepted an unknown root field"
+fi
+restore_lineage_result
+trap - EXIT
+echo "[schemas] lineage result root rejects unknown fields"
 for lineage_fixture in "$lineage_input" "$lineage_result"; do
   ratio_backup="$tmp/lineage-ratio.json"
   cp "$lineage_fixture" "$ratio_backup"
