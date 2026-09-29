@@ -31,7 +31,8 @@ tr = json.load(open(sys.argv[3]))
 assert tr["schema"] == "rh-adapter-transformation-report/1" and tr["adapter"] == "declared-role-ledger", tr
 assert tr["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), tr
 assert tr["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), tr
-assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/declared-role-ledger/1").hexdigest(), tr
+assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/declared-role-ledger/2").hexdigest(), tr
+assert any("change_id" in row["source"] for row in tr["fields"]), tr
 assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 assert d["source_tally"] == {"provider": 1, "file": 2, "operator": 1}, d["source_tally"]
 assert d["role_tally"] == {"owner": 1, "maintainer": 0, "triager": 1, "member": 1, "unknown": 1}, d["role_tally"]
@@ -177,6 +178,19 @@ m = {row["key"]: row for row in d["metrics"]}
 assert m["maintainer.observed_release_actors"]["value"] == 1, m
 assert m["maintainer.observed_review_actors"]["value"] == 1, m
 PY
+cat > "$T/change-links.json" <<'JSON'
+{"schema":"rh-roles-input/1","declarations":[],"observed_actions":[{"kind":"merge","at":10,"change_id":"pr-1"},{"kind":"merge","at":11,"change_id":"pr-1"},{"kind":"merge","at":12,"change_id":"pr-2"},{"kind":"merge","at":13},{"kind":"review","at":14,"change_id":"pr-1"},{"kind":"review","at":15,"change_id":"pr-1"},{"kind":"review","at":16,"change_id":"pr-3"}]}
+JSON
+"$ROOT/build/rh_cli" roles --input "$T/change-links.json" --out "$T/change-links-out.json" >/dev/null || fail "linked change review share"
+python3 - "$T/change-links-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["change_review"] == {"status": "observed", "numerator": 1, "denominator": 2, "basis": "unique-linked-merge-change-identifiers", "excluded_unlinked_merge_actions": 1}, d
+PY
+printf '{"schema":"rh-roles-input/1","declarations":[],"observed_actions":[{"kind":"merge","at":1,"change_id":""}]}' > "$T/empty-change-id.json"
+if "$ROOT/build/rh_cli" roles --input "$T/empty-change-id.json" --out "$T/empty-change-id-out.json" >/dev/null 2>&1; then fail "empty change identifier accepted"; fi
+printf '{"schema":"rh-roles-input/1","declarations":[],"observed_actions":[{"kind":"release","at":1,"change_id":"release-1"}]}' > "$T/wrong-change-kind.json"
+if "$ROOT/build/rh_cli" roles --input "$T/wrong-change-kind.json" --out "$T/wrong-change-kind-out.json" >/dev/null 2>&1; then fail "change identifier on an unrelated action accepted"; fi
 printf '{"schema":"rh-roles-input/1","observed_actions_window":{"start":200,"end":100},"declarations":[]}' > "$T/bwindow.json"
 if "$ROOT/build/rh_cli" roles --input "$T/bwindow.json" --out "$T/bwindow-out.json" >/dev/null 2>&1; then fail "invalid action window accepted"; fi
 

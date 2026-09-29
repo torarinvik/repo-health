@@ -212,6 +212,12 @@ module RolesReport:
                     return -1 if at_action < 0 or not rh_rr_str(nodes, texts, ac, "kind", &kind_s, &kind_e)
                     kind_action: u8 = rh_rr_action_kind(texts, kind_s, kind_e)
                     return -1 if kind_action == 0
+                    change_id_start: mutable i64 = 0
+                    change_id_end: mutable i64 = 0
+                    change_id_idx: i64 = Json::rh_json_obj_get(nodes, texts, ac, "change_id")
+                    if change_id_idx >= 0:
+                        return -1 if not Json::rh_json_str_span(nodes, change_id_idx, &change_id_start, &change_id_end) or change_id_start == change_id_end
+                        return -1 if kind_action != Roles::RH_ACTION_MERGE and kind_action != Roles::RH_ACTION_REVIEW
                     if has_action_window and (at_action < action_window_start or at_action >= action_window_end):
                         ac <- nodes[ac.usize()].next_sibling
                         continue
@@ -223,7 +229,7 @@ module RolesReport:
                         return -1 if not Json::rh_json_str_span(nodes, actor_kind_idx, &actor_kind_s, &actor_kind_e)
                         actor_kind <- rh_rr_actor_kind(texts, actor_kind_s, actor_kind_e)
                         return -1 if actor_kind == 255
-                    actions.push(Roles::RhObservedAction{actor_id: actor_action, identity_actor_id: identity_actor_action, kind: kind_action, actor_kind: actor_kind, observed_at: at_action})
+                    actions.push(Roles::RhObservedAction{actor_id: actor_action, identity_actor_id: identity_actor_action, kind: kind_action, actor_kind: actor_kind, observed_at: at_action, change_id_start: change_id_start, change_id_end: change_id_end})
                     ac <- nodes[ac.usize()].next_sibling
             return -1 if identity_override_count > 0 and not has_identity_revision
             persistent_actors: mutable darray[i64] = []
@@ -368,6 +374,10 @@ module RolesReport:
             observed_release_actors: i64 = Roles::rh_observed_actor_count(actions, Roles::RH_ACTION_RELEASE)
             observed_merge_actors: i64 = Roles::rh_observed_actor_count(actions, Roles::RH_ACTION_MERGE)
             observed_review_actors: i64 = Roles::rh_observed_actor_count(actions, Roles::RH_ACTION_REVIEW)
+            linked_reviewed_changes: mutable i64 = 0
+            linked_merged_changes: mutable i64 = 0
+            unlinked_merge_actions: mutable i64 = 0
+            return -1 if has_actions and not Roles::rh_observed_linked_merge_review_counts(actions, texts, &linked_reviewed_changes, &linked_merged_changes, &unlinked_merge_actions)
             release_action_actor_types: mutable darray[i64] = [0, 0, 0, 0]
             merge_action_actor_types: mutable darray[i64] = [0, 0, 0, 0]
             review_action_actor_types: mutable darray[i64] = [0, 0, 0, 0]
@@ -608,5 +618,22 @@ module RolesReport:
                         Base::rh_push_text(out, "false")
                     Base::rh_push_text(out, "}")
                     pc <- nodes[pc.usize()].next_sibling
-            Base::rh_push_text(out, "],\"note\":\"declared roles are time-scoped evidence, separate from observed actions; an unrecognized role string is unknown, never guessed; a revoked or not-yet-effective declaration is not active at that time\"}")
+            Base::rh_push_text(out, "],\"change_review\":")
+            if not has_actions:
+                Base::rh_push_text(out, "{\"status\":\"unknown\",\"numerator\":null,\"denominator\":null,\"basis\":\"unique-linked-merge-change-identifiers\",\"excluded_unlinked_merge_actions\":null,\"reason\":\"observed-actions-not-supplied\"}")
+            elif linked_merged_changes > 0:
+                Base::rh_push_text(out, "{\"status\":\"observed\",\"numerator\":")
+                Base::rh_push_decimal_i64(out, linked_reviewed_changes)
+                Base::rh_push_text(out, ",\"denominator\":")
+                Base::rh_push_decimal_i64(out, linked_merged_changes)
+                Base::rh_push_text(out, ",\"basis\":\"unique-linked-merge-change-identifiers\",\"excluded_unlinked_merge_actions\":")
+                Base::rh_push_decimal_i64(out, unlinked_merge_actions)
+                Base::rh_push_text(out, "}")
+            elif unlinked_merge_actions > 0:
+                Base::rh_push_text(out, "{\"status\":\"unknown\",\"numerator\":null,\"denominator\":null,\"basis\":\"unique-linked-merge-change-identifiers\",\"excluded_unlinked_merge_actions\":")
+                Base::rh_push_decimal_i64(out, unlinked_merge_actions)
+                Base::rh_push_text(out, ",\"reason\":\"merge-change-identifiers-not-supplied\"}")
+            else:
+                Base::rh_push_text(out, "{\"status\":\"not_applicable\",\"numerator\":null,\"denominator\":0,\"basis\":\"unique-linked-merge-change-identifiers\",\"excluded_unlinked_merge_actions\":0}")
+            Base::rh_push_text(out, ",\"note\":\"declared roles are time-scoped evidence, separate from observed actions; an unrecognized role string is unknown, never guessed; a revoked or not-yet-effective declaration is not active at that time\"}")
             0

@@ -46,6 +46,14 @@ module Roles:
             kind: u8
             actor_kind: u8
             observed_at: i64
+            change_id_start: i64
+            change_id_end: i64
+
+        struct RhLinkedChange:
+            mutable id_start: i64
+            mutable id_end: i64
+            mutable has_merge: bool
+            mutable has_review: bool
 
         const RH_ACTION_RELEASE: u8 = 1
         const RH_ACTION_MERGE: u8 = 2
@@ -203,6 +211,55 @@ module Roles:
                     denominator_out[0] <- denominator_out[0] + 1
                     numerator_out[0] <- numerator_out[0] + 1 if action.actor_id == actor
                 i <- i + 1
+
+        def rh_observed_linked_merge_review_counts(actions: darray[RhObservedAction]&, texts: darray[u8]&, reviewed_out: mutable i64&, linked_merges_out: mutable i64&, unlinked_merges_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            reviewed_out[0] <- 0
+            linked_merges_out[0] <- 0
+            unlinked_merges_out[0] <- 0
+            capacity: usize = actions.count * 2 + 1
+            return false if capacity < actions.count
+            slots: mutable darray[i64] = []
+            while i < capacity |i: usize = 0, slots, capacity|:
+                slots.push(-1)
+                i <- i + 1
+            changes: mutable darray[RhLinkedChange] = []
+            while i < actions.count |i: usize = 0, actions, texts, slots, changes, capacity, unlinked_merges_out|:
+                action: RhObservedAction = actions[i]
+                if action.kind == RH_ACTION_MERGE:
+                    if action.change_id_start == action.change_id_end:
+                        unlinked_merges_out[0] <- unlinked_merges_out[0] + 1
+                    else:
+                        hash: usize = hash_sview(string_view_slice(bytes_view(texts), action.change_id_start.usize(), action.change_id_end.usize())).usize() % capacity
+                        slot: mutable usize = hash
+                        while slots[slot] >= 0 |slot, slots, changes, texts, action|:
+                            change_index: usize = slots[slot].usize()
+                            if Base::rh_bytes_equal_span(texts, changes[change_index].id_start, changes[change_index].id_end, texts, action.change_id_start, action.change_id_end):
+                                changes[change_index].has_merge <- true
+                                break
+                            slot <- (slot + 1) % capacity
+                        if slots[slot] < 0:
+                            changes.push(RhLinkedChange{id_start: action.change_id_start, id_end: action.change_id_end, has_merge: true, has_review: false})
+                            slots[slot] <- changes.count.i64() - 1
+                elif action.kind == RH_ACTION_REVIEW and action.change_id_start != action.change_id_end:
+                    hash: usize = hash_sview(string_view_slice(bytes_view(texts), action.change_id_start.usize(), action.change_id_end.usize())).usize() % capacity
+                    slot: mutable usize = hash
+                    while slots[slot] >= 0 |slot, slots, changes, texts, action|:
+                        change_index: usize = slots[slot].usize()
+                        if Base::rh_bytes_equal_span(texts, changes[change_index].id_start, changes[change_index].id_end, texts, action.change_id_start, action.change_id_end):
+                            changes[change_index].has_review <- true
+                            break
+                        slot <- (slot + 1) % capacity
+                    if slots[slot] < 0:
+                        changes.push(RhLinkedChange{id_start: action.change_id_start, id_end: action.change_id_end, has_merge: false, has_review: true})
+                        slots[slot] <- changes.count.i64() - 1
+                i <- i + 1
+            while i < changes.count |i: usize = 0, changes, reviewed_out, linked_merges_out|:
+                change: RhLinkedChange = changes[i]
+                if change.has_merge:
+                    linked_merges_out[0] <- linked_merges_out[0] + 1
+                    reviewed_out[0] <- reviewed_out[0] + 1 if change.has_review
+                i <- i + 1
+            true
 
         def rh_observed_concentration_80(actions: darray[RhObservedAction]&, kind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
             actors: mutable darray[i64] = []
