@@ -63,6 +63,13 @@ for output, schema in ((continuity, "rh-continuity/1"), (metrics, "rh-continuity
 print("[continuity] transformation reports bind retained evidence, configuration, and outputs")
 PY
 grep -q '"schema":"rh-continuity/1"' "$CJ" || fail "missing schema"
+python3 - "$CM" "$T/full/bundle.manifest" <<'PY'
+import json, pathlib, sys
+metrics = json.load(open(sys.argv[1]))
+manifest = pathlib.Path(sys.argv[2]).read_text()
+cutoff = int(next(line.split(": ", 1)[1] for line in manifest.splitlines() if line.startswith("evidence-cutoff: ")))
+assert metrics["observation_window"] == {"start": 0, "end": cutoff + 1}, metrics
+PY
 grep -q '"key":"persistence.retained_90d"' "$CM" || fail "missing metric key"
 grep -q '"status":"observed"' "$CM" || fail "expected observed retention"
 grep -q '"num":1' "$CM" || fail "expected retained numerator 1"

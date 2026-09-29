@@ -13,12 +13,26 @@ python3 "$ROOT/tools/generate_synthetic_fixtures.py" --out "$T/history" --histor
 "$ROOT/build/rh_cli" continuity --bundle "$T/full/bundle.manifest" --out "$T/full-continuity" >/dev/null || fail "full continuity"
 "$ROOT/build/rh_cli" continuity --bundle "$T/windowed/bundle.manifest" --out "$T/windowed-continuity" >/dev/null || fail "windowed continuity"
 
-cat > "$T/roles-input.json" <<'JSON'
-{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":true,"as_of":1700001000,"declarations":[],"observed_actions":[{"actor_id":1,"actor_type":"human","kind":"release","at":1700000000},{"actor_id":2,"actor_type":"unknown","kind":"release","at":1700000010},{"actor_id":1,"actor_type":"bot","kind":"release","at":1700000015},{"actor_id":3,"actor_type":"bot","kind":"review","at":1700000020},{"actor_id":4,"actor_type":"human","kind":"review","at":1700000030},{"actor_id":3,"actor_type":"human","kind":"review","at":1700000035}],"queries":[],"permission_queries":[]}
-JSON
-cat > "$T/roles-unsupported-input.json" <<'JSON'
-{"schema":"rh-roles-input/1","authorization":{"state":"not_requested"},"declarations":[],"queries":[],"permission_queries":[]}
-JSON
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+window = json.load(open(root / "full-continuity/continuity-metrics.json"))["observation_window"]
+base = {"schema":"rh-roles-input/1", "observed_actions_window":window,
+        "authorization":{"state":"authorized"}, "permission_inventory_complete":True,
+        "as_of":1700001000, "declarations":[], "observed_actions":[
+          {"actor_id":1,"actor_type":"human","kind":"release","at":1700000000},
+          {"actor_id":2,"actor_type":"unknown","kind":"release","at":1700000010},
+          {"actor_id":1,"actor_type":"bot","kind":"release","at":1700000015},
+          {"actor_id":3,"actor_type":"bot","kind":"review","at":1700000020},
+          {"actor_id":4,"actor_type":"human","kind":"review","at":1700000030},
+          {"actor_id":3,"actor_type":"human","kind":"review","at":1700000035}],
+        "queries":[], "permission_queries":[]}
+(root / "roles-input.json").write_text(json.dumps(base))
+unsupported = {"schema":"rh-roles-input/1", "observed_actions_window":window,
+               "authorization":{"state":"not_requested"}, "declarations":[],
+               "queries":[], "permission_queries":[]}
+(root / "roles-unsupported-input.json").write_text(json.dumps(unsupported))
+PY
 "$ROOT/build/rh_cli" roles --input "$T/roles-input.json" --out "$T/roles.json" >/dev/null || fail "roles source"
 "$ROOT/build/rh_cli" roles --input "$T/roles-unsupported-input.json" --out "$T/roles-unsupported.json" >/dev/null || fail "unsupported roles source"
 
@@ -32,7 +46,7 @@ value = {
          "continuity_metrics": json.loads((root / "full-continuity/continuity-metrics.json").read_bytes()),
          "roles": json.loads((root / "roles.json").read_bytes())},
         {"id": 2,
-         "continuity_metrics": json.loads((root / "windowed-continuity/continuity-metrics.json").read_bytes()),
+         "continuity_metrics": json.loads((root / "full-continuity/continuity-metrics.json").read_bytes()),
          "roles": json.loads((root / "roles-unsupported.json").read_bytes())},
     ],
 }
@@ -48,7 +62,7 @@ assert actual["schema"] == "rh-intrinsics/2", actual
 assert actual["metrics"] == ["persistence.persistent_12m", "maintainer.observed_release_actors", "maintainer.observed_review_actors"], actual
 assert actual["values"] == [
     {"id": 1, "mask": 7, "observations": [1, 2, 2]},
-    {"id": 2, "mask": 0, "observations": [None, None, None]},
+    {"id": 2, "mask": 1, "observations": [1, None, None]},
 ], actual
 report = json.load(open(output + ".transformations.json"))
 assert report["adapter"] == "independent-intrinsics-assembly", report
@@ -70,17 +84,17 @@ report = json.load(open(sys.argv[1]))
 assert report["intrinsics"]["dependent_total"] == 2, report["intrinsics"]
 coverage = {item["key"]: item for item in report["intrinsics"]["covered"]}
 assert {key: value["observed"] for key, value in coverage.items()} == {
-    "persistence.persistent_12m": 1,
+    "persistence.persistent_12m": 2,
     "maintainer.observed_release_actors": 1,
     "maintainer.observed_review_actors": 1,
 }, coverage
-assert coverage["persistence.persistent_12m"]["distribution"] == [1], coverage
+assert coverage["persistence.persistent_12m"]["distribution"] == [1, 1], coverage
 assert coverage["maintainer.observed_release_actors"]["distribution"] == [2], coverage
 assert coverage["maintainer.observed_review_actors"]["distribution"] == [2], coverage
 print("[intrinsics-build] downstream reports metric-specific denominators and distributions")
 PY
 
-python3 - "$T/source-set.json" "$T/duplicate.json" "$T/overflow.json" "$T/duplicate-key.json" <<'PY'
+python3 - "$T/source-set.json" "$T/duplicate.json" "$T/overflow.json" "$T/duplicate-key.json" "$T/window-mismatch.json" <<'PY'
 import json, sys
 source = json.load(open(sys.argv[1]))
 duplicate = json.loads(json.dumps(source))
@@ -93,12 +107,16 @@ json.dump(overflow, open(sys.argv[3], "w"), separators=(",", ":"))
 text = open(sys.argv[1]).read()
 text = text.replace('"schema":"rh-roles-result/1"', '"schema":"rh-roles-result/1","schema":"rh-roles-result/1"', 1)
 open(sys.argv[4], "w").write(text)
+mismatch = json.loads(json.dumps(source))
+mismatch["dependents"][0]["roles"]["observed_actions_window"]["end"] += 1
+json.dump(mismatch, open(sys.argv[5], "w"), separators=(",", ":"))
 PY
 set +e
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/duplicate.json" --out "$T/invalid-duplicate.json" >/dev/null 2>&1; duplicate_rc=$?
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/overflow.json" --out "$T/invalid-overflow.json" >/dev/null 2>&1; overflow_rc=$?
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/duplicate-key.json" --out "$T/invalid-key.json" >/dev/null 2>&1; duplicate_key_rc=$?
+"$ROOT/build/rh_cli" intrinsics-build --input "$T/window-mismatch.json" --out "$T/invalid-window.json" >/dev/null 2>&1; window_rc=$?
 set -e
-[[ "$duplicate_rc" -eq 4 && "$overflow_rc" -eq 4 && "$duplicate_key_rc" -eq 4 ]] || fail "malformed source sets must fail closed"
-echo "[intrinsics-build] duplicate dependents/keys and out-of-range metric values fail closed"
+[[ "$duplicate_rc" -eq 4 && "$overflow_rc" -eq 4 && "$duplicate_key_rc" -eq 4 && "$window_rc" -eq 4 ]] || fail "malformed source sets must fail closed"
+echo "[intrinsics-build] duplicate dependents/keys, mismatched windows, and out-of-range metric values fail closed"
 echo "test_intrinsics_build_cli OK"
