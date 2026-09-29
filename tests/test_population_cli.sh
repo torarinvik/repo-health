@@ -45,9 +45,41 @@ assert report["adapter"] == "focal-library-population", report
 assert "context" in report["fields"][0]["target"], report
 assert report["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), report
 assert report["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), report
-assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/3;dependents=1000;unresolved=1000;metrics=63").hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/4;dependents=1000;unresolved=1000;metrics=63;ratio-definitions=pooled-count-pairs").hexdigest(), report
 assert all(field["state"] in {"preserved", "transformed", "inferred", "discarded", "unsupported", "unknown"} for field in report["fields"]), report
 print("[population] bounded selection + per-metric coverage + witnesses OK")
+PY
+
+echo "[population] aggregate linked merge review as an exact pooled ratio"
+python3 - "$T/in.json" "$T/ratio.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["metric_definitions"] += [
+    {"key":"maintainer.reviewed_merge_change_count","version":"1.0.0"},
+    {"key":"maintainer.linked_merge_change_count","version":"1.0.0"},
+]
+d["ratio_definitions"] = [{"key":"maintainer.linked_merge_review_coverage","version":"1.0.0",
+    "numerator_key":"maintainer.reviewed_merge_change_count","numerator_version":"1.0.0",
+    "denominator_key":"maintainer.linked_merge_change_count","denominator_version":"1.0.0"}]
+for dependent, pair in zip(d["dependents"], [(1, 1), (None, None), (2, 3)]):
+    status = "observed" if pair[0] is not None else "unknown"
+    dependent["metrics"] += [
+        {"key":"maintainer.reviewed_merge_change_count","version":"1.0.0","status":status,"value":pair[0],"policy":"unknown"},
+        {"key":"maintainer.linked_merge_change_count","version":"1.0.0","status":status,"value":pair[1],"policy":"unknown"},
+    ]
+json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" population --input "$T/ratio.json" --out "$T/ratio-out.json" >/dev/null || fail "linked review ratio population"
+python3 - "$T/ratio-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+ratio, = d["ratio_metrics"]
+assert ratio["key"] == "maintainer.linked_merge_review_coverage", ratio
+assert ratio["status"] == "partial", ratio
+assert ratio["numerator_count"] == 3 and ratio["denominator_count"] == 4 and ratio["ratio"] == {"num":3,"den":4}, ratio
+assert ratio["coverage"] == {"observed_dependents":2,"not_applicable_dependents":0,"unknown_dependents":1,"selected_dependents":3}, ratio
+assert ratio["basis"] == "pooled-configured-count-pairs-over-selected-dependents", ratio
+print("[population] pooled exact ratio retains linked-change denominator and selected-population coverage")
 PY
 
 echo "[population] join reviewed project identities from the selected graph population"
@@ -90,7 +122,7 @@ framed = (b"rh-population-identity-input/1\npopulation:" + str(len(population_ra
 assert sidecar["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), sidecar
 assert sidecar["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), sidecar
 assert sidecar["output_schema"] == "rh-population-result/2", sidecar
-assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/4;dependents=1000;unresolved=1000;metrics=63;identity-join=true").hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/4;dependents=1000;unresolved=1000;metrics=63;ratio-definitions=pooled-count-pairs;identity-join=true").hexdigest(), sidecar
 print("[population] canonical identity, unknown coverage, and input binding OK")
 PY
 python3 - "$T/identity-in.json" "$T/missing-node-key.json" "$T/unselected-node-key.json" "$T/duplicate-node-key.json" "$T/bad-downstream.json" <<'PY'

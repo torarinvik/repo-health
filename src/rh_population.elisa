@@ -33,6 +33,14 @@ module Population:
             version_s: mutable i64
             version_e: mutable i64
 
+        struct RhPopulationRatio:
+            key_s: mutable i64
+            key_e: mutable i64
+            version_s: mutable i64
+            version_e: mutable i64
+            numerator_index: mutable i64
+            denominator_index: mutable i64
+
         struct RhPopulationCell:
             metric_index: mutable i64
             status: mutable u8
@@ -378,6 +386,35 @@ module Population:
                 metrics.push(RhPopulationMetric{key_s: ks, key_e: ke, version_s: vs, version_e: ve})
                 definition <- nodes[definition.usize()].next_sibling
             return -1 if metrics.count == 0
+            ratios: mutable darray[RhPopulationRatio] = []
+            ratio_defs_idx: i64 = Population::rh_population_get(nodes, texts, root, "ratio_definitions")
+            if ratio_defs_idx >= 0:
+                return -1 if nodes[ratio_defs_idx.usize()].kind != Json::RH_JSON_ARR or nodes[ratio_defs_idx.usize()].child_count > RH_POP_MAX_METRICS
+                while ratio_def >= 0 |ratio_def: i64 = nodes[ratio_defs_idx.usize()].first_child, nodes, texts, metrics, ratios|:
+                    return -1 if not Population::rh_population_unique_object_keys(nodes, texts, ratio_def)
+                    ratio_key_s: mutable i64 = 0
+                    ratio_key_e: mutable i64 = 0
+                    ratio_version_s: mutable i64 = 0
+                    ratio_version_e: mutable i64 = 0
+                    numerator_key_s: mutable i64 = 0
+                    numerator_key_e: mutable i64 = 0
+                    numerator_version_s: mutable i64 = 0
+                    numerator_version_e: mutable i64 = 0
+                    denominator_key_s: mutable i64 = 0
+                    denominator_key_e: mutable i64 = 0
+                    denominator_version_s: mutable i64 = 0
+                    denominator_version_e: mutable i64 = 0
+                    return -1 if not Population::rh_population_str(nodes, texts, ratio_def, "key", &ratio_key_s, &ratio_key_e) or not Population::rh_population_str(nodes, texts, ratio_def, "version", &ratio_version_s, &ratio_version_e) or not Population::rh_population_str(nodes, texts, ratio_def, "numerator_key", &numerator_key_s, &numerator_key_e) or not Population::rh_population_str(nodes, texts, ratio_def, "numerator_version", &numerator_version_s, &numerator_version_e) or not Population::rh_population_str(nodes, texts, ratio_def, "denominator_key", &denominator_key_s, &denominator_key_e) or not Population::rh_population_str(nodes, texts, ratio_def, "denominator_version", &denominator_version_s, &denominator_version_e)
+                    return -1 if ratio_key_s == ratio_key_e or ratio_version_s == ratio_version_e or numerator_key_s == numerator_key_e or numerator_version_s == numerator_version_e or denominator_key_s == denominator_key_e or denominator_version_s == denominator_version_e
+                    numerator_index: i64 = Population::rh_population_metric_index(metrics, texts, numerator_key_s, numerator_key_e, numerator_version_s, numerator_version_e)
+                    denominator_index: i64 = Population::rh_population_metric_index(metrics, texts, denominator_key_s, denominator_key_e, denominator_version_s, denominator_version_e)
+                    return -1 if numerator_index < 0 or denominator_index < 0 or numerator_index == denominator_index or Population::rh_population_metric_index(metrics, texts, ratio_key_s, ratio_key_e, ratio_version_s, ratio_version_e) >= 0
+                    while prior_ratio < ratios.count |prior_ratio: usize = 0, ratios, texts, ratio_key_s, ratio_key_e, ratio_version_s, ratio_version_e|:
+                        prior: RhPopulationRatio = ratios[prior_ratio]
+                        return -1 if Base::rh_bytes_equal_span(texts, prior.key_s, prior.key_e, texts, ratio_key_s, ratio_key_e) and Base::rh_bytes_equal_span(texts, prior.version_s, prior.version_e, texts, ratio_version_s, ratio_version_e)
+                        prior_ratio <- prior_ratio + 1
+                    ratios.push(RhPopulationRatio{key_s: ratio_key_s, key_e: ratio_key_e, version_s: ratio_version_s, version_e: ratio_version_e, numerator_index: numerator_index, denominator_index: denominator_index})
+                    ratio_def <- nodes[ratio_def.usize()].next_sibling
             dep_idx: i64 = Population::rh_population_get(nodes, texts, root, "dependents")
             return -1 if dep_idx < 0 or nodes[dep_idx.usize()].kind != Json::RH_JSON_ARR
             return -1 if nodes[dep_idx.usize()].child_count > RH_POP_MAX_DEPENDENTS
@@ -395,6 +432,11 @@ module Population:
             policy_pass: mutable darray[i64] = []
             policy_fail: mutable darray[i64] = []
             policy_unknown: mutable darray[i64] = []
+            ratio_numerator_sums: mutable darray[i64] = []
+            ratio_denominator_sums: mutable darray[i64] = []
+            ratio_observed_dependents: mutable darray[i64] = []
+            ratio_unknown_dependents: mutable darray[i64] = []
+            ratio_not_applicable_dependents: mutable darray[i64] = []
             identity_accepted: mutable i64 = 0
             canonical_family_count: mutable i64 = 0
             while i < metrics.count |i: usize = 0, metrics, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown|:
@@ -409,7 +451,14 @@ module Population:
                 policy_fail.push(0)
                 policy_unknown.push(0)
                 i <- i + 1
-            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, families_s, families_e, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, has_downstream, identity_accepted, identities, identity_texts, canonical_family_count|:
+            while i < ratios.count |i: usize = 0, ratios, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents|:
+                ratio_numerator_sums.push(0)
+                ratio_denominator_sums.push(0)
+                ratio_observed_dependents.push(0)
+                ratio_unknown_dependents.push(0)
+                ratio_not_applicable_dependents.push(0)
+                i <- i + 1
+            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, families_s, families_e, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, ratios, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, has_downstream, identity_accepted, identities, identity_texts, canonical_family_count|:
                 return -1 if not Population::rh_population_unique_object_keys(nodes, texts, dep)
                 ids: mutable i64 = 0
                 ide: mutable i64 = 0
@@ -519,6 +568,34 @@ module Population:
                         policy_unknown[mi.usize()] <- policy_unknown[mi.usize()] + 1
                     cell <- nodes[cell.usize()].next_sibling
                 return -1 if seen_metrics.count != metrics.count
+                while ratio_index < ratios.count |ratio_index: usize = 0, ratios, cells, cell_start, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents|:
+                    ratio: RhPopulationRatio = ratios[ratio_index]
+                    numerator_status: mutable u8 = 255
+                    denominator_status: mutable u8 = 255
+                    numerator_value: mutable i64 = 0
+                    denominator_value: mutable i64 = 0
+                    while ratio_cell < (cells.count.i64() - cell_start).usize() |ratio_cell: usize = 0, cells, cell_start, ratio, numerator_status, denominator_status, numerator_value, denominator_value|:
+                        cell_value: RhPopulationCell = cells[(cell_start + ratio_cell.i64()).usize()]
+                        if cell_value.metric_index == ratio.numerator_index:
+                            numerator_status <- cell_value.status
+                            numerator_value <- cell_value.value
+                        if cell_value.metric_index == ratio.denominator_index:
+                            denominator_status <- cell_value.status
+                            denominator_value <- cell_value.value
+                        ratio_cell <- ratio_cell + 1
+                    return -1 if numerator_status == 255 or denominator_status == 255
+                    if numerator_status == RH_POP_STATUS_OBSERVED and denominator_status == RH_POP_STATUS_OBSERVED:
+                        if denominator_value == 0:
+                            return -1 if numerator_value != 0
+                            ratio_not_applicable_dependents[ratio_index] <- ratio_not_applicable_dependents[ratio_index] + 1
+                        else:
+                            return -1 if numerator_value > denominator_value or ratio_numerator_sums[ratio_index] > 9223372036854775807 - numerator_value or ratio_denominator_sums[ratio_index] > 9223372036854775807 - denominator_value
+                            ratio_numerator_sums[ratio_index] <- ratio_numerator_sums[ratio_index] + numerator_value
+                            ratio_denominator_sums[ratio_index] <- ratio_denominator_sums[ratio_index] + denominator_value
+                            ratio_observed_dependents[ratio_index] <- ratio_observed_dependents[ratio_index] + 1
+                    else:
+                        ratio_unknown_dependents[ratio_index] <- ratio_unknown_dependents[ratio_index] + 1
+                    ratio_index <- ratio_index + 1
                 cells_added: i64 = cells.count.i64() - cell_start
                 dependents.push(RhPopulationDependent{id_s: ids, id_e: ide, family_s: fs, family_e: fe, package_s: ps, package_e: pe, version_s: vs, version_e: ve, relation_s: rs, relation_e: re, package_count: package_count, path_index: path_idx, cell_start: cell_start, cell_count: cells_added, graph_node_id: graph_node_id, identity_index: identity_index})
                 dep <- nodes[dep.usize()].next_sibling
@@ -691,5 +768,39 @@ module Population:
                 Base::rh_push_decimal_i64(out, policy_unknown[i])
                 Base::rh_push_text(out, "}}")
                 i <- i + 1
-            Base::rh_push_text(out, "],\"note\":\"selected dependent population counts projects once even when a repository publishes several packages; provider caps and unresolved mappings remain visible; intrinsic metrics are independent evidence; unknown values are not imputed as zero; path witnesses identify the qualifying package context\"}")
+            Base::rh_push_text(out, "],\"ratio_metrics\":[")
+            while i < ratios.count |i: usize = 0, ratios, texts, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, dependents, out|:
+                if i > 0:
+                    out.push(44)
+                ratio: RhPopulationRatio = ratios[i]
+                Base::rh_push_text(out, "{\"key\":")
+                Population::rh_population_emit_span(out, texts, ratio.key_s, ratio.key_e)
+                Base::rh_push_text(out, ",\"version\":")
+                Population::rh_population_emit_span(out, texts, ratio.version_s, ratio.version_e)
+                Base::rh_push_text(out, ",\"status\":\"")
+                Base::rh_push_text(out, "partial") if ratio_unknown_dependents[i] > 0 and ratio_denominator_sums[i] > 0
+                Base::rh_push_text(out, "observed") if ratio_unknown_dependents[i] == 0 and ratio_denominator_sums[i] > 0
+                Base::rh_push_text(out, "not_applicable") if ratio_denominator_sums[i] == 0 and ratio_unknown_dependents[i] == 0
+                Base::rh_push_text(out, "unknown") if ratio_unknown_dependents[i] > 0 and ratio_denominator_sums[i] == 0
+                Base::rh_push_text(out, "\",\"numerator_count\":")
+                Base::rh_push_decimal_i64(out, ratio_numerator_sums[i])
+                Base::rh_push_text(out, ",\"denominator_count\":")
+                Base::rh_push_decimal_i64(out, ratio_denominator_sums[i])
+                Base::rh_push_text(out, ",\"ratio\":{\"num\":") if ratio_denominator_sums[i] > 0
+                Base::rh_push_decimal_i64(out, ratio_numerator_sums[i]) if ratio_denominator_sums[i] > 0
+                Base::rh_push_text(out, ",\"den\":") if ratio_denominator_sums[i] > 0
+                Base::rh_push_decimal_i64(out, ratio_denominator_sums[i]) if ratio_denominator_sums[i] > 0
+                Base::rh_push_text(out, "}") if ratio_denominator_sums[i] > 0
+                Base::rh_push_text(out, "null") if ratio_denominator_sums[i] == 0
+                Base::rh_push_text(out, ",\"coverage\":{\"observed_dependents\":")
+                Base::rh_push_decimal_i64(out, ratio_observed_dependents[i])
+                Base::rh_push_text(out, ",\"not_applicable_dependents\":")
+                Base::rh_push_decimal_i64(out, ratio_not_applicable_dependents[i])
+                Base::rh_push_text(out, ",\"unknown_dependents\":")
+                Base::rh_push_decimal_i64(out, ratio_unknown_dependents[i])
+                Base::rh_push_text(out, ",\"selected_dependents\":")
+                Base::rh_push_decimal_i64(out, dependents.count.i64())
+                Base::rh_push_text(out, "},\"basis\":\"pooled-configured-count-pairs-over-selected-dependents\"}")
+                i <- i + 1
+            Base::rh_push_text(out, "],\"note\":\"selected dependent population counts projects once even when a repository publishes several packages; provider caps and unresolved mappings remain visible; intrinsic metrics are independent evidence; unknown values are not imputed as zero; path witnesses identify the qualifying package context; configured ratios pool exact count pairs only over observed selected dependents\"}")
             0
