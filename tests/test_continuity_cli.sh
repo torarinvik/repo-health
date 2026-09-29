@@ -197,8 +197,10 @@ python3 - "$T/win-cont/continuity-metrics.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 by = {m["key"]: m for m in d["metrics"]}
-for key in ("persistence.active_3_of_12_months", "persistence.active_6_of_12_months", "persistence.active_9_of_12_months", "persistence.persistent_event_share", "persistence.median_observed_tenure_days"):
+for key in ("persistence.persistent_event_share", "persistence.median_observed_tenure_days"):
     assert by[key]["status"] == "partial", (key, by[key])
+for key in ("persistence.active_3_of_12_months", "persistence.active_6_of_12_months", "persistence.active_9_of_12_months"):
+    assert by[key]["status"] == "unsupported" and by[key]["reason"] == "fewer-than-twelve-complete-months", (key, by[key])
 print("[continuity] persistence window states OK")
 PY
 
