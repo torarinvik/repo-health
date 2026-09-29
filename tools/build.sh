@@ -68,6 +68,7 @@ compile "$ROOT/src/test_package.elisa" test_package
 compile "$ROOT/src/test_continuity.elisa" test_continuity
 compile "$ROOT/src/test_continuity_scan.elisa" test_continuity_scan
 compile "$ROOT/src/test_m05.elisa" test_m05
+compile "$ROOT/src/test_project_map.elisa" test_project_map
 compile "$ROOT/src/test_m06.elisa" test_m06
 compile "$ROOT/src/test_m06b.elisa" test_m06b
 compile "$ROOT/src/test_m07.elisa" test_m07

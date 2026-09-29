@@ -104,6 +104,7 @@ include "./rh_proof.elisa"
 include "./rh_forecast.elisa"
 include "./rh_intervention.elisa"
 include "./rh_mapping.elisa"
+include "./rh_project_map.elisa"
 include "./rh_coverage.elisa"
 include "./rh_columnar.elisa"
 include "./rh_aggregates.elisa"
@@ -229,6 +230,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli forecast --input <file> --out <file>")
     rh_cli_err("       rh_cli intervention --input <file> --out <file>")
     rh_cli_err("       rh_cli mapping --input <file> --out <file>")
+    rh_cli_err("       rh_cli project-map --graph <rh-dep-graph/1> --input <rh-project-node-map-input/1> --out <file>")
     rh_cli_err("       rh_cli coverage --input <file> --out <file>")
     rh_cli_err("       rh_cli snapshot --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli aggregate --input <file> --out <file> [--state-store <dir>]")
@@ -3031,6 +3033,33 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 mmq <- mmq + 1
         return rh_cli_usage(2) if mi_idx < 0 or mo_idx < 0
         return rh_do_mapping(slots[mi_idx], slots[mo_idx])
+    if Base::rh_streq(cmd, "project-map"):
+        pm_graph_idx, pm_input_idx, pm_out_idx =
+            while pm_q < argc |pm_graph_idx: i64 = -1, pm_input_idx: i64 = -1, pm_out_idx: i64 = -1, pm_q: i64 = 2, slots| -> pm_graph_idx, pm_input_idx, pm_out_idx:
+                option: u8& = slots[pm_q].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(option, "--graph"):
+                    if pm_q + 1 < argc:
+                        pm_q <- pm_q + 1
+                        pm_graph_idx <- pm_q
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(option, "--input"):
+                    if pm_q + 1 < argc:
+                        pm_q <- pm_q + 1
+                        pm_input_idx <- pm_q
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(option, "--out"):
+                    if pm_q + 1 < argc:
+                        pm_q <- pm_q + 1
+                        pm_out_idx <- pm_q
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                pm_q <- pm_q + 1
+        return rh_cli_usage(2) if pm_graph_idx < 0 or pm_input_idx < 0 or pm_out_idx < 0
+        return rh_do_project_map(slots[pm_graph_idx], slots[pm_input_idx], slots[pm_out_idx])
     if Base::rh_streq(cmd, "coverage"):
         ci_idx, co_idx =
             while ccq < argc |ci_idx: i64 = -1, co_idx: i64 = -1, ccq: i64 = 2, slots| -> ci_idx, co_idx:
@@ -10324,6 +10353,65 @@ def rh_do_mapping(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, 
         rh_cli_err("mapping: cannot write transformation report")
         return 4
     rh_cli_out("mapping: evidence observed")
+    0
+
+# --- M05 reviewed graph-node/project identity binding. ---
+# The mapping is usable only with the exact graph digest it was reviewed against.
+def rh_project_map_write_sidecar(graph_raw: darray[u8]&, input_raw: darray[u8]&, body: darray[u8]&, out_path: cstr) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO]:
+    transformation_input: mutable darray[u8] =
+        transformation_input: mutable darray[u8] = []
+        Base::rh_push_text(transformation_input, "graph:")
+        Base::rh_push_decimal_u64(transformation_input, graph_raw.count.u64())
+        transformation_input.push(58)
+        transformation_input.extend(bytes_view(graph_raw))
+        Base::rh_push_text(transformation_input, "\nproject-map:")
+        Base::rh_push_decimal_u64(transformation_input, input_raw.count.u64())
+        transformation_input.push(58)
+        transformation_input.extend(bytes_view(input_raw))
+        transformation_input
+    sidecar_result: bool =
+        sidecar_result: bool = AdapterTransformationCli::rh_write_sidecar(transformation_input, body, "reviewed-project-node-map", "rh-project-node-map/1", "repo-health/project-node-map/1", "[{\"source\":\"exact dependency graph SHA-256\",\"target\":\"mapping graph binding\",\"state\":\"preserved\"},{\"source\":\"accepted package-node to project and family assertions\",\"target\":\"reviewed project identities\",\"state\":\"transformed\"},{\"source\":\"reviewer, review time, and evidence digest\",\"target\":\"mapping provenance\",\"state\":\"preserved\"},{\"source\":\"stale graph, unreviewed identity, or malformed assertion\",\"target\":\"project identity output\",\"state\":\"unsupported\"}]", out_path)
+        sidecar_result
+    sidecar_result
+
+def rh_do_project_map(graph_path: cstr, input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(graph_path) or not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected project-map argument (allowlist)")
+        return 3
+    graph_path_buffer: mutable darray[u8] =
+        graph_path_buffer: mutable darray[u8] = []
+        Base::rh_push_cstr(graph_path_buffer, graph_path)
+        graph_path_buffer.push(0)
+        graph_path_buffer
+    input_path_buffer: mutable darray[u8] =
+        input_path_buffer: mutable darray[u8] = []
+        Base::rh_push_cstr(input_path_buffer, input_path)
+        input_path_buffer.push(0)
+        input_path_buffer
+    graph_cstr: cstr = (&graph_path_buffer[0]).cast[cstr] can Unsafe.PointerCast
+    input_cstr: cstr = (&input_path_buffer[0]).cast[cstr] can Unsafe.PointerCast
+    graph_raw: mutable darray[u8] = []
+    input_raw: mutable darray[u8] = []
+    graph_read: i64 = Base::rh_io_read(graph_cstr, graph_raw)
+    input_read: i64 = Base::rh_io_read(input_cstr, input_raw)
+    if graph_read < 0 or input_read < 0:
+        rh_cli_err("project-map: cannot read graph or mapping input")
+        return 4
+    body: mutable darray[u8] = []
+    report_status: i64 = ProjectMap::rh_project_map_report(graph_raw, input_raw, body)
+    if report_status != 0:
+        rh_cli_err("project-map: unsupported, stale, or malformed mapping (fail closed)")
+        return 4
+    body.push(10)
+    write_status: bool = Base::rh_io_write(out_path, body)
+    if not write_status:
+        rh_cli_err("project-map: cannot write --out")
+        return 4
+    sidecar_status: bool = rh_project_map_write_sidecar(graph_raw, input_raw, body, out_path)
+    if not sidecar_status:
+        rh_cli_err("project-map: cannot write transformation report")
+        return 4
+    rh_cli_out("project-map: reviewed identities bound to graph")
     0
 
 # --- M05 source-specific capability coverage execution path. ---

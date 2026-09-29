@@ -1,0 +1,177 @@
+# rh_project_map.elisa — reviewed package-node to project identity joins.
+#
+# Graph node numbers are local traversal keys. This adapter only publishes a
+# project identity when a reviewed, evidence-bound mapping names the exact graph.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+
+module ProjectMap:
+    private:
+        const RH_PROJECT_MAP_MAX_ROWS: i64 = 10000
+
+        def rh_pm_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            value: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
+            value
+
+        def rh_pm_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = ProjectMap::rh_pm_get(nodes, texts, obj, key)
+            return false if idx < 0 or nodes[idx.usize()].kind != Json::RH_JSON_STR
+            value: Json::RhJsonNode = nodes[idx.usize()]
+            start_out[0] <- value.text_start
+            end_out[0] <- value.text_end
+            found: bool = true
+            found
+
+        def rh_pm_unique_object_keys(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if object < 0 or nodes[object.usize()].kind != Json::RH_JSON_OBJ
+            while key >= 0 |key: i64 = nodes[object.usize()].first_child, nodes, texts, object|:
+                return false if nodes[key.usize()].kind != Json::RH_JSON_STR
+                value: i64 = nodes[key.usize()].next_sibling
+                return false if value < 0
+                key_s: i64 = nodes[key.usize()].text_start
+                key_e: i64 = nodes[key.usize()].text_end
+                while other >= 0 |other: i64 = nodes[value.usize()].next_sibling, nodes, texts, key_s, key_e|:
+                    return false if nodes[other.usize()].kind != Json::RH_JSON_STR
+                    other_value: i64 = nodes[other.usize()].next_sibling
+                    return false if other_value < 0
+                    return false if Base::rh_bytes_equal_span(texts, key_s, key_e, texts, nodes[other.usize()].text_start, nodes[other.usize()].text_end)
+                    other <- nodes[other_value.usize()].next_sibling
+                key <- nodes[value.usize()].next_sibling
+            true
+
+        def rh_pm_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = ProjectMap::rh_pm_get(nodes, texts, obj, key)
+            value: i64 = Json::rh_json_int(nodes, raw, idx, ok_out)
+            value
+
+        def rh_pm_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            Base::rh_json_escape(out, texts, start.usize(), end.usize())
+            out.push(34)
+
+        def rh_pm_is_sha256(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != 64
+            while i < 64 |i: i64 = 0, texts, start|:
+                c: u8 = texts[(start + i).usize()]
+                valid: bool = (c >= 48 and c <= 57) or (c >= 97 and c <= 102)
+                return false if not valid
+                i <- i + 1
+            true
+
+    public:
+        def rh_project_map_report(graph_raw: darray[u8]&, map_raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            graph_nodes: mutable darray[Json::RhJsonNode] = []
+            graph_texts: mutable darray[u8] = []
+            graph_root: i64 = Json::rh_json_parse(graph_raw, graph_nodes, graph_texts)
+            return -1 if graph_root < 0 or not ProjectMap::rh_pm_unique_object_keys(graph_nodes, graph_texts, graph_root)
+            graph_schema_s: mutable i64 = 0
+            graph_schema_e: mutable i64 = 0
+            return -1 if not ProjectMap::rh_pm_str(graph_nodes, graph_texts, graph_root, "schema", &graph_schema_s, &graph_schema_e)
+            return -1 if not Base::rh_bytes_equal_literal(graph_texts, graph_schema_s, graph_schema_e, "rh-dep-graph/1")
+            graph_nodes_idx: i64 = ProjectMap::rh_pm_get(graph_nodes, graph_texts, graph_root, "nodes")
+            return -1 if graph_nodes_idx < 0 or graph_nodes[graph_nodes_idx.usize()].kind != Json::RH_JSON_ARR
+            graph_node_count: i64 = graph_nodes[graph_nodes_idx.usize()].child_count
+            graph_node_index: mutable i64 = 0
+            while graph_node >= 0 |graph_node: i64 = graph_nodes[graph_nodes_idx.usize()].first_child, graph_nodes, graph_raw, graph_texts, graph_node_index|:
+                return -1 if graph_nodes[graph_node.usize()].kind != Json::RH_JSON_OBJ
+                graph_id_ok: mutable i64 = 0
+                graph_id: i64 = ProjectMap::rh_pm_int(graph_nodes, graph_raw, graph_texts, graph_node, "id", &graph_id_ok)
+                return -1 if graph_id_ok == 0 or graph_id != graph_node_index
+                graph_node_index <- graph_node_index + 1
+                graph_node <- graph_nodes[graph_node.usize()].next_sibling
+
+            expected_digest: mutable darray[u8] = []
+            Sha256::rh_sha256(graph_raw, expected_digest)
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(map_raw, nodes, texts)
+            return -1 if root < 0 or not ProjectMap::rh_pm_unique_object_keys(nodes, texts, root)
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not ProjectMap::rh_pm_str(nodes, texts, root, "schema", &schema_s, &schema_e)
+            return -1 if not Base::rh_bytes_equal_literal(texts, schema_s, schema_e, "rh-project-node-map-input/1")
+            graph_digest_s: mutable i64 = 0
+            graph_digest_e: mutable i64 = 0
+            return -1 if not ProjectMap::rh_pm_str(nodes, texts, root, "graph_sha256", &graph_digest_s, &graph_digest_e)
+            return -1 if graph_digest_e - graph_digest_s != expected_digest.count.i64()
+            return -1 if not Base::rh_bytes_equal_span(texts, graph_digest_s, graph_digest_e, expected_digest, 0, expected_digest.count.i64())
+            revision_ok: mutable i64 = 0
+            revision: i64 = ProjectMap::rh_pm_int(nodes, map_raw, texts, root, "revision", &revision_ok)
+            return -1 if revision_ok == 0 or revision < 0
+            mappings_idx: i64 = ProjectMap::rh_pm_get(nodes, texts, root, "mappings")
+            return -1 if mappings_idx < 0 or nodes[mappings_idx.usize()].kind != Json::RH_JSON_ARR or nodes[mappings_idx.usize()].child_count > RH_PROJECT_MAP_MAX_ROWS
+
+            node_ids: mutable darray[i64] = []
+            project_ids_s: mutable darray[i64] = []
+            project_ids_e: mutable darray[i64] = []
+            family_ids_s: mutable darray[i64] = []
+            family_ids_e: mutable darray[i64] = []
+            reviewers: mutable darray[i64] = []
+            review_times: mutable darray[i64] = []
+            evidence_s: mutable darray[i64] = []
+            evidence_e: mutable darray[i64] = []
+            while row >= 0 |row: i64 = nodes[mappings_idx.usize()].first_child, nodes, texts, map_raw, graph_node_count, node_ids, project_ids_s, project_ids_e, family_ids_s, family_ids_e, reviewers, review_times, evidence_s, evidence_e|:
+                return -1 if not ProjectMap::rh_pm_unique_object_keys(nodes, texts, row)
+                node_ok: mutable i64 = 0
+                node_id: i64 = ProjectMap::rh_pm_int(nodes, map_raw, texts, row, "node_id", &node_ok)
+                return -1 if node_ok == 0 or node_id < 0 or node_id >= graph_node_count
+                project_s: mutable i64 = 0
+                project_e: mutable i64 = 0
+                family_s: mutable i64 = 0
+                family_e: mutable i64 = 0
+                state_s: mutable i64 = 0
+                state_e: mutable i64 = 0
+                return -1 if not ProjectMap::rh_pm_str(nodes, texts, row, "project_id", &project_s, &project_e) or project_s == project_e
+                return -1 if not ProjectMap::rh_pm_str(nodes, texts, row, "family_id", &family_s, &family_e) or family_s == family_e
+                return -1 if not ProjectMap::rh_pm_str(nodes, texts, row, "state", &state_s, &state_e)
+                return -1 if not Base::rh_bytes_equal_literal(texts, state_s, state_e, "accepted")
+                reviewer_ok: mutable i64 = 0
+                reviewer_id: i64 = ProjectMap::rh_pm_int(nodes, map_raw, texts, row, "reviewer_id", &reviewer_ok)
+                reviewed_at_ok: mutable i64 = 0
+                reviewed_at: i64 = ProjectMap::rh_pm_int(nodes, map_raw, texts, row, "reviewed_at", &reviewed_at_ok)
+                return -1 if reviewer_ok == 0 or reviewer_id <= 0 or reviewed_at_ok == 0 or reviewed_at < 0
+                evidence_idx: i64 = ProjectMap::rh_pm_get(nodes, texts, row, "evidence_sha256")
+                evidence_start: mutable i64 = 0
+                evidence_end: mutable i64 = 0
+                return -1 if evidence_idx < 0 or not Json::rh_json_str_span(nodes, evidence_idx, &evidence_start, &evidence_end)
+                return -1 if not ProjectMap::rh_pm_is_sha256(texts, evidence_start, evidence_end)
+                while i < node_ids.count |i: usize = 0, node_ids, node_id, project_ids_s, project_ids_e, family_ids_s, family_ids_e, reviewers, review_times, evidence_s, evidence_e, project_s, project_e, family_s, family_e, reviewer_id, reviewed_at, evidence_start, evidence_end|:
+                    return -1 if node_ids[i] == node_id
+                    i <- i + 1
+                node_ids.push(node_id)
+                project_ids_s.push(project_s)
+                project_ids_e.push(project_e)
+                family_ids_s.push(family_s)
+                family_ids_e.push(family_e)
+                reviewers.push(reviewer_id)
+                review_times.push(reviewed_at)
+                evidence_s.push(evidence_start)
+                evidence_e.push(evidence_end)
+                row <- nodes[row.usize()].next_sibling
+
+            Base::rh_push_text(out, "{\"schema\":\"rh-project-node-map/1\",\"graph_sha256\":\"")
+            out.extend(bytes_view(expected_digest))
+            Base::rh_push_text(out, "\",\"revision\":")
+            Base::rh_push_decimal_i64(out, revision)
+            Base::rh_push_text(out, ",\"mappings\":[")
+            while i < node_ids.count |i: usize = 0, node_ids, project_ids_s, project_ids_e, family_ids_s, family_ids_e, reviewers, review_times, evidence_s, evidence_e, texts, out|:
+                if i > 0:
+                    out.push(44)
+                Base::rh_push_text(out, "{\"node_id\":")
+                Base::rh_push_decimal_i64(out, node_ids[i])
+                Base::rh_push_text(out, ",\"project_id\":")
+                ProjectMap::rh_pm_emit_span(out, texts, project_ids_s[i], project_ids_e[i])
+                Base::rh_push_text(out, ",\"family_id\":")
+                ProjectMap::rh_pm_emit_span(out, texts, family_ids_s[i], family_ids_e[i])
+                Base::rh_push_text(out, ",\"reviewer_id\":")
+                Base::rh_push_decimal_i64(out, reviewers[i])
+                Base::rh_push_text(out, ",\"reviewed_at\":")
+                Base::rh_push_decimal_i64(out, review_times[i])
+                Base::rh_push_text(out, ",\"evidence_sha256\":")
+                ProjectMap::rh_pm_emit_span(out, texts, evidence_s[i], evidence_e[i])
+                Base::rh_push_text(out, "}")
+                i <- i + 1
+            Base::rh_push_text(out, "]}")
+            0
