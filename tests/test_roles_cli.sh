@@ -164,4 +164,20 @@ for rc in "$rc_schema" "$rc_src" "$rc_decls" "$rc_id" "$rc_auth" "$rc_actor_type
   [[ "$rc" -eq 4 ]] || fail "malformed roles input must exit 4 (got $rc)"
 done
 
+# Action windows are half-open: start is included and end is excluded.
+cat > "$T/window.json" <<'JSON'
+{"schema":"rh-roles-input/1","observed_actions_window":{"start":100,"end":200},"declarations":[],"observed_actions":[{"actor_id":1,"kind":"release","at":99},{"actor_id":2,"kind":"release","at":100},{"actor_id":2,"kind":"review","at":199},{"actor_id":3,"kind":"review","at":200}]}
+JSON
+"$ROOT/build/rh_cli" roles --input "$T/window.json" --out "$T/window-out.json" >/dev/null || fail "windowed run"
+python3 - "$T/window-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["observed_actions_window"] == {"start": 100, "end": 200}, d
+m = {row["key"]: row for row in d["metrics"]}
+assert m["maintainer.observed_release_actors"]["value"] == 1, m
+assert m["maintainer.observed_review_actors"]["value"] == 1, m
+PY
+printf '{"schema":"rh-roles-input/1","observed_actions_window":{"start":200,"end":100},"declarations":[]}' > "$T/bwindow.json"
+if "$ROOT/build/rh_cli" roles --input "$T/bwindow.json" --out "$T/bwindow-out.json" >/dev/null 2>&1; then fail "invalid action window accepted"; fi
+
 echo "test_roles_cli OK"
