@@ -26,6 +26,10 @@ PROCESS_OBJECT="$ROOT/build/rh_process.o"
 if [[ ! -f "$PROCESS_OBJECT" || "$ROOT/src/rh_process.c" -nt "$PROCESS_OBJECT" ]]; then
   clang -std=c11 -O2 -Wall -Wextra -Werror -c "$ROOT/src/rh_process.c" -o "$PROCESS_OBJECT"
 fi
+PROCESS_TREE_TEST="$ROOT/build/test_process_tree"
+if [[ ! -x "$PROCESS_TREE_TEST" || "$ROOT/src/test_process_tree.c" -nt "$PROCESS_TREE_TEST" ]]; then
+  clang -std=c11 -O2 -Wall -Wextra -Werror "$ROOT/src/test_process_tree.c" -o "$PROCESS_TREE_TEST"
+fi
 BASE_LINK_FLAGS="${ELISA_STAGE1_LINK:-}"
 BASE_LINK_FLAGS="${BASE_LINK_FLAGS:+$BASE_LINK_FLAGS }build/rh_process.o"
 compile() {

@@ -1,18 +1,32 @@
+#define _DARWIN_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/socket.h>
+#include <libproc.h>
+#include <sys/proc_info.h>
+#elif defined(__linux__)
+#include <stdio.h>
+#else
+#error "rh_process requires Darwin or Linux process-group resource accounting"
+#endif
 
 extern char **environ;
 
@@ -24,8 +38,15 @@ enum {
     RH_PROCESS_SIGNAL = 4,
     RH_PROCESS_IO_ERROR = 5,
     RH_PROCESS_CAPACITY_LIMIT = 6,
+    RH_PROCESS_RESOURCE_LIMIT = 7,
+    RH_PROCESS_MAX_GROUP_PROCESSES = 64,
+    RH_PROCESS_MAX_GROUP_MEMORY_MIB = 1024,
+    RH_PROCESS_RESOURCE_SAMPLE_MS = 50,
     RH_PROCESS_MAX_ACTIVE_GROUPS = 32
 };
+
+#define RH_PROCESS_MAX_GROUP_MEMORY_BYTES \
+    ((uint64_t)RH_PROCESS_MAX_GROUP_MEMORY_MIB * 1024 * 1024)
 
 static pthread_mutex_t rh_process_capacity_mutex = PTHREAD_MUTEX_INITIALIZER;
 static size_t rh_process_active_groups = 0;
@@ -112,6 +133,91 @@ static void rh_process_close(int *descriptor) {
 static int rh_process_nonblocking(int descriptor) {
     int flags = fcntl(descriptor, F_GETFL);
     return flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) < 0 ? -1 : 0;
+}
+
+/* Account for the complete spawned process group, including descendants. */
+static int rh_process_group_usage(pid_t group, size_t *processes_out,
+                                  uint64_t *memory_out) {
+    if (group <= 0 || processes_out == NULL || memory_out == NULL) return EINVAL;
+    size_t processes = 0;
+    uint64_t memory = 0;
+#if defined(__APPLE__)
+    pid_t pids[RH_PROCESS_MAX_GROUP_PROCESSES + 1];
+    int bytes = proc_listpids(PROC_PGRP_ONLY, (uint32_t)group, pids,
+                              (int)sizeof(pids));
+    if (bytes < 0) return errno == 0 ? EIO : errno;
+    if (bytes % (int)sizeof(pid_t) != 0) return EIO;
+    processes = (size_t)bytes / sizeof(pid_t);
+    if (processes > RH_PROCESS_MAX_GROUP_PROCESSES) {
+        *processes_out = processes;
+        *memory_out = RH_PROCESS_MAX_GROUP_MEMORY_BYTES + 1;
+        return 0;
+    }
+    for (size_t index = 0; index < processes; ++index) {
+        if (pids[index] <= 0) continue;
+        rusage_info_current usage;
+        if (proc_pid_rusage(pids[index], RUSAGE_INFO_CURRENT,
+                            (rusage_info_t *)&usage) != 0) {
+            if (errno == ESRCH) continue;
+            return errno == 0 ? EIO : errno;
+        }
+        if (UINT64_MAX - memory < usage.ri_phys_footprint) return EOVERFLOW;
+        memory += usage.ri_phys_footprint;
+    }
+#elif defined(__linux__)
+    DIR *directory = opendir("/proc");
+    if (directory == NULL) return errno == 0 ? EIO : errno;
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
+        char *pid_end = NULL;
+        long raw_pid = strtol(entry->d_name, &pid_end, 10);
+        if (pid_end == entry->d_name || *pid_end != '\0' || raw_pid <= 0 || raw_pid > INT_MAX) continue;
+        char path[64];
+        int length = snprintf(path, sizeof(path), "/proc/%ld/stat", raw_pid);
+        if (length < 0 || (size_t)length >= sizeof(path)) { closedir(directory); return EIO; }
+        FILE *stat_file = fopen(path, "r");
+        if (stat_file == NULL) continue;
+        char stat_line[4096];
+        char *read_line = fgets(stat_line, sizeof(stat_line), stat_file);
+        fclose(stat_file);
+        if (read_line == NULL) continue;
+        char *command_end = strrchr(stat_line, ')');
+        if (command_end == NULL || command_end[1] != ' ') { closedir(directory); return EIO; }
+        char state = 0;
+        long parent = 0;
+        long process_group = 0;
+        if (sscanf(command_end + 2, "%c %ld %ld", &state, &parent, &process_group) != 3) {
+            closedir(directory);
+            return EIO;
+        }
+        if (process_group != (long)group) continue;
+        processes += 1;
+        if (processes > RH_PROCESS_MAX_GROUP_PROCESSES) continue;
+        length = snprintf(path, sizeof(path), "/proc/%ld/statm", raw_pid);
+        if (length < 0 || (size_t)length >= sizeof(path)) { closedir(directory); return EIO; }
+        FILE *memory_file = fopen(path, "r");
+        if (memory_file == NULL) continue;
+        unsigned long total_pages = 0;
+        unsigned long resident_pages = 0;
+        int scanned = fscanf(memory_file, "%lu %lu", &total_pages, &resident_pages);
+        fclose(memory_file);
+        (void)total_pages;
+        if (scanned != 2) { closedir(directory); return EIO; }
+        long page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0 || resident_pages > UINT64_MAX / (uint64_t)page_size) {
+            closedir(directory);
+            return EOVERFLOW;
+        }
+        uint64_t resident = (uint64_t)resident_pages * (uint64_t)page_size;
+        if (UINT64_MAX - memory < resident) { closedir(directory); return EOVERFLOW; }
+        memory += resident;
+    }
+    closedir(directory);
+#endif
+    *processes_out = processes;
+    *memory_out = memory;
+    return 0;
 }
 
 /*
@@ -236,12 +342,28 @@ static int rh_process_run_inner(const char *executable, const char *argv_flat,
     int pipe_was_pending = sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1;
     int stdout_open = 1, stderr_open = 1, child_reaped = 0, status = 0;
     size_t input_written = 0, output_bytes = 0;
+    int64_t last_resource_sample = started - RH_PROCESS_RESOURCE_SAMPLE_MS;
     int result_kind = RH_PROCESS_EXIT;
     int result_code = 0;
     while (stdout_open || stderr_open || !child_reaped) {
         int64_t now = rh_process_millis();
         if (now < 0) { result_kind = RH_PROCESS_IO_ERROR; result_code = EIO; (void)kill(-child, SIGKILL); break; }
         if (now - started >= timeout_ms) { result_kind = RH_PROCESS_TIMEOUT; result_code = timeout_ms; (void)kill(-child, SIGKILL); break; }
+        if (now - last_resource_sample >= RH_PROCESS_RESOURCE_SAMPLE_MS) {
+            size_t group_processes = 0;
+            uint64_t group_memory = 0;
+            int usage_error = rh_process_group_usage(child, &group_processes, &group_memory);
+            last_resource_sample = now;
+            if (usage_error != 0 || group_processes > RH_PROCESS_MAX_GROUP_PROCESSES ||
+                group_memory > RH_PROCESS_MAX_GROUP_MEMORY_BYTES) {
+                result_kind = RH_PROCESS_RESOURCE_LIMIT;
+                result_code = usage_error != 0 ? usage_error :
+                    group_processes > RH_PROCESS_MAX_GROUP_PROCESSES ?
+                    RH_PROCESS_MAX_GROUP_PROCESSES : RH_PROCESS_MAX_GROUP_MEMORY_MIB;
+                (void)kill(-child, SIGKILL);
+                break;
+            }
+        }
 
         struct pollfd fds[3];
         nfds_t count = 0;
