@@ -94,6 +94,54 @@ assert d["clusters"] == [[0], [1], [2]], d["clusters"]
 print("[identity] no-op links OK")
 PY
 
+echo "[identity] exhaustive two-edge lifecycle cross-product"
+python3 - "$T" <<'PY'
+import itertools, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+states = ("accepted", "proposed", "rejected", "revoked")
+expected = {}
+for case, pair in enumerate(itertools.product(states, repeat=2)):
+    links = [
+        {"a": a, "b": b, "state": state, "revision_added": index + 1}
+        for index, ((a, b), state) in enumerate(zip(((0, 1), (1, 2)), pair))
+    ]
+    source = {"schema": "rh-identity-input/1", "actor_count": 3, "links": links}
+    (root / f"cross-{case:02d}.json").write_text(json.dumps(source, separators=(",", ":")) + "\n")
+
+    # Independent oracle: only accepted edges join actors. The revision is the
+    # maximum ledger watermark that changed the accepted identity graph.
+    parent = list(range(3))
+    def find(actor):
+        while parent[actor] != actor:
+            actor = parent[actor]
+        return actor
+    for link in links:
+        if link["state"] == "accepted":
+            left, right = find(link["a"]), find(link["b"])
+            parent[max(left, right)] = min(left, right)
+    clusters = {}
+    for actor in range(3):
+        clusters.setdefault(find(actor), []).append(actor)
+    expected[f"{case:02d}"] = {
+        "clusters": list(clusters.values()),
+        "revision": max((link["revision_added"] for link in links
+                         if link["state"] in ("accepted", "revoked")), default=0),
+    }
+(root / "cross-expected.json").write_text(json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+for case in 00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15; do
+  "$ROOT/build/rh_cli" identity --input "$T/cross-$case.json" --out "$T/cross-$case.out" >/dev/null || fail "lifecycle cross-product $case"
+done
+python3 - "$T/cross-expected.json" "$T" <<'PY'
+import json, pathlib, sys
+expected, root = json.load(open(sys.argv[1])), pathlib.Path(sys.argv[2])
+for case, contract in expected.items():
+    actual = json.load(open(root / f"cross-{case}.out"))
+    assert actual["clusters"] == contract["clusters"], (case, actual, contract)
+    assert actual["identity_revision"] == contract["revision"], (case, actual, contract)
+print("[identity] all 16 lifecycle combinations match independent cluster/revision oracle")
+PY
+
 echo "[identity] determinism"
 "$ROOT/build/rh_cli" identity --input "$T/a.json" --out "$T/a2.out" >/dev/null || fail "rerun"
 cmp -s "$T/a.out" "$T/a2.out" || fail "identity output not deterministic"
