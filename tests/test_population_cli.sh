@@ -56,7 +56,7 @@ graph = open(sys.argv[1], "rb").read()
 doc = {"schema":"rh-project-node-map-input/1", "graph_sha256":hashlib.sha256(graph).hexdigest(), "revision":21,
        "mappings":[
            {"node_id":1,"project_id":"forge:acme/repo-a","family_id":"canonical-family-a","state":"accepted","reviewer_id":91,"reviewed_at":1700000000,"evidence_sha256":"a"*64},
-           {"node_id":3,"project_id":"forge:acme/repo-c","family_id":"canonical-family-c","state":"accepted","reviewer_id":92,"reviewed_at":1700000000,"evidence_sha256":"b"*64},
+           {"node_id":3,"project_id":"forge:acme/repo-c","family_id":"canonical-family-a","state":"accepted","reviewer_id":92,"reviewed_at":1700000000,"evidence_sha256":"b"*64},
        ]}
 json.dump(doc, open(sys.argv[2], "w"), separators=(",", ":"))
 PY
@@ -74,11 +74,11 @@ import hashlib, json, pathlib, sys
 population, downstream, output = [pathlib.Path(path) for path in sys.argv[1:]]
 result = json.loads(output.read_bytes())
 assert result["schema"] == "rh-population-result/2", result
-assert result["project_identity_mapping"] == {"revision":21,"selected":3,"accepted":2,"unknown":1}, result
+assert result["project_identity_mapping"] == {"revision":21,"selected":3,"accepted":2,"unknown":1,"distinct_accepted_families":1}, result
 rows = {row["graph_node_id"]: row["project_identity"] for row in result["dependents"]}
 assert rows[1]["project_id"] == "forge:acme/repo-a" and rows[1]["reviewer_id"] == 91, rows
 assert rows[2]["mapping_status"] == "unknown" and rows[2]["project_id"] is None, rows
-assert rows[3]["family_id"] == "canonical-family-c" and rows[3]["evidence_sha256"] == "b"*64, rows
+assert rows[3]["family_id"] == "canonical-family-a" and rows[3]["evidence_sha256"] == "b"*64, rows
 sidecar = json.loads(pathlib.Path(str(output)+".transformations.json").read_bytes())
 population_raw, downstream_raw = population.read_bytes(), downstream.read_bytes()
 framed = (b"rh-population-identity-input/1\npopulation:" + str(len(population_raw)).encode() + b":" + population_raw

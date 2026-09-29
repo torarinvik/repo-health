@@ -301,6 +301,16 @@ module Population:
                 i <- i + 1
             -1
 
+        def rh_population_canonical_family_seen(dependents: darray[RhPopulationDependent]&, identities: darray[RhPopulationProjectIdentity]&, identity_texts: darray[u8]&, identity_index: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            current: RhPopulationProjectIdentity = identities[identity_index.usize()]
+            while i < dependents.count |i: usize = 0, dependents, identities, identity_texts, current|:
+                previous_index: i64 = dependents[i].identity_index
+                if previous_index >= 0:
+                    previous: RhPopulationProjectIdentity = identities[previous_index.usize()]
+                    return true if previous.accepted and Base::rh_bytes_equal_span(identity_texts, current.family_s, current.family_e, identity_texts, previous.family_s, previous.family_e)
+                i <- i + 1
+            false
+
     public:
         def rh_population_report(raw: darray[u8]&, downstream_raw: darray[u8]&, has_downstream: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             identity_nodes: mutable darray[Json::RhJsonNode] = []
@@ -384,6 +394,7 @@ module Population:
             policy_fail: mutable darray[i64] = []
             policy_unknown: mutable darray[i64] = []
             identity_accepted: mutable i64 = 0
+            canonical_family_count: mutable i64 = 0
             while i < metrics.count |i: usize = 0, metrics, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown|:
                 observed.push(0)
                 partial.push(0)
@@ -396,7 +407,7 @@ module Population:
                 policy_fail.push(0)
                 policy_unknown.push(0)
                 i <- i + 1
-            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, families_s, families_e, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, has_downstream, identity_accepted, identities|:
+            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, families_s, families_e, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, has_downstream, identity_accepted, identities, identity_texts, canonical_family_count|:
                 return -1 if not Population::rh_population_unique_object_keys(nodes, texts, dep)
                 ids: mutable i64 = 0
                 ide: mutable i64 = 0
@@ -420,6 +431,8 @@ module Population:
                     return -1 if identity_index < 0
                     return -1 if identities[identity_index.usize()].accepted and identity_accepted == 9223372036854775807
                     identity_accepted <- identity_accepted + 1 if identities[identity_index.usize()].accepted
+                    if identities[identity_index.usize()].accepted and not Population::rh_population_canonical_family_seen(dependents, identities, identity_texts, identity_index):
+                        canonical_family_count <- canonical_family_count + 1
                     while prior < dependents.count |prior: usize = 0, dependents, graph_node_id|:
                         return -1 if dependents[prior].graph_node_id == graph_node_id
                         prior <- prior + 1
@@ -550,6 +563,8 @@ module Population:
                 Base::rh_push_decimal_i64(out, identity_accepted)
                 Base::rh_push_text(out, ",\"unknown\":")
                 Base::rh_push_decimal_i64(out, dependents.count.i64() - identity_accepted)
+                Base::rh_push_text(out, ",\"distinct_accepted_families\":")
+                Base::rh_push_decimal_i64(out, canonical_family_count)
                 Base::rh_push_text(out, "}")
             Base::rh_push_text(out, ",\"deduplication_unit\":")
             Population::rh_population_emit_span(out, texts, unit_s, unit_e)
