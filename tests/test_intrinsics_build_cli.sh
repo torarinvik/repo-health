@@ -100,13 +100,14 @@ assert coverage["maintainer.linked_merge_change_count"]["distribution"] == [1], 
 print("[intrinsics-build] downstream reports metric-specific denominators and distributions")
 PY
 
-python3 - "$T/source-set.json" "$T/duplicate.json" "$T/overflow.json" "$T/duplicate-key.json" "$T/window-mismatch.json" "$T/bad-review-count.json" "$T/missing-review-denominator.json" <<'PY'
+python3 - "$T/source-set.json" "$T/duplicate.json" "$T/overflow.json" "$T/duplicate-key.json" "$T/window-mismatch.json" "$T/bad-review-count.json" "$T/missing-review-denominator.json" "$T/not-applicable-review-denominator.json" <<'PY'
 import json, sys
 source = json.load(open(sys.argv[1]))
 duplicate = json.loads(json.dumps(source))
 overflow = json.loads(json.dumps(source))
 bad_review_count = json.loads(json.dumps(source))
 missing_review_denominator = json.loads(json.dumps(source))
+not_applicable_review_denominator = json.loads(json.dumps(source))
 duplicate["dependents"].append(duplicate["dependents"][0])
 json.dump(duplicate, open(sys.argv[2], "w"), separators=(",", ":"))
 next(metric for metric in overflow["dependents"][0]["roles"]["metrics"]
@@ -122,6 +123,8 @@ bad_review_count["dependents"][0]["roles"]["change_review"]["numerator"] = 2
 json.dump(bad_review_count, open(sys.argv[6], "w"), separators=(",", ":"))
 del missing_review_denominator["dependents"][0]["roles"]["change_review"]["denominator"]
 json.dump(missing_review_denominator, open(sys.argv[7], "w"), separators=(",", ":"))
+not_applicable_review_denominator["dependents"][0]["roles"]["change_review"] = {"status":"not_applicable","numerator":None,"denominator":5}
+json.dump(not_applicable_review_denominator, open(sys.argv[8], "w"), separators=(",", ":"))
 PY
 set +e
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/duplicate.json" --out "$T/invalid-duplicate.json" >/dev/null 2>&1; duplicate_rc=$?
@@ -130,7 +133,8 @@ set +e
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/window-mismatch.json" --out "$T/invalid-window.json" >/dev/null 2>&1; window_rc=$?
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/bad-review-count.json" --out "$T/invalid-review-count.json" >/dev/null 2>&1; review_count_rc=$?
 "$ROOT/build/rh_cli" intrinsics-build --input "$T/missing-review-denominator.json" --out "$T/invalid-review-denominator.json" >/dev/null 2>&1; review_denominator_rc=$?
+"$ROOT/build/rh_cli" intrinsics-build --input "$T/not-applicable-review-denominator.json" --out "$T/invalid-not-applicable-review-denominator.json" >/dev/null 2>&1; not_applicable_review_denominator_rc=$?
 set -e
-[[ "$duplicate_rc" -eq 4 && "$overflow_rc" -eq 4 && "$duplicate_key_rc" -eq 4 && "$window_rc" -eq 4 && "$review_count_rc" -eq 4 && "$review_denominator_rc" -eq 4 ]] || fail "malformed source sets must fail closed"
+[[ "$duplicate_rc" -eq 4 && "$overflow_rc" -eq 4 && "$duplicate_key_rc" -eq 4 && "$window_rc" -eq 4 && "$review_count_rc" -eq 4 && "$review_denominator_rc" -eq 4 && "$not_applicable_review_denominator_rc" -eq 4 ]] || fail "malformed source sets must fail closed"
 echo "[intrinsics-build] duplicate dependents/keys, mismatched windows, and out-of-range metric values fail closed"
 echo "test_intrinsics_build_cli OK"
