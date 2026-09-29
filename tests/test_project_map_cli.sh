@@ -42,6 +42,7 @@ report = json.loads(output)
 assert report["schema"] == "rh-downstream/3", report
 items = report["project_identities"]["items"]
 assert report["project_identities"]["revision"] == 12, report
+assert report["project_identities"]["coverage"] == {"selected": 2, "accepted": 1, "unknown": 1}, report
 assert items == [
     {"graph_node_id": 1, "mapping_status": "accepted", "project_id": "forge:acme/consumer", "family_id": "acme-consumer", "reviewer_id": 42, "reviewed_at": 1700000000, "evidence_sha256": "a" * 64},
     {"graph_node_id": 2, "mapping_status": "unknown", "project_id": None, "family_id": None, "reviewer_id": None, "reviewed_at": None, "evidence_sha256": None},
@@ -62,6 +63,7 @@ python3 - "$T/downstream-cutoff/downstream.json" <<'PY'
 import json, sys
 items = json.load(open(sys.argv[1]))["project_identities"]["items"]
 assert all(row["mapping_status"] == "unknown" and row["project_id"] is None for row in items), items
+assert json.load(open(sys.argv[1]))["project_identities"]["coverage"] == {"selected": 2, "accepted": 0, "unknown": 2}
 print("[project-map] post-cutoff review remains unknown")
 PY
 set +e
