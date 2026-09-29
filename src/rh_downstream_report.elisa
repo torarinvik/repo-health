@@ -176,13 +176,106 @@ module DownstreamReport:
             Base::rh_push_text(out, "]}")
             true
 
+        # Emit reviewed identities only for selected traversal candidates. The
+        # graph-local node id remains the join key; missing or future reviews
+        # are represented as unknown, never inferred from package names.
+        def rh_ds_emit_project_identities(out: mutable darray[u8]&, targets: darray[i64]&, project_map_raw: darray[u8]&, has_project_map: bool, known_as_of: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            map_nodes: mutable darray[Json::RhJsonNode] = []
+            map_texts: mutable darray[u8] = []
+            map_root: mutable i64 = -1
+            revision: mutable i64 = 0
+            mappings: mutable i64 = -1
+            if has_project_map:
+                map_root <- Json::rh_json_parse(project_map_raw, map_nodes, map_texts)
+                return false if map_root < 0 or map_nodes[map_root.usize()].kind != Json::RH_JSON_OBJ
+                schema: i64 = Json::rh_json_obj_get(map_nodes, map_texts, map_root, "schema")
+                schema_s: mutable i64 = 0
+                schema_e: mutable i64 = 0
+                return false if schema < 0 or not Json::rh_json_str_span(map_nodes, schema, &schema_s, &schema_e)
+                return false if not Base::rh_bytes_equal_literal(map_texts, schema_s, schema_e, "rh-project-node-map/1")
+                revision_ok: mutable i64 = 0
+                revision <- Json::rh_json_int(map_nodes, project_map_raw, Json::rh_json_obj_get(map_nodes, map_texts, map_root, "revision"), &revision_ok)
+                return false if revision_ok != 1 or revision < 0
+                mappings <- Json::rh_json_obj_get(map_nodes, map_texts, map_root, "mappings")
+                return false if mappings < 0 or map_nodes[mappings.usize()].kind != Json::RH_JSON_ARR
+            Base::rh_push_text(out, "{\"revision\":")
+            if has_project_map:
+                Base::rh_push_decimal_i64(out, revision)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"items\":[")
+            while target_index < targets.count |target_index: usize = 0, targets, out, map_nodes, map_texts, project_map_raw, has_project_map, known_as_of, mappings|:
+                if target_index > 0:
+                    out.push(44)
+                target: i64 = targets[target_index]
+                match_row: mutable i64 = -1
+                if has_project_map:
+                    row: mutable i64 = map_nodes[mappings.usize()].first_child
+                    while row >= 0 |row, map_nodes, map_texts, project_map_raw, target, known_as_of, match_row|:
+                        id_node: i64 = Json::rh_json_obj_get(map_nodes, map_texts, row, "node_id")
+                        id_ok: mutable i64 = 0
+                        id: i64 = Json::rh_json_int(map_nodes, project_map_raw, id_node, &id_ok)
+                        if id_ok == 1 and id == target:
+                            reviewed_node: i64 = Json::rh_json_obj_get(map_nodes, map_texts, row, "reviewed_at")
+                            reviewed_ok: mutable i64 = 0
+                            reviewed_at: i64 = Json::rh_json_int(map_nodes, project_map_raw, reviewed_node, &reviewed_ok)
+                            return false if reviewed_ok != 1 or reviewed_at < 0
+                            match_row <- row if known_as_of == 0 or reviewed_at <= known_as_of
+                            row <- -1
+                        else:
+                            row <- map_nodes[row.usize()].next_sibling
+                Base::rh_push_text(out, "{\"graph_node_id\":")
+                Base::rh_push_decimal_i64(out, target)
+                Base::rh_push_text(out, ",\"mapping_status\":\"")
+                Base::rh_push_text(out, "accepted\"") if match_row >= 0 else Base::rh_push_text(out, "unknown\"")
+                if match_row >= 0:
+                    project_id: i64 = Json::rh_json_obj_get(map_nodes, map_texts, match_row, "project_id")
+                    project_s: mutable i64 = 0
+                    project_e: mutable i64 = 0
+                    return false if project_id < 0 or not Json::rh_json_str_span(map_nodes, project_id, &project_s, &project_e)
+                    Base::rh_push_text(out, ",\"project_id\":\"")
+                    Base::rh_json_escape(out, map_texts, project_s.usize(), project_e.usize())
+                    out.push(34)
+                    family_id: i64 = Json::rh_json_obj_get(map_nodes, map_texts, match_row, "family_id")
+                    family_s: mutable i64 = 0
+                    family_e: mutable i64 = 0
+                    return false if family_id < 0 or not Json::rh_json_str_span(map_nodes, family_id, &family_s, &family_e)
+                    Base::rh_push_text(out, ",\"family_id\":\"")
+                    Base::rh_json_escape(out, map_texts, family_s.usize(), family_e.usize())
+                    out.push(34)
+                    reviewer_value: i64 = Json::rh_json_obj_get(map_nodes, map_texts, match_row, "reviewer_id")
+                    reviewer_ok: mutable i64 = 0
+                    reviewer_id: i64 = Json::rh_json_int(map_nodes, project_map_raw, reviewer_value, &reviewer_ok)
+                    return false if reviewer_ok != 1
+                    Base::rh_push_text(out, ",\"reviewer_id\":")
+                    Base::rh_push_decimal_i64(out, reviewer_id)
+                    reviewed_value: i64 = Json::rh_json_obj_get(map_nodes, map_texts, match_row, "reviewed_at")
+                    reviewed_ok: mutable i64 = 0
+                    reviewed_at: i64 = Json::rh_json_int(map_nodes, project_map_raw, reviewed_value, &reviewed_ok)
+                    return false if reviewed_ok != 1
+                    Base::rh_push_text(out, ",\"reviewed_at\":")
+                    Base::rh_push_decimal_i64(out, reviewed_at)
+                    evidence: i64 = Json::rh_json_obj_get(map_nodes, map_texts, match_row, "evidence_sha256")
+                    evidence_s: mutable i64 = 0
+                    evidence_e: mutable i64 = 0
+                    return false if evidence < 0 or not Json::rh_json_str_span(map_nodes, evidence, &evidence_s, &evidence_e)
+                    Base::rh_push_text(out, ",\"evidence_sha256\":\"")
+                    Base::rh_json_escape(out, map_texts, evidence_s.usize(), evidence_e.usize())
+                    out.push(34)
+                else:
+                    Base::rh_push_text(out, ",\"project_id\":null,\"family_id\":null,\"reviewer_id\":null,\"reviewed_at\":null,\"evidence_sha256\":null")
+                out.push(125)
+                target_index <- target_index + 1
+            Base::rh_push_text(out, "]}")
+            true
+
         # Parse a dep graph and emit a downstream report. Returns:
         #   0 ok, -1 malformed/unsupported shape, -2 subject id not present,
         #   -3 malformed intrinsics document.
         # Explicit valid/known-time or edge filters emit the versioned
         # rh-downstream/2 projection; default callers retain rh-downstream/1.
     public:
-        def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, private_ids: darray[i64]&, asserts: darray[Graph::RhAssertion]&, identity_revision: i64, mapping_revision: i64, scope_filter: u8, platform_filter: i64, valid_as_of: i64, known_as_of: i64, schema_version: i64, intr_raw: darray[u8]&, has_intr: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, snapshot_id: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def rh_downstream_report(raw: darray[u8]&, graph_source: cstr, subject: i64, private_ids: darray[i64]&, asserts: darray[Graph::RhAssertion]&, identity_revision: i64, mapping_revision: i64, scope_filter: u8, platform_filter: i64, valid_as_of: i64, known_as_of: i64, schema_version: i64, intr_raw: darray[u8]&, has_intr: bool, project_map_raw: darray[u8]&, has_project_map: bool, max_nodes: i64, max_depth: i64, unavailable: i64, has_unavailable: bool, snapshot_id: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -477,6 +570,9 @@ module DownstreamReport:
             rh_ds_emit_list(out, trans2, nodes, texts, name_idx, ver_idx)
             Base::rh_push_text(out, "],\"transitive_count\":")
             Base::rh_push_decimal_i64(out, tc2)
+            if has_project_map:
+                Base::rh_push_text(out, ",\"project_identities\":")
+                return -4 if not rh_ds_emit_project_identities(out, trans2, project_map_raw, has_project_map, known_as_of)
             Base::rh_push_text(out, ",\"path_witnesses\":")
             return -1 if not rh_ds_emit_path_witnesses(out, trans, path_parents, mapped_subject)
             Base::rh_push_text(out, ",\"truncated\":")

@@ -9,7 +9,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 "$ROOT/build/test_project_map" >/dev/null || fail "project identity oracle"
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/graph.json" <<'JSON'
-{"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"focus","version":"1"},{"id":1,"name":"consumer","version":"2"}],"edges":[{"from":1,"to":0,"scope":"normal"}],"unresolved":[],"advisories":[]}
+{"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"focus","version":"1"},{"id":1,"name":"consumer","version":"2"},{"id":2,"name":"unmapped-consumer","version":"3"}],"edges":[{"from":1,"to":0,"scope":"normal"},{"from":2,"to":0,"scope":"normal"}],"unresolved":[],"advisories":[]}
 JSON
 python3 - "$T/graph.json" "$T/map.json" <<'PY'
 import hashlib, json, sys
@@ -32,6 +32,37 @@ assert report["source_input_sha256"] == hashlib.sha256(b"graph:" + str(len(graph
 assert report["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[3], "rb").read()).hexdigest(), report
 assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/project-node-map/1").hexdigest(), report
 print("[project-map] graph-bound reviewed project identity OK")
+PY
+"$ROOT/build/rh_cli" downstream --graph "$T/graph.json" --subject 0 --out "$T/downstream" --project-map "$T/map.json" --known-as-of 1800000000 >/dev/null || fail "downstream project identity join"
+python3 - "$T/graph.json" "$T/map.json" "$T/downstream/downstream.json" "$T/downstream/downstream.json.transformations.json" <<'PY'
+import hashlib, json, sys
+graph, mapping = (open(path, "rb").read() for path in sys.argv[1:3])
+output = open(sys.argv[3], "rb").read()
+report = json.loads(output)
+assert report["schema"] == "rh-downstream/3", report
+items = report["project_identities"]["items"]
+assert report["project_identities"]["revision"] == 12, report
+assert items == [
+    {"graph_node_id": 1, "mapping_status": "accepted", "project_id": "forge:acme/consumer", "family_id": "acme-consumer", "reviewer_id": 42, "reviewed_at": 1700000000, "evidence_sha256": "a" * 64},
+    {"graph_node_id": 2, "mapping_status": "unknown", "project_id": None, "family_id": None, "reviewer_id": None, "reviewed_at": None, "evidence_sha256": None},
+], items
+sidecar = json.load(open(sys.argv[4]))
+assert sidecar["adapter"] == "downstream-projection", sidecar
+assert sidecar["output_schema"] == "rh-downstream/3", sidecar
+framed = (b"rh-downstream-input/1\ngraph:" + str(len(graph)).encode() + b":" + graph
+          + b"\nintrinsics-present:0\n0:\nmapping-present:0\n0:\nproject-map-present:1\n"
+          + str(len(mapping)).encode() + b":" + mapping + b"\nprivate-ids:0\nassertions:0")
+assert sidecar["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(output).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/downstream/1;subject=0;max-nodes=1000;max-depth=32;unavailable=-1;has-unavailable=false;scope=255;platform=0;valid-as-of=0;known-as-of=1800000000;identity-revision=0;mapping-revision=0;project-map-enabled=true;snapshot-enabled=false;schema-version=3").hexdigest(), sidecar
+print("[project-map] downstream identity join and unknown-state behavior OK")
+PY
+"$ROOT/build/rh_cli" downstream --graph "$T/graph.json" --subject 0 --out "$T/downstream-cutoff" --project-map "$T/map.json" --known-as-of 1600000000 >/dev/null || fail "downstream project identity cutoff"
+python3 - "$T/downstream-cutoff/downstream.json" <<'PY'
+import json, sys
+items = json.load(open(sys.argv[1]))["project_identities"]["items"]
+assert all(row["mapping_status"] == "unknown" and row["project_id"] is None for row in items), items
+print("[project-map] post-cutoff review remains unknown")
 PY
 set +e
 sed 's/"graph_sha256":"[0-9a-f]*/"graph_sha256":"0000000000000000000000000000000000000000000000000000000000000000/' "$T/map.json" > "$T/stale.json"

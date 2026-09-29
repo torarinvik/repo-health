@@ -345,7 +345,7 @@ PY
 
 echo "[downstream] reviewed mappings obey known-time cutoffs"
 cat > "$T/mapping.json" <<'JSON'
-{"schema":"rh-mapping-input/1","revision":7,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"migration","source":"operator","reviewed_at":100,"evidence":[]}]}
+{"schema":"rh-mapping-input/1","revision":7,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"migration","source":"operator","reviewed_at":100,"reviewer_id":7,"evidence":["review/1"]}]}
 JSON
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/map-before" --mapping "$T/mapping.json" --known-as-of 50 >/dev/null || fail "pre-review mapping projection"
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/map-after" --mapping "$T/mapping.json" --known-as-of 100 >/dev/null || fail "post-review mapping projection"
@@ -365,7 +365,7 @@ cat > "$T/mapping-bridge.json" <<'JSON'
 {"schema":"rh-dep-graph/1","ecosystem":"npm","nodes":[{"id":0,"name":"other","version":"1"},{"id":1,"name":"upstream","version":"1"},{"id":2,"name":"canonical","version":"1"},{"id":3,"name":"alias","version":"1"},{"id":4,"name":"focus","version":"1"}],"edges":[{"from":3,"to":4,"scope":"normal"},{"from":1,"to":2,"scope":"normal"}],"unresolved":[],"advisories":[]}
 JSON
 cat > "$T/mapping-bridge-assertion.json" <<'JSON'
-{"schema":"rh-mapping-input/1","revision":8,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"mirror","source":"operator","reviewed_at":100,"evidence":[]}]}
+{"schema":"rh-mapping-input/1","revision":8,"assertions":[{"a":2,"b":3,"state":"accepted","relation":"mirror","source":"operator","reviewed_at":100,"reviewer_id":7,"evidence":["review/1"]}]}
 JSON
 "$ROOT/build/rh_cli" downstream --graph "$T/mapping-bridge.json" --subject 4 --out "$T/map-bridge" --mapping "$T/mapping-bridge-assertion.json" --known-as-of 100 >/dev/null || fail "mapped bridge traversal"
 python3 - "$T/map-bridge/downstream.json" <<'PY'
