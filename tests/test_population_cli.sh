@@ -46,6 +46,69 @@ assert all(field["state"] in {"preserved", "transformed", "inferred", "discarded
 print("[population] bounded selection + per-metric coverage + witnesses OK")
 PY
 
+echo "[population] join reviewed project identities from the selected graph population"
+cat > "$T/graph.json" <<'JSON'
+{"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"acme-core","version":"1.2.0"},{"id":1,"name":"consumer-a","version":"1"},{"id":2,"name":"consumer-b","version":"1"},{"id":3,"name":"consumer-c","version":"1"}],"edges":[{"from":1,"to":0,"scope":"normal"},{"from":2,"to":0,"scope":"normal"},{"from":3,"to":0,"scope":"normal"}],"unresolved":[],"advisories":[]}
+JSON
+python3 - "$T/graph.json" "$T/project-map.json" <<'PY'
+import hashlib, json, sys
+graph = open(sys.argv[1], "rb").read()
+doc = {"schema":"rh-project-node-map-input/1", "graph_sha256":hashlib.sha256(graph).hexdigest(), "revision":21,
+       "mappings":[
+           {"node_id":1,"project_id":"forge:acme/repo-a","family_id":"canonical-family-a","state":"accepted","reviewer_id":91,"reviewed_at":1700000000,"evidence_sha256":"a"*64},
+           {"node_id":3,"project_id":"forge:acme/repo-c","family_id":"canonical-family-c","state":"accepted","reviewer_id":92,"reviewed_at":1700000000,"evidence_sha256":"b"*64},
+       ]}
+json.dump(doc, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" downstream --graph "$T/graph.json" --subject 0 --out "$T/downstream" --project-map "$T/project-map.json" --known-as-of 1800000000 >/dev/null || fail "downstream identity source"
+python3 - "$T/in.json" "$T/identity-in.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+for dependent, graph_node_id in zip(doc["dependents"], [1, 2, 3]):
+    dependent["graph_node_id"] = graph_node_id
+json.dump(doc, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" population --input "$T/identity-in.json" --downstream "$T/downstream/downstream.json" --out "$T/identity-out.json" >/dev/null || fail "population project identity join"
+python3 - "$T/identity-in.json" "$T/downstream/downstream.json" "$T/identity-out.json" <<'PY'
+import hashlib, json, pathlib, sys
+population, downstream, output = [pathlib.Path(path) for path in sys.argv[1:]]
+result = json.loads(output.read_bytes())
+assert result["schema"] == "rh-population-result/2", result
+assert result["project_identity_mapping"] == {"revision":21,"selected":3,"accepted":2,"unknown":1}, result
+rows = {row["graph_node_id"]: row["project_identity"] for row in result["dependents"]}
+assert rows[1]["project_id"] == "forge:acme/repo-a" and rows[1]["reviewer_id"] == 91, rows
+assert rows[2]["mapping_status"] == "unknown" and rows[2]["project_id"] is None, rows
+assert rows[3]["family_id"] == "canonical-family-c" and rows[3]["evidence_sha256"] == "b"*64, rows
+sidecar = json.loads(pathlib.Path(str(output)+".transformations.json").read_bytes())
+population_raw, downstream_raw = population.read_bytes(), downstream.read_bytes()
+framed = (b"rh-population-identity-input/1\npopulation:" + str(len(population_raw)).encode() + b":" + population_raw
+          + b"\ndownstream:" + str(len(downstream_raw)).encode() + b":" + downstream_raw)
+assert sidecar["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), sidecar
+assert sidecar["output_schema"] == "rh-population-result/2", sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/3;dependents=1000;unresolved=1000;metrics=63;identity-join=true").hexdigest(), sidecar
+print("[population] canonical identity, unknown coverage, and input binding OK")
+PY
+python3 - "$T/identity-in.json" "$T/missing-node-key.json" "$T/unselected-node-key.json" "$T/duplicate-node-key.json" "$T/bad-downstream.json" <<'PY'
+import copy, json, sys
+base = json.load(open(sys.argv[1]))
+missing = copy.deepcopy(base); del missing["dependents"][0]["graph_node_id"]
+unselected = copy.deepcopy(base); unselected["dependents"][0]["graph_node_id"] = 99
+duplicate = copy.deepcopy(base); duplicate["dependents"][2]["graph_node_id"] = 1
+for value, path in zip((missing, unselected, duplicate), sys.argv[2:5]):
+    json.dump(value, open(path, "w"), separators=(",", ":"))
+downstream = json.load(open("/tmp/rh-population/downstream/downstream.json"))
+downstream["project_identities"]["coverage"]["accepted"] += 1
+json.dump(downstream, open(sys.argv[5], "w"), separators=(",", ":"))
+PY
+set +e
+"$ROOT/build/rh_cli" population --input "$T/missing-node-key.json" --downstream "$T/downstream/downstream.json" --out "$T/x.json" >/dev/null 2>&1; rc_missing_node=$?
+"$ROOT/build/rh_cli" population --input "$T/unselected-node-key.json" --downstream "$T/downstream/downstream.json" --out "$T/x.json" >/dev/null 2>&1; rc_unselected_node=$?
+"$ROOT/build/rh_cli" population --input "$T/duplicate-node-key.json" --downstream "$T/downstream/downstream.json" --out "$T/x.json" >/dev/null 2>&1; rc_duplicate_node=$?
+"$ROOT/build/rh_cli" population --input "$T/identity-in.json" --downstream "$T/bad-downstream.json" --out "$T/x.json" >/dev/null 2>&1; rc_bad_downstream=$?
+set -e
+[[ "$rc_missing_node" -eq 4 && "$rc_unselected_node" -eq 4 && "$rc_duplicate_node" -eq 4 && "$rc_bad_downstream" -eq 4 ]] || fail "invalid project identity joins must exit 4 (got $rc_missing_node/$rc_unselected_node/$rc_duplicate_node/$rc_bad_downstream)"
+
 echo "[population] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" population --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "population output not deterministic"

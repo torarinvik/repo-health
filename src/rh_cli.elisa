@@ -238,6 +238,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli adoption --input <file> --out <file> [--store-root <dir> | --postgres] (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli lineage --input <file> --out <file>")
     rh_cli_err("       rh_cli population --input <file> --out <file>")
+    rh_cli_err("            [--downstream <rh-downstream/3 report>]")
     rh_cli_err("       rh_cli ingest --root <dir> --input <file> --out <file>")
     rh_cli_err("       rh_cli ingest --postgres --root <store-dir> --input <rh-postgres-ingest-input/1|rh-postgres-legacy-ingest-input/1> --out <file>  (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli postgres --input <rh-postgres-command/1> --out <file>  (RH_DATABASE_URL)")
@@ -2960,8 +2961,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if aq_idx < 0 or as_idx < 0 or ao_idx < 0
         return rh_do_agent_check(slots[aq_idx], slots[as_idx], slots[ao_idx])
     if Base::rh_streq(cmd, "proof"):
-        pi_idx, po_idx =
-            while ppq < argc |pi_idx: i64 = -1, po_idx: i64 = -1, ppq: i64 = 2, slots| -> pi_idx, po_idx:
+        pi_idx, po_idx, downstream_idx =
+            while ppq < argc |pi_idx: i64 = -1, po_idx: i64 = -1, downstream_idx: mutable i64 = -1, ppq: i64 = 2, slots| -> pi_idx, po_idx, downstream_idx:
                 a27: u8& = slots[ppq].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(a27, "--input"):
                     if ppq + 1 < argc:
@@ -3241,8 +3242,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if adi_idx < 0 or ado_idx < 0
         return rh_do_lineage(slots[adi_idx], slots[ado_idx], true)
     if Base::rh_streq(cmd, "population"):
-        pi_idx, po_idx =
-            while ppq < argc |pi_idx: i64 = -1, po_idx: i64 = -1, ppq: i64 = 2, slots| -> pi_idx, po_idx:
+        pi_idx, po_idx, downstream_idx =
+            while ppq < argc |pi_idx: i64 = -1, po_idx: i64 = -1, downstream_idx: i64 = -1, ppq: i64 = 2, slots| -> pi_idx, po_idx, downstream_idx:
                 a37: u8& = slots[ppq].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(a37, "--input"):
                     if ppq + 1 < argc:
@@ -3256,11 +3257,19 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         po_idx <- ppq
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(a37, "--downstream"):
+                    if ppq + 1 < argc:
+                        ppq <- ppq + 1
+                        downstream_idx <- ppq
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 ppq <- ppq + 1
         return rh_cli_usage(2) if pi_idx < 0 or po_idx < 0
-        return rh_do_population(slots[pi_idx], slots[po_idx])
+        downstream_path: mutable cstr = ""
+        downstream_path <- slots[downstream_idx] if downstream_idx >= 0
+        return rh_do_population(slots[pi_idx], slots[po_idx], downstream_path, downstream_idx >= 0)
 
     if Base::rh_streq(cmd, "intrinsics-build"):
         intrinsic_input_idx, intrinsic_output_idx =
@@ -10707,8 +10716,8 @@ def rh_do_lineage(input_path: cstr, out_path: cstr, assessment_dedup: bool) -> i
 # Keeps the selected discovery population, family deduplication, path
 # witnesses, per-metric denominators, and unknown intrinsic measurements
 # explicit. The report is bounded by the input's declared page limit.
-def rh_do_population(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+def rh_do_population(input_path: cstr, out_path: cstr, downstream_path: cstr, has_downstream: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path) or (has_downstream and not Git::rh_arg_safe(downstream_path)):
         rh_cli_err("rejected population argument (allowlist)")
         return 3
     ip: mutable darray[u8] =
@@ -10721,8 +10730,17 @@ def rh_do_population(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
     if Base::rh_io_read(ipp, raw) < 0:
         rh_cli_err("population: cannot read --input")
         return 4
+    downstream_raw: mutable darray[u8] = []
+    if has_downstream:
+        dp: mutable darray[u8] = []
+        Base::rh_push_cstr(dp, downstream_path)
+        dp.push(0)
+        dpp: cstr = (&dp[0]).cast[cstr] can Unsafe.PointerCast
+        if Base::rh_io_read(dpp, downstream_raw) < 0:
+            rh_cli_err("population: cannot read --downstream")
+            return 4
     body: mutable darray[u8] = []
-    if Population::rh_population_report(raw, body) != 0:
+    if Population::rh_population_report(raw, downstream_raw, has_downstream, body) != 0:
         rh_cli_err("population: unsupported or malformed population (fail closed)")
         return 4
     body.push(10)
@@ -10731,12 +10749,25 @@ def rh_do_population(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocat
         return 4
     population_configuration: mutable darray[u8] =
         population_configuration: mutable darray[u8] = []
-        Base::rh_push_text(population_configuration, "repo-health/focal-library-population/2;dependents=1000;unresolved=1000;metrics=63")
+        Base::rh_push_text(population_configuration, "repo-health/focal-library-population/3;dependents=1000;unresolved=1000;metrics=63;identity-join=true") if has_downstream
+        Base::rh_push_text(population_configuration, "repo-health/focal-library-population/2;dependents=1000;unresolved=1000;metrics=63") if not has_downstream
         population_configuration.push(0)
         population_configuration
     population_configuration_ptr: cstr = (&population_configuration[0]).cast[cstr] can Unsafe.PointerCast
-    population_fields: u8& = "[{\"source\":\"selected population metadata\",\"target\":\"discovery, version policy, mapping revision, and deduplication contract\",\"state\":\"preserved\"},{\"source\":\"dependent metric evidence and path witnesses\",\"target\":\"per-dependent metrics and bounded witnesses\",\"state\":\"preserved\"},{\"source\":\"unresolved mappings and unavailable metrics\",\"target\":\"visible unknown coverage\",\"state\":\"preserved\"},{\"source\":\"caller-supplied policy outcomes\",\"target\":\"named pass/fail/unknown counts\",\"state\":\"preserved\"}]"
-    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "focal-library-population", "rh-population-result/1", population_configuration_ptr, population_fields, out_path):
+    population_fields: u8& = "[{\"source\":\"selected population metadata\",\"target\":\"discovery, version policy, mapping revision, and deduplication contract\",\"state\":\"preserved\"},{\"source\":\"dependent metric evidence and path witnesses\",\"target\":\"per-dependent metrics and bounded witnesses\",\"state\":\"preserved\"},{\"source\":\"unresolved mappings and unavailable metrics\",\"target\":\"visible unknown coverage\",\"state\":\"preserved\"},{\"source\":\"caller-supplied policy outcomes\",\"target\":\"named pass/fail/unknown counts\",\"state\":\"preserved\"},{\"source\":\"graph-bound reviewed downstream project identities\",\"target\":\"per-dependent canonical project identity and review coverage\",\"state\":\"transformed\"}]" if has_downstream else "[{\"source\":\"selected population metadata\",\"target\":\"discovery, version policy, mapping revision, and deduplication contract\",\"state\":\"preserved\"},{\"source\":\"dependent metric evidence and path witnesses\",\"target\":\"per-dependent metrics and bounded witnesses\",\"state\":\"preserved\"},{\"source\":\"unresolved mappings and unavailable metrics\",\"target\":\"visible unknown coverage\",\"state\":\"preserved\"},{\"source\":\"caller-supplied policy outcomes\",\"target\":\"named pass/fail/unknown counts\",\"state\":\"preserved\"}]"
+    population_sidecar_input: mutable darray[u8] = raw
+    if has_downstream:
+        population_sidecar_input <- []
+        Base::rh_push_text(population_sidecar_input, "rh-population-identity-input/1\npopulation:")
+        Base::rh_push_decimal_u64(population_sidecar_input, raw.count.u64())
+        population_sidecar_input.push(58)
+        population_sidecar_input.extend(bytes_view(raw))
+        Base::rh_push_text(population_sidecar_input, "\ndownstream:")
+        Base::rh_push_decimal_u64(population_sidecar_input, downstream_raw.count.u64())
+        population_sidecar_input.push(58)
+        population_sidecar_input.extend(bytes_view(downstream_raw))
+    population_schema: cstr = "rh-population-result/2" if has_downstream else "rh-population-result/1"
+    if not AdapterTransformationCli::rh_write_sidecar(population_sidecar_input, body, "focal-library-population", population_schema, population_configuration_ptr, population_fields, out_path):
         rh_cli_err("population: cannot write transformation report")
         return 4
     rh_cli_out("population: bounded downstream report emitted")
