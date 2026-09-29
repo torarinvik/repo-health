@@ -40,6 +40,7 @@ assert "counts projects once" in d["note"], d
 report = json.load(open(sys.argv[1] + ".transformations.json"))
 assert report["schema"] == "rh-adapter-transformation-report/1", report
 assert report["adapter"] == "focal-library-population", report
+assert "context" in report["fields"][0]["target"], report
 assert report["source_input_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), report
 assert report["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), report
 assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/2;dependents=1000;unresolved=1000;metrics=63").hexdigest(), report
