@@ -185,6 +185,17 @@ set +e
 set -e
 [[ "$rc_unknown_transformation" -eq 4 && "$rc_unknown_metric" -eq 4 ]] || fail "unknown lineage record fields must fail closed (got $rc_unknown_transformation/$rc_unknown_metric)"
 echo "[lineage] unknown transformation and metric fields fail closed"
+python3 - "$T/in.json" "$T/unknown-root-field.json" <<'PYROOT'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["future_field"] = "must-not-disappear"
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PYROOT
+set +e
+"$ROOT/build/rh_cli" lineage --input "$T/unknown-root-field.json" --out "$T/x" >/dev/null 2>&1; rc_unknown_root=$?
+set -e
+[[ "$rc_unknown_root" -eq 4 ]] || fail "unknown lineage root fields must fail closed (got $rc_unknown_root)"
+echo "[lineage] unknown root fields fail closed"
 python3 - "$T/in.json" "$T/duplicate-ref.json" "$T/over-bound-refs.json" "$T/over-bound-transformations.json" "$T/over-bound-metrics.json" <<'PY'
 import json, sys
 document = json.load(open(sys.argv[1]))
