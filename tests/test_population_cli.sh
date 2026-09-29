@@ -63,6 +63,14 @@ sed 's/"status":"unknown","value":null/"status":"unknown","value":1/' "$T/in.jso
 "$ROOT/build/rh_cli" population --input "$T/bad-value.json" --out "$T/x" >/dev/null 2>&1; rc_value=$?
 sed 's/"status":"unknown","value":null,"policy":"unknown"/"status":"unknown","value":null,"policy":"pass"/' "$T/in.json" > "$T/bad-policy-state.json"
 "$ROOT/build/rh_cli" population --input "$T/bad-policy-state.json" --out "$T/x" >/dev/null 2>&1; rc_policy_state=$?
+python3 - "$T/in.json" "$T/bad-duplicate-root-key.json" "$T/bad-duplicate-cell-key.json" <<'PY'
+import sys
+source = open(sys.argv[1]).read()
+open(sys.argv[2], "w").write(source.replace('"truncated":true', '"truncated":true,"truncated":false', 1))
+open(sys.argv[3], "w").write(source.replace('"status":"unknown","value":null', '"status":"unknown","status":"observed","value":null', 1))
+PY
+"$ROOT/build/rh_cli" population --input "$T/bad-duplicate-root-key.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate_root=$?
+"$ROOT/build/rh_cli" population --input "$T/bad-duplicate-cell-key.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate_cell=$?
 sed 's/"provider_status":"rate_limit"/"provider_status":"mystery"/' "$T/in.json" > "$T/bad-provider.json"
 "$ROOT/build/rh_cli" population --input "$T/bad-provider.json" --out "$T/x" >/dev/null 2>&1; rc_provider=$?
 sed 's/"relation":"direct"/"relation":"indirect"/' "$T/in.json" > "$T/bad-relation.json"
@@ -90,6 +98,6 @@ PY
 "$ROOT/build/rh_cli" population --input "$T/bad-dependent-cap.json" --out "$T/x" >/dev/null 2>&1; rc_dependent_cap=$?
 "$ROOT/build/rh_cli" population --input "$T/bad-metric-cap.json" --out "$T/x" >/dev/null 2>&1; rc_metric_cap=$?
 set -e
-[[ "$rc_bool" -eq 4 && "$rc_revision" -eq 4 && "$rc_path" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_value" -eq 4 && "$rc_policy_state" -eq 4 && "$rc_provider" -eq 4 && "$rc_relation" -eq 4 && "$rc_path_relation" -eq 4 && "$rc_negative" -eq 4 && "$rc_overflow" -eq 4 && "$rc_dependent_cap" -eq 4 && "$rc_metric_cap" -eq 4 ]] || fail "invalid population must exit 4 (got $rc_bool/$rc_revision/$rc_path/$rc_duplicate/$rc_value/$rc_policy_state/$rc_provider/$rc_relation/$rc_path_relation/$rc_negative/$rc_overflow/$rc_dependent_cap/$rc_metric_cap)"
+[[ "$rc_bool" -eq 4 && "$rc_revision" -eq 4 && "$rc_path" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_value" -eq 4 && "$rc_policy_state" -eq 4 && "$rc_duplicate_root" -eq 4 && "$rc_duplicate_cell" -eq 4 && "$rc_provider" -eq 4 && "$rc_relation" -eq 4 && "$rc_path_relation" -eq 4 && "$rc_negative" -eq 4 && "$rc_overflow" -eq 4 && "$rc_dependent_cap" -eq 4 && "$rc_metric_cap" -eq 4 ]] || fail "invalid population must exit 4 (got $rc_bool/$rc_revision/$rc_path/$rc_duplicate/$rc_value/$rc_policy_state/$rc_duplicate_root/$rc_duplicate_cell/$rc_provider/$rc_relation/$rc_path_relation/$rc_negative/$rc_overflow/$rc_dependent_cap/$rc_metric_cap)"
 
 echo "test_population_cli OK"
