@@ -63,7 +63,27 @@ sed 's/"status":"unknown","value":null/"status":"unknown","value":1/' "$T/in.jso
 "$ROOT/build/rh_cli" population --input "$T/bad-value.json" --out "$T/x" >/dev/null 2>&1; rc_value=$?
 sed 's/"provider_status":"rate_limit"/"provider_status":"mystery"/' "$T/in.json" > "$T/bad-provider.json"
 "$ROOT/build/rh_cli" population --input "$T/bad-provider.json" --out "$T/x" >/dev/null 2>&1; rc_provider=$?
+sed 's/"value":5/"value":-1/' "$T/in.json" > "$T/bad-negative-value.json"
+"$ROOT/build/rh_cli" population --input "$T/bad-negative-value.json" --out "$T/x" >/dev/null 2>&1; rc_negative=$?
+python3 - "$T/in.json" "$T/bad-overflow.json" "$T/bad-dependent-cap.json" "$T/bad-metric-cap.json" <<'PY'
+import copy, json, sys
+base = json.load(open(sys.argv[1]))
+overflow = copy.deepcopy(base)
+overflow["dependents"][1]["metrics"][1]["value"] = 9223372036854775807
+overflow["dependents"][2]["metrics"][1]["value"] = 1
+json.dump(overflow, open(sys.argv[2], "w"), separators=(",", ":"))
+too_many = copy.deepcopy(base)
+template = too_many["dependents"][0]
+too_many["dependents"] = [dict(template, id=f"repo-{i}", family=f"family-{i}") for i in range(1001)]
+json.dump(too_many, open(sys.argv[3], "w"), separators=(",", ":"))
+too_many_metrics = copy.deepcopy(base)
+too_many_metrics["metric_definitions"] = [{"key":f"metric.{i}", "version":"1"} for i in range(64)]
+json.dump(too_many_metrics, open(sys.argv[4], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" population --input "$T/bad-overflow.json" --out "$T/x" >/dev/null 2>&1; rc_overflow=$?
+"$ROOT/build/rh_cli" population --input "$T/bad-dependent-cap.json" --out "$T/x" >/dev/null 2>&1; rc_dependent_cap=$?
+"$ROOT/build/rh_cli" population --input "$T/bad-metric-cap.json" --out "$T/x" >/dev/null 2>&1; rc_metric_cap=$?
 set -e
-[[ "$rc_bool" -eq 4 && "$rc_revision" -eq 4 && "$rc_path" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_value" -eq 4 && "$rc_provider" -eq 4 ]] || fail "invalid population must exit 4 (got $rc_bool/$rc_revision/$rc_path/$rc_duplicate/$rc_value/$rc_provider)"
+[[ "$rc_bool" -eq 4 && "$rc_revision" -eq 4 && "$rc_path" -eq 4 && "$rc_duplicate" -eq 4 && "$rc_value" -eq 4 && "$rc_provider" -eq 4 && "$rc_negative" -eq 4 && "$rc_overflow" -eq 4 && "$rc_dependent_cap" -eq 4 && "$rc_metric_cap" -eq 4 ]] || fail "invalid population must exit 4 (got $rc_bool/$rc_revision/$rc_path/$rc_duplicate/$rc_value/$rc_provider/$rc_negative/$rc_overflow/$rc_dependent_cap/$rc_metric_cap)"
 
 echo "test_population_cli OK"
