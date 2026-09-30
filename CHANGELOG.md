@@ -59,6 +59,10 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- The temporal oracle now reaches the exact signed-`i64` Unix-second ceiling
+  with an independent Gregorian leap-day count. It verifies conversion at the
+  maximum instant, output preservation after overflow, and a representable
+  timezone-adjusted instant immediately below the ceiling.
 - The M00 temporal oracle now checks 200 timezone-offset conversions against
   epoch seconds derived independently from Gregorian year and month lengths.
   Cases cover epoch crossing, leap days, century behavior, cycle end, and both

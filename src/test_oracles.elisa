@@ -124,11 +124,12 @@ def gregorian_cycle_oracle(fails: mutable i64&) -> void can[Memory.Allocate, Abo
                 expected_days <- expected_days + 1
 
 def oracle_days_from_epoch(year: i64, month: i64, day: i64) -> i64:
-    days: mutable i64 = 0
-    for current_year in 1970..<year |current_year, days|:
-        leap: bool = current_year % 4 == 0 and (current_year % 100 != 0 or current_year % 400 == 0)
-        days <- days + 365
-        days <- days + 1 if leap
+    # Count Gregorian leap years arithmetically, independently of the
+    # production civil-date conversion and without a year-sized iteration.
+    last_year: i64 = year - 1
+    leap_days_before_epoch: i64 = 1969 / 4 - 1969 / 100 + 1969 / 400
+    leap_days: i64 = last_year / 4 - last_year / 100 + last_year / 400 - leap_days_before_epoch
+    days: mutable i64 = (year - 1970) * 365 + leap_days
     for current_month in 1..<month |current_month, year, days|:
         leap: bool = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
         days_in_month: i64 =
@@ -506,6 +507,13 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     checked_instant <- 123
     check(not Temporal::rh_unix_from_civil_checked(292277026597, 1, 1, &checked_instant) and checked_instant == 123, "unix-second-overflow-date-rejected-with-output-preserved", &fails)
     check(not Temporal::rh_unix_from_civil_checked(9223372036854775807, 1, 1, &checked_instant) and checked_instant == 123, "extreme-year-rejected-before-arithmetic-overflow", &fails)
+    max_epoch_instant: i64 = oracle_days_from_epoch(292277026596, 12, 4) * 86400 + 15 * 3600 + 30 * 60 + 7
+    check(max_epoch_instant == 9223372036854775807, "independent-epoch-oracle-reaches-signed-i64-maximum", &fails)
+    check(Temporal::rh_unix_from_civil_time_checked(292277026596, 12, 4, 15, 30, 7, 0, &checked_instant) and checked_instant == max_epoch_instant, "maximum-representable-civil-instant-converts", &fails)
+    checked_instant <- 123
+    check(not Temporal::rh_unix_from_civil_time_checked(292277026596, 12, 4, 15, 30, 8, 0, &checked_instant) and checked_instant == 123, "civil-instant-one-second-past-signed-i64-rejected", &fails)
+    check(not Temporal::rh_unix_from_civil_time_checked(292277026596, 12, 4, 15, 30, 7, -1, &checked_instant) and checked_instant == 123, "negative-offset-overflow-rejected-with-output-preserved", &fails)
+    check(Temporal::rh_unix_from_civil_time_checked(292277026596, 12, 4, 15, 30, 7, 1, &checked_instant) and checked_instant == max_epoch_instant - 1, "positive-offset-near-maximum-remains-representable", &fails)
     check(Temporal::rh_unix_from_civil_time_checked(1969, 12, 31, 23, 0, 0, -3600, &checked_instant) and checked_instant == 0, "offset-corrected-pre-epoch-civil-time-reaches-epoch", &fails)
     checked_instant <- 123
     check(not Temporal::rh_unix_from_civil_time_checked(1970, 1, 1, 0, 0, 0, 3600, &checked_instant) and checked_instant == 123, "offset-adjusted-pre-epoch-instant-rejected", &fails)
