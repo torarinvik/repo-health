@@ -8,6 +8,7 @@ on the real execution path.
 ## [Unreleased]
 
 ### Fixed
+- The M07 source-rights register now matches forge manifests: GitLab project-member collection is declared, while Bitbucket releases/traffic and Gitea/Forgejo permissions/traffic are explicitly unsupported. A regression checks that each forge capability appears in exactly one rights-scope bucket.
 - The M07 monitor now accepts explicit policy-evaluation and policy-unknown
   observations and reports the unknown share with a real denominator; absent
   policy observations yield `null`. This remains independent of service

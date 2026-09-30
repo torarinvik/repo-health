@@ -124,7 +124,8 @@ grep -q "Idempotent" "$ROOT/src/rh_store.elisa" || fail "idempotent-delete note 
 
 echo "[m07] source review register schema (M07-06)"
 python3 - "$ROOT/ops/source-review-register.json" <<'PY'
-import json, sys
+import json, os, sys
+root = os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[1])))
 d = json.load(open(sys.argv[1]))
 assert d.get("register_version") == "rh-source-review/1", "register version"
 assert len(d.get("sources", [])) >= 5, "need at least five reviewed source families"
@@ -137,7 +138,10 @@ for s in d["sources"]:
         assert k in s, ("missing field", s.get("id"), k)
     assert s["id"] not in ids, "duplicate source id"
     ids.add(s["id"])
-    assert isinstance(s["capabilities"], list) and isinstance(s["unauthorized"], list), s["id"]
+    for field in ("capabilities", "unauthorized", "unsupported"):
+        assert isinstance(s[field], list) and len(s[field]) == len(set(s[field])), (s["id"], field)
+    supported, unauthorized, unsupported = map(set, (s["capabilities"], s["unauthorized"], s["unsupported"]))
+    assert not (supported & unauthorized or supported & unsupported or unauthorized & unsupported), (s["id"], supported & unauthorized, supported & unsupported, unauthorized & unsupported)
     assert s["capabilities"] or s["unauthorized"], ("empty scope without an explicit restriction", s["id"])
     assert isinstance(s["retention_days"], int) and s["retention_days"] >= 0
     assert s["redistribution"] in ("none", "metadata_only", "full"), s["id"]
@@ -148,6 +152,23 @@ assert "traffic" in gh["unauthorized"], "github traffic must be unauthorized"
 dd = [s for s in d["sources"] if s["id"] == "deps-dev"]
 assert len(dd) == 1 and dd[0]["redistribution"] == "metadata_only", dd
 assert "version_metadata" in dd[0]["capabilities"] and "package_execution" in dd[0]["unsupported"], dd[0]
+sources = {s["id"]: s for s in d["sources"]}
+for provider in ("github", "gitlab", "gitea", "forgejo", "bitbucket"):
+    manifest = json.load(open(os.path.join(root, "connectors", "manifests", provider + ".json")))
+    source = sources[provider]
+    buckets = {"read": "capabilities", "unsupported": "unsupported", "unsupported-no-traffic-api": "unsupported", "unauthorized-in-m02-slice": "unauthorized", "authorized-14-day-window": "unauthorized"}
+    for capability in ("issues", "reviews", "releases", "permissions", "traffic"):
+        state = manifest["capabilities"][capability]
+        destinations = [field for field in ("capabilities", "unauthorized", "unsupported") if capability in source[field]]
+        assert len(destinations) == 1, (provider, capability, destinations)
+        expected = buckets.get(state)
+        if state == "authorized-only":
+            assert destinations[0] in ("capabilities", "unauthorized"), (provider, capability, state, destinations)
+        else:
+            assert destinations == [expected], (provider, capability, state, destinations, expected)
+bitbucket = sources["bitbucket"]
+assert "releases" in bitbucket["unsupported"] and "releases" not in bitbucket["capabilities"], bitbucket
+assert "permissions" in sources["gitlab"]["capabilities"], sources["gitlab"]
 blob = json.dumps(d).lower()
 for bad in ("token", "password", "secret", "api_key", "bearer"):
     assert bad not in blob, ("possible credential field", bad)
