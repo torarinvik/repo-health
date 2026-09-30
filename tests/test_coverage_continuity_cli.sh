@@ -25,14 +25,15 @@ assert side["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb"
 print("[coverage-continuity] adjacent half-open intervals remain continuous across source instances")
 PY
 
-python3 - "$T/in.json" "$T/gap.json" "$T/unknown.json" "$T/overlap.json" "$T/future.json" <<'PY'
+python3 - "$T/in.json" "$T/gap.json" "$T/unknown.json" "$T/overlap.json" "$T/future.json" "$T/bad-state.json" <<'PY'
 import copy, json, sys
 base = json.load(open(sys.argv[1]))
 gap = copy.deepcopy(base); gap["reports"][1]["capabilities"][0]["valid_start"] = 110
 unknown = copy.deepcopy(base); unknown["reports"][1]["capabilities"][0].update(state="partial", valid_start=None, valid_end=200)
 overlap = copy.deepcopy(base); overlap["reports"][1]["capabilities"][0]["valid_start"] = 99
 future = copy.deepcopy(base); future["reports"][1]["capabilities"][0]["known_as_of"] = 201
-for path, value in zip(sys.argv[2:], [gap, unknown, overlap, future]):
+bad_state = copy.deepcopy(base); bad_state["reports"][0]["capabilities"][0]["state"] = "complete-ish"
+for path, value in zip(sys.argv[2:], [gap, unknown, overlap, future, bad_state]):
     json.dump(value, open(path, "w"), separators=(",", ":"))
 PY
 "$ROOT/build/rh_cli" coverage-continuity --input "$T/gap.json" --out "$T/gap-out.json" >/dev/null || fail "gapped source intervals"
@@ -49,6 +50,7 @@ PY
 set +e
 "$ROOT/build/rh_cli" coverage-continuity --input "$T/overlap.json" --out "$T/overlap-out.json" >/dev/null 2>&1; overlap_rc=$?
 "$ROOT/build/rh_cli" coverage-continuity --input "$T/future.json" --out "$T/future-out.json" >/dev/null 2>&1; future_rc=$?
+"$ROOT/build/rh_cli" coverage-continuity --input "$T/bad-state.json" --out "$T/bad-state-out.json" >/dev/null 2>&1; bad_state_rc=$?
 set -e
-[[ "$overlap_rc" -eq 4 && "$future_rc" -eq 4 ]] || fail "overlap and future-known reports fail closed"
+[[ "$overlap_rc" -eq 4 && "$future_rc" -eq 4 && "$bad_state_rc" -eq 4 ]] || fail "overlap, future-known, and invalid-state reports fail closed"
 echo "test_coverage_continuity_cli OK"
