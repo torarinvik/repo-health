@@ -65,6 +65,59 @@ assert "unresolved never forced human" in d["note"], d["note"]
 print("[identity] clusters + kinds OK")
 PY
 
+echo "[identity] actor kind/source/time/evidence cross-product"
+python3 - "$T/metadata-cross.json" "$T/metadata-cross-expected.json" <<'PY'
+import itertools, json, pathlib, sys
+input_path, expected_path = map(pathlib.Path, sys.argv[1:])
+kinds = ("human", "bot_known", "service_known", "unresolved")
+sources = ("provider", "project", "operator", "unknown")
+classifications = []
+for actor_id, (kind, source, has_time, has_evidence) in enumerate(
+    itertools.product(kinds, sources, (False, True), (False, True))
+):
+    classifications.append({
+        "actor_id": actor_id,
+        "kind": kind,
+        "source": source,
+        "observed_at": 1700000000 + actor_id if has_time else None,
+        "evidence_ref": f"evidence:actor-{actor_id}" if has_evidence else None,
+    })
+input_doc = {
+    "schema": "rh-identity-input/1",
+    "actor_count": len(classifications),
+    "links": [],
+    "actor_kinds": [row["kind"] for row in classifications],
+    "actor_kind_sources": [row["source"] for row in classifications],
+    "actor_kind_observed_at": [row["observed_at"] for row in classifications],
+    "actor_kind_evidence_refs": [row["evidence_ref"] for row in classifications],
+    "actors": [
+        {"source":"github", "source_instance":"github.com/acme",
+         "native_object_id":f"repo-{row['actor_id']}", "display_name":f"repo-{row['actor_id']}", "aliases":[]}
+        for row in classifications
+    ],
+}
+input_path.write_text(json.dumps(input_doc, separators=(",", ":")) + "\n")
+expected = {
+    "actor_count": 64,
+    "clusters": [[actor_id] for actor_id in range(64)],
+    "identity_revision": 0,
+    "actor_kinds": {kind: 16 for kind in kinds},
+    "actor_kind_sources": {source: 16 for source in sources},
+    "actor_kind_observation_times": {"observed": 32, "unknown": 32},
+    "actor_kind_evidence_references": {"present": 32, "unknown": 32},
+    "actor_classifications": classifications,
+}
+expected_path.write_text(json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+"$ROOT/build/rh_cli" identity --input "$T/metadata-cross.json" --out "$T/metadata-cross.out" >/dev/null || fail "actor metadata cross-product"
+python3 - "$T/metadata-cross-expected.json" "$T/metadata-cross.out" <<'PY'
+import json, sys
+expected, actual = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
+for field in expected:
+    assert actual[field] == expected[field], (field, actual.get(field), expected[field])
+print("[identity] all 64 actor metadata combinations match independent classification oracles")
+PY
+
 echo "[identity] rejecting a link changes nothing; revoking recomputes"
 "$ROOT/build/rh_cli" identity --input "$T/b.json" --out "$T/b.out" >/dev/null || fail "B run"
 python3 - "$T/a.out" "$T/b.out" <<'PY'
