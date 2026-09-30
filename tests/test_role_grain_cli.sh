@@ -15,9 +15,17 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-role-grain-input/1","identity_revision":3,"as_known_revision":2,"events":[{"id":"e1","actor":"alice","role":"author","at":1},{"id":"e2","actor":"bob","role":"reviewer","at":2},{"id":"e3","actor":"alice","role":"releaser","at":3},{"id":"e4","actor":"carol","role":"reviewer","at":4}],"corrections":[{"event_id":"e2","action":"replace","actor":"alice","revision":3},{"event_id":"e3","action":"retract","revision":3}],"affiliations":[{"actor":"alice","organization":"old-org","valid_from":0,"valid_to":2},{"actor":"alice","organization":"new-org","valid_from":3,"valid_to":null},{"actor":"bob","organization":"unknown-org","valid_from":null,"valid_to":5}]}
 JSON
 "$ROOT/build/rh_cli" role-grain --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "role-grain run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
+python3 - "$T/in.json" "$T/out.json" <<'PY'
+import hashlib, json, sys
+source_path, output_path = sys.argv[1:]
+d = json.load(open(output_path))
+report = json.load(open(output_path + ".transformations.json"))
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "role-event-grain" and report["output_schema"] == "rh-role-grain-result/1", report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/role-event-grain/1").hexdigest(), report
+assert report["source_input_sha256"] == hashlib.sha256(open(source_path, "rb").read()).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(open(output_path, "rb").read()).hexdigest(), report
+assert {field["state"] for field in report["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, report
 assert d["schema"] == "rh-role-grain-result/1", d
 assert d["event_grain"] == "one_event_one_role", d
 known = {r["role"]: r for r in d["as_known"]["roles"]}
@@ -38,6 +46,7 @@ PY
 echo "[role-grain] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" role-grain --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "role-grain output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "role-grain transformation report not deterministic"
 set +e
 sed 's/"role":"reviewer"/"role":"maintainer"/' "$T/in.json" > "$T/bad-role.json"
 "$ROOT/build/rh_cli" role-grain --input "$T/bad-role.json" --out "$T/x" >/dev/null 2>&1; rc_role=$?
