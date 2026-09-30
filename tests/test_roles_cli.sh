@@ -77,6 +77,21 @@ for key in (
     }, metric
 assert metrics["maintainer.role_assignments_with_end_dates"]["value"] == 1, metrics
 assert metrics["maintainer.declared_current"]["value"] == 1 and metrics["maintainer.declared_current"]["as_of"] == 350, metrics
+assert metrics["maintainer.declared_current"]["quality_dimensions"] == {
+    "completeness": "complete",
+    "freshness": "unknown",
+    "validity": "valid",
+    "provenance": "evidence_backed",
+}, metrics
+assert metrics["maintainer.active_declared_12m"]["status"] == "unsupported", metrics
+assert metrics["maintainer.active_declared_12m"]["value"] is None, metrics
+assert metrics["maintainer.active_declared_12m"]["as_of"] == 350, metrics
+assert metrics["maintainer.active_declared_12m"]["quality_dimensions"] == {
+    "completeness": "unknown",
+    "freshness": "unknown",
+    "validity": "unknown",
+    "provenance": "evidence_backed",
+}, metrics
 assert metrics["maintainer.permission_observed_current"]["value"] == 1, metrics
 assert metrics["maintainer.permission_inventory_coverage"]["value"] == {"num": 1, "den": 1}, metrics
 assert metrics["maintainer.observed_release_actors"]["value"] == 1, metrics
@@ -119,6 +134,12 @@ d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
 assert m["maintainer.active_declared_12m"]["value"] == 1, m
 assert m["maintainer.active_declared_12m"]["as_of"] == 31536100, m
+assert m["maintainer.active_declared_12m"]["quality_dimensions"] == {
+    "completeness": "complete",
+    "freshness": "unknown",
+    "validity": "valid",
+    "provenance": "evidence_backed",
+}, m
 print("[roles] twelve-month declaration metric OK")
 PY
 
@@ -131,6 +152,12 @@ d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
 assert m["maintainer.active_declared_12m"]["status"] == "unsupported", m
 assert m["maintainer.active_declared_12m"]["reason"] == "persistent-activity-profile-not-supplied", m
+assert m["maintainer.active_declared_12m"]["quality_dimensions"] == {
+    "completeness": "unknown",
+    "freshness": "unknown",
+    "validity": "unknown",
+    "provenance": "evidence_backed",
+}, m
 assert m["maintainer.permission_inventory_coverage"]["status"] == "unsupported", m
 assert m["maintainer.permission_inventory_coverage"]["reason"] == "permission-inventory-completeness-not-supplied", m
 assert m["maintainer.permission_inventory_coverage"]["quality_dimensions"] == {
@@ -228,6 +255,16 @@ for key in (
 ):
     assert m[key]["status"] == "unsupported" and m[key]["value"] is None, m[key]
     assert m[key]["reason"] == "observed-actions-not-supplied", m[key]
+    assert m[key]["quality_dimensions"] == {
+        "completeness": "unknown",
+        "freshness": "unknown",
+        "validity": "unknown",
+        "provenance": "evidence_backed",
+    }, m[key]
+for key in ("maintainer.declared_current", "maintainer.active_declared_12m"):
+    assert m[key]["status"] == "unsupported" and m[key]["value"] is None, m[key]
+    assert m[key]["reason"] == "no-declaration-as-of-time", m[key]
+    assert m[key]["as_of"] is None, m[key]
     assert m[key]["quality_dimensions"] == {
         "completeness": "unknown",
         "freshness": "unknown",

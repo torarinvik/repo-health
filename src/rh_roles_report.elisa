@@ -66,7 +66,7 @@ module RolesReport:
             Base::rh_push_decimal_i64(out, counts[Roles::RH_ACTOR_KIND_UNKNOWN.usize()])
             Base::rh_push_text(out, "}")
 
-        def rh_rr_emit_typed_metric(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_rr_observation(value: Observation::RhMetricValue, status: u8) -> Observation::RhObservation can[Memory.Allocate, Abort.Panic]:
             quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
                 completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Unknown,
                 freshness: Observation::RhFreshness.Unknown,
@@ -75,14 +75,21 @@ module RolesReport:
             }
             evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
             Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.RolesInput)
-            observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(
+            Observation::rh_observation_make_with_evidence(
                 status,
                 value,
                 false,
                 quality,
                 evidence
             )
+
+        def rh_rr_emit_typed_metric(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            observation: Observation::RhObservation = RolesReport::rh_rr_observation(value, status)
             Observation::rh_observation_emit_metric(out, key, "1.0.0", reason, observation)
+
+        def rh_rr_emit_metric_with_as_of(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, reason: cstr, has_as_of: bool, as_of: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            observation: Observation::RhObservation = RolesReport::rh_rr_observation(value, status)
+            Observation::rh_observation_emit_metric_with_optional_as_of(out, key, "1.0.0", reason, has_as_of, as_of, observation)
 
         def rh_rr_emit_count_metric(out: mutable darray[u8]&, key: cstr, count: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             rh_rr_emit_typed_metric(out, key, Observation::RhMetricValue.Count(count), Observation::RH_ST_OBSERVED, "")
@@ -463,32 +470,18 @@ module RolesReport:
             out.push(44)
             return -1 if not RolesReport::rh_rr_emit_count_metric(out, "maintainer.role_assignments_with_end_dates", ended_count)
             out.push(44)
-            Base::rh_push_text(out, "{\"key\":\"maintainer.declared_current\",\"version\":\"1.0.0\",\"status\":\"")
             if has_as_of:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, declared_current)
+                return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.declared_current", Observation::RhMetricValue.Count(declared_current), Observation::RH_ST_OBSERVED, "", true, current_as_of)
             else:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"no-declaration-as-of-time\"")
-            Base::rh_push_text(out, ",\"as_of\":")
-            if has_as_of:
-                Base::rh_push_decimal_i64(out, current_as_of)
-            else:
-                Base::rh_push_text(out, "null")
-            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"maintainer.active_declared_12m\",\"version\":\"1.0.0\",\"status\":\"")
+                return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.declared_current", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "no-declaration-as-of-time", false, 0)
+            out.push(44)
             if has_as_of and has_persistent_profile:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, active_declared_12m)
+                return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.active_declared_12m", Observation::RhMetricValue.Count(active_declared_12m), Observation::RH_ST_OBSERVED, "", true, current_as_of)
             elif not has_as_of:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"no-declaration-as-of-time\"")
+                return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.active_declared_12m", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "no-declaration-as-of-time", false, 0)
             else:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"persistent-activity-profile-not-supplied\"")
-            Base::rh_push_text(out, ",\"as_of\":")
-            if has_as_of:
-                Base::rh_push_decimal_i64(out, current_as_of)
-            else:
-                Base::rh_push_text(out, "null")
-            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
+                return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.active_declared_12m", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "persistent-activity-profile-not-supplied", true, current_as_of)
+            out.push(44)
             if has_actions:
                 return -1 if not RolesReport::rh_rr_emit_count_metric(out, "maintainer.observed_release_actors", observed_release_actors)
             else:

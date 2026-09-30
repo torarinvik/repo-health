@@ -67,6 +67,25 @@ def observation_metric_emits_value(value: Observation::RhMetricValue, expected_v
     Base::rh_push_text(expected, ",\"evidence\":[\"git_log\"],\"quality_dimensions\":{\"completeness\":\"complete\",\"freshness\":\"unknown\",\"validity\":\"valid\",\"provenance\":\"evidence_backed\"}}")
     Base::rh_bytes_equal_span(actual, 0, actual.count.i64(), expected, 0, expected.count.i64())
 
+def observation_metric_emits_optional_as_of() -> bool can[Memory.Allocate, Abort.Panic]:
+    quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Complete, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.EvidenceBacked}
+    evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+    Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.RolesInput)
+    observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Count(4), false, quality, evidence)
+    timestamped: mutable darray[u8] = []
+    return false if not Observation::rh_observation_emit_metric_with_optional_as_of(timestamped, "test.metric", "1.0.0", "", true, 42, observation)
+    expected_timestamped: mutable darray[u8] = []
+    Base::rh_push_text(expected_timestamped, "{\"key\":\"test.metric\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":4,\"as_of\":42,\"evidence\":[\"roles-input\"],\"quality_dimensions\":{\"completeness\":\"complete\",\"freshness\":\"unknown\",\"validity\":\"valid\",\"provenance\":\"evidence_backed\"}}")
+    return false if not Base::rh_bytes_equal_span(timestamped, 0, timestamped.count.i64(), expected_timestamped, 0, expected_timestamped.count.i64())
+    unknown_timestamp: mutable darray[u8] = []
+    return false if not Observation::rh_observation_emit_metric_with_optional_as_of(unknown_timestamp, "test.metric", "1.0.0", "", false, 0, observation)
+    expected_unknown: mutable darray[u8] = []
+    Base::rh_push_text(expected_unknown, "{\"key\":\"test.metric\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":4,\"as_of\":null,\"evidence\":[\"roles-input\"],\"quality_dimensions\":{\"completeness\":\"complete\",\"freshness\":\"unknown\",\"validity\":\"valid\",\"provenance\":\"evidence_backed\"}}")
+    return false if not Base::rh_bytes_equal_span(unknown_timestamp, 0, unknown_timestamp.count.i64(), expected_unknown, 0, expected_unknown.count.i64())
+    invalid_timestamp: mutable darray[u8] = []
+    return false if Observation::rh_observation_emit_metric_with_optional_as_of(invalid_timestamp, "test.metric", "1.0.0", "", true, -1, observation)
+    invalid_timestamp.count == 0
+
 def observation_metric_emits_optional_reason(reason: cstr, expected_reason_field: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
     observation: Observation::RhObservation = Observation::rh_observation_make(Observation::RH_ST_NOT_APPLICABLE, Observation::RhMetricValue.Absent, false)
     actual: mutable darray[u8] = []
@@ -401,6 +420,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
                 valid <- valid and observation_roundtrip(Observation::rh_observation_make(status, Observation::RhMetricValue.Enumeration(0), incomplete))
     check(serialized_cross_product, "typed-observation-json-roundtrip-cross-product", &fails)
     check(observation_evidence_roundtrip(), "typed-observation-evidence-link-roundtrip", &fails)
+    check(observation_metric_emits_optional_as_of(), "typed-observation-optional-as-of-contract", &fails)
     check(observation_external_evidence_roundtrip(), "typed-observation-external-evidence-roundtrip", &fails)
     report_quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Partial, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.EvidenceBacked}
     duplicate_links: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
