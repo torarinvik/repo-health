@@ -59,6 +59,11 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- The shared observation module now owns metric JSON serialization for every
+  tagged value variant, with validation, escaped evidence, reasoned non-observed
+  states, and quality dimensions in one writer. Coverage and downstream reports
+  use it in place of local serializers, and population summary counts now emit
+  the same typed envelope. M00 oracles cover all seven present value shapes.
 - `rh-downstream/1` and `/2` metric rows now serialize from validated shared
   observations. Truncated scenario counts retain partial status with an absent
   value and reason, while unrequested scenarios remain not applicable. Quality

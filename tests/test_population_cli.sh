@@ -27,6 +27,15 @@ summary = {m["key"]: m for m in d["summary_metrics"]}
 assert summary["population.selected_dependent_count"]["value"] == 3, summary
 assert summary["population.distinct_family_count"]["value"] == 2, summary
 assert summary["population.unresolved_mapping_count"]["value"] == 1, summary
+for metric in summary.values():
+    assert metric["status"] == "observed", metric
+    assert metric["evidence"] == ["population-input"], metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "complete",
+        "freshness": "unknown",
+        "validity": "valid",
+        "provenance": "evidence_backed",
+    }, metric
 assert d["dependents"][1]["path_witness"] == ["tool", "dep", "acme-core"], d
 assert d["dependents"][0]["published_package_count"] == 2, d
 assert d["population"]["selected_dependents"] == len(d["dependents"]), d

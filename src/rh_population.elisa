@@ -8,6 +8,7 @@
 
 include "./rh_base.elisa"
 include "./rh_json.elisa"
+include "./rh_observation.elisa"
 
 module Population:
     private:
@@ -156,6 +157,18 @@ module Population:
             return "rate_limit" if status == RH_POP_PROVIDER_RATE_LIMIT
             return "authorization" if status == RH_POP_PROVIDER_AUTHORIZATION
             "unavailable"
+
+        def rh_population_emit_summary_metric(out: mutable darray[u8]&, key: cstr, count: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked
+            }
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+            Observation::rh_evidence_links_push_external(&evidence, string_view_slice(bytes_view("population-input"), 0, 16))
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Count(count), false, quality, evidence)
+            Observation::rh_observation_emit_metric(out, key, "1.0.0", "", observation)
 
         def rh_population_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
             out.push(34)
@@ -718,15 +731,12 @@ module Population:
             Base::rh_push_text(out, "],\"unresolved_count\":")
             Base::rh_push_decimal_i64(out, unresolved_count)
             Base::rh_push_text(out, ",\"summary_metrics\":[")
-            Base::rh_push_text(out, "{\"key\":\"population.selected_dependent_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, dependents.count.i64())
-            Base::rh_push_text(out, ",\"evidence\":[\"population-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"population.distinct_family_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, families_s.count.i64())
-            Base::rh_push_text(out, ",\"evidence\":[\"population-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"population.unresolved_mapping_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, unresolved_count)
-            Base::rh_push_text(out, ",\"evidence\":[\"population-input\"]}],\"metrics\":[")
+            return -1 if not Population::rh_population_emit_summary_metric(out, "population.selected_dependent_count", dependents.count.i64())
+            out.push(44)
+            return -1 if not Population::rh_population_emit_summary_metric(out, "population.distinct_family_count", families_s.count.i64())
+            out.push(44)
+            return -1 if not Population::rh_population_emit_summary_metric(out, "population.unresolved_mapping_count", unresolved_count)
+            Base::rh_push_text(out, "],\"metrics\":[")
             while i < metrics.count |i: usize = 0, metrics, texts, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, out|:
                 if i > 0:
                     out.push(44)

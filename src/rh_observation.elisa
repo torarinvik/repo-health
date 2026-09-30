@@ -7,6 +7,8 @@
 #   partial/stale -> value optional, but incompleteness recorded alongside
 #   all others    -> NO value (unknown is not zero, S006)
 
+include "./rh_base.elisa"
+
 module Observation:
     public:
     const RH_ST_OBSERVED: u8 = 0
@@ -310,6 +312,78 @@ module Observation:
         return false if not rh_evidence_links_valid(observation.evidence)
         return false if observation.quality.provenance == RhProvenanceQuality.EvidenceBacked and rh_evidence_links_count(observation.evidence) == 0
         return false if not rh_quality_dimensions_valid(observation.status, observation.quality)
+        true
+
+    def rh_observation_emit_metric(out: mutable darray[u8]&, key: cstr, version: cstr, reason: cstr, observation: RhObservation) -> bool can[Memory.Allocate, Abort.Panic]:
+        return false if not rh_observation_valid(observation)
+        Base::rh_push_text(out, "{\"key\":\"")
+        Base::rh_json_escape_view(out, sview(key, 0, -1))
+        Base::rh_push_text(out, "\",\"version\":\"")
+        Base::rh_json_escape_view(out, sview(version, 0, -1))
+        Base::rh_push_text(out, "\",\"status\":\"")
+        Base::rh_push_text(out, rh_status_label(observation.status))
+        Base::rh_push_text(out, "\",\"value\":")
+        match observation.value:
+            RhMetricValue.Absent:
+                Base::rh_push_text(out, "null")
+            RhMetricValue.Count(count):
+                Base::rh_push_decimal_i64(out, count)
+            RhMetricValue.CountPair(first, second):
+                Base::rh_push_text(out, "{\"first\":")
+                Base::rh_push_decimal_i64(out, first)
+                Base::rh_push_text(out, ",\"second\":")
+                Base::rh_push_decimal_i64(out, second)
+                Base::rh_push_text(out, "}")
+            RhMetricValue.CountHistogram5(bin_0, bin_1, bin_2, bin_3, bin_4, population_count):
+                Base::rh_push_text(out, "{\"bins\":[")
+                Base::rh_push_decimal_i64(out, bin_0)
+                Base::rh_push_text(out, ",")
+                Base::rh_push_decimal_i64(out, bin_1)
+                Base::rh_push_text(out, ",")
+                Base::rh_push_decimal_i64(out, bin_2)
+                Base::rh_push_text(out, ",")
+                Base::rh_push_decimal_i64(out, bin_3)
+                Base::rh_push_text(out, ",")
+                Base::rh_push_decimal_i64(out, bin_4)
+                Base::rh_push_text(out, "],\"population_count\":")
+                Base::rh_push_decimal_i64(out, population_count)
+                Base::rh_push_text(out, "}")
+            RhMetricValue.Timestamp(unix_seconds):
+                Base::rh_push_decimal_i64(out, unix_seconds)
+            RhMetricValue.Ratio(num, den):
+                Base::rh_push_text(out, "{\"num\":")
+                Base::rh_push_decimal_i64(out, num)
+                Base::rh_push_text(out, ",\"den\":")
+                Base::rh_push_decimal_i64(out, den)
+                Base::rh_push_text(out, "}")
+            RhMetricValue.Boolean(flag):
+                Base::rh_push_text(out, "true") if flag
+                Base::rh_push_text(out, "false") if not flag
+            RhMetricValue.Enumeration(code):
+                Base::rh_push_decimal_i64(out, code)
+        if observation.status != RH_ST_OBSERVED:
+            Base::rh_push_text(out, ",\"reason\":\"")
+            Base::rh_json_escape_view(out, sview(reason, 0, -1))
+            Base::rh_push_text(out, "\"")
+        Base::rh_push_text(out, ",\"evidence\":[")
+        for index in 0..<rh_evidence_links_count(observation.evidence) |index, observation, out|:
+            Base::rh_push_text(out, ",") if index > 0
+            link: RhEvidenceLink = rh_evidence_links_get_link(observation.evidence, index)
+            out.push(34)
+            if link.object == RhEvidenceObject.External:
+                Base::rh_json_escape_view(out, link.locator)
+            else:
+                Base::rh_push_text(out, rh_evidence_object_label(link.object))
+            out.push(34)
+        Base::rh_push_text(out, "],\"quality_dimensions\":{\"completeness\":\"")
+        Base::rh_push_text(out, rh_completeness_label(observation.quality.completeness))
+        Base::rh_push_text(out, "\",\"freshness\":\"")
+        Base::rh_push_text(out, rh_freshness_label(observation.quality.freshness))
+        Base::rh_push_text(out, "\",\"validity\":\"")
+        Base::rh_push_text(out, rh_validity_label(observation.quality.validity))
+        Base::rh_push_text(out, "\",\"provenance\":\"")
+        Base::rh_push_text(out, rh_provenance_quality_label(observation.quality.provenance))
+        Base::rh_push_text(out, "\"}}")
         true
 
     # Status/value consistency (§18.2 CHECK logic). has_value = whether a value

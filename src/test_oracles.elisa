@@ -54,6 +54,19 @@ def observation_decode_rejects_overbound_evidence() -> bool can[Memory.Allocate,
     decoded: mutable Observation::RhObservation = Observation::rh_observation_make(Observation::RH_ST_UNAVAILABLE, Observation::RhMetricValue.Absent, false)
     not ObservationCodec::rh_observation_decode(raw, &decoded)
 
+def observation_metric_emits_value(value: Observation::RhMetricValue, expected_value: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Complete, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.EvidenceBacked}
+    evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+    Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.GitLog)
+    observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(Observation::RH_ST_OBSERVED, value, false, quality, evidence)
+    actual: mutable darray[u8] = []
+    return false if not Observation::rh_observation_emit_metric(actual, "test.metric", "1.0.0", "", observation)
+    expected: mutable darray[u8] = []
+    Base::rh_push_text(expected, "{\"key\":\"test.metric\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
+    Base::rh_push_cstr(expected, expected_value)
+    Base::rh_push_text(expected, ",\"evidence\":[\"git_log\"],\"quality_dimensions\":{\"completeness\":\"complete\",\"freshness\":\"unknown\",\"validity\":\"valid\",\"provenance\":\"evidence_backed\"}}")
+    Base::rh_bytes_equal_span(actual, 0, actual.count.i64(), expected, 0, expected.count.i64())
+
 def bitemporal_cross_product_oracle(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     # Compare the public predicates with the plan's interval definition over
     # every small endpoint combination. End modes 0..3 name a fixed endpoint;
@@ -292,6 +305,13 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check(observation_roundtrip(Observation::rh_observation_make(Observation::RH_ST_OBSERVED, valid_histogram, false)), "typed-histogram-codec-roundtrip", &fails)
     all_value_variants: bool = Observation::rh_observation_valid(Observation::rh_observation_make(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Count(1), false)) and Observation::rh_observation_valid(Observation::rh_observation_make(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Timestamp(0), false)) and Observation::rh_observation_valid(Observation::rh_observation_make(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Ratio(-1, 2), false)) and Observation::rh_observation_valid(Observation::rh_observation_make(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Boolean(false), false)) and Observation::rh_observation_valid(Observation::rh_observation_make(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Enumeration(1), false))
     check(all_value_variants, "typed-all-value-variants", &fails)
+    check(observation_metric_emits_value(Observation::RhMetricValue.Count(7), "7"), "typed-metric-emits-count", &fails)
+    check(observation_metric_emits_value(Observation::RhMetricValue.CountPair(2, 9), "{\"first\":2,\"second\":9}"), "typed-metric-emits-count-pair", &fails)
+    check(observation_metric_emits_value(Observation::RhMetricValue.CountHistogram5(1, 2, 0, 3, 4, 10), "{\"bins\":[1,2,0,3,4],\"population_count\":10}"), "typed-metric-emits-fixed-histogram", &fails)
+    check(observation_metric_emits_value(Observation::RhMetricValue.Timestamp(1700000000), "1700000000"), "typed-metric-emits-timestamp", &fails)
+    check(observation_metric_emits_value(Observation::RhMetricValue.Ratio(2, 3), "{\"num\":2,\"den\":3}"), "typed-metric-emits-ratio", &fails)
+    check(observation_metric_emits_value(Observation::RhMetricValue.Boolean(true), "true"), "typed-metric-emits-boolean", &fails)
+    check(observation_metric_emits_value(Observation::RhMetricValue.Enumeration(4), "4"), "typed-metric-emits-enumeration", &fails)
     state_value_cross_product: bool =
         for status in 0..<Observation::RH_ST_COUNT |valid: bool = true| -> valid:
             no_value: Observation::RhObservation = Observation::rh_observation_make(status, Observation::RhMetricValue.Absent, status == Observation::RH_ST_PARTIAL or status == Observation::RH_ST_STALE)
