@@ -104,6 +104,63 @@ set +e
 set -e
 [[ "$rc_binding" -eq 5 ]] || fail "changed database snapshot must fail binding verification (got $rc_binding)"
 
+echo "[store] binding streams a database dump beyond the 64 MiB read bound"
+python3 - "$T/large-database.snapshot" "$T/large-database.sha256" <<'PY'
+import hashlib, sys
+path, digest_path = sys.argv[1:]
+block = bytes((index * 31 + 7) & 255 for index in range(65536))
+remaining = 67108864 + 257
+digest = hashlib.sha256()
+with open(path, "wb") as output:
+    while remaining >= len(block):
+        output.write(block)
+        digest.update(block)
+        remaining -= len(block)
+    if remaining:
+        tail = block[:remaining]
+        output.write(tail)
+        digest.update(tail)
+open(digest_path, "w").write(digest.hexdigest())
+PY
+"$ROOT/build/rh_cli" ops bind --root "$T/replay-source" --manifest "$T/replay.manifest" --database "$T/large-database.snapshot" --out "$T/large-binding.json" >/dev/null || fail "bind large database dump"
+"$ROOT/build/rh_cli" ops verify-binding --root "$T/replay-source" --manifest "$T/replay.manifest" --database "$T/large-database.snapshot" --input "$T/large-binding.json" >/dev/null || fail "verify large database dump binding"
+python3 - "$T/large-database.snapshot" "$T/large-database.sha256" "$T/replay.manifest" "$T/large-binding.json" <<'PY'
+import hashlib, json, sys
+database, digest_path, manifest, binding = sys.argv[1:]
+with open(digest_path) as expected:
+    expected_database_sha = expected.read()
+assert json.load(open(binding)) == {
+    "schema": "rh-backup-binding/1",
+    "database_snapshot_sha256": expected_database_sha,
+    "evidence_manifest_sha256": hashlib.sha256(open(manifest, "rb").read()).hexdigest(),
+    "evidence_object_count": 1,
+}
+print("[store] streamed dump digest matches independent SHA-256 oracle")
+PY
+python3 - "$T/padding-boundary.snapshot" <<'PY'
+import sys
+open(sys.argv[1], "wb").write(bytes(range(60)))
+PY
+"$ROOT/build/rh_cli" ops bind --root "$T/replay-source" --manifest "$T/replay.manifest" --database "$T/padding-boundary.snapshot" --out "$T/padding-boundary-binding.json" >/dev/null || fail "bind SHA-256 two-block padding boundary"
+python3 - "$T/padding-boundary.snapshot" "$T/replay.manifest" "$T/padding-boundary-binding.json" <<'PY'
+import hashlib, json, sys
+database, manifest, binding = sys.argv[1:]
+assert json.load(open(binding))["database_snapshot_sha256"] == hashlib.sha256(open(database, "rb").read()).hexdigest()
+print("[store] streaming SHA-256 two-block padding matches oracle")
+PY
+python3 - "$T/large-database.snapshot" <<'PY'
+import sys
+with open(sys.argv[1], "r+b") as dump:
+    dump.seek(-1, 2)
+    byte = dump.read(1)
+    dump.seek(-1, 2)
+    dump.write(bytes([byte[0] ^ 1]))
+PY
+set +e
+"$ROOT/build/rh_cli" ops verify-binding --root "$T/replay-source" --manifest "$T/replay.manifest" --database "$T/large-database.snapshot" --input "$T/large-binding.json" >/dev/null 2>&1; rc_large_tamper=$?
+set -e
+[[ "$rc_large_tamper" -eq 5 ]] || fail "tampered large dump must fail binding verification (got $rc_large_tamper)"
+
 printf 'preserve this file\n' > "$T/outside"
 printf 'rh-backup/1 fnv1a-64-hex\n../outside\n' > "$T/path-traversal.manifest"
 set +e

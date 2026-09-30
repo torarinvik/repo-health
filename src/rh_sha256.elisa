@@ -14,6 +14,8 @@ module Sha256:
         #
         # Correctness is pinned to published test vectors in test_m07_sha.elisa.
 
+        const RH_SHA256_FILE_CHUNK_BYTES: usize = 65536
+        const RH_SHA256_MAX_BYTES: u64 = 2305843009213693951
 
         # Right rotation of a 32-bit word.
         def rh_rotr(x: u32, n: u32) -> u32:
@@ -103,14 +105,14 @@ module Sha256:
 
         # Compress one 64-byte block into the 8-word state h (8 u32 entries).
         def rh_sha256_block(block: darray[u8]&, start: usize, h: mutable darray[u32]&) -> void can[Memory.Allocate, Abort.Panic]:
-            w: mutable darray[u32] = []
+            w: mutable u32[64] = zeroed
             while t < 64 |t: i64 = 0, w, block, start|:
                 if t < 16:
                     b0: u8 = block[start + (t * 4).usize()]
                     b1: u8 = block[start + (t * 4 + 1).usize()]
                     b2: u8 = block[start + (t * 4 + 2).usize()]
                     b3: u8 = block[start + (t * 4 + 3).usize()]
-                    w.push(rh_be32(b0, b1, b2, b3))
+                    w[t.usize()] <- rh_be32(b0, b1, b2, b3)
                 else:
                     x: u32 = w[(t - 15).usize()]
                     y: u32 = w[(t - 2).usize()]
@@ -118,7 +120,7 @@ module Sha256:
                     s1: u32 = rh_rotr(y, 17) ^ rh_rotr(y, 19) ^ (y >> 10)
                     w16: u32 = w[(t - 16).usize()]
                     w7: u32 = w[(t - 7).usize()]
-                    w.push(w16 + s0 + w7 + s1)
+                    w[t.usize()] <- w16 + s0 + w7 + s1
                 t <- t + 1
             a, b, c, d, e, f, g, hh =
                 while t2 < 64 |a: u32 = h[0], b: u32 = h[1], c: u32 = h[2], d: u32 = h[3], e: u32 = h[4], f: u32 = h[5], g: u32 = h[6], hh: u32 = h[7], t2: i64 = 0, w| -> a, b, c, d, e, f, g, hh:
@@ -205,6 +207,70 @@ module Sha256:
             digest: mutable darray[u8] = []
             Sha256::rh_sha256_digest(data, digest)
             Sha256::rh_push_hex_bytes(out_hex, digest)
+
+        # Stream a file through SHA-256 with fixed memory use. The standard
+        # library owns the FILE* lifecycle; only its bounded fread buffer is
+        # retained while hashing, so large database dumps need not be loaded
+        # into one darray.
+        def rh_sha256_file(path: cstr, out_hex: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            stream_option: mutable heap void&? = fopen(path.cast[u8&], "rb")
+            return false if stream_option == null
+            stream: mutable heap void& = stream_option
+            h: mutable darray[u32] = []
+            while state_index < 8 |state_index: i64 = 0, h|:
+                h.push(Sha256::rh_h0(state_index))
+                state_index <- state_index + 1
+            chunk: mutable darray[u8] = []
+            while byte_index < (RH_SHA256_FILE_CHUNK_BYTES + 63) |byte_index: usize = 0, chunk|:
+                chunk.push(0)
+                byte_index <- byte_index + 1
+            pending_bytes: mutable usize = 0
+            total_bytes: mutable u64 = 0
+            failed: mutable bool = false
+            while true |stream, chunk, h, pending_bytes, total_bytes, failed|:
+                destination: mutable void& = (&chunk[pending_bytes]).cast[mutable void&] can Unsafe.PointerCast
+                read_bytes: usize = fread(destination, 1, RH_SHA256_FILE_CHUNK_BYTES, stream)
+                if read_bytes == 0:
+                    failed <- true if ferror(stream) != 0
+                    break
+                if total_bytes > RH_SHA256_MAX_BYTES - read_bytes.u64():
+                    failed <- true
+                    break
+                total_bytes <- total_bytes + read_bytes.u64()
+                available_bytes: usize = pending_bytes + read_bytes
+                aligned_bytes: usize = available_bytes - (available_bytes % 64)
+                while block_start < aligned_bytes |block_start: usize = 0, chunk, h|:
+                    Sha256::rh_sha256_block(chunk, block_start, h)
+                    block_start <- block_start + 64
+                pending_bytes <- available_bytes - aligned_bytes
+                while tail_index < pending_bytes |tail_index: usize = 0, chunk, aligned_bytes, pending_bytes|:
+                    chunk[tail_index] <- chunk[aligned_bytes + tail_index]
+                    tail_index <- tail_index + 1
+                if ferror(stream) != 0:
+                    failed <- true
+                    break
+            closed: i32 = fclose(stream)
+            return false if failed or closed != 0
+            final_block: mutable darray[u8] = []
+            while tail_index < pending_bytes |tail_index: usize = 0, chunk, pending_bytes, final_block|:
+                final_block.push(chunk[tail_index])
+                tail_index <- tail_index + 1
+            final_block.push(128)
+            while final_block.count % 64 != 56 |final_block|:
+                final_block.push(0)
+            bit_length: u64 = total_bytes * 8
+            while length_byte >= 0 |length_byte: i64 = 7, final_block, bit_length|:
+                final_block.push(((bit_length >> (length_byte * 8).u64()) & 255).u8())
+                length_byte <- length_byte - 1
+            while final_offset < final_block.count |final_offset: usize = 0, final_block, h|:
+                Sha256::rh_sha256_block(final_block, final_offset, h)
+                final_offset <- final_offset + 64
+            digest: mutable darray[u8] = []
+            while digest_index < 8 |digest_index: i64 = 0, digest, h|:
+                Sha256::rh_push_be32(digest, h[digest_index.usize()])
+                digest_index <- digest_index + 1
+            Sha256::rh_push_hex_bytes(out_hex, digest)
+            true
 
         # SHA-256 of data; canonical SRI Base64 appended to out_base64.
         def rh_sha256_base64(data: darray[u8]&, out_base64: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:

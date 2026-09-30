@@ -88,7 +88,10 @@ workflow and protected connection handling; the opt-in
 backup and restore drivers against PostgreSQL 16, then checks a restored row,
 evidence digest, byte-identical report replay, and pair binding. The restore
 driver uses a temporary owner-only libpq service file to satisfy `pg_restore`
-without putting credentials in argv. Job leasing is a real path too: `rh_cli store
+without putting credentials in argv. Binding and verification stream the
+database dump through a fixed 64 KiB buffer; the store CLI test checks a dump
+larger than 64 MiB against Python's SHA-256 oracle and confirms tampering fails.
+Job leasing is a real path too: `rh_cli store
 lease --root <dir> --job <name> --input <file> --out <file>` applies a
 claim/heartbeat/release/status sequence to a real `<root>/leases/<job>.lease`
 (+ attempt `.log`) and enforces fencing — a live lease is held, an expired

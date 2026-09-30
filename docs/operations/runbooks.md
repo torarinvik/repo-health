@@ -171,8 +171,9 @@ Trigger: scheduled drill, or recovery after corruption/loss.
    `--manifest`, `--database`, and `--input <backup-binding>`; it rehashes the
    database dump and manifest and verifies every evidence object. Keep the
    database dump itself with the backup: the binding is an integrity index,
-   not a claim that the snapshot is correct. Current input reads are capped at
-   64 MiB, so larger dumps require a streaming backup path.
+   not a claim that the snapshot is correct. Database dump hashing streams
+   through a fixed-size buffer, including dumps larger than 64 MiB; evidence
+   transfer bundles and other bounded inputs retain their separate 64 MiB cap.
 3. Create a **new empty database** and choose a new evidence directory (never
    restore over live state). The restore tool refuses an existing evidence
    destination and checks the target database for user relations, routines,

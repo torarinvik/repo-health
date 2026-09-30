@@ -59,6 +59,10 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- M07 backup binding now hashes database dumps incrementally with a fixed
+  64 KiB buffer, so `bind` and `verify-binding` support dumps above the former
+  64 MiB whole-file read cap. The store CLI regression compares a 64 MiB-plus
+  dump to an independent streaming SHA-256 oracle and rejects tampering.
 - `rh_cli forge review-chain` assembles bounded GitHub repository-review segments only when their exact-byte SHA-256 predecessor links, repository scope, and consumed pull/review cursors form one chain. It merges each pull request’s validated merge timestamp and replaces repeated review IDs with their last observation; unfinished chains stay partial, and completed traversal does not claim an atomic GitHub snapshot.
 - Review-chain assembly allows an unmerged observation to gain its later `merged_at`, while rejecting a later attempt to clear or change an already observed merge timestamp.
 - `rh_cli postgres` now exposes the durable M02-06 current-state transaction
