@@ -144,4 +144,54 @@ for scenario, path in zip(("linked", "revoked", "proposed"), sys.argv[23:26]):
 print("[synthetic] history, graph, role events, and identity ledgers match independent expectations")
 PY
 
+python3 - "$ROOT" "$T/cartesian" "$CLI" <<'PY'
+import itertools, json, pathlib, subprocess, sys
+root, destination, cli = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+generator = root / "tools/generate_synthetic_fixtures.py"
+history_sizes, graph_sizes, revocation_times = (1, 5, 12), (2, 7, 32), (91, 180, 1000)
+
+for history_size, graph_size, revoked_at in itertools.product(history_sizes, graph_sizes, revocation_times):
+    case = destination / f"h{history_size}-g{graph_size}-r{revoked_at}"
+    subprocess.run([
+        sys.executable, str(generator), "--out", str(case),
+        "--history-commits", str(history_size),
+        "--graph-chain-nodes", str(graph_size),
+        "--role-revoked-at", str(revoked_at),
+    ], check=True, stdout=subprocess.DEVNULL)
+    report_dir, graph_out = case / "scan", case / "graph.json"
+    index_out, roles_out = case / "index.json", case / "roles.json"
+    subprocess.run([cli, "scan", "--repo", str(case / "history/repo"), "--out", str(report_dir), "--window-days", "36500"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([cli, "snapshot", "--input", str(case / "graph/chain-input.json"), "--out", str(graph_out)], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([cli, "index", "--input", str(case / "graph/chain-input.json"), "--out", str(index_out)], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([cli, "roles", "--input", str(case / "roles/input.json"), "--out", str(roles_out)], check=True, stdout=subprocess.DEVNULL)
+
+    # These expected values are derived from the fixture contract, not from
+    # generated expected.json or any production analyzer.
+    report = json.load(open(report_dir / "report.json"))
+    metrics = {metric["key"]: metric for metric in report["metrics"]}
+    expected_authors = 1 if history_size == 1 else 2
+    assert metrics["history.commit_count"]["value"] == history_size, (case, metrics)
+    assert metrics["contributors.raw_identity_count"]["value"] == expected_authors, (case, metrics)
+    assert metrics["activity.active_months"]["value"] == history_size, (case, metrics)
+
+    graph = json.load(open(graph_out))
+    assert graph["row_counts"] == {"nodes": graph_size, "edges": graph_size - 1}, (case, graph)
+    index = json.load(open(index_out))
+    assert index["degree_summary"] == {
+        "max_out": 1, "max_out_node": 0,
+        "max_in": 1, "max_in_node": 1,
+    }, (case, index)
+
+    roles = json.load(open(roles_out))
+    assert roles["declaration_count"] == 3, (case, roles)
+    assert {role: roles["role_tally"][role] for role in ("owner", "member", "maintainer")} == {
+        "owner": 1, "member": 1, "maintainer": 1,
+    }, (case, roles)
+    assert roles["action_events_by_actor_type"]["release"]["human"] == 2, (case, roles)
+    assert roles["action_events_by_actor_type"]["review"]["human"] == 1, (case, roles)
+    assert [query["declared_role"] for query in roles["queries"][2:]] == ["maintainer", "unknown"], (case, roles)
+
+print("[synthetic] all 27 history/graph/revocation cross-product cases match independent expectations")
+PY
+
 echo "test_synthetic_fixtures OK"
