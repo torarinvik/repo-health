@@ -1,0 +1,369 @@
+# Assemble bounded GitHub review segments only when their exact cursor chain is contiguous.
+include "./rh_base.elisa"
+include "./rh_git.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+
+module ForgeReviewChain:
+    private:
+        const RH_FRC_MAX_SEGMENTS: i64 = 128
+        const RH_FRC_MAX_TOTAL_BYTES: i64 = 67108864
+        const RH_FRC_MAX_ROWS: i64 = 100000
+
+        struct RhFrcCursor:
+            pull_number: i64
+            next_page: i64
+
+        struct RhFrcPull:
+            number: i64
+            merged_at: i64
+            has_merged_at: bool
+
+        struct RhFrcEvent:
+            id_s: i64
+            id_e: i64
+            status_s: i64
+            status_e: i64
+            pull_number: i64
+            submitted_at: i64
+
+        def rh_frc_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_frc_github_id(texts: darray[u8]&, start: i64, end: i64) -> bool:
+            return false if end - start < 8
+            return false if texts[start.usize()] != 103 or texts[(start + 1).usize()] != 105 or texts[(start + 2).usize()] != 116 or texts[(start + 3).usize()] != 104 or texts[(start + 4).usize()] != 117 or texts[(start + 5).usize()] != 98 or texts[(start + 6).usize()] != 58
+            while offset < end - start - 7 |has_nonzero: bool = false, offset: i64 = 0| -> has_nonzero:
+                digit: u8 = texts[(start + 7 + offset).usize()]
+                return false if digit < 48 or digit > 57
+                has_nonzero <- true if digit != 48
+                offset <- offset + 1
+
+        def rh_frc_capability_status(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, capabilities: i64, key: u8&, expected: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            capability: i64 = Json::rh_json_obj_get(nodes, texts, capabilities, key)
+            return false if capability < 0 or nodes[capability.usize()].kind != Json::RH_JSON_OBJ
+            status_s: mutable i64 = 0
+            status_e: mutable i64 = 0
+            Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, capability, "status"), &status_s, &status_e) and ForgeReviewChain::rh_frc_eq(texts, status_s, status_e, expected)
+
+        def rh_frc_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            value_out[0] <- 0
+            ok: mutable i64 = 0
+            value_out[0] <- Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, obj, key), &ok)
+            ok == 1
+
+        def rh_frc_copy_span(out: mutable darray[u8]&, input: darray[u8]&, start: i64, end: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if start < 0 or end < start or end > input.count.i64()
+            output_start: i64 = out.count.i64()
+            while offset < end - start |offset: i64 = 0, input, out, start|:
+                out.push(input[(start + offset).usize()])
+                offset <- offset + 1
+            output_start
+
+        def rh_frc_read_cursors(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, out: mutable darray[RhFrcCursor]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            array: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
+            return false if array < 0 or nodes[array.usize()].kind != Json::RH_JSON_ARR or nodes[array.usize()].child_count > 10
+            while child >= 0 |child: i64 = nodes[array.usize()].first_child, nodes, raw, texts, out|:
+                return false if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                number: mutable i64 = 0
+                page: mutable i64 = 0
+                return false if not ForgeReviewChain::rh_frc_int(nodes, raw, texts, child, "number", &number) or number < 1
+                return false if not ForgeReviewChain::rh_frc_int(nodes, raw, texts, child, "next_review_page", &page) or page < 1 or page > 2147483640
+                while prior < out.count.i64() |prior: i64 = 0, out, number|:
+                    return false if out[prior.usize()].pull_number == number
+                    prior <- prior + 1
+                out.push(RhFrcCursor{pull_number: number, next_page: page})
+                child <- nodes[child.usize()].next_sibling
+            true
+
+        def rh_frc_cursor_index(cursors: darray[RhFrcCursor]&, number: i64) -> i64:
+            while index < cursors.count.i64() |index: i64 = 0, cursors, number|:
+                return index if cursors[index.usize()].pull_number == number
+                index <- index + 1
+            -1
+
+        def rh_frc_pull_index(pulls: darray[RhFrcPull]&, number: i64) -> i64:
+            while index < pulls.count.i64() |index: i64 = 0, pulls, number|:
+                return index if pulls[index.usize()].number == number
+                index <- index + 1
+            -1
+
+        def rh_frc_add_pulls(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, collection: i64, all_pulls: mutable darray[RhFrcPull]&, batch_pulls: mutable darray[RhFrcPull]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            array: i64 = Json::rh_json_obj_get(nodes, texts, collection, "batch_pull_requests")
+            return false if array < 0 or nodes[array.usize()].kind != Json::RH_JSON_ARR or nodes[array.usize()].child_count > 10
+            while child >= 0 |child: i64 = nodes[array.usize()].first_child, nodes, raw, texts, all_pulls, batch_pulls|:
+                return false if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                number: mutable i64 = 0
+                return false if not ForgeReviewChain::rh_frc_int(nodes, raw, texts, child, "number", &number) or number < 1 or ForgeReviewChain::rh_frc_pull_index(batch_pulls, number) >= 0
+                merged_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "merged_at")
+                return false if merged_idx < 0
+                merged_at: mutable i64 = 0
+                has_merged_at: mutable bool = false
+                if nodes[merged_idx.usize()].kind != Json::RH_JSON_NULL:
+                    merged_ok: mutable i64 = 0
+                    merged_at <- Json::rh_json_int(nodes, raw, merged_idx, &merged_ok)
+                    return false if merged_ok == 0 or merged_at < 0
+                    has_merged_at <- true
+                pull: RhFrcPull = RhFrcPull{number: number, merged_at: merged_at, has_merged_at: has_merged_at}
+                batch_pulls.push(pull)
+                existing: i64 = ForgeReviewChain::rh_frc_pull_index(all_pulls, number)
+                if existing >= 0:
+                    all_pulls[existing.usize()] <- pull
+                else:
+                    return false if all_pulls.count >= RH_FRC_MAX_ROWS
+                    all_pulls.push(pull)
+                child <- nodes[child.usize()].next_sibling
+            true
+
+        def rh_frc_add_events(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, source_texts: darray[u8]&, events_idx: i64, texts: mutable darray[u8]&, events: mutable darray[RhFrcEvent]&, event_slots: mutable darray[i64]&, batch_pulls: darray[RhFrcPull]&, requested_reviews: darray[RhFrcCursor]&, requested_pull_page: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if events_idx < 0 or nodes[events_idx.usize()].kind != Json::RH_JSON_ARR
+            if event_slots.count == 0 and nodes[events_idx.usize()].child_count > 0:
+                while slot_count < RH_FRC_MAX_ROWS * 2 + 1 |slot_count: i64 = 0, event_slots|:
+                    event_slots.push(-1)
+                    slot_count <- slot_count + 1
+            while child >= 0 |child: i64 = nodes[events_idx.usize()].first_child, nodes, raw, source_texts, texts, events, batch_pulls, requested_reviews, requested_pull_page|:
+                return false if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                kind_s: mutable i64 = 0
+                kind_e: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, source_texts, child, "kind"), &kind_s, &kind_e) or not ForgeReviewChain::rh_frc_eq(source_texts, kind_s, kind_e, "reviews")
+                id_s: mutable i64 = 0
+                id_e: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, source_texts, child, "native_id"), &id_s, &id_e) or not ForgeReviewChain::rh_frc_github_id(source_texts, id_s, id_e)
+                status_s: mutable i64 = 0
+                status_e: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, source_texts, child, "status"), &status_s, &status_e) or status_e <= status_s
+                pull_number: mutable i64 = 0
+                return false if not ForgeReviewChain::rh_frc_int(nodes, raw, source_texts, child, "pull_request", &pull_number) or pull_number < 1
+                submitted_at: mutable i64 = 0
+                return false if not ForgeReviewChain::rh_frc_int(nodes, raw, source_texts, child, "created_at", &submitted_at) or submitted_at < 0
+                return false if requested_pull_page > 0 and ForgeReviewChain::rh_frc_pull_index(batch_pulls, pull_number) < 0
+                return false if requested_pull_page == 0 and ForgeReviewChain::rh_frc_cursor_index(requested_reviews, pull_number) < 0
+                id_copy_start: i64 = ForgeReviewChain::rh_frc_copy_span(texts, source_texts, id_s, id_e)
+                return false if id_copy_start < 0
+                status_copy_start: i64 = ForgeReviewChain::rh_frc_copy_span(texts, source_texts, status_s, status_e)
+                return false if status_copy_start < 0
+                event: RhFrcEvent = RhFrcEvent{id_s: id_copy_start, id_e: id_copy_start + id_e - id_s, status_s: status_copy_start, status_e: texts.count.i64(), pull_number: pull_number, submitted_at: submitted_at}
+                hash: usize = (hash_sview(string_view_slice(bytes_view(source_texts), id_s.usize(), id_e.usize())).usize() ^ pull_number.usize()) % event_slots.count
+                existing, empty_slot =
+                    while event_slots[slot] >= 0 |existing: i64 = -1, slot: usize = hash, event_slots, events, texts, id_s, id_e, pull_number| -> existing, slot:
+                        prior_index: usize = event_slots[slot].usize()
+                        prior_event: RhFrcEvent = events[prior_index]
+                        if prior_event.pull_number == pull_number and Base::rh_bytes_equal_span(texts, prior_event.id_s, prior_event.id_e, source_texts, id_s, id_e):
+                            existing <- prior_index.i64()
+                            break
+                        slot <- (slot + 1) % event_slots.count
+                if existing >= 0:
+                    events[existing.usize()] <- event
+                else:
+                    return false if events.count >= RH_FRC_MAX_ROWS
+                    events.push(event)
+                    event_slots[empty_slot] <- events.count.i64() - 1
+                child <- nodes[child.usize()].next_sibling
+            true
+
+        def rh_frc_emit_events(out: mutable darray[u8]&, texts: darray[u8]&, events: darray[RhFrcEvent]&) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(91)
+            while index < events.count.i64() |index: i64 = 0, events, texts, out|:
+                out.push(44) if index > 0
+                event: RhFrcEvent = events[index.usize()]
+                Base::rh_push_text(out, "{\"native_id\":\"")
+                Base::rh_json_escape(out, texts, event.id_s.usize(), event.id_e.usize())
+                Base::rh_push_text(out, "\",\"pull_request\":")
+                Base::rh_push_decimal_i64(out, event.pull_number)
+                Base::rh_push_text(out, ",\"submitted_at\":")
+                Base::rh_push_decimal_i64(out, event.submitted_at)
+                Base::rh_push_text(out, ",\"status\":\"")
+                Base::rh_json_escape(out, texts, event.status_s.usize(), event.status_e.usize())
+                Base::rh_push_text(out, "\"}")
+                index <- index + 1
+            out.push(93)
+
+    public:
+        def rh_forge_review_chain_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if raw.count > 1048576
+            input_nodes: mutable darray[Json::RhJsonNode] = []
+            input_texts: mutable darray[u8] = []
+            input_root: i64 = Json::rh_json_parse(raw, input_nodes, input_texts)
+            return -1 if input_root < 0 or input_nodes[input_root.usize()].kind != Json::RH_JSON_OBJ
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not Json::rh_json_str_span(input_nodes, Json::rh_json_obj_get(input_nodes, input_texts, input_root, "schema"), &schema_s, &schema_e) or not ForgeReviewChain::rh_frc_eq(input_texts, schema_s, schema_e, "rh-forge-review-chain-input/1")
+            segments: i64 = Json::rh_json_obj_get(input_nodes, input_texts, input_root, "segments")
+            return -1 if segments < 0 or input_nodes[segments.usize()].kind != Json::RH_JSON_ARR or input_nodes[segments.usize()].child_count < 1 or input_nodes[segments.usize()].child_count > RH_FRC_MAX_SEGMENTS
+
+            repository: mutable darray[u8] = []
+            repository_end: mutable i64 = 0
+            events: mutable darray[RhFrcEvent] = []
+            event_slots: mutable darray[i64] = []
+            pulls: mutable darray[RhFrcPull] = []
+            previous_pending: mutable darray[RhFrcCursor] = []
+            previous_digest: mutable darray[u8] = []
+            previous_next_pull_page: mutable i64 = 0
+            previous_next_pull_present: mutable bool = false
+            previous_pulls_complete: mutable bool = false
+            previous_complete: mutable bool = false
+            captured_at: mutable i64 = 0
+            total_bytes: mutable i64 = 0
+            segment_count: mutable i64 = 0
+            complete: mutable bool = false
+
+            while segment_node >= 0 |segment_node: i64 = input_nodes[segments.usize()].first_child, input_nodes, input_texts, repository, repository_end, events, event_slots, pulls, previous_pending, previous_digest, previous_next_pull_page, previous_next_pull_present, previous_pulls_complete, previous_complete, captured_at, total_bytes, segment_count, complete|:
+                return -1 if input_nodes[segment_node.usize()].kind != Json::RH_JSON_STR
+                path_s: mutable i64 = 0
+                path_e: mutable i64 = 0
+                return -1 if not Json::rh_json_str_span(input_nodes, segment_node, &path_s, &path_e) or path_e <= path_s
+                path: mutable darray[u8] = []
+                while path_offset < path_e - path_s |path_offset: i64 = 0, input_texts, path, path_s|:
+                    path.push(input_texts[(path_s + path_offset).usize()])
+                    path_offset <- path_offset + 1
+                path.push(0)
+                path_ptr: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+                return -1 if not Git::rh_arg_safe(path_ptr)
+                segment_raw: mutable darray[u8] = []
+                return -1 if Base::rh_io_read(path_ptr, segment_raw) < 0 or segment_raw.count > 4194304
+                return -1 if total_bytes > RH_FRC_MAX_TOTAL_BYTES - segment_raw.count.i64()
+                total_bytes <- total_bytes + segment_raw.count.i64()
+                nodes: mutable darray[Json::RhJsonNode] = []
+                texts: mutable darray[u8] = []
+                root: i64 = Json::rh_json_parse(segment_raw, nodes, texts)
+                return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+                report_schema_s: mutable i64 = 0
+                report_schema_e: mutable i64 = 0
+                return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "schema"), &report_schema_s, &report_schema_e) or not ForgeReviewChain::rh_frc_eq(texts, report_schema_s, report_schema_e, "rh-forge-events-result/1")
+                provider_s: mutable i64 = 0
+                provider_e: mutable i64 = 0
+                return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "provider"), &provider_s, &provider_e) or not ForgeReviewChain::rh_frc_eq(texts, provider_s, provider_e, "github")
+                scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scope")
+                return -1 if scope_idx < 0 or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
+                return -1 if Json::rh_json_obj_get(nodes, texts, scope_idx, "pull_request") >= 0
+                repo_idx: i64 = Json::rh_json_obj_get(nodes, texts, scope_idx, "repository")
+                repo_s: mutable i64 = 0
+                repo_e: mutable i64 = 0
+                return -1 if not Json::rh_json_str_span(nodes, repo_idx, &repo_s, &repo_e) or repo_e <= repo_s
+                if segment_count == 0:
+                    repository_start: i64 = ForgeReviewChain::rh_frc_copy_span(repository, texts, repo_s, repo_e)
+                    return -1 if repository_start < 0
+                    repository_end <- repository.count.i64()
+                else:
+                    return -1 if not Base::rh_bytes_equal_span(repository, 0, repository_end, texts, repo_s, repo_e)
+
+                collection: i64 = Json::rh_json_obj_get(nodes, texts, root, "review_collection")
+                return -1 if collection < 0 or nodes[collection.usize()].kind != Json::RH_JSON_OBJ
+                capabilities: i64 = Json::rh_json_obj_get(nodes, texts, root, "capabilities")
+                return -1 if capabilities < 0 or nodes[capabilities.usize()].kind != Json::RH_JSON_OBJ
+                review_capability: i64 = Json::rh_json_obj_get(nodes, texts, capabilities, "reviews")
+                return -1 if review_capability < 0 or nodes[review_capability.usize()].kind != Json::RH_JSON_OBJ
+                return -1 if not ForgeReviewChain::rh_frc_capability_status(nodes, texts, capabilities, "reviews", "observed") or not ForgeReviewChain::rh_frc_capability_status(nodes, texts, capabilities, "issues", "not_attempted") or not ForgeReviewChain::rh_frc_capability_status(nodes, texts, capabilities, "proposals", "not_attempted") or not ForgeReviewChain::rh_frc_capability_status(nodes, texts, capabilities, "releases", "not_attempted")
+                declared_review_count: mutable i64 = 0
+                return -1 if not ForgeReviewChain::rh_frc_int(nodes, segment_raw, texts, review_capability, "count", &declared_review_count) or declared_review_count < 0
+                current_pending: mutable darray[RhFrcCursor] = []
+                return -1 if not ForgeReviewChain::rh_frc_read_cursors(nodes, segment_raw, texts, collection, "pending_pull_requests", current_pending)
+                request: i64 = Json::rh_json_obj_get(nodes, texts, collection, "batch_request")
+                return -1 if request < 0 or nodes[request.usize()].kind != Json::RH_JSON_OBJ
+                digest_idx: i64 = Json::rh_json_obj_get(nodes, texts, request, "resumed_from_sha256")
+                return -1 if digest_idx < 0
+                digest_is_null: bool = nodes[digest_idx.usize()].kind == Json::RH_JSON_NULL
+                digest_s: mutable i64 = 0
+                digest_e: mutable i64 = 0
+                if not digest_is_null:
+                    return -1 if not Json::rh_json_str_span(nodes, digest_idx, &digest_s, &digest_e) or digest_e - digest_s != 64
+                pull_page_idx: i64 = Json::rh_json_obj_get(nodes, texts, request, "pull_page")
+                return -1 if pull_page_idx < 0
+                pull_page: mutable i64 = 0
+                pull_page_present: bool = nodes[pull_page_idx.usize()].kind != Json::RH_JSON_NULL
+                if pull_page_present:
+                    return -1 if not ForgeReviewChain::rh_frc_int(nodes, segment_raw, texts, request, "pull_page", &pull_page) or pull_page < 1 or pull_page > 2147483640
+                requested_reviews: mutable darray[RhFrcCursor] = []
+                return -1 if not ForgeReviewChain::rh_frc_read_cursors(nodes, segment_raw, texts, request, "review_pages", requested_reviews)
+                if segment_count == 0:
+                    return -1 if not digest_is_null or not pull_page_present or pull_page != 1 or requested_reviews.count != 0
+                else:
+                    return -1 if previous_complete or digest_is_null or digest_e - digest_s != previous_digest.count.i64() or not Base::rh_bytes_equal_span(previous_digest, 0, previous_digest.count.i64(), texts, digest_s, digest_e)
+                    if previous_pending.count > 0:
+                        return -1 if pull_page_present or requested_reviews.count != previous_pending.count
+                        while cursor_idx < previous_pending.count.i64() |cursor_idx: i64 = 0, previous_pending, requested_reviews|:
+                            return -1 if requested_reviews[cursor_idx.usize()].pull_number != previous_pending[cursor_idx.usize()].pull_number or requested_reviews[cursor_idx.usize()].next_page != previous_pending[cursor_idx.usize()].next_page
+                            cursor_idx <- cursor_idx + 1
+                    else:
+                        return -1 if previous_pulls_complete or not previous_next_pull_present or not pull_page_present or pull_page != previous_next_pull_page or requested_reviews.count != 0
+
+                pulls_complete_idx: i64 = Json::rh_json_obj_get(nodes, texts, collection, "pulls_complete")
+                next_pull_idx: i64 = Json::rh_json_obj_get(nodes, texts, collection, "next_pull_page")
+                complete_idx: i64 = Json::rh_json_obj_get(nodes, texts, collection, "complete")
+                return -1 if pulls_complete_idx < 0 or nodes[pulls_complete_idx.usize()].kind != Json::RH_JSON_BOOL or next_pull_idx < 0 or complete_idx < 0 or nodes[complete_idx.usize()].kind != Json::RH_JSON_BOOL
+                pulls_complete: bool = Json::rh_json_is_true(nodes, segment_raw, pulls_complete_idx)
+                next_pull_present: bool = nodes[next_pull_idx.usize()].kind != Json::RH_JSON_NULL
+                next_pull_page: mutable i64 = 0
+                if next_pull_present:
+                    return -1 if not ForgeReviewChain::rh_frc_int(nodes, segment_raw, texts, collection, "next_pull_page", &next_pull_page) or next_pull_page < 1 or next_pull_page > 2147483640
+                return -1 if pulls_complete == next_pull_present
+                current_complete: bool = Json::rh_json_is_true(nodes, segment_raw, complete_idx)
+                return -1 if current_complete != (pulls_complete and current_pending.count == 0)
+                return -1 if segment_count > 0 and previous_pending.count > 0 and (pulls_complete != previous_pulls_complete or next_pull_present != previous_next_pull_present or (next_pull_present and next_pull_page != previous_next_pull_page))
+
+                batch_pulls: mutable darray[RhFrcPull] = []
+                return -1 if not ForgeReviewChain::rh_frc_add_pulls(nodes, segment_raw, texts, collection, pulls, batch_pulls)
+                if pull_page_present:
+                    return -1 if (pulls_complete and next_pull_present) or (not pulls_complete and (not next_pull_present or next_pull_page != pull_page + 1))
+                    while pending_idx < current_pending.count.i64() |pending_idx: i64 = 0, current_pending, batch_pulls|:
+                        return -1 if ForgeReviewChain::rh_frc_pull_index(batch_pulls, current_pending[pending_idx].pull_number) < 0
+                        pending_idx <- pending_idx + 1
+                else:
+                    return -1 if batch_pulls.count > 0
+                    while pending_idx < current_pending.count.i64() |pending_idx: i64 = 0, current_pending, requested_reviews|:
+                        request_idx: i64 = ForgeReviewChain::rh_frc_cursor_index(requested_reviews, current_pending[pending_idx].pull_number)
+                        return -1 if request_idx < 0 or current_pending[pending_idx].next_page <= requested_reviews[request_idx.usize()].next_page
+                        pending_idx <- pending_idx + 1
+
+                events_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "events")
+                return -1 if events_idx < 0 or nodes[events_idx.usize()].kind != Json::RH_JSON_ARR or nodes[events_idx.usize()].child_count != declared_review_count
+                return -1 if not ForgeReviewChain::rh_frc_add_events(nodes, segment_raw, texts, events_idx, repository, events, event_slots, batch_pulls, requested_reviews, pull_page if pull_page_present else 0)
+                captured_ok: mutable i64 = 0
+                segment_captured: i64 = Json::rh_json_int(nodes, segment_raw, Json::rh_json_obj_get(nodes, texts, root, "captured_at"), &captured_ok)
+                return -1 if captured_ok == 0 or segment_captured < 0 or (segment_count > 0 and segment_captured < captured_at)
+                captured_at <- segment_captured
+                previous_pending <- current_pending
+                previous_next_pull_page <- next_pull_page
+                previous_next_pull_present <- next_pull_present
+                previous_pulls_complete <- pulls_complete
+                previous_complete <- current_complete
+                previous_digest <- []
+                Sha256::rh_sha256(segment_raw, previous_digest)
+                complete <- current_complete
+                segment_count <- segment_count + 1
+                segment_node <- input_nodes[segment_node.usize()].next_sibling
+
+            merged_count: mutable i64 = 0
+            while pull_idx < pulls.count.i64() |pull_idx: usize = 0, pulls, merged_count|:
+                merged_count <- merged_count + 1 if pulls[pull_idx].has_merged_at
+                pull_idx <- pull_idx + 1
+            Base::rh_push_text(out, "{\"schema\":\"rh-forge-review-chain-result/1\",\"repository\":\"")
+            Base::rh_json_escape(out, repository, 0, repository_end.usize())
+            Base::rh_push_text(out, "\",\"as_of\":")
+            Base::rh_push_decimal_i64(out, captured_at)
+            Base::rh_push_text(out, ",\"status\":\"")
+            Base::rh_push_text(out, "complete" if complete else "partial")
+            Base::rh_push_text(out, "\",\"complete\":")
+            Base::rh_push_text(out, "true" if complete else "false")
+            Base::rh_push_text(out, ",\"segment_count\":")
+            Base::rh_push_decimal_i64(out, segment_count)
+            Base::rh_push_text(out, ",\"pull_request_count\":")
+            Base::rh_push_decimal_i64(out, pulls.count.i64())
+            Base::rh_push_text(out, ",\"merged_pull_request_count\":")
+            Base::rh_push_decimal_i64(out, merged_count)
+            Base::rh_push_text(out, ",\"review_event_count\":")
+            Base::rh_push_decimal_i64(out, events.count.i64())
+            Base::rh_push_text(out, ",\"pull_requests\":[")
+            while pull_idx < pulls.count.i64() |pull_idx: usize = 0, pulls, out|:
+                out.push(44) if pull_idx > 0
+                Base::rh_push_text(out, "{\"number\":")
+                Base::rh_push_decimal_i64(out, pulls[pull_idx].number)
+                Base::rh_push_text(out, ",\"merged_at\":")
+                Base::rh_push_decimal_i64(out, pulls[pull_idx].merged_at) if pulls[pull_idx].has_merged_at
+                Base::rh_push_text(out, "null") if not pulls[pull_idx].has_merged_at
+                out.push(125)
+                pull_idx <- pull_idx + 1
+            Base::rh_push_text(out, "],\"review_events\":")
+            ForgeReviewChain::rh_frc_emit_events(out, repository, events)
+            Base::rh_push_text(out, ",\"basis\":\"same-repository reports in exact-byte cursor order; GitHub pull-list updates between pages prevent an atomic snapshot claim\"}")
+            0

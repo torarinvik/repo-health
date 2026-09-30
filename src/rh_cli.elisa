@@ -107,6 +107,7 @@ include "./rh_mapping.elisa"
 include "./rh_project_map.elisa"
 include "./rh_coverage.elisa"
 include "./rh_coverage_continuity.elisa"
+include "./rh_forge_review_chain.elisa"
 include "./rh_columnar.elisa"
 include "./rh_aggregates.elisa"
 include "./rh_index.elisa"
@@ -195,6 +196,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli pilot-review --input <file> --out <file>")
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
     rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [review options] | --gitlab-project <group/path> [--resume-from <result>]) --out <file> [--max-pages N]")
+    rh_cli_err("       rh_cli forge review-chain --input <rh-forge-review-chain-input/1> --out <file>")
     rh_cli_err("       rh_cli staged-normalize --input <provider-specific staged token|rh-postgres-staged-forge-events-input/1> --out <file> [--postgres]")
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
     rh_cli_err("       rh_cli connector probe (--github-repo <owner/repo> [--all | --review-pull N | --collaborators] | --gitlab-project <group/project> --all | --instance <approved-instance.json> --repository <owner/repo> --all | --bitbucket-repo <workspace/repo> --all) --out <file>")
@@ -1948,6 +1950,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
     if Base::rh_streq(cmd, "forge"):
         return rh_cli_usage(2) if argc < 3
         fsub: u8& = slots[2].cast[u8&] can Unsafe.PointerCast
+        if Base::rh_streq(fsub, "review-chain"):
+            frci_idx, frco_idx =
+                while frcq < argc |frci_idx: i64 = -1, frco_idx: i64 = -1, frcq: i64 = 3, slots| -> frci_idx, frco_idx:
+                    option: u8& = slots[frcq].cast[u8&] can Unsafe.PointerCast
+                    if Base::rh_streq(option, "--input"):
+                        if frcq + 1 < argc:
+                            frcq <- frcq + 1
+                            frci_idx <- frcq
+                        else:
+                            return rh_cli_usage(2)
+                    elif Base::rh_streq(option, "--out"):
+                        if frcq + 1 < argc:
+                            frcq <- frcq + 1
+                            frco_idx <- frcq
+                        else:
+                            return rh_cli_usage(2)
+                    else:
+                        return rh_cli_usage(2)
+                    frcq <- frcq + 1
+            return rh_cli_usage(2) if frci_idx < 0 or frco_idx < 0
+            return rh_do_forge_review_chain(slots[frci_idx], slots[frco_idx])
         if Base::rh_streq(fsub, "events"):
             fei_idx, feo_idx, feg_idx, fgl_idx, fem_idx, fer_idx, fep_idx, frepo_pull_limit_idx, frepo_resume_idx, frepo_reviews =
                 while feq < argc |fei_idx: i64 = -1, feo_idx: i64 = -1, feg_idx: i64 = -1, fgl_idx: i64 = -1, fem_idx: i64 = -1, fer_idx: i64 = -1, fep_idx: i64 = -1, frepo_pull_limit_idx: i64 = -1, frepo_resume_idx: i64 = -1, frepo_reviews: mutable bool = false, feq: i64 = 3, slots| -> fei_idx, feo_idx, feg_idx, fgl_idx, fem_idx, fer_idx, fep_idx, frepo_pull_limit_idx, frepo_resume_idx, frepo_reviews:
@@ -7833,6 +7856,33 @@ def rh_do_forge_events(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloc
         rh_cli_err("forge events: cannot write transformation report")
         return 4
     rh_cli_out("forge events: ok")
+    0
+
+# Assemble only a digest-linked, cursor-contiguous sequence of repository review batches.
+def rh_do_forge_review_chain(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected forge review-chain argument (allowlist)")
+        return 3
+    input_path_buffer: mutable darray[u8] =
+        path: mutable darray[u8] = []
+        Base::rh_push_cstr(path, input_path)
+        path.push(0)
+        path
+    input_path_ptr: cstr = (&input_path_buffer[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    return 4 if Base::rh_io_read(input_path_ptr, raw) < 0
+    body: mutable darray[u8] = []
+    if ForgeReviewChain::rh_forge_review_chain_report(raw, body) != 0:
+        rh_cli_err("forge review-chain: segments are malformed, out of order, cross-scope, or incomplete as a cursor chain")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("forge review-chain: cannot write --out")
+        return 4
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "forge-review-chain", "rh-forge-review-chain-result/1", "repo-health/forge-review-chain/1", "[{\"source\":\"same-repository bounded review segments\",\"target\":\"digest-linked cursor chain\",\"state\":\"validated\"},{\"source\":\"per-page merge timestamps and normalized review events\",\"target\":\"deduplicated pull-request and review populations\",\"state\":\"transformed\"},{\"source\":\"unfinished final cursor\",\"target\":\"full-source completeness\",\"state\":\"unknown\"},{\"source\":\"GitHub pull-list mutation across pages\",\"target\":\"atomic repository snapshot\",\"state\":\"unsupported\"}]", out_path):
+        rh_cli_err("forge review-chain: cannot write transformation report")
+        return 4
+    rh_cli_out("forge review-chain: assembled bounded segment chain")
     0
 
 # Replay committed PostgreSQL forge stage rows through the provider-native
