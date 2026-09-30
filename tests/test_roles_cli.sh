@@ -61,6 +61,10 @@ for key in (
     "maintainer.unattributed_release_count",
     "concentration.release_actor_count_80",
     "concentration.review_actor_count_80",
+    "maintainer.permission_observed_current",
+    "maintainer.review_share",
+    "maintainer.release_role_automation_share",
+    "maintainer.permission_inventory_coverage",
 ):
     metric = metrics[key]
     assert metric["status"] == "observed", metric
@@ -129,11 +133,36 @@ assert m["maintainer.active_declared_12m"]["status"] == "unsupported", m
 assert m["maintainer.active_declared_12m"]["reason"] == "persistent-activity-profile-not-supplied", m
 assert m["maintainer.permission_inventory_coverage"]["status"] == "unsupported", m
 assert m["maintainer.permission_inventory_coverage"]["reason"] == "permission-inventory-completeness-not-supplied", m
+assert m["maintainer.permission_inventory_coverage"]["quality_dimensions"] == {
+    "completeness": "unknown",
+    "freshness": "unknown",
+    "validity": "unknown",
+    "provenance": "evidence_backed",
+}, m
 print("[roles] missing activity and permission completeness evidence stays unsupported")
 PY
 
+echo "[roles] empty provider permission inventory is not applicable"
+printf '{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":true,"as_of":10,"declarations":[]}' > "$T/no-provider-permissions.json"
+"$ROOT/build/rh_cli" roles --input "$T/no-provider-permissions.json" --out "$T/no-provider-permissions.out.json" >/dev/null || fail "empty provider permission inventory run"
+python3 - "$T/no-provider-permissions.out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+metric = m["maintainer.permission_inventory_coverage"]
+assert metric["status"] == "not_applicable" and metric["value"] is None, metric
+assert metric["reason"] == "no-active-provider-permission-actors", metric
+assert metric["quality_dimensions"] == {
+    "completeness": "unknown",
+    "freshness": "unknown",
+    "validity": "unknown",
+    "provenance": "evidence_backed",
+}, metric
+print("[roles] empty provider permission inventory remains reasoned not-applicable")
+PY
+
 echo "[roles] empty action populations are not applicable"
-printf '{"schema":"rh-roles-input/1","declarations":[],"observed_actions":[{"actor_id":1,"kind":"merge","at":10}]}' > "$T/no-release-review.json"
+printf '{"schema":"rh-roles-input/1","declarations":[],"review_actor_id":1,"observed_actions":[{"actor_id":1,"kind":"merge","at":10}]}' > "$T/no-release-review.json"
 "$ROOT/build/rh_cli" roles --input "$T/no-release-review.json" --out "$T/no-release-review.out.json" >/dev/null || fail "empty release and review populations run"
 python3 - "$T/no-release-review.out.json" <<'PY'
 import json, sys
@@ -142,6 +171,8 @@ m = {x["key"]: x for x in d["metrics"]}
 for key, reason in (
     ("concentration.release_actor_count_80", "no-release-actions"),
     ("concentration.review_actor_count_80", "no-review-actions"),
+    ("maintainer.review_share", "no-attributed-review-actions"),
+    ("maintainer.release_role_automation_share", "no-attributed-release-actions"),
 ):
     assert m[key]["status"] == "not_applicable" and m[key]["value"] is None, m[key]
     assert m[key]["reason"] == reason, m[key]
@@ -192,6 +223,8 @@ for key in (
     "maintainer.unattributed_release_count",
     "concentration.release_actor_count_80",
     "concentration.review_actor_count_80",
+    "maintainer.review_share",
+    "maintainer.release_role_automation_share",
 ):
     assert m[key]["status"] == "unsupported" and m[key]["value"] is None, m[key]
     assert m[key]["reason"] == "observed-actions-not-supplied", m[key]
@@ -201,7 +234,36 @@ for key in (
         "validity": "unknown",
         "provenance": "evidence_backed",
     }, m[key]
+for key in (
+    "maintainer.permission_observed_current",
+    "maintainer.permission_inventory_coverage",
+):
+    assert m[key]["status"] == "unsupported" and m[key]["value"] is None, m[key]
+    assert m[key]["reason"] == "authorized-provider-permission-enumeration-not-available", m[key]
 print("[roles] absent authorization is explicit unknown")
+PY
+
+echo "[roles] unauthorized permission observations are typed"
+printf '{"schema":"rh-roles-input/1","authorization":{"state":"unauthorized"},"permission_inventory_complete":true,"as_of":10,"declarations":[]}' > "$T/unauthorized.json"
+"$ROOT/build/rh_cli" roles --input "$T/unauthorized.json" --out "$T/unauthorized.out.json" >/dev/null || fail "unauthorized permission run"
+python3 - "$T/unauthorized.out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+for key in (
+    "maintainer.permission_observed_current",
+    "maintainer.permission_inventory_coverage",
+):
+    metric = m[key]
+    assert metric["status"] == "unauthorized" and metric["value"] is None, metric
+    assert metric["reason"] == "provider-permission-enumeration-unauthorized", metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "unknown",
+        "freshness": "unknown",
+        "validity": "unknown",
+        "provenance": "evidence_backed",
+    }, metric
+print("[roles] unauthorized permission states remain explicit")
 PY
 
 echo "[roles] malformed input fails closed"
