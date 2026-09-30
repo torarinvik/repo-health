@@ -45,6 +45,7 @@ for metric in metrics.values():
         }, metric
     else:
         assert metric["status"] == "not_applicable", metric
+        assert "reason" not in metric, metric
         assert metric["value"] is None and metric["quality_dimensions"] == {
             "completeness": "unknown", "freshness": "unknown",
             "validity": "unknown", "provenance": "evidence_backed"

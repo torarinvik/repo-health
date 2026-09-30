@@ -59,6 +59,11 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- Adoption count, ratio, empty-population, and contract-error metric rows now
+  pass through the shared typed observation serializer. Empty optional reasons
+  are omitted; dedicated duration histogram values keep their documented
+  bucket-boundary shape. The adoption, coverage, downstream, population, and
+  M00 observation checks pass.
 - The temporal oracle now reaches the exact signed-`i64` Unix-second ceiling
   with an independent Gregorian leap-day count. It verifies conversion at the
   maximum instant, output preservation after overflow, and a representable
