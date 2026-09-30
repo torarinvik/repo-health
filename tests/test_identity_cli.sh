@@ -242,6 +242,70 @@ for case, contract in expected.items():
 print("[identity] all 256 four-edge cycle lifecycle combinations match independent cluster/revision oracle")
 PY
 
+echo "[identity] endpoint orientation and link-order invariance"
+python3 - "$ROOT/build/rh_cli" "$T" <<'PY'
+import itertools, json, pathlib, subprocess, sys
+binary, root = sys.argv[1], pathlib.Path(sys.argv[2])
+edges = ((0, 1), (1, 2), (2, 3), (3, 0))
+patterns = (
+    ("accepted", "accepted", "accepted", "accepted"),
+    ("accepted", "proposed", "accepted", "rejected"),
+    ("accepted", "proposed", "accepted", "revoked"),
+    ("revoked", "revoked", "revoked", "revoked"),
+)
+cases = 0
+for pattern_index, states in enumerate(patterns):
+    base_links = [
+        {"a": left, "b": right, "state": state, "revision_added": index + 1}
+        for index, ((left, right), state) in enumerate(zip(edges, states))
+    ]
+    for permutation_index, order in enumerate(itertools.permutations(range(4))):
+        for reverse_mask in range(16):
+            links = []
+            for position, edge_index in enumerate(order):
+                link = dict(base_links[edge_index])
+                if reverse_mask & (1 << edge_index):
+                    link["a"], link["b"] = link["b"], link["a"]
+                links.append(link)
+            source = {"schema": "rh-identity-input/1", "actor_count": 4, "links": links}
+            key = f"{pattern_index:02d}-{permutation_index:02d}-{reverse_mask:02d}"
+            input_path, output_path = root / f"order-{key}.json", root / f"order-{key}.out"
+            input_path.write_text(json.dumps(source, separators=(",", ":")) + "\n")
+
+            # Recompute the expected partition from undirected accepted edges;
+            # order and endpoint orientation do not enter this oracle.
+            parent = list(range(4))
+
+            def find(actor):
+                while parent[actor] != actor:
+                    actor = parent[actor]
+                return actor
+
+            for link in base_links:
+                if link["state"] == "accepted":
+                    left, right = find(link["a"]), find(link["b"])
+                    parent[max(left, right)] = min(left, right)
+            clusters = {}
+            for actor in range(4):
+                clusters.setdefault(find(actor), []).append(actor)
+            expected_clusters = list(clusters.values())
+            expected_revision = max(
+                (link["revision_added"] for link in base_links
+                 if link["state"] in ("accepted", "revoked")),
+                default=0,
+            )
+            subprocess.run(
+                [binary, "identity", "--input", str(input_path), "--out", str(output_path)],
+                check=True, stdout=subprocess.DEVNULL,
+            )
+            actual = json.load(open(output_path))
+            assert actual["clusters"] == expected_clusters, (key, actual, expected_clusters)
+            assert actual["identity_revision"] == expected_revision, (key, actual, expected_revision)
+            cases += 1
+assert cases == 1536, cases
+print("[identity] all 1,536 cyclic edge-order/orientation cases match independent cluster/revision oracles")
+PY
+
 echo "[identity] determinism"
 "$ROOT/build/rh_cli" identity --input "$T/a.json" --out "$T/a2.out" >/dev/null || fail "rerun"
 cmp -s "$T/a.out" "$T/a2.out" || fail "identity output not deterministic"
