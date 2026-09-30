@@ -16,6 +16,11 @@ module ForgeEventsFetch:
             pull_number: mutable i64
             next_page: mutable i64
 
+        struct RhFefPullRequest:
+            number: i64
+            merged_at: i64
+            has_merged_at: bool
+
         struct RhFefGitlabCursor:
             issues_page: mutable i64
             proposals_page: mutable i64
@@ -240,7 +245,7 @@ module ForgeEventsFetch:
             Base::rh_push_text(groups, "]}")
             group_count[0] <- group_count[0] + 1
 
-        def rh_fef_pull_numbers(raw: darray[u8]&, limit: i64, pull_numbers_out: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_fef_pull_requests(raw: darray[u8]&, limit: i64, pull_requests_out: mutable darray[RhFefPullRequest]&) -> bool can[Memory.Allocate, Abort.Panic, Memory.Release, Unsafe.PointerCast]:
             pulls_json: mutable darray[u8] =
                 value: mutable darray[u8] = []
                 value.push(91)
@@ -251,15 +256,28 @@ module ForgeEventsFetch:
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(pulls_json, nodes, texts)
             return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_ARR or nodes[root.usize()].child_count > limit
-            while pull >= 0 |pull: i64 = nodes[root.usize()].first_child, nodes, pulls_json, texts, pull_numbers_out|:
+            while pull >= 0 |pull: i64 = nodes[root.usize()].first_child, nodes, pulls_json, texts, pull_requests_out|:
                 return false if nodes[pull.usize()].kind != Json::RH_JSON_OBJ
                 number_ok: mutable i64 = 0
                 number: i64 = Json::rh_json_int(nodes, pulls_json, Json::rh_json_obj_get(nodes, texts, pull, "number"), &number_ok)
                 return false if number_ok == 0 or number < 1
-                while prior_idx < pull_numbers_out.count.i64() |prior_idx: i64 = 0, pull_numbers_out, number|:
-                    return false if pull_numbers_out[prior_idx.usize()] == number
+                while prior_idx < pull_requests_out.count.i64() |prior_idx: i64 = 0, pull_requests_out, number|:
+                    return false if pull_requests_out[prior_idx.usize()].number == number
                     prior_idx <- prior_idx + 1
-                pull_numbers_out.push(number)
+                merged_at_idx: i64 = Json::rh_json_obj_get(nodes, texts, pull, "merged_at")
+                return false if merged_at_idx < 0
+                merged_at: mutable i64 = 0
+                has_merged_at: mutable bool = false
+                if nodes[merged_at_idx.usize()].kind != Json::RH_JSON_NULL:
+                    return false if nodes[merged_at_idx.usize()].kind != Json::RH_JSON_STR
+                    merged_at_start: mutable i64 = 0
+                    merged_at_end: mutable i64 = 0
+                    return false if not Json::rh_json_str_span(nodes, merged_at_idx, &merged_at_start, &merged_at_end)
+                    parsed_ok: mutable i64 = 0
+                    merged_at <- Forge::rh_parse_iso8601(texts, merged_at_start.usize(), merged_at_end.usize(), &parsed_ok)
+                    return false if parsed_ok == 0 or merged_at < 0
+                    has_merged_at <- true
+                pull_requests_out.push(RhFefPullRequest{number: number, merged_at: merged_at, has_merged_at: has_merged_at})
                 pull <- nodes[pull.usize()].next_sibling
             true
 
@@ -284,7 +302,7 @@ module ForgeEventsFetch:
             pending.push(RhFefReviewCursor{pull_number: pull_number, next_page: review_next_page}) if review_complete == 0
             true
 
-        def rh_fef_fetch_pull_page(repository: cstr, pull_limit: i64, pull_page: i64, evidence_base: cstr, byte_total: mutable i64&, pull_numbers: mutable darray[i64]&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_fetch_pull_page(repository: cstr, pull_limit: i64, pull_page: i64, evidence_base: cstr, byte_total: mutable i64&, pull_requests: mutable darray[RhFefPullRequest]&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             pulls: mutable darray[u8] = []
             pull_total: mutable i64 = 0
             endpoint: mutable darray[u8] = []
@@ -295,9 +313,9 @@ module ForgeEventsFetch:
             endpoint_ptr: cstr = (&endpoint[0]).cast[cstr] can Unsafe.PointerCast
             return false if not ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint_ptr, "review-pulls", pull_page, 1, pull_limit, evidence_base, pulls, &pull_total, &byte_total[0], &complete_out[0], &next_page_out[0])
             return true if pull_total == 0
-            ForgeEventsFetch::rh_fef_pull_numbers(pulls, pull_limit, pull_numbers)
+            ForgeEventsFetch::rh_fef_pull_requests(pulls, pull_limit, pull_requests)
 
-        def rh_fef_report_repository_reviews(repository: cstr, groups: darray[u8]&, pending: darray[RhFefReviewCursor]&, next_pull_page: i64, pulls_complete: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_report_repository_reviews(repository: cstr, groups: darray[u8]&, pending: darray[RhFefReviewCursor]&, pull_requests: darray[RhFefPullRequest]&, next_pull_page: i64, pulls_complete: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Memory.Release, Unsafe.PointerCast]:
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             token: u8&? = getenv("RH_GITHUB_TOKEN")
@@ -326,6 +344,19 @@ module ForgeEventsFetch:
                 Base::rh_push_text(capture, "null")
             else:
                 Base::rh_push_decimal_i64(capture, next_pull_page)
+            Base::rh_push_text(capture, ",\"batch_pull_requests\":[")
+            while pull_idx < pull_requests.count.i64() |pull_idx: usize = 0, pull_requests, capture|:
+                capture.push(44) if pull_idx > 0
+                Base::rh_push_text(capture, "{\"number\":")
+                Base::rh_push_decimal_i64(capture, pull_requests[pull_idx].number)
+                Base::rh_push_text(capture, ",\"merged_at\":")
+                if pull_requests[pull_idx].has_merged_at:
+                    Base::rh_push_decimal_i64(capture, pull_requests[pull_idx].merged_at)
+                else:
+                    Base::rh_push_text(capture, "null")
+                capture.push(125)
+                pull_idx <- pull_idx + 1
+            capture.push(93)
             Base::rh_push_text(capture, ",\"pulls_complete\":")
             Base::rh_push_text(capture, "true" if pulls_complete else "false")
             Base::rh_push_text(capture, "}}")
@@ -346,23 +377,23 @@ module ForgeEventsFetch:
             reviews_by_pull: mutable darray[u8] = []
             group_count: mutable i64 = 0
             next_pending: mutable darray[RhFefReviewCursor] = []
+            pull_batch: mutable darray[RhFefPullRequest] = []
             if pending.count > 0:
                 while pending_idx < pending.count |pending_idx: usize = 0, pending, next_pending, reviews_by_pull, group_count, byte_total, repository, review_page_limit, evidence_base|:
                     cursor: RhFefReviewCursor = pending[pending_idx]
                     return -1 if not ForgeEventsFetch::rh_fef_fetch_reviews_for_pull(repository, cursor.pull_number, cursor.next_page, review_page_limit, evidence_base, &byte_total, reviews_by_pull, &group_count, next_pending)
                     pending_idx <- pending_idx + 1
             else:
-                pull_numbers: mutable darray[i64] = []
                 pull_complete: mutable i64 = 0
                 pull_next_page: mutable i64 = 1
-                return -1 if not ForgeEventsFetch::rh_fef_fetch_pull_page(repository, pull_limit, next_pull_page, evidence_base, &byte_total, pull_numbers, &pull_complete, &pull_next_page)
+                return -1 if not ForgeEventsFetch::rh_fef_fetch_pull_page(repository, pull_limit, next_pull_page, evidence_base, &byte_total, pull_batch, &pull_complete, &pull_next_page)
                 pulls_complete <- pull_complete == 1
                 next_pull_page <- pull_next_page
-                while pull_idx < pull_numbers.count |pull_idx: usize = 0, pull_numbers, reviews_by_pull, next_pending, group_count, byte_total, repository, review_page_limit, evidence_base|:
-                    pull_number: i64 = pull_numbers[pull_idx]
+                while pull_idx < pull_batch.count |pull_idx: usize = 0, pull_batch, reviews_by_pull, next_pending, group_count, byte_total, repository, review_page_limit, evidence_base|:
+                    pull_number: i64 = pull_batch[pull_idx].number
                     return -1 if not ForgeEventsFetch::rh_fef_fetch_reviews_for_pull(repository, pull_number, 1, review_page_limit, evidence_base, &byte_total, reviews_by_pull, &group_count, next_pending)
                     pull_idx <- pull_idx + 1
-            ForgeEventsFetch::rh_fef_report_repository_reviews(repository, reviews_by_pull, next_pending, next_pull_page, pulls_complete, out)
+            ForgeEventsFetch::rh_fef_report_repository_reviews(repository, reviews_by_pull, next_pending, pull_batch, next_pull_page, pulls_complete, out)
 
         def rh_fef_fetch_pages_from(repository: cstr, endpoint: cstr, capability: cstr, start_page: i64, max_pages: i64, page_size: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return false if start_page < 1 or max_pages < 1 or start_page > 2147483640 or max_pages > RH_FEF_MAX_PAGES or page_size < 1 or page_size > RH_FEF_PAGE_SIZE

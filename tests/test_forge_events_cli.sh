@@ -232,22 +232,31 @@ set -e
 [[ "$rc_records" -eq 4 ]] || fail "record attempt cap must fail closed (got $rc_records)"
 [[ ! -e "$T/over-limit.out" ]] || fail "over-limit capture wrote partial output"
 
-python3 - "$T/repository-reviews-input.json" "$T/duplicate-review-groups.json" "$T/over-limit-review-groups.json" <<'PY'
+python3 - "$T/repository-reviews-input.json" "$T/duplicate-review-groups.json" "$T/over-limit-review-groups.json" "$T/duplicate-batch-pulls.json" "$T/malformed-batch-merge-time.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 d["reviews_by_pull"] = [{"pull_number":7,"reviews":[]}, {"pull_number":7,"reviews":[]}]
 json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
 d["reviews_by_pull"] = [{"pull_number":n,"reviews":[]} for n in range(1, 12)]
 json.dump(d, open(sys.argv[3], "w", encoding="utf-8"), separators=(",", ":"))
+d["reviews_by_pull"] = []
+d["review_collection"]["batch_pull_requests"] = [{"number":7,"merged_at":1700172800},{"number":7,"merged_at":None}]
+json.dump(d, open(sys.argv[4], "w", encoding="utf-8"), separators=(",", ":"))
+d["review_collection"]["batch_pull_requests"] = [{"number":7,"merged_at":"later"}]
+json.dump(d, open(sys.argv[5], "w", encoding="utf-8"), separators=(",", ":"))
 PY
 set +e
 "$ROOT/build/rh_cli" forge events --input "$T/duplicate-review-groups.json" --out "$T/duplicate-review-groups.out" >/dev/null 2>&1
 rc_duplicate_review_groups=$?
 "$ROOT/build/rh_cli" forge events --input "$T/over-limit-review-groups.json" --out "$T/over-limit-review-groups.out" >/dev/null 2>&1
 rc_review_groups=$?
+"$ROOT/build/rh_cli" forge events --input "$T/duplicate-batch-pulls.json" --out "$T/duplicate-batch-pulls.out" >/dev/null 2>&1
+rc_duplicate_batch_pulls=$?
+"$ROOT/build/rh_cli" forge events --input "$T/malformed-batch-merge-time.json" --out "$T/malformed-batch-merge-time.out" >/dev/null 2>&1
+rc_batch_merge_time=$?
 set -e
-[[ "$rc_duplicate_review_groups" -eq 4 && "$rc_review_groups" -eq 4 ]] || fail "duplicate or over-limit pull groups were accepted"
-[[ ! -e "$T/duplicate-review-groups.out" && ! -e "$T/over-limit-review-groups.out" ]] || fail "invalid review groups wrote output"
+[[ "$rc_duplicate_review_groups" -eq 4 && "$rc_review_groups" -eq 4 && "$rc_duplicate_batch_pulls" -eq 4 && "$rc_batch_merge_time" -eq 4 ]] || fail "duplicate/over-limit review groups or invalid pull metadata were accepted"
+[[ ! -e "$T/duplicate-review-groups.out" && ! -e "$T/over-limit-review-groups.out" && ! -e "$T/duplicate-batch-pulls.out" && ! -e "$T/malformed-batch-merge-time.out" ]] || fail "invalid review groups or pull metadata wrote output"
 
 echo "[forge-events] malformed envelopes fail closed"
 set +e
@@ -281,7 +290,7 @@ echo "[forge-events] bounded live GitHub issue, pull-request, and release pages 
 mkdir -p "$T/bin"
 python3 - "$T/live-page-1.json" "$T/live-empty.json" "$T/live-full-page.json" "$T/live-issues-page-1.json" "$T/live-issues-full-page.json" "$T/live-releases-page-1.json" "$T/live-releases-full-page.json" "$T/live-reviews-page-1.json" "$T/repo-pulls-page-1.json" "$T/repo-pulls-page-2.json" "$T/repo-reviews-7-page-1.json" "$T/repo-reviews-7-page-2.json" "$T/repo-reviews-8-page-1.json" "$T/repo-reviews-9-page-1.json" <<'PY'
 import json, sys
-pull = {"number": 7, "state": "closed", "created_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "closed_at": "2023-11-16T22:13:20Z", "html_url": "https://github.com/example/project/pull/7"}
+pull = {"number": 7, "state": "closed", "created_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "closed_at": "2023-11-16T22:13:20Z", "merged_at": "2023-11-16T22:13:20Z", "html_url": "https://github.com/example/project/pull/7"}
 issue = {"number": 301, "state": "open", "created_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "closed_at": None, "html_url": "https://github.com/example/project/issues/301"}
 release = {"id": 1, "tag_name": "v1", "created_at": "2023-11-14T22:13:20Z", "published_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "html_url": "https://github.com/example/project/releases/tag/v1", "draft": False}
 json.dump([pull], open(sys.argv[1], "w", encoding="utf-8"), separators=(",", ":"))
@@ -297,7 +306,7 @@ release_rows.insert(0, dict(release, id=999, tag_name="draft", published_at=None
 json.dump(release_rows, open(sys.argv[7], "w", encoding="utf-8"), separators=(",", ":"))
 review = {"id": 55, "state": "APPROVED", "submitted_at": "2023-11-14T22:13:20Z", "updated_at": "2023-11-15T22:13:20Z", "html_url": "https://github.com/example/project/pull/7#pullrequestreview-55"}
 json.dump([review], open(sys.argv[8], "w", encoding="utf-8"), separators=(",", ":"))
-json.dump([dict(pull, number=n, html_url=f"https://github.com/example/project/pull/{n}") for n in (7, 8)], open(sys.argv[9], "w", encoding="utf-8"), separators=(",", ":"))
+json.dump([dict(pull, number=n, merged_at=None if n == 8 else pull["merged_at"], html_url=f"https://github.com/example/project/pull/{n}") for n in (7, 8)], open(sys.argv[9], "w", encoding="utf-8"), separators=(",", ":"))
 json.dump([dict(pull, number=9, html_url="https://github.com/example/project/pull/9")], open(sys.argv[10], "w", encoding="utf-8"), separators=(",", ":"))
 repo_review = {"state":"COMMENTED", "submitted_at":"2023-11-14T22:13:20Z", "updated_at":"2023-11-15T22:13:20Z"}
 json.dump([dict(repo_review, id=n, html_url=f"https://github.com/example/project/pull/7#pullrequestreview-{n}") for n in range(1, 101)], open(sys.argv[11], "w", encoding="utf-8"), separators=(",", ":"))
@@ -602,7 +611,7 @@ assert d["authorization"]["state"] == "authorized", d["authorization"]
 assert d["capabilities"]["reviews"]["count"] == 101, d["capabilities"]
 assert len(d["events"]) == 101, len(d["events"])
 assert {event["pull_request"] for event in d["events"]} == {7, 8}, d["events"][:2]
-assert state == {"pending_pull_requests":[{"number":7,"next_review_page":2}], "next_pull_page":2, "pulls_complete":False, "complete":False}, state
+assert state == {"pending_pull_requests":[{"number":7,"next_review_page":2}], "batch_pull_requests":[{"number":7,"merged_at":1700172800},{"number":8,"merged_at":None}], "next_pull_page":2, "pulls_complete":False, "complete":False}, state
 assert d["pagination"]["reviews"] == {"next":None,"complete":False}, d["pagination"]
 assert (t / "repo-reviews-1.out.github-review-pulls-page-1.url").read_text().strip().endswith("pulls?state=all&sort=updated&direction=desc&per_page=2&page=1")
 assert (t / "repo-reviews-1.out.github-reviews-pr-7-page-1.url").read_text().strip().endswith("/pulls/7/reviews?per_page=100&page=1")
@@ -626,7 +635,7 @@ python3 - "$T/repo-reviews-2.out" "$T" <<'PY'
 import json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 t = pathlib.Path(sys.argv[2])
-assert d["review_collection"] == {"pending_pull_requests":[], "next_pull_page":2, "pulls_complete":False, "complete":False}, d["review_collection"]
+assert d["review_collection"] == {"pending_pull_requests":[], "batch_pull_requests":[], "next_pull_page":2, "pulls_complete":False, "complete":False}, d["review_collection"]
 assert len(d["events"]) == 1 and d["events"][0]["native_id"] == "github:101" and d["events"][0]["pull_request"] == 7, d["events"]
 assert (t / "repo-reviews-2.out.github-reviews-pr-7-page-2.url").read_text().strip().endswith("/pulls/7/reviews?per_page=100&page=2")
 assert "/pulls?state=all" not in open(t / "repo-reviews-2-curl.args").read(), open(t / "repo-reviews-2-curl.args").read()
@@ -643,7 +652,7 @@ python3 - "$T/repo-reviews-3.out" "$T" <<'PY'
 import json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 t = pathlib.Path(sys.argv[2])
-assert d["review_collection"] == {"pending_pull_requests":[], "next_pull_page":None, "pulls_complete":True, "complete":True}, d["review_collection"]
+assert d["review_collection"] == {"pending_pull_requests":[], "batch_pull_requests":[{"number":9,"merged_at":1700172800}], "next_pull_page":None, "pulls_complete":True, "complete":True}, d["review_collection"]
 assert len(d["events"]) == 1 and d["events"][0]["native_id"] == "github:301" and d["events"][0]["pull_request"] == 9, d["events"]
 assert (t / "repo-reviews-3.out.github-review-pulls-page-2.url").read_text().strip().endswith("pulls?state=all&sort=updated&direction=desc&per_page=2&page=2")
 assert (t / "repo-reviews-3.out.github-reviews-pr-9-page-1.url").read_text().strip().endswith("/pulls/9/reviews?per_page=100&page=1")
@@ -659,7 +668,7 @@ python3 - "$T/repo-reviews-empty.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["capabilities"]["reviews"] == {"status":"observed","attempted":0,"normalized":0,"duplicate_replacements":0,"count":0,"rejected":0}, d["capabilities"]
-assert d["review_collection"] == {"pending_pull_requests":[],"next_pull_page":None,"pulls_complete":True,"complete":True}, d["review_collection"]
+assert d["review_collection"] == {"pending_pull_requests":[],"batch_pull_requests":[],"next_pull_page":None,"pulls_complete":True,"complete":True}, d["review_collection"]
 assert d["events"] == [], d["events"]
 print("[forge-events] successful empty repository review scan is observed and complete")
 PY

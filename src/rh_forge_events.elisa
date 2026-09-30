@@ -56,6 +56,11 @@ module ForgeEvents:
             pull_number: mutable i64
             next_review_page: mutable i64
 
+        struct RhForgePullBatch:
+            pull_number: i64
+            merged_at: i64
+            has_merged_at: bool
+
         def rh_fe_eq(texts: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, literal)
 
@@ -519,6 +524,7 @@ module ForgeEvents:
             review_collection_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "review_collection")
             review_collection_present: bool = review_collection_idx >= 0
             review_cursors: mutable darray[RhForgeReviewCursor] = []
+            pull_batch: mutable darray[RhForgePullBatch] = []
             next_pull_page: mutable i64 = 0
             next_pull_page_present: mutable i64 = 0
             pulls_complete: mutable bool = false
@@ -539,6 +545,28 @@ module ForgeEvents:
                         prior_cursor_idx <- prior_cursor_idx + 1
                     review_cursors.push(RhForgeReviewCursor{pull_number: pull_number, next_review_page: next_review_page})
                     pending_node <- nodes[pending_node.usize()].next_sibling
+                pull_batch_idx: i64 = Json::rh_json_obj_get(nodes, texts, review_collection_idx, "batch_pull_requests")
+                if pull_batch_idx >= 0:
+                    return -1 if nodes[pull_batch_idx.usize()].kind != Json::RH_JSON_ARR or nodes[pull_batch_idx.usize()].child_count > 10
+                    while pull_node >= 0 |pull_node: i64 = nodes[pull_batch_idx.usize()].first_child, nodes, raw, texts, pull_batch|:
+                        return -1 if nodes[pull_node.usize()].kind != Json::RH_JSON_OBJ
+                        pull_ok: mutable i64 = 0
+                        pull_number: mutable i64 = 0
+                        return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, pull_node, "number", &pull_number, &pull_ok) or pull_ok == 0 or pull_number < 1
+                        while prior_pull_idx < pull_batch.count.i64() |prior_pull_idx: i64 = 0, pull_batch, pull_number|:
+                            return -1 if pull_batch[prior_pull_idx.usize()].pull_number == pull_number
+                            prior_pull_idx <- prior_pull_idx + 1
+                        merged_idx: i64 = Json::rh_json_obj_get(nodes, texts, pull_node, "merged_at")
+                        return -1 if merged_idx < 0
+                        merged_at: mutable i64 = 0
+                        has_merged_at: mutable bool = false
+                        if nodes[merged_idx.usize()].kind != Json::RH_JSON_NULL:
+                            merged_ok: mutable i64 = 0
+                            merged_at <- Json::rh_json_int(nodes, raw, merged_idx, &merged_ok)
+                            return -1 if merged_ok == 0 or merged_at < 0
+                            has_merged_at <- true
+                        pull_batch.push(RhForgePullBatch{pull_number: pull_number, merged_at: merged_at, has_merged_at: has_merged_at})
+                        pull_node <- nodes[pull_node.usize()].next_sibling
                 next_pull_idx: i64 = Json::rh_json_obj_get(nodes, texts, review_collection_idx, "next_pull_page")
                 return -1 if next_pull_idx < 0
                 if nodes[next_pull_idx.usize()].kind != Json::RH_JSON_NULL:
@@ -631,6 +659,18 @@ module ForgeEvents:
                     Base::rh_push_decimal_i64(out, review_cursors[cursor_idx.usize()].next_review_page)
                     Base::rh_push_text(out, "}")
                     cursor_idx <- cursor_idx + 1
+                Base::rh_push_text(out, "],\"batch_pull_requests\":[")
+                while pull_idx < pull_batch.count.i64() |pull_idx: usize = 0, pull_batch, out|:
+                    out.push(44) if pull_idx > 0
+                    Base::rh_push_text(out, "{\"number\":")
+                    Base::rh_push_decimal_i64(out, pull_batch[pull_idx].pull_number)
+                    Base::rh_push_text(out, ",\"merged_at\":")
+                    if pull_batch[pull_idx].has_merged_at:
+                        Base::rh_push_decimal_i64(out, pull_batch[pull_idx].merged_at)
+                    else:
+                        Base::rh_push_text(out, "null")
+                    out.push(125)
+                    pull_idx <- pull_idx + 1
                 Base::rh_push_text(out, "],\"next_pull_page\":")
                 if next_pull_page_present > 0:
                     Base::rh_push_decimal_i64(out, next_pull_page)
