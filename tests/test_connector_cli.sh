@@ -408,7 +408,7 @@ PATH="$T/probe-bin:$PATH" RH_GITHUB_TOKEN="ghp_collaborator_probe_fixture" \
   "$ROOT/build/rh_cli" connector probe --github-repo example/project --collaborators \
     --out "$T/collaborator-probe.out" >/dev/null || fail "authenticated collaborator capability probe"
 python3 - "$T/collaborator-probe.out" "$T" <<'PY'
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 t = pathlib.Path(sys.argv[2])
 assert d["schema"] == "rh-github-collaborator-probe-result/1", d
@@ -418,10 +418,24 @@ assert d["capabilities"]["collaborators"] == {"declaration":"read-one-item-authe
 assert "private-account" not in open(sys.argv[1]).read(), d
 assert (t / "collaborator-probe.out.github-collaborators.json").read_text().find("private-account") >= 0
 assert (t / "collaborator-probe.out.github-collaborators.url").read_text().strip() == "https://api.github.com/repos/example/project/collaborators?per_page=1"
+def frame(label, value):
+    return label.encode() + b":" + str(len(value)).encode() + b":" + str(len(value)).encode() + b":" + value + b"\n"
+source_material = b"repo-health/github-collaborator-probe-source/1\n"
+for ext, label in (("url", "request_url"), ("status", "http_status"), ("json", "response_body"), ("err", "transport_error")):
+    source_material += frame(label, (t / f"collaborator-probe.out.github-collaborators.{ext}").read_bytes())
+sidecar = json.load(open(sys.argv[1] + ".transformations.json"))
+assert sidecar["adapter"] == "github-collaborator-capability-probe", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(source_material).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(
+    b"repo-health/github-collaborator-probe/1|repository=example/project|route=/collaborators?per_page=1|authorization=configured"
+).hexdigest(), sidecar
+assert "private-account" not in open(sys.argv[1] + ".transformations.json").read(), sidecar
 print("[connector] collaborator probe publishes only access and scope, with raw item retained locally")
 PY
 grep -Fxq 'header = "Authorization: Bearer ghp_collaborator_probe_fixture"' "$T/collaborator-probe.config" || fail "collaborator probe token header absent"
 ! grep -Fq 'ghp_collaborator_probe_fixture' "$T/collaborator-probe.args" || fail "collaborator probe token leaked into curl arguments"
+! grep -Fq 'ghp_collaborator_probe_fixture' "$T/collaborator-probe.out.transformations.json" || fail "collaborator probe token leaked into transformation sidecar"
 set +e
 PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/collaborator-missing-token.args" \
   "$ROOT/build/rh_cli" connector probe --github-repo example/project --collaborators \
