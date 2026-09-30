@@ -4,6 +4,7 @@
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="/tmp/rh-postgres-backup-$PPID-$$"
+EXPECTED_PYTHON="$(command -v python3)"
 trap 'rm -rf "$T"' EXIT
 
 fail() { echo "[postgres-backup] FAIL: $1" >&2; exit 1; }
@@ -52,9 +53,18 @@ assert "[repo-health-restore]" in text and "restore-secret" in text and "restore
 PY
 SH
 chmod +x "$T/bin/psql" "$T/bin/pg_restore"
+cat > "$T/bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+  [[ "$argument" != *"$EXPECTED_DATABASE_URL"* ]] || exit 61
+done
+exec "$EXPECTED_PYTHON" "$@"
+SH
+chmod +x "$T/bin/python3"
 
 database_url='postgresql://backup-user:secret@example.test/repo_health'
-export EXPECTED_DATABASE_URL="$database_url" PG_DUMP_ARGS="$T/pg_dump.args" PG_TOOL_ARGS="$T/pg-tool.args"
+export EXPECTED_DATABASE_URL="$database_url" EXPECTED_PYTHON PG_DUMP_ARGS="$T/pg_dump.args" PG_TOOL_ARGS="$T/pg-tool.args"
 PATH="$T/bin:$PATH" RH_DATABASE_URL="$database_url" bash "$ROOT/tools/backup-postgres.sh" "$T/evidence" "$T/backup" >/dev/null || fail "backup workflow"
 [[ -f "$T/backup/database.dump" && -f "$T/backup/evidence.manifest" && -f "$T/backup/evidence.bundle" && -f "$T/backup/backup-binding.json" ]] || fail "backup set is incomplete"
 ! rg -q 'secret|backup-user|example.test' "$T/backup" || fail "connection credentials leaked into backup artifacts"

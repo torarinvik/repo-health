@@ -27,12 +27,14 @@ trap cleanup EXIT
 trap 'exit 1' INT TERM
 
 SERVICE_FILE="$STAGE/restore.pg_service.conf"
-python3 - "$RH_RESTORE_DATABASE_URL" "$SERVICE_FILE" <<'PY'
+python3 - "$SERVICE_FILE" <<'PY'
+import os
 import re
 import sys
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-url, output = sys.argv[1:]
+url = os.environ["RH_RESTORE_DATABASE_URL"]
+output = sys.argv[1]
 try:
     parts = urlsplit(url)
     port = parts.port
