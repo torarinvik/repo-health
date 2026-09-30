@@ -80,6 +80,36 @@ def bitemporal_cross_product_oracle(fails: mutable i64&) -> void can[Memory.Allo
     check(not Temporal::rh_bitemporal_valid(malformed_open_valid), "bitemporal-open-valid-end-canonicalized", fails)
     check(not Temporal::rh_bitemporal_valid(malformed_open_known), "bitemporal-open-known-end-canonicalized", fails)
 
+def gregorian_cycle_oracle(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    # Count days forward from the Unix epoch independently of the production
+    # civil-date conversion, then check every date in one Gregorian cycle.
+    expected_days: mutable i64 = 0
+    for year in 1970..<2000 |year, expected_days|:
+        expected_days <- expected_days + 365
+        leap: bool = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+        expected_days <- expected_days + 1 if leap
+    for year in 2000..<2400 |year, expected_days, fails|:
+        for month in 1..<13 |month, year, expected_days, fails|:
+            leap: bool = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+            days_in_month: i64 =
+                if month == 2:
+                    29 if leap else 28
+                elif month == 4 or month == 6 or month == 9 or month == 11:
+                    30
+                else:
+                    31
+            for day in 1..<(days_in_month + 1) |day, year, month, expected_days, fails|:
+                matches: bool =
+                    instant: mutable i64 = -1
+                    round_year: mutable i64 = 0
+                    round_month: mutable i64 = 0
+                    round_day: mutable i64 = 0
+                    converted: bool = Temporal::rh_unix_from_civil_checked(year, month, day, &instant)
+                    Temporal::rh_civil_from_days(expected_days, &round_year, &round_month, &round_day)
+                    Temporal::rh_civil_date_valid(year, month, day) and converted and instant == expected_days * 86400 and Temporal::rh_days_from_civil(year, month, day) == expected_days and round_year == year and round_month == month and round_day == day
+                check(matches, "gregorian-400-year-cycle-roundtrip", fails)
+                expected_days <- expected_days + 1
+
 def observation_evidence_roundtrip() -> bool can[Memory.Allocate, Abort.Panic]:
     quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Unknown, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Unknown, provenance: Observation::RhProvenanceQuality.Unknown}
     evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
@@ -433,6 +463,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     malformed_bitemporal: Temporal::RhBitemporal = Temporal::rh_bitemporal_make(20, 10, true, 0, 0, false)
     check(not Temporal::rh_bitemporal_valid(malformed_bitemporal), "inverted-bitemporal-valid-range-rejected", &fails)
     bitemporal_cross_product_oracle(&fails)
+    gregorian_cycle_oracle(&fails)
 
 # --- M04-07 numerical oracles (plan §9.4), computed here first ---
     c1: mutable darray[u64] =
