@@ -27,9 +27,17 @@ json.dump({"schema":"rh-drilldown-input/1", "lineage":lin, "findings":fin}, open
 PY
 
 "$ROOT/build/rh_cli" drilldown --input "$T/input.json" --out "$T/out.json" >/dev/null || fail "drilldown run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
+python3 - "$T/input.json" "$T/out.json" <<'PY'
+import hashlib, json, sys
+source_path, output_path = sys.argv[1:]
+d = json.load(open(output_path))
+report = json.load(open(output_path + ".transformations.json"))
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "lineage-findings-drilldown" and report["output_schema"] == "rh-evidence-drilldown/1", report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/lineage-findings-drilldown/1").hexdigest(), report
+assert report["source_input_sha256"] == hashlib.sha256(open(source_path, "rb").read()).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(open(output_path, "rb").read()).hexdigest(), report
+assert {field["state"] for field in report["fields"]} == {"preserved", "transformed", "unsupported"}, report
 assert d["schema"] == "rh-evidence-drilldown/1", d
 assert d["source_payload"]["digest"] == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", d
 assert d["source_payload"]["locator"].startswith("https://github.com"), d
@@ -45,6 +53,7 @@ PY
 echo "[drilldown] determinism + mismatched origin fails closed"
 "$ROOT/build/rh_cli" drilldown --input "$T/input.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "drilldown output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "drilldown transformation report not deterministic"
 sed 's/"tool_version":"5.0.0"/"tool_version":"9.9.9"/' "$T/input.json" > "$T/bad-origin.json"
 set +e
 "$ROOT/build/rh_cli" drilldown --input "$T/bad-origin.json" --out "$T/x" >/dev/null 2>&1; rc_origin=$?
