@@ -12,9 +12,118 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_release_feed.elisa"
+include "./rh_observation.elisa"
 
 module ReleaseFeedReport:
     private:
+        struct RhReleaseMetricTotals:
+            release_count: i64
+            rejected_count: i64
+            asset_count: i64
+            digest_known_count: i64
+            published_count: i64
+            stable_count: i64
+            prerelease_count: i64
+            withdrawn_count: i64
+            supported_line_count: i64
+            support_end_known: i64
+            support_end_latest: i64
+            release_notes_known: i64
+            release_notes_present: i64
+            target_change_known: i64
+            target_change_count: i64
+            source_mapping_known: i64
+            source_mapped_count: i64
+            latest_stable_age_days: i64
+            interrelease_median_days: i64
+            interrelease_variance: i64
+
+        def rh_rfr_emit_metric(out: mutable darray[u8]&, key: cstr, version: cstr, value: Observation::RhMetricValue, status: u8, incomplete: bool, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Partial if status == Observation::RH_ST_PARTIAL else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if status == Observation::RH_ST_OBSERVED else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked
+            }
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+            Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.ReleaseFeedInput)
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(status, value, incomplete, quality, evidence)
+            Observation::rh_observation_emit_metric(out, key, version, reason, observation)
+
+        def rh_rfr_emit_count_metric(out: mutable darray[u8]&, key: cstr, version: cstr, count: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_rfr_emit_metric(out, key, version, Observation::RhMetricValue.Count(count), Observation::RH_ST_OBSERVED, false, "")
+
+        def rh_rfr_emit_timestamp_metric(out: mutable darray[u8]&, key: cstr, version: cstr, timestamp: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_rfr_emit_metric(out, key, version, Observation::RhMetricValue.Timestamp(timestamp), Observation::RH_ST_OBSERVED, false, "")
+
+        def rh_rfr_emit_ratio_metric(out: mutable darray[u8]&, key: cstr, version: cstr, numerator: i64, denominator: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            Observation::rh_ratio_valid(numerator, denominator) and rh_rfr_emit_metric(out, key, version, Observation::RhMetricValue.Ratio(numerator, denominator), Observation::RH_ST_OBSERVED, false, "")
+
+        def rh_rfr_emit_absent_metric(out: mutable darray[u8]&, key: cstr, version: cstr, status: u8, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_rfr_emit_metric(out, key, version, Observation::RhMetricValue.Absent, status, status == Observation::RH_ST_PARTIAL, reason)
+
+        def rh_rfr_emit_release_note_metric(out: mutable darray[u8]&, totals: RhReleaseMetricTotals) -> bool can[Memory.Allocate, Abort.Panic]:
+            if totals.release_count == 0:
+                rh_rfr_emit_absent_metric(out, "release.release_note_presence", "2.0.0", Observation::RH_ST_NOT_APPLICABLE, "no-included-releases")
+            elif totals.release_notes_known == 0:
+                rh_rfr_emit_absent_metric(out, "release.release_note_presence", "2.0.0", Observation::RH_ST_UNSUPPORTED, "release-note-retrieval-state-not-supplied")
+            elif totals.release_notes_known < totals.release_count:
+                rh_rfr_emit_absent_metric(out, "release.release_note_presence", "2.0.0", Observation::RH_ST_PARTIAL, "release-note-retrieval-state-incomplete")
+            else:
+                rh_rfr_emit_ratio_metric(out, "release.release_note_presence", "2.0.0", totals.release_notes_present, totals.release_count)
+
+        def rh_rfr_emit_target_change_metric(out: mutable darray[u8]&, totals: RhReleaseMetricTotals) -> bool can[Memory.Allocate, Abort.Panic]:
+            if totals.target_change_known == 0:
+                rh_rfr_emit_absent_metric(out, "release.tag_target_changes", "1.0.0", Observation::RH_ST_UNSUPPORTED, "tag-target-not-supplied")
+            elif totals.target_change_known < 2:
+                rh_rfr_emit_absent_metric(out, "release.tag_target_changes", "1.0.0", Observation::RH_ST_NOT_APPLICABLE, "fewer-than-two-tag-target-observations")
+            else:
+                rh_rfr_emit_count_metric(out, "release.tag_target_changes", "1.0.0", totals.target_change_count)
+
+        def rh_rfr_emit_source_mapping_metric(out: mutable darray[u8]&, totals: RhReleaseMetricTotals) -> bool can[Memory.Allocate, Abort.Panic]:
+            if totals.source_mapping_known == 0:
+                rh_rfr_emit_absent_metric(out, "release.release_source_mapping_coverage", "1.0.0", Observation::RH_ST_UNSUPPORTED, "source-mapping-not-supplied")
+            else:
+                rh_rfr_emit_ratio_metric(out, "release.release_source_mapping_coverage", "1.0.0", totals.source_mapped_count, totals.source_mapping_known)
+
+        def rh_rfr_emit_metrics(out: mutable darray[u8]&, totals: RhReleaseMetricTotals) -> bool can[Memory.Allocate, Abort.Panic]:
+            ok: bool = |out|
+                Base::rh_push_text(out, "[")
+                first: bool = rh_rfr_emit_count_metric(out, "release.release_count", "1.0.0", totals.release_count)
+                out.push(44) if first
+                second: bool = first and rh_rfr_emit_count_metric(out, "release.rejected_count", "1.0.0", totals.rejected_count)
+                out.push(44) if second
+                third: bool = second and rh_rfr_emit_count_metric(out, "release.asset_count", "1.0.0", totals.asset_count)
+                out.push(44) if third
+                fourth: bool = third and rh_rfr_emit_count_metric(out, "release.digest_known_count", "1.0.0", totals.digest_known_count)
+                out.push(44) if fourth
+                fifth: bool = fourth and rh_rfr_emit_count_metric(out, "release.published_time_known_count", "1.0.0", totals.published_count)
+                out.push(44) if fifth
+                sixth: bool = fifth and rh_rfr_emit_count_metric(out, "release.stable_count", "1.0.0", totals.stable_count)
+                out.push(44) if sixth
+                seventh: bool = sixth and rh_rfr_emit_count_metric(out, "release.prerelease_count", "1.0.0", totals.prerelease_count)
+                out.push(44) if seventh
+                eighth: bool = seventh and rh_rfr_emit_count_metric(out, "release.withdrawn_publications", "1.0.0", totals.withdrawn_count)
+                out.push(44) if eighth
+                ninth: bool = eighth and rh_rfr_emit_count_metric(out, "release.supported_lines", "1.0.0", totals.supported_line_count)
+                out.push(44) if ninth
+                tenth: bool = ninth and (rh_rfr_emit_absent_metric(out, "release.support_end_timestamp", "1.0.0", Observation::RH_ST_UNSUPPORTED, "support-end-not-supplied") if totals.support_end_known == 0 else rh_rfr_emit_timestamp_metric(out, "release.support_end_timestamp", "1.0.0", totals.support_end_latest))
+                out.push(44) if tenth
+                eleventh: bool = tenth and rh_rfr_emit_release_note_metric(out, totals)
+                out.push(44) if eleventh
+                twelfth: bool = eleventh and rh_rfr_emit_target_change_metric(out, totals)
+                out.push(44) if twelfth
+                thirteenth: bool = twelfth and rh_rfr_emit_source_mapping_metric(out, totals)
+                out.push(44) if thirteenth
+                fourteenth: bool = thirteenth and (rh_rfr_emit_count_metric(out, "release.latest_stable_age_days", "1.0.0", totals.latest_stable_age_days) if totals.latest_stable_age_days >= 0 else rh_rfr_emit_absent_metric(out, "release.latest_stable_age_days", "1.0.0", Observation::RH_ST_NOT_APPLICABLE, "no-published-stable-release"))
+                out.push(44) if fourteenth
+                fifteenth: bool = fourteenth and (rh_rfr_emit_count_metric(out, "release.interrelease_median_days", "1.0.0", totals.interrelease_median_days) if totals.interrelease_median_days >= 0 else rh_rfr_emit_absent_metric(out, "release.interrelease_median_days", "1.0.0", Observation::RH_ST_NOT_APPLICABLE, "fewer-than-two-published-stable-releases"))
+                out.push(44) if fifteenth
+                sixteenth: bool = fifteenth and (rh_rfr_emit_count_metric(out, "release.interrelease_variance", "1.0.0", totals.interrelease_variance) if totals.interrelease_variance >= 0 else rh_rfr_emit_absent_metric(out, "release.interrelease_variance", "1.0.0", Observation::RH_ST_NOT_APPLICABLE, "fewer-than-two-published-stable-releases"))
+                Base::rh_push_text(out, "]")
+                sixteenth
+            ok
+
         def rh_rel_supported_line_count(pool: darray[u8]&, releases: darray[ReleaseFeed::RhRelease]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             pool_loop: mutable darray[u8]& = pool
             releases_loop: mutable darray[ReleaseFeed::RhRelease]& = releases
@@ -207,6 +316,28 @@ module ReleaseFeedReport:
                         variance_sum <- variance_sum + delta * delta
                         i <- i + 1
                 interrelease_variance <- variance_sum / gaps.count.i64()
+            metric_totals: RhReleaseMetricTotals = RhReleaseMetricTotals{
+                release_count: releases.count.i64(),
+                rejected_count: rej,
+                asset_count: asset_total,
+                digest_known_count: digest_total,
+                published_count: published_total,
+                stable_count: stable_total,
+                prerelease_count: prerelease_total,
+                withdrawn_count: withdrawn_total,
+                supported_line_count: supported_line_total,
+                support_end_known: support_end_known,
+                support_end_latest: support_end_latest,
+                release_notes_known: release_notes_known,
+                release_notes_present: release_notes_present,
+                target_change_known: target_change_known,
+                target_change_count: target_change_total,
+                source_mapping_known: source_mapping_known,
+                source_mapped_count: source_mapped_total,
+                latest_stable_age_days: latest_stable_age,
+                interrelease_median_days: interrelease_median,
+                interrelease_variance: interrelease_variance
+            }
             Base::rh_push_text(out, "],\"rejected\":")
             Base::rh_push_decimal_i64(out, rej)
             Base::rh_push_text(out, ",\"source\":{\"history_supported\":")
@@ -219,93 +350,7 @@ module ReleaseFeedReport:
                 Base::rh_push_text(out, "true")
             else:
                 Base::rh_push_text(out, "false")
-            Base::rh_push_text(out, "},\"metrics\":[")
-            Base::rh_push_text(out, "{\"key\":\"release.release_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, releases.count.i64())
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.rejected_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, rej)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.asset_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, asset_total)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.digest_known_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, digest_total)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.published_time_known_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, published_total)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.stable_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, stable_total)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.prerelease_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, prerelease_total)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.withdrawn_publications\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, withdrawn_total)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.supported_lines\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, supported_line_total)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.support_end_timestamp\",\"version\":\"1.0.0\",\"status\":\"")
-            if support_end_known == 0:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"support-end-not-supplied\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, support_end_latest)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.release_note_presence\",\"version\":\"2.0.0\",\"status\":\"")
-            if releases.count == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-included-releases\"")
-            elif release_notes_known == 0:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"release-note-retrieval-state-not-supplied\"")
-            elif release_notes_known < releases.count.i64():
-                Base::rh_push_text(out, "partial\",\"reason\":\"release-note-retrieval-state-incomplete\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_i64(out, release_notes_present)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_i64(out, releases.count.i64())
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.tag_target_changes\",\"version\":\"1.0.0\",\"status\":\"")
-            if target_change_known == 0:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"tag-target-not-supplied\"")
-            elif target_change_known < 2:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"fewer-than-two-tag-target-observations\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, target_change_total)
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.release_source_mapping_coverage\",\"version\":\"1.0.0\",\"status\":\"")
-            if source_mapping_known == 0:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"source-mapping-not-supplied\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_i64(out, source_mapped_total)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_i64(out, source_mapping_known)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.latest_stable_age_days\",\"version\":\"1.0.0\",\"status\":\"")
-            if latest_stable_age >= 0:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, latest_stable_age)
-            else:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-published-stable-release\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.interrelease_median_days\",\"version\":\"1.0.0\",\"status\":\"")
-            if interrelease_median >= 0:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, interrelease_median)
-            else:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"fewer-than-two-published-stable-releases\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"release.interrelease_variance\",\"version\":\"1.0.0\",\"status\":\"")
-            if interrelease_variance >= 0:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, interrelease_variance)
-            else:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"fewer-than-two-published-stable-releases\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"release-feed-input\"]}],\"note\":\"release-only source: a tag is a label, not a release event; published time is valid time and first-seen is known time (both retained); missing published time and missing release classification stay unknown; stable/prerelease counts include only explicit boolean classification; freshness uses first_seen as the explicit report cutoff; no history or author identity is derived\"}")
+            Base::rh_push_text(out, "},\"metrics\":")
+            return -1 if not ReleaseFeedReport::rh_rfr_emit_metrics(out, metric_totals)
+            Base::rh_push_text(out, ",\"note\":\"release-only source: a tag is a label, not a release event; published time is valid time and first-seen is known time (both retained); missing published time and missing release classification stay unknown; stable/prerelease counts include only explicit boolean classification; freshness uses first_seen as the explicit report cutoff; no history or author identity is derived\"}")
             0

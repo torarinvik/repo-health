@@ -34,6 +34,8 @@ catalog below contains 226 implemented definitions across 225 distinct keys.**
 
 **M00-04 inventory producer increment:** All seven CycloneDX/SPDX inventory metrics now pass through validated typed observations and the shared metric writer, with a closed `InventoryInput` evidence identity. Observed counts and digest shares expose complete/valid quality; an empty inventory emits a reasoned not-applicable digest share with a null value and unknown completeness/validity. The inventory schema constrains metric values by status and validates evidence and quality dimensions. `tests/test_inventory_cli.sh`, `tests/test_m00.sh`, and `tests/test_schemas.sh` pass. Registry definitions and typed migration of other specialized producers remain open.
 
+**M00-04 release-feed producer increment:** All 16 release-feed metrics now use validated typed observations and the shared writer with a closed `ReleaseFeedInput` evidence identity. Bounded release-note and source-mapping ratios validate their denominators; partial note-retrieval coverage carries partial completeness with an absent value, while unsupported and not-applicable states retain explicit reasons and unknown quality. `tests/test_release_feed_cli.sh`, `tests/test_m00.sh`, and `tests/test_schemas.sh` pass. Other specialized producers and catalog definitions remain open.
+
 **M00-04 observation schema variants:** `rh-jsonschema/1` now validates discriminator-specific payload fields/types, closed observation/quality keys, nonnegative counts/timestamps/codes, positive ratio denominators, and count-pair ordering in the lineage input/result schemas. `tests/test_schemas.sh` covers all seven value variants and rejects invalid count types, zero denominators, and reversed count pairs in both directions.
 
 **M02 scope (in progress):** `db/migrations/001_initial.sql` target schema
@@ -892,7 +894,10 @@ path: `src/rh_release_feed_report.elisa` + `rh_cli release-feed --input
 <file> --out <file>` emit `rh-release-feed-result/1` with published (valid)
 and first-seen (known) time kept separate, a missing published time staying
 `null`, exact asset/digest counts, and `history_supported`/`identity_supported`
-both false (`tests/test_release_feed_cli.sh`).
+both false (`tests/test_release_feed_cli.sh`). All 16 metric rows use the shared
+typed observation writer and closed `ReleaseFeedInput` evidence; observed,
+partial, unsupported, and not-applicable cases preserve quality dimensions
+and explicit reasons.
 Each successful feed normalization also writes a digest-bound
 `rh-adapter-transformation-report/1` sidecar for exact input/output bytes and
 configuration. It reports release field preservation, metric derivation,

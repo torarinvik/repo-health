@@ -27,6 +27,21 @@ assert d["schema"] == "rh-release-feed-result/1", d
 r = d["releases"]
 assert len(r) == 2 and d["rejected"] == 0, d
 metrics = {m["key"]: m for m in d["metrics"]}
+assert len(metrics) == 16, metrics
+for metric in metrics.values():
+    assert metric["evidence"] == ["release-feed-input"], metric
+    dimensions = metric["quality_dimensions"]
+    assert dimensions["freshness"] == "unknown" and dimensions["provenance"] == "evidence_backed", metric
+    if metric["status"] == "observed":
+        assert dimensions["completeness"] == "complete" and dimensions["validity"] == "valid", metric
+        assert metric["value"] is not None, metric
+    elif metric["status"] == "partial":
+        assert metric["value"] is None and metric.get("reason"), metric
+        assert dimensions["completeness"] == "partial" and dimensions["validity"] == "unknown", metric
+    else:
+        assert metric["status"] in ("unsupported", "not_applicable"), metric
+        assert metric["value"] is None and metric.get("reason"), metric
+        assert dimensions["completeness"] == "unknown" and dimensions["validity"] == "unknown", metric
 assert {k: metrics[k]["value"] for k in (
     "release.release_count", "release.rejected_count", "release.asset_count",
     "release.digest_known_count", "release.published_time_known_count",
@@ -41,8 +56,10 @@ assert {k: metrics[k]["value"] for k in (
 }, metrics
 assert metrics["release.withdrawn_publications"]["value"] == 1, metrics
 assert metrics["release.supported_lines"]["value"] == 1, metrics
-assert metrics["release.support_end_timestamp"] == {"key":"release.support_end_timestamp","version":"1.0.0","status":"observed","value":1800000000,"evidence":["release-feed-input"]}, metrics
-assert metrics["release.release_note_presence"] == {"key":"release.release_note_presence","version":"2.0.0","status":"observed","value":{"num":1,"den":2},"evidence":["release-feed-input"]}, metrics
+assert metrics["release.support_end_timestamp"]["value"] == 1800000000, metrics
+assert metrics["release.support_end_timestamp"]["version"] == "1.0.0", metrics
+assert metrics["release.release_note_presence"]["version"] == "2.0.0", metrics
+assert metrics["release.release_note_presence"]["value"] == {"num":1,"den":2}, metrics
 assert metrics["release.release_source_mapping_coverage"]["value"] == {"num": 1, "den": 2}, metrics
 assert metrics["release.latest_stable_age_days"]["value"] == 0, metrics
 assert metrics["release.interrelease_median_days"]["status"] == "not_applicable", metrics
@@ -74,8 +91,15 @@ m = {x["key"]: x for x in json.load(open(sys.argv[1]))["metrics"]}
 assert m["release.latest_stable_age_days"]["value"] == 1, m
 assert m["release.interrelease_median_days"]["value"] == 3, m
 assert m["release.interrelease_variance"]["value"] == 1, m
-assert m["release.support_end_timestamp"]["status"] == "unsupported", m
-assert m["release.release_note_presence"]["status"] == "unsupported", m
+for key, reason in (("release.support_end_timestamp", "support-end-not-supplied"),
+                    ("release.release_note_presence", "release-note-retrieval-state-not-supplied")):
+    metric = m[key]
+    assert metric["status"] == "unsupported" and metric["value"] is None, metric
+    assert metric["reason"] == reason and metric["evidence"] == ["release-feed-input"], metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "unknown", "freshness": "unknown",
+        "validity": "unknown", "provenance": "evidence_backed",
+    }, metric
 print("[release-feed] cadence metrics OK")
 PY
 
@@ -88,7 +112,14 @@ python3 - "$T/notes-partial.out" <<'PY'
 import json, sys
 m = {x["key"]: x for x in json.load(open(sys.argv[1]))["metrics"]}
 note = m["release.release_note_presence"]
-assert note == {"key":"release.release_note_presence","version":"2.0.0","status":"partial","reason":"release-note-retrieval-state-incomplete","evidence":["release-feed-input"]}, note
+assert note["key"] == "release.release_note_presence" and note["version"] == "2.0.0", note
+assert note["status"] == "partial" and note["value"] is None, note
+assert note["reason"] == "release-note-retrieval-state-incomplete", note
+assert note["evidence"] == ["release-feed-input"], note
+assert note["quality_dimensions"] == {
+    "completeness": "partial", "freshness": "unknown",
+    "validity": "unknown", "provenance": "evidence_backed",
+}, note
 print("[release-feed] partial note coverage OK")
 PY
 
@@ -101,7 +132,14 @@ python3 - "$T/notes-empty.out" <<'PY'
 import json, sys
 m = {x["key"]: x for x in json.load(open(sys.argv[1]))["metrics"]}
 note = m["release.release_note_presence"]
-assert note == {"key":"release.release_note_presence","version":"2.0.0","status":"not_applicable","reason":"no-included-releases","evidence":["release-feed-input"]}, note
+assert note["key"] == "release.release_note_presence" and note["version"] == "2.0.0", note
+assert note["status"] == "not_applicable" and note["value"] is None, note
+assert note["reason"] == "no-included-releases", note
+assert note["evidence"] == ["release-feed-input"], note
+assert note["quality_dimensions"] == {
+    "completeness": "unknown", "freshness": "unknown",
+    "validity": "unknown", "provenance": "evidence_backed",
+}, note
 print("[release-feed] empty note population OK")
 PY
 
@@ -116,6 +154,11 @@ d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
 assert m["release.tag_target_changes"]["status"] == "observed", m
 assert m["release.tag_target_changes"]["value"] == 1, m
+assert m["release.tag_target_changes"]["evidence"] == ["release-feed-input"], m
+assert m["release.tag_target_changes"]["quality_dimensions"] == {
+    "completeness": "complete", "freshness": "unknown",
+    "validity": "valid", "provenance": "evidence_backed",
+}, m
 assert d["releases"][0]["target"] == "abc" and d["releases"][1]["target"] == "def", d
 print("[release-feed] tag target changes OK")
 PY
