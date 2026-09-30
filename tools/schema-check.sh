@@ -26,6 +26,12 @@ def type_ok(val, t):
         return isinstance(val, list)
     if t == "dict":
         return isinstance(val, dict)
+    if t == "null":
+        return val is None
+    if t == "int_or_dict":
+        return (isinstance(val, int) and not isinstance(val, bool)) or isinstance(val, dict)
+    if t == "int_dict_or_null":
+        return val is None or (isinstance(val, int) and not isinstance(val, bool)) or isinstance(val, dict)
     if t == "dict_or_null":
         return val is None or isinstance(val, dict)
     if t == "bool":
@@ -84,6 +90,12 @@ def check_obj(obj, spec, ctx):
         cases = variant_spec["cases"]
         assert value[discriminator] in cases, (ctx, "unknown variant", k, value[discriminator])
         check_obj(value, cases[value[discriminator]], "%s.%s<%s>" % (ctx, k, value[discriminator]))
+    conditional = spec.get("conditional")
+    if conditional is not None and conditional["field"] in obj:
+        discriminator = conditional["field"]
+        cases = conditional["cases"]
+        assert obj[discriminator] in cases, (ctx, "unknown conditional case", discriminator, obj[discriminator])
+        check_obj(obj, cases[obj[discriminator]], "%s<%s=%s>" % (ctx, discriminator, obj[discriminator]))
     for k, item_type in spec.get("item_types", {}).items():
         if k in obj:
             assert isinstance(obj[k], list), (ctx, "bad list", k)

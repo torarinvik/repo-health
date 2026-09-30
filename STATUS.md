@@ -32,6 +32,8 @@ catalog below contains 226 implemented definitions across 225 distinct keys.**
 
 **M00-04 identity producer increment:** Both `rh-identity-result/1` metrics now use validated typed observations with a closed inline `IdentityInput` evidence identity. The actor-kind metric preserves its unsupported status and reason when classification is absent, with an absent value and unknown quality dimensions. `tests/test_identity_cli.sh` checks observed/unsupported metric envelopes and continues to pass its exhaustive lifecycle cross-products; the M00 codec oracle round-trips the evidence identity.
 
+**M00-04 inventory producer increment:** All seven CycloneDX/SPDX inventory metrics now pass through validated typed observations and the shared metric writer, with a closed `InventoryInput` evidence identity. Observed counts and digest shares expose complete/valid quality; an empty inventory emits a reasoned not-applicable digest share with a null value and unknown completeness/validity. The inventory schema constrains metric values by status and validates evidence and quality dimensions. `tests/test_inventory_cli.sh`, `tests/test_m00.sh`, and `tests/test_schemas.sh` pass. Registry definitions and typed migration of other specialized producers remain open.
+
 **M00-04 observation schema variants:** `rh-jsonschema/1` now validates discriminator-specific payload fields/types, closed observation/quality keys, nonnegative counts/timestamps/codes, positive ratio denominators, and count-pair ordering in the lineage input/result schemas. `tests/test_schemas.sh` covers all seven value variants and rejects invalid count types, zero denominators, and reversed count pairs in both directions.
 
 **M02 scope (in progress):** `db/migrations/001_initial.sql` target schema

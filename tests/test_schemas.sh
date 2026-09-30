@@ -35,6 +35,32 @@ for want in ("connector-manifest", "canonical-repo", "dep-graph", "adapter-trans
 print("[schemas] families OK:", ", ".join(sorted(names)))
 PY
 
+echo "[schemas] inventory metric status constrains nullable values"
+inventory_negative="$ROOT/fixtures/inventory-results/_schema-negative.json"
+trap 'rm -f "$inventory_negative"' EXIT
+for invalid in observed-null not-applicable-value; do
+  python3 - "$ROOT/fixtures/inventory-results/cyclonedx-1.5.json" "$inventory_negative" "$invalid" <<'PY'
+import json, sys
+source, target, invalid = sys.argv[1:]
+document = json.load(open(source))
+metric = document["metrics"][0]
+if invalid == "observed-null":
+    metric["value"] = None
+else:
+    metric["status"] = "not_applicable"
+    metric["value"] = 1
+json.dump(document, open(target, "w"), separators=(",", ":"))
+PY
+  if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+    rm -f "$inventory_negative"
+    trap - EXIT
+    fail "inventory schema accepted $invalid metric value"
+  fi
+done
+rm -f "$inventory_negative"
+trap - EXIT
+echo "[schemas] inventory observed and absent metric values are constrained"
+
 echo "[schemas] negative control: a malformed document is rejected"
 tmp="$ROOT/build/tmp_schema_neg"
 rm -rf "$tmp"; mkdir -p "$tmp"

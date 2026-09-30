@@ -48,6 +48,14 @@ assert d["completeness"] == {
     ],
 }, d["completeness"]
 metrics = {m["key"]: m for m in d["metrics"]}
+assert len(metrics) == 7, metrics
+for metric in metrics.values():
+    assert metric["status"] == "observed", metric
+    assert metric["evidence"] == ["inventory-input"], metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "complete", "freshness": "unknown",
+        "validity": "valid", "provenance": "evidence_backed",
+    }, metric
 assert {k: metrics[k]["value"] for k in metrics} == {
     "inventory.component_count": 2,
     "inventory.invalid_component_count": 1,
@@ -73,6 +81,14 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["format"] == "cyclonedx" and d["spec_version"] == sys.argv[2], d
 assert d["status"] == "observed" and d["counts"]["components"] == 1, d
+assert len(d["metrics"]) == 7, d["metrics"]
+for metric in d["metrics"]:
+    assert metric["status"] == "observed", metric
+    assert metric["evidence"] == ["inventory-input"], metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "complete", "freshness": "unknown",
+        "validity": "valid", "provenance": "evidence_backed",
+    }, metric
 print("[inventory] CycloneDX", sys.argv[2], "OK")
 PY
 done
@@ -84,6 +100,14 @@ python3 - "$T/cdx-unknown.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["counts"]["unknown_top_keys"] == 2, d["counts"]
+share = next(m for m in d["metrics"] if m["key"] == "provenance.artifact_digest_present_share")
+assert share["status"] == "not_applicable" and share["value"] is None, share
+assert share["reason"] == "no-parsed-components", share
+assert share["evidence"] == ["inventory-input"], share
+assert share["quality_dimensions"] == {
+    "completeness": "unknown", "freshness": "unknown",
+    "validity": "unknown", "provenance": "evidence_backed",
+}, share
 print("[inventory] cyclonedx unknown-keys counted OK")
 PY
 
@@ -108,12 +132,43 @@ c = d["counts"]
 assert c["packages"] == 2 and c["invalid"] == 1, c
 assert c["unknown_top_keys"] == 1, c
 metrics = {m["key"]: m for m in d["metrics"]}
+assert len(metrics) == 7, metrics
+for metric in metrics.values():
+    assert metric["status"] == "observed", metric
+    assert metric["evidence"] == ["inventory-input"], metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "complete", "freshness": "unknown",
+        "validity": "valid", "provenance": "evidence_backed",
+    }, metric
 assert metrics["inventory.component_count"]["value"] == 2, metrics
 assert metrics["inventory.invalid_component_count"]["value"] == 1, metrics
 assert metrics["inventory.known_digest_count"]["value"] == 1, metrics
 assert metrics["provenance.artifact_digest_present_share"]["value"] == {"num": 2, "den": 2}, metrics
 assert metrics["inventory.unknown_field_count"]["value"] == 1, metrics
 print("[inventory] spdx OK")
+PY
+
+echo "[inventory] SPDX empty package set retains an explicit absent share"
+python3 - "$T/spdx-empty.json" "$T/spdx-2.3.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[2]))
+d["packages"] = []
+with open(sys.argv[1], "w") as output:
+    json.dump(d, output, separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" inventory --format spdx --input "$T/spdx-empty.json" --out "$T/spdx-empty.out" >/dev/null || fail "empty spdx parse"
+python3 - "$T/spdx-empty.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+share = next(m for m in d["metrics"] if m["key"] == "provenance.artifact_digest_present_share")
+assert share["status"] == "not_applicable" and share["value"] is None, share
+assert share["reason"] == "no-parsed-packages", share
+assert share["evidence"] == ["inventory-input"], share
+assert share["quality_dimensions"] == {
+    "completeness": "unknown", "freshness": "unknown",
+    "validity": "unknown", "provenance": "evidence_backed",
+}, share
+print("[inventory] empty SPDX share OK")
 PY
 
 echo "[inventory] determinism"

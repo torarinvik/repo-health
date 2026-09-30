@@ -14,9 +14,48 @@ include "./rh_json.elisa"
 include "./rh_sha256.elisa"
 include "./rh_inventory.elisa"
 include "./rh_spdx.elisa"
+include "./rh_observation.elisa"
 
 module InventoryReport:
     private:
+        def rh_inv_emit_metric(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if status == Observation::RH_ST_OBSERVED else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked
+            }
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+            Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.InventoryInput)
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(status, value, false, quality, evidence)
+            Observation::rh_observation_emit_metric(out, key, "1.0.0", reason, observation)
+
+        def rh_inv_emit_count_metric(out: mutable darray[u8]&, key: cstr, count: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_inv_emit_metric(out, key, Observation::RhMetricValue.Count(count), Observation::RH_ST_OBSERVED, "")
+
+        def rh_inv_emit_ratio_metric(out: mutable darray[u8]&, key: cstr, numerator: i64, denominator: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            Observation::rh_ratio_valid(numerator, denominator) and rh_inv_emit_metric(out, key, Observation::RhMetricValue.Ratio(numerator, denominator), Observation::RH_ST_OBSERVED, "")
+
+        def rh_inv_emit_metrics(out: mutable darray[u8]&, component_count: i64, invalid_count: i64, purl_count: i64, hash_count: i64, known_digest_count: i64, unknown_field_count: i64, empty_reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            ok: bool = |out|
+                Base::rh_push_text(out, "[")
+                first: bool = rh_inv_emit_count_metric(out, "inventory.component_count", component_count)
+                out.push(44) if first
+                second: bool = first and rh_inv_emit_count_metric(out, "inventory.invalid_component_count", invalid_count)
+                out.push(44) if second
+                third: bool = second and rh_inv_emit_count_metric(out, "inventory.components_with_purl_count", purl_count)
+                out.push(44) if third
+                fourth: bool = third and rh_inv_emit_count_metric(out, "inventory.components_with_hash_count", hash_count)
+                out.push(44) if fourth
+                fifth: bool = fourth and rh_inv_emit_count_metric(out, "inventory.known_digest_count", known_digest_count)
+                out.push(44) if fifth
+                sixth: bool = fifth and (rh_inv_emit_ratio_metric(out, "provenance.artifact_digest_present_share", hash_count, component_count) if component_count > 0 else rh_inv_emit_metric(out, "provenance.artifact_digest_present_share", Observation::RhMetricValue.Absent, Observation::RH_ST_NOT_APPLICABLE, empty_reason))
+                out.push(44) if sixth
+                seventh: bool = sixth and rh_inv_emit_count_metric(out, "inventory.unknown_field_count", unknown_field_count)
+                Base::rh_push_text(out, "]")
+                seventh
+            ok
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_inv_emit_span(out: mutable darray[u8]&, pool: darray[u8]&, s: i64, e: i64) -> void can[Memory.Allocate, Abort.Panic]:
             if s >= 0 and e >= s and e <= pool.count.i64():
@@ -153,35 +192,8 @@ module InventoryReport:
                     i <- i + 1
                 Base::rh_push_text(out, "]")
                 rh_inv_completeness(composition_assertions, pool, bom, out)
-                Base::rh_push_text(out, ",\"metrics\":[")
-                Base::rh_push_text(out, "{\"key\":\"inventory.component_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, bom.component_count)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]},")
-                Base::rh_push_text(out, "{\"key\":\"inventory.invalid_component_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, bom.invalid_components)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]},")
-                Base::rh_push_text(out, "{\"key\":\"inventory.components_with_purl_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, bom.with_purl)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]},")
-                Base::rh_push_text(out, "{\"key\":\"inventory.components_with_hash_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, bom.with_hash)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]},")
-                Base::rh_push_text(out, "{\"key\":\"inventory.known_digest_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, bom.digest_known)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]},")
-                Base::rh_push_text(out, "{\"key\":\"provenance.artifact_digest_present_share\",\"version\":\"1.0.0\",\"status\":\"")
-                if bom.component_count > 0:
-                    Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                    Base::rh_push_decimal_i64(out, bom.with_hash)
-                    Base::rh_push_text(out, ",\"den\":")
-                    Base::rh_push_decimal_i64(out, bom.component_count)
-                    Base::rh_push_text(out, "},\"evidence\":[\"inventory-input\"]")
-                else:
-                    Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-parsed-components\"")
-                Base::rh_push_text(out, "},")
-                Base::rh_push_text(out, "{\"key\":\"inventory.unknown_field_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, bom.unknown_top_keys)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]}]")
+                Base::rh_push_text(out, ",\"metrics\":")
+                return -1 if not InventoryReport::rh_inv_emit_metrics(out, bom.component_count, bom.invalid_components, bom.with_purl, bom.with_hash, bom.digest_known, bom.unknown_top_keys, "no-parsed-components")
             Base::rh_push_text(out, ",\"note\":\"valid != complete: a well-formed document proves it parses, not that every dependency is listed\"}")
             return 1 if bom.spec_unsupported == 1
             0
@@ -236,35 +248,8 @@ module InventoryReport:
                     i <- i + 1
                 Base::rh_push_text(out, "]")
                 Base::rh_push_text(out, ",\"completeness\":{\"dependency_assertions\":{\"state\":\"not_asserted\",\"count\":0,\"complete\":0,\"incomplete\":0,\"unknown\":0,\"not_specified\":0},\"compositions\":[]}")
-                Base::rh_push_text(out, ",\"metrics\":[")
-                Base::rh_push_text(out, "{\"key\":\"inventory.component_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, spdx.packages)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]},")
-                Base::rh_push_text(out, "{\"key\":\"inventory.invalid_component_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, spdx.invalid_packages)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]},")
-                Base::rh_push_text(out, "{\"key\":\"inventory.components_with_purl_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, spdx.with_purl)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]},")
-                Base::rh_push_text(out, "{\"key\":\"inventory.components_with_hash_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, spdx.with_hash)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]},")
-                Base::rh_push_text(out, "{\"key\":\"inventory.known_digest_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, spdx.digest_known)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]},")
-                Base::rh_push_text(out, "{\"key\":\"provenance.artifact_digest_present_share\",\"version\":\"1.0.0\",\"status\":\"")
-                if spdx.packages > 0:
-                    Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                    Base::rh_push_decimal_i64(out, spdx.with_hash)
-                    Base::rh_push_text(out, ",\"den\":")
-                    Base::rh_push_decimal_i64(out, spdx.packages)
-                    Base::rh_push_text(out, "},\"evidence\":[\"inventory-input\"]")
-                else:
-                    Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-parsed-packages\"")
-                Base::rh_push_text(out, "},")
-                Base::rh_push_text(out, "{\"key\":\"inventory.unknown_field_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, spdx.unknown_top_keys)
-                Base::rh_push_text(out, ",\"evidence\":[\"inventory-input\"]}]")
+                Base::rh_push_text(out, ",\"metrics\":")
+                return -1 if not InventoryReport::rh_inv_emit_metrics(out, spdx.packages, spdx.invalid_packages, spdx.with_purl, spdx.with_hash, spdx.digest_known, spdx.unknown_top_keys, "no-parsed-packages")
             Base::rh_push_text(out, ",\"note\":\"valid != complete: a well-formed document proves it parses, not that every dependency is listed\"}")
             return 1 if spdx.spec_unsupported == 1
             0
