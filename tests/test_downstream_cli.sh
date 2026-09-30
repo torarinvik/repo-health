@@ -213,6 +213,27 @@ assert metrics["graph.cyclic_node_share"]["value"] == {"num": 0, "den": 5}, metr
 assert metrics["graph.traversal_truncated"]["value"] is False, metrics
 assert metrics["graph.scenario_affected_count"]["status"] == "not_applicable", metrics
 assert metrics["downstream_condition.intrinsic_coverage_share"]["status"] == "not_applicable", metrics
+for key, metric in metrics.items():
+    if metric["status"] == "observed":
+        assert metric["quality_dimensions"] == {
+            "completeness": "complete",
+            "freshness": "unknown",
+            "validity": "valid",
+            "provenance": "evidence_backed",
+        }, (key, metric)
+        assert metric["evidence"] == ["graph_source"], (key, metric)
+scenario_metric = metrics["graph.scenario_affected_count"]
+assert scenario_metric["value"] is None and scenario_metric["reason"] == "scenario-not-requested", scenario_metric
+assert scenario_metric["quality_dimensions"] == {
+    "completeness": "unknown", "freshness": "unknown", "validity": "unknown", "provenance": "evidence_backed"
+}, scenario_metric
+assert scenario_metric["evidence"] == ["graph_source"], scenario_metric
+intrinsic_metric = metrics["downstream_condition.intrinsic_coverage_share"]
+assert intrinsic_metric["value"] is None and intrinsic_metric["reason"] == "intrinsic-metrics-not-supplied", intrinsic_metric
+assert intrinsic_metric["quality_dimensions"] == {
+    "completeness": "unknown", "freshness": "unknown", "validity": "unknown", "provenance": "unknown"
+}, intrinsic_metric
+assert intrinsic_metric["evidence"] == [], intrinsic_metric
 print("[downstream] diamond OK")
 PY
 
@@ -299,6 +320,10 @@ assert got == {"history.months_active": 3, "review.count": 1, "release.count": 1
 assert "independent of downstream inputs" in intr["note"], intr["note"]
 metrics = {m["key"]: m for m in d["metrics"]}
 assert metrics["downstream_condition.intrinsic_coverage_share"]["value"] == {"num": 5, "den": 9}, metrics
+assert metrics["downstream_condition.intrinsic_coverage_share"]["evidence"] == ["graph_source", "intrinsics"], metrics
+assert metrics["downstream_condition.intrinsic_coverage_share"]["quality_dimensions"] == {
+    "completeness": "complete", "freshness": "unknown", "validity": "valid", "provenance": "evidence_backed"
+}, metrics
 print("[downstream] intrinsic join OK")
 PY
 
@@ -448,6 +473,11 @@ scenario = d["scenario"]
 assert scenario["truncated"] is True and scenario["affected"] == [] and scenario["affected_count"] is None, scenario
 metric = next(m for m in d["metrics"] if m["key"] == "graph.scenario_affected_count")
 assert metric["status"] == "partial" and metric["value"] is None, metric
+assert metric["reason"] == "scenario-traversal-truncated", metric
+assert metric["quality_dimensions"] == {
+    "completeness": "partial", "freshness": "unknown", "validity": "unknown", "provenance": "evidence_backed"
+}, metric
+assert metric["evidence"] == ["graph_source"], metric
 print("[downstream] truncated scenario remains partial, not an exact affected count")
 PY
 

@@ -59,6 +59,11 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- `rh-downstream/1` and `/2` metric rows now serialize from validated shared
+  observations. Truncated scenario counts retain partial status with an absent
+  value and reason, while unrequested scenarios remain not applicable. Quality
+  dimensions and evidence are emitted from the observation; absent intrinsic
+  joins no longer claim evidence from an input that was not supplied.
 - Source-specific capability coverage metrics now pass through shared typed
   observations before serialization. Reports retain their existing keys and
   values while adding explicit quality dimensions; metrics with no applicable

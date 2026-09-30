@@ -16,10 +16,108 @@ include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_graph.elisa"
 include "./rh_downstream.elisa"
+include "./rh_observation.elisa"
 
 module DownstreamReport:
     private:
         const RH_DS_PATH_WITNESS_LIMIT: i64 = 16
+        const RH_DS_EVIDENCE_NONE: i64 = 0
+        const RH_DS_EVIDENCE_GRAPH: i64 = 1
+        const RH_DS_EVIDENCE_GRAPH_AND_INTRINSICS: i64 = 2
+
+        def rh_ds_observation(value: Observation::RhMetricValue, status: u8, has_incompleteness: bool, evidence_mode: i64) -> Observation::RhObservation can[Memory.Allocate, Abort.Panic]:
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Partial if status == Observation::RH_ST_PARTIAL else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if status == Observation::RH_ST_OBSERVED else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked if evidence_mode != RH_DS_EVIDENCE_NONE else Observation::RhProvenanceQuality.Unknown
+            }
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+            if evidence_mode == RH_DS_EVIDENCE_GRAPH or evidence_mode == RH_DS_EVIDENCE_GRAPH_AND_INTRINSICS:
+                Observation::rh_evidence_links_push_external(&evidence, string_view_slice(bytes_view("graph_source"), 0, 12))
+            if evidence_mode == RH_DS_EVIDENCE_GRAPH_AND_INTRINSICS:
+                Observation::rh_evidence_links_push_external(&evidence, string_view_slice(bytes_view("intrinsics"), 0, 10))
+            Observation::rh_observation_make_with_evidence(status, value, has_incompleteness, quality, evidence)
+
+        def rh_ds_emit_evidence(out: mutable darray[u8]&, evidence: Observation::RhEvidenceLinks) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, ",\"evidence\":[")
+            for index in 0..<Observation::rh_evidence_links_count(evidence) |index, evidence, out|:
+                Base::rh_push_text(out, ",") if index > 0
+                link: Observation::RhEvidenceLink = Observation::rh_evidence_links_get_link(evidence, index)
+                out.push(34)
+                if link.object == Observation::RhEvidenceObject.External:
+                    Base::rh_json_escape_view(out, link.locator)
+                else:
+                    Base::rh_push_text(out, Observation::rh_evidence_object_label(link.object))
+                out.push(34)
+            Base::rh_push_text(out, "]")
+
+        def rh_ds_emit_quality(out: mutable darray[u8]&, observation: Observation::RhObservation) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, ",\"quality_dimensions\":{\"completeness\":\"")
+            Base::rh_push_text(out, Observation::rh_completeness_label(observation.quality.completeness))
+            Base::rh_push_text(out, "\",\"freshness\":\"")
+            Base::rh_push_text(out, Observation::rh_freshness_label(observation.quality.freshness))
+            Base::rh_push_text(out, "\",\"validity\":\"")
+            Base::rh_push_text(out, Observation::rh_validity_label(observation.quality.validity))
+            Base::rh_push_text(out, "\",\"provenance\":\"")
+            Base::rh_push_text(out, Observation::rh_provenance_quality_label(observation.quality.provenance))
+            Base::rh_push_text(out, "\"}")
+
+        def rh_ds_emit_metric(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, has_incompleteness: bool, reason: cstr, evidence_mode: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            observation: Observation::RhObservation = DownstreamReport::rh_ds_observation(value, status, has_incompleteness, evidence_mode)
+            return false if not Observation::rh_observation_valid(observation)
+            Base::rh_push_text(out, "{\"key\":\"")
+            Base::rh_push_cstr(out, key)
+            Base::rh_push_text(out, "\",\"version\":\"1.0.0\",\"status\":\"")
+            Base::rh_push_text(out, Observation::rh_status_label(observation.status))
+            Base::rh_push_text(out, "\",\"value\":")
+            match observation.value:
+                Observation::RhMetricValue.Absent:
+                    Base::rh_push_text(out, "null")
+                Observation::RhMetricValue.Count(count):
+                    Base::rh_push_decimal_i64(out, count)
+                Observation::RhMetricValue.CountPair(first, second):
+                    Base::rh_push_text(out, "{\"first\":")
+                    Base::rh_push_decimal_i64(out, first)
+                    Base::rh_push_text(out, ",\"second\":")
+                    Base::rh_push_decimal_i64(out, second)
+                    Base::rh_push_text(out, "}")
+                Observation::RhMetricValue.CountHistogram5(bin_0, bin_1, bin_2, bin_3, bin_4, population_count):
+                    Base::rh_push_text(out, "{\"bins\":[")
+                    Base::rh_push_decimal_i64(out, bin_0)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_1)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_2)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_3)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_4)
+                    Base::rh_push_text(out, "],\"population_count\":")
+                    Base::rh_push_decimal_i64(out, population_count)
+                    Base::rh_push_text(out, "}")
+                Observation::RhMetricValue.Timestamp(unix_seconds):
+                    Base::rh_push_decimal_i64(out, unix_seconds)
+                Observation::RhMetricValue.Ratio(num, den):
+                    Base::rh_push_text(out, "{\"num\":")
+                    Base::rh_push_decimal_i64(out, num)
+                    Base::rh_push_text(out, ",\"den\":")
+                    Base::rh_push_decimal_i64(out, den)
+                    Base::rh_push_text(out, "}")
+                Observation::RhMetricValue.Boolean(flag):
+                    Base::rh_push_text(out, "true") if flag
+                    Base::rh_push_text(out, "false") if not flag
+                Observation::RhMetricValue.Enumeration(code):
+                    Base::rh_push_decimal_i64(out, code)
+            if observation.status != Observation::RH_ST_OBSERVED:
+                Base::rh_push_text(out, ",\"reason\":\"")
+                Base::rh_push_cstr(out, reason)
+                Base::rh_push_text(out, "\"")
+            DownstreamReport::rh_ds_emit_evidence(out, observation.evidence)
+            DownstreamReport::rh_ds_emit_quality(out, observation)
+            Base::rh_push_text(out, "}")
+            true
+
         # Map the dep-graph scope label back to a caller-defined scope byte:
         # 1 runtime/normal, 2 dev, 3 optional, 4 peer. The projection here keeps
         # every scope (Graph::RH_SCOPE_ALL); the label is preserved in the report.
@@ -670,54 +768,34 @@ module DownstreamReport:
             else:
                 Base::rh_push_text(out, ",\"scenario\":null")
             Base::rh_push_text(out, ",\"metrics\":[")
-            Base::rh_push_text(out, "{\"key\":\"graph.direct_dependents_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, dc2)
-            Base::rh_push_text(out, ",\"evidence\":[\"graph_source\"]},")
-            Base::rh_push_text(out, "{\"key\":\"graph.transitive_dependents_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, tc2)
-            Base::rh_push_text(out, ",\"evidence\":[\"graph_source\"]},")
-            Base::rh_push_text(out, "{\"key\":\"graph.scc_component_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, scc)
-            Base::rh_push_text(out, ",\"evidence\":[\"graph_source\"]},")
-            Base::rh_push_text(out, "{\"key\":\"graph.strongly_connected_components\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, scc)
-            Base::rh_push_text(out, ",\"evidence\":[\"graph_source\"]},")
-            Base::rh_push_text(out, "{\"key\":\"graph.reverse_reachability_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, tc2)
-            Base::rh_push_text(out, ",\"evidence\":[\"graph_source\"]},")
-            Base::rh_push_text(out, "{\"key\":\"graph.cyclic_node_share\",\"version\":\"1.0.0\",\"status\":\"")
-            if visible_nodes > 0:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_i64(out, cyclic_nodes)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_i64(out, visible_nodes)
-                Base::rh_push_text(out, "},\"evidence\":[\"graph_source\"]")
-            else:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-visible-nodes\"")
-            Base::rh_push_text(out, "},")
-            Base::rh_push_text(out, "{\"key\":\"graph.traversal_truncated\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_text(out, "true" if trunc == 1 or strunc == 1 else "false")
-            Base::rh_push_text(out, ",\"evidence\":[\"graph_source\"]},")
-            Base::rh_push_text(out, "{\"key\":\"graph.scenario_affected_count\",\"version\":\"1.0.0\",\"status\":\"")
-            if not has_unavailable:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"scenario-not-requested\"")
-            elif strunc == 1:
-                Base::rh_push_text(out, "partial\",\"value\":null,\"reason\":\"scenario-traversal-truncated\",\"evidence\":[\"graph_source\"]")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, scount2)
-                Base::rh_push_text(out, ",\"evidence\":[\"graph_source\"]")
-            Base::rh_push_text(out, "},")
-            Base::rh_push_text(out, "{\"key\":\"downstream_condition.intrinsic_coverage_share\",\"version\":\"1.0.0\",\"status\":\"")
-            if not ijoin or icount <= 0 or itotal <= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"intrinsic-metrics-not-supplied\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_i64(out, covered_intrinsic)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_i64(out, itotal * icount)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"graph_source\",\"intrinsics\"]}],\"note\":\"counts are within the labeled projection; truncated=true means this is NOT a total; private nodes are excluded from the public projection; mirrors/families group only on ACCEPTED assertions and forks stay distinct; dependents do not feed back into intrinsic metrics\"}")
+            cyclic_status: u8 = Observation::RH_ST_OBSERVED if visible_nodes > 0 else Observation::RH_ST_NOT_APPLICABLE
+            cyclic_value: Observation::RhMetricValue = Observation::RhMetricValue.Ratio(cyclic_nodes, visible_nodes) if visible_nodes > 0 else Observation::RhMetricValue.Absent
+            scenario_status: u8 = Observation::RH_ST_NOT_APPLICABLE if not has_unavailable else Observation::RH_ST_PARTIAL if strunc == 1 else Observation::RH_ST_OBSERVED
+            scenario_value: Observation::RhMetricValue = Observation::RhMetricValue.Count(scount2) if has_unavailable and strunc != 1 else Observation::RhMetricValue.Absent
+            scenario_reason: cstr = "scenario-not-requested" if not has_unavailable else "scenario-traversal-truncated"
+            intrinsic_denominator: i64 = itotal * icount if ijoin and icount > 0 and itotal > 0 else 0
+            intrinsic_status: u8 = Observation::RH_ST_OBSERVED if intrinsic_denominator > 0 else Observation::RH_ST_NOT_APPLICABLE
+            intrinsic_value: Observation::RhMetricValue = Observation::RhMetricValue.Ratio(covered_intrinsic, intrinsic_denominator) if intrinsic_denominator > 0 else Observation::RhMetricValue.Absent
+            return -1 if visible_nodes > 0 and not Observation::rh_ratio_valid(cyclic_nodes, visible_nodes)
+            return -1 if intrinsic_denominator > 0 and not Observation::rh_ratio_valid(covered_intrinsic, intrinsic_denominator)
+            return -1 if not DownstreamReport::rh_ds_emit_metric(out, "graph.direct_dependents_count", Observation::RhMetricValue.Count(dc2), Observation::RH_ST_OBSERVED, false, "", RH_DS_EVIDENCE_GRAPH)
+            out.push(44)
+            return -1 if not DownstreamReport::rh_ds_emit_metric(out, "graph.transitive_dependents_count", Observation::RhMetricValue.Count(tc2), Observation::RH_ST_OBSERVED, false, "", RH_DS_EVIDENCE_GRAPH)
+            out.push(44)
+            return -1 if not DownstreamReport::rh_ds_emit_metric(out, "graph.scc_component_count", Observation::RhMetricValue.Count(scc), Observation::RH_ST_OBSERVED, false, "", RH_DS_EVIDENCE_GRAPH)
+            out.push(44)
+            return -1 if not DownstreamReport::rh_ds_emit_metric(out, "graph.strongly_connected_components", Observation::RhMetricValue.Count(scc), Observation::RH_ST_OBSERVED, false, "", RH_DS_EVIDENCE_GRAPH)
+            out.push(44)
+            return -1 if not DownstreamReport::rh_ds_emit_metric(out, "graph.reverse_reachability_count", Observation::RhMetricValue.Count(tc2), Observation::RH_ST_OBSERVED, false, "", RH_DS_EVIDENCE_GRAPH)
+            out.push(44)
+            return -1 if not DownstreamReport::rh_ds_emit_metric(out, "graph.cyclic_node_share", cyclic_value, cyclic_status, false, "no-visible-nodes", RH_DS_EVIDENCE_GRAPH)
+            out.push(44)
+            return -1 if not DownstreamReport::rh_ds_emit_metric(out, "graph.traversal_truncated", Observation::RhMetricValue.Boolean(trunc == 1 or strunc == 1), Observation::RH_ST_OBSERVED, false, "", RH_DS_EVIDENCE_GRAPH)
+            out.push(44)
+            return -1 if not DownstreamReport::rh_ds_emit_metric(out, "graph.scenario_affected_count", scenario_value, scenario_status, strunc == 1 and has_unavailable, scenario_reason, RH_DS_EVIDENCE_GRAPH)
+            out.push(44)
+            return -1 if not DownstreamReport::rh_ds_emit_metric(out, "downstream_condition.intrinsic_coverage_share", intrinsic_value, intrinsic_status, false, "intrinsic-metrics-not-supplied", RH_DS_EVIDENCE_GRAPH_AND_INTRINSICS if intrinsic_denominator > 0 else RH_DS_EVIDENCE_NONE)
+            Base::rh_push_text(out, "],\"note\":\"counts are within the labeled projection; truncated=true means this is NOT a total; private nodes are excluded from the public projection; mirrors/families group only on ACCEPTED assertions and forks stay distinct; dependents do not feed back into intrinsic metrics\"}")
             0
 
         # Public CLI boundary for the mirror assertion syntax. The parser itself
