@@ -59,6 +59,9 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- Temporal oracles now cover the first proleptic Gregorian date: year 1
+  January 1 is calendar-valid, its non-leap February 29 is rejected, and its
+  pre-epoch conversion preserves the output value.
 - Adoption count, ratio, empty-population, and contract-error metric rows now
   pass through the shared typed observation serializer. Empty optional reasons
   are omitted; dedicated duration histogram values keep their documented
