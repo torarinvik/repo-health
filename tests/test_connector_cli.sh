@@ -573,7 +573,7 @@ PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/bitbucket.args" RH_PROBE_CURL_C
   "$ROOT/build/rh_cli" connector probe --bitbucket-repo workspace/project --all \
     --out "$T/bitbucket-probe.out" >/dev/null || fail "Bitbucket capability matrix probe"
 python3 - "$T/bitbucket-probe.out" "$T" <<'PY'
-import json, os, sys
+import hashlib, json, os, pathlib, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-bitbucket-capability-matrix/1", d
 assert d["provider"] == "bitbucket" and d["scope"] == {"repository":"workspace/project"}, d
@@ -582,6 +582,25 @@ assert d["capabilities"]["pulls"]["status"] == "observed", d
 assert d["capabilities"]["releases"] == {"declaration":"unsupported", "status":"unsupported", "coverage_state":"unavailable"}, d
 assert "private-account-must-stay-local" not in open(sys.argv[1]).read()
 assert "private-account-must-stay-local" in open(os.path.join(sys.argv[2], "bitbucket-probe.out.bitbucket-issues.json")).read()
+def frame(label, value):
+    return label.encode() + b":" + str(len(value)).encode() + b":" + str(len(value)).encode() + b":" + value + b"\n"
+source_material = b"repo-health/bitbucket-capability-matrix-source/1\n"
+for capability in ("issues", "pulls"):
+    for extension, label_suffix in (("url", "request_url"), ("status", "http_status"), ("json", "response_body"), ("err", "transport_error")):
+        evidence = pathlib.Path(sys.argv[2]) / f"bitbucket-probe.out.bitbucket-{capability}.{extension}"
+        source_material += frame(f"{capability}_{label_suffix}", evidence.read_bytes())
+sidecar = json.load(open(sys.argv[1] + ".transformations.json"))
+assert sidecar["adapter"] == "bitbucket-capability-matrix-probe", sidecar
+assert sidecar["output_schema"] == "rh-bitbucket-capability-matrix/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(source_material).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(
+    b"repo-health/bitbucket-capability-matrix/1|repository=workspace/project|routes=issues,pullrequests|pagelen=1|releases=unsupported-no-release-list|authorization=not_requested"
+).hexdigest(), sidecar
+assert {field["state"] for field in sidecar["fields"]} == {
+    "preserved", "transformed", "discarded", "unknown", "unsupported"
+}, sidecar
+assert "private-account-must-stay-local" not in open(sys.argv[1] + ".transformations.json").read(), sidecar
 PY
 PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_EXIT=23 RH_PROBE_CURL_ARGS="$T/bitbucket-process-failure.args" \
   "$ROOT/build/rh_cli" connector probe --bitbucket-repo workspace/project --all \
@@ -593,6 +612,7 @@ assert all(d["capabilities"][name]["status"] == "unavailable" and d["capabilitie
 print("[connector] Bitbucket runner failures map to unavailable")
 PY
 [[ "$(grep -c 'https://api.bitbucket.org/2.0/repositories/workspace/project/' "$T/bitbucket.args")" -eq 2 ]] || fail "Bitbucket matrix must issue two fixed requests"
+! grep -Fq 'private-account-must-stay-local' "$T/bitbucket-probe.out.transformations.json" || fail "Bitbucket account data leaked into transformation sidecar"
 ! grep -Fq 'private-account-must-stay-local' "$T/bitbucket.args" || fail "Bitbucket evidence content leaked to curl args"
 for http_state in "403 forbidden_or_rate_limited" "404 not_found_or_private" "429 rate_limited"; do
   read -r http expected <<< "$http_state"
