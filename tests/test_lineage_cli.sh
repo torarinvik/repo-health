@@ -20,9 +20,19 @@ json.dump(json.load(open(sys.argv[1])), open(sys.argv[2], "w"), indent=2)
 PY
 "$ROOT/build/rh_cli" lineage --input "$T/pretty-input.json" --out "$T/pretty-output.json" >/dev/null || fail "pretty-printed lineage run"
 cmp -s "$T/out.json" "$T/pretty-output.json" || fail "lineage serialization depends on observation input formatting"
-python3 - "$T/out.json" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
+python3 - "$T/in.json" "$T/out.json" "$T/pretty-input.json" "$T/pretty-output.json" <<'PY'
+import hashlib, json, sys
+source, output, pretty_source, pretty_output = sys.argv[1:]
+d = json.load(open(output))
+for source_path, output_path in ((source, output), (pretty_source, pretty_output)):
+    report = json.load(open(output_path + ".transformations.json"))
+    assert report["schema"] == "rh-adapter-transformation-report/1", report
+    assert report["adapter"] == "evidence-lineage" and report["output_schema"] == "rh-lineage-result/1", report
+    assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/evidence-lineage/1").hexdigest(), report
+    assert report["source_input_sha256"] == hashlib.sha256(open(source_path, "rb").read()).hexdigest(), report
+    assert report["normalized_output_sha256"] == hashlib.sha256(open(output_path, "rb").read()).hexdigest(), report
+    assert {field["state"] for field in report["fields"]} == {"preserved", "transformed", "unknown"}, report
+assert json.load(open(output + ".transformations.json"))["normalized_output_sha256"] == json.load(open(pretty_output + ".transformations.json"))["normalized_output_sha256"]
 assert d["schema"] == "rh-lineage-result/1", d
 assert d["observation_id"] == "observation-42", d
 assert d["subject"] == {"type": "repository", "id": "repo:acme/project"}, d

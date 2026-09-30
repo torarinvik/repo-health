@@ -19,10 +19,19 @@ cp "$ROOT/fixtures/lineage/assessment-dedup-input.json" "$T/input.json"
 cmp "$ROOT/fixtures/lineage/assessment-dedup-result.json" "$T/result.json" || fail "canonical output differs from golden"
 "$CLI" assessment-dedup --input "$T/input.json" --out "$T/result2.json" >/dev/null || fail "deterministic rerun"
 cmp "$T/result.json" "$T/result2.json" || fail "output is not deterministic"
-python3 - "$ROOT/fixtures/lineage/assessment-dedup-input.json" "$T/result.json" <<'PY'
+cmp "$T/result.json.transformations.json" "$T/result2.json.transformations.json" || fail "transformation report is not deterministic"
+python3 - "$T/input.json" "$T/result.json" <<'PY'
 import hashlib, json, sys
-source = json.load(open(sys.argv[1]))
-result = json.load(open(sys.argv[2]))
+source_path, output_path = sys.argv[1:]
+source = json.load(open(source_path))
+result = json.load(open(output_path))
+report = json.load(open(output_path + ".transformations.json"))
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "origin-assessment-dedup" and report["output_schema"] == "rh-assessment-dedup-result/1", report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/origin-assessment-dedup/1").hexdigest(), report
+assert report["source_input_sha256"] == hashlib.sha256(open(source_path, "rb").read()).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(open(output_path, "rb").read()).hexdigest(), report
+assert {field["state"] for field in report["fields"]} == {"preserved", "transformed", "unknown", "unsupported"}, report
 rows = result["deliveries"]
 assert result["counts"] == {
     "delivery_count": 5,
