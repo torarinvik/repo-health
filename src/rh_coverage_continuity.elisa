@@ -1,0 +1,200 @@
+# Combine ordered, source-specific capability intervals without erasing gaps.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module CoverageContinuity:
+    private:
+        const RH_CC_MAX_SOURCES: i64 = 16
+
+        struct RhCoverageInterval:
+            source_s: mutable i64
+            source_e: mutable i64
+            instance_s: mutable i64
+            instance_e: mutable i64
+            state_s: mutable i64
+            state_e: mutable i64
+            start: mutable i64
+            has_start: mutable bool
+            finish: mutable i64
+            has_finish: mutable bool
+            known_as_of: mutable i64
+            has_known_as_of: mutable bool
+            complete: mutable bool
+
+        def rh_cc_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            Json::rh_json_obj_get(nodes, texts, object, key)
+
+        def rh_cc_eq(texts: darray[u8]&, start: i64, finish: i64, value: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, finish, value)
+
+        def rh_cc_string(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, start_out: mutable i64&, finish_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Json::rh_json_str_span(nodes, CoverageContinuity::rh_cc_get(nodes, texts, object, key), start_out, finish_out)
+
+        def rh_cc_integer(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, object: i64, key: u8&, value_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            ok: mutable i64 = 0
+            value_out[0] <- Json::rh_json_int(nodes, raw, CoverageContinuity::rh_cc_get(nodes, texts, object, key), &ok)
+            ok == 1 and value_out[0] >= 0
+
+        def rh_cc_unique_object(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if object < 0 or nodes[object.usize()].kind != Json::RH_JSON_OBJ
+            while key_node >= 0 |key_node: i64 = nodes[object.usize()].first_child, nodes, texts, object|:
+                return false if nodes[key_node.usize()].kind != Json::RH_JSON_STR
+                value_node: i64 = nodes[key_node.usize()].next_sibling
+                return false if value_node < 0
+                key_start: i64 = nodes[key_node.usize()].text_start
+                key_end: i64 = nodes[key_node.usize()].text_end
+                while other_key >= 0 |other_key: i64 = nodes[value_node.usize()].next_sibling, nodes, texts, key_start, key_end|:
+                    return false if nodes[other_key.usize()].kind != Json::RH_JSON_STR
+                    return false if Base::rh_bytes_equal_span(texts, key_start, key_end, texts, nodes[other_key.usize()].text_start, nodes[other_key.usize()].text_end)
+                    other_value: i64 = nodes[other_key.usize()].next_sibling
+                    return false if other_value < 0
+                    other_key <- nodes[other_value.usize()].next_sibling
+                key_node <- nodes[value_node.usize()].next_sibling
+            true
+
+        def rh_cc_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, finish: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            out.push(34)
+            Base::rh_json_escape(out, texts, start.usize(), finish.usize())
+            out.push(34)
+
+        def rh_cc_state_label(texts: darray[u8]&, start: i64, finish: i64, complete: bool) -> u8&:
+            return "observed" if complete
+            return "partial" if CoverageContinuity::rh_cc_eq(texts, start, finish, "partial")
+            return "stale" if CoverageContinuity::rh_cc_eq(texts, start, finish, "stale")
+            return "unavailable" if CoverageContinuity::rh_cc_eq(texts, start, finish, "unavailable")
+            "unknown"
+
+    public:
+        # Reports must be supplied in chronological source order. A continuity
+        # claim is withheld if any source lacks an observed bounded interval.
+        def rh_coverage_continuity_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if out.count != 0
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or not CoverageContinuity::rh_cc_unique_object(nodes, texts, root)
+            schema_s: mutable i64 = 0
+            schema_e: mutable i64 = 0
+            return -1 if not CoverageContinuity::rh_cc_string(nodes, texts, root, "schema", &schema_s, &schema_e) or not CoverageContinuity::rh_cc_eq(texts, schema_s, schema_e, "rh-coverage-continuity-input/1")
+            capability_s: mutable i64 = 0
+            capability_e: mutable i64 = 0
+            return -1 if not CoverageContinuity::rh_cc_string(nodes, texts, root, "capability", &capability_s, &capability_e) or capability_s == capability_e
+            as_of: mutable i64 = 0
+            return -1 if not CoverageContinuity::rh_cc_integer(nodes, raw, texts, root, "as_of", &as_of)
+            report_list: i64 = CoverageContinuity::rh_cc_get(nodes, texts, root, "reports")
+            return -1 if report_list < 0 or nodes[report_list.usize()].kind != Json::RH_JSON_ARR or nodes[report_list.usize()].child_count == 0 or nodes[report_list.usize()].child_count > RH_CC_MAX_SOURCES
+            intervals: mutable darray[RhCoverageInterval] = []
+            while report >= 0 |report: i64 = nodes[report_list.usize()].first_child, nodes, raw, texts, capability_s, capability_e, as_of, intervals|:
+                return -1 if not CoverageContinuity::rh_cc_unique_object(nodes, texts, report)
+                report_schema_s: mutable i64 = 0
+                report_schema_e: mutable i64 = 0
+                source_s: mutable i64 = 0
+                source_e: mutable i64 = 0
+                instance_s: mutable i64 = 0
+                instance_e: mutable i64 = 0
+                return -1 if not CoverageContinuity::rh_cc_string(nodes, texts, report, "schema", &report_schema_s, &report_schema_e) or not CoverageContinuity::rh_cc_eq(texts, report_schema_s, report_schema_e, "rh-coverage-result/1")
+                return -1 if not CoverageContinuity::rh_cc_string(nodes, texts, report, "source", &source_s, &source_e) or source_s == source_e or not CoverageContinuity::rh_cc_string(nodes, texts, report, "source_instance", &instance_s, &instance_e) or instance_s == instance_e
+                while prior < intervals.count |prior: usize = 0, intervals, texts, source_s, source_e, instance_s, instance_e|:
+                    previous: RhCoverageInterval = intervals[prior]
+                    return -1 if Base::rh_bytes_equal_span(texts, previous.source_s, previous.source_e, texts, source_s, source_e) and Base::rh_bytes_equal_span(texts, previous.instance_s, previous.instance_e, texts, instance_s, instance_e)
+                    prior <- prior + 1
+                capabilities: i64 = CoverageContinuity::rh_cc_get(nodes, texts, report, "capabilities")
+                return -1 if capabilities < 0 or nodes[capabilities.usize()].kind != Json::RH_JSON_ARR
+                matched_capability: mutable i64 = -1
+                while capability_node >= 0 |capability_node: i64 = nodes[capabilities.usize()].first_child, nodes, texts, capability_s, capability_e, matched_capability|:
+                    return -1 if not CoverageContinuity::rh_cc_unique_object(nodes, texts, capability_node)
+                    candidate_s: mutable i64 = 0
+                    candidate_e: mutable i64 = 0
+                    return -1 if not CoverageContinuity::rh_cc_string(nodes, texts, capability_node, "capability", &candidate_s, &candidate_e)
+                    if Base::rh_bytes_equal_span(texts, candidate_s, candidate_e, texts, capability_s, capability_e):
+                        return -1 if matched_capability >= 0
+                        matched_capability <- capability_node
+                    capability_node <- nodes[capability_node.usize()].next_sibling
+                row_state_s: mutable i64 = -1
+                row_state_e: mutable i64 = -1
+                row_start: mutable i64 = 0
+                has_start: mutable bool = false
+                row_finish: mutable i64 = 0
+                has_finish: mutable bool = false
+                row_known: mutable i64 = as_of
+                has_known_as_of: mutable bool = false
+                complete: mutable bool = false
+                if matched_capability >= 0:
+                    return -1 if not CoverageContinuity::rh_cc_string(nodes, texts, matched_capability, "state", &row_state_s, &row_state_e) or not CoverageContinuity::rh_cc_integer(nodes, raw, texts, matched_capability, "known_as_of", &row_known) or row_known > as_of
+                    has_known_as_of <- true
+                    start_node: i64 = CoverageContinuity::rh_cc_get(nodes, texts, matched_capability, "valid_start")
+                    finish_node: i64 = CoverageContinuity::rh_cc_get(nodes, texts, matched_capability, "valid_end")
+                    if start_node >= 0 and nodes[start_node.usize()].kind != Json::RH_JSON_NULL:
+                        return -1 if not CoverageContinuity::rh_cc_integer(nodes, raw, texts, matched_capability, "valid_start", &row_start)
+                        has_start <- true
+                    if finish_node >= 0 and nodes[finish_node.usize()].kind != Json::RH_JSON_NULL:
+                        return -1 if not CoverageContinuity::rh_cc_integer(nodes, raw, texts, matched_capability, "valid_end", &row_finish)
+                        has_finish <- true
+                    return -1 if has_start and has_finish and row_finish < row_start
+                    complete <- has_start and has_finish and CoverageContinuity::rh_cc_eq(texts, row_state_s, row_state_e, "observed")
+                else:
+                    row_state_s <- schema_s
+                    row_state_e <- schema_s
+                intervals.push(RhCoverageInterval{source_s: source_s, source_e: source_e, instance_s: instance_s, instance_e: instance_e, state_s: row_state_s, state_e: row_state_e, start: row_start, has_start: has_start, finish: row_finish, has_finish: has_finish, known_as_of: row_known, has_known_as_of: has_known_as_of, complete: complete})
+                report <- nodes[report.usize()].next_sibling
+            mutable all_complete: bool = true
+            covered_seconds: mutable i64 = 0
+            gap_seconds: mutable i64 = 0
+            gap_count: mutable i64 = 0
+            while i < intervals.count |i: usize = 0, intervals, all_complete, covered_seconds, gap_seconds, gap_count|:
+                current: RhCoverageInterval = intervals[i]
+                all_complete <- false if not current.complete
+                if current.complete:
+                    duration: i64 = current.finish - current.start
+                    return -1 if covered_seconds > 9223372036854775807 - duration
+                    covered_seconds <- covered_seconds + duration
+                    if i > 0 and all_complete:
+                        previous: RhCoverageInterval = intervals[i - 1]
+                        return -1 if current.start < previous.finish
+                        if current.start > previous.finish:
+                            gap: i64 = current.start - previous.finish
+                            return -1 if gap_seconds > 9223372036854775807 - gap
+                            gap_seconds <- gap_seconds + gap
+                            gap_count <- gap_count + 1
+                i <- i + 1
+            Base::rh_push_text(out, "{\"schema\":\"rh-coverage-continuity-result/1\",\"capability\":")
+            CoverageContinuity::rh_cc_emit_span(out, texts, capability_s, capability_e)
+            Base::rh_push_text(out, ",\"as_of\":")
+            Base::rh_push_decimal_i64(out, as_of)
+            Base::rh_push_text(out, ",\"status\":\"")
+            Base::rh_push_text(out, "unknown") if not all_complete
+            Base::rh_push_text(out, "continuous") if all_complete and gap_count == 0
+            Base::rh_push_text(out, "gapped") if all_complete and gap_count > 0
+            Base::rh_push_text(out, "\",\"covered_seconds\":")
+            Base::rh_push_decimal_i64(out, covered_seconds) if all_complete
+            Base::rh_push_text(out, "null") if not all_complete
+            Base::rh_push_text(out, ",\"gap_count\":")
+            Base::rh_push_decimal_i64(out, gap_count) if all_complete
+            Base::rh_push_text(out, "null") if not all_complete
+            Base::rh_push_text(out, ",\"gap_seconds\":")
+            Base::rh_push_decimal_i64(out, gap_seconds) if all_complete
+            Base::rh_push_text(out, "null") if not all_complete
+            Base::rh_push_text(out, ",\"sources\":[")
+            while i < intervals.count |i: usize = 0, intervals, texts, out|:
+                if i > 0:
+                    out.push(44)
+                current: RhCoverageInterval = intervals[i]
+                Base::rh_push_text(out, "{\"source\":")
+                CoverageContinuity::rh_cc_emit_span(out, texts, current.source_s, current.source_e)
+                Base::rh_push_text(out, ",\"source_instance\":")
+                CoverageContinuity::rh_cc_emit_span(out, texts, current.instance_s, current.instance_e)
+                Base::rh_push_text(out, ",\"state\":\"")
+                Base::rh_push_text(out, CoverageContinuity::rh_cc_state_label(texts, current.state_s, current.state_e, current.complete))
+                Base::rh_push_text(out, "\",\"valid_start\":")
+                Base::rh_push_decimal_i64(out, current.start) if current.has_start
+                Base::rh_push_text(out, "null") if not current.has_start
+                Base::rh_push_text(out, ",\"valid_end\":")
+                Base::rh_push_decimal_i64(out, current.finish) if current.has_finish
+                Base::rh_push_text(out, "null") if not current.has_finish
+                Base::rh_push_text(out, ",\"known_as_of\":")
+                Base::rh_push_decimal_i64(out, current.known_as_of) if current.has_known_as_of
+                Base::rh_push_text(out, "null") if not current.has_known_as_of
+                Base::rh_push_text(out, "}")
+                i <- i + 1
+            Base::rh_push_text(out, "],\"basis\":\"ordered-source-specific-reported-intervals; continuity does not imply source completeness outside these bounds\"}")
+            0

@@ -106,6 +106,7 @@ include "./rh_intervention.elisa"
 include "./rh_mapping.elisa"
 include "./rh_project_map.elisa"
 include "./rh_coverage.elisa"
+include "./rh_coverage_continuity.elisa"
 include "./rh_columnar.elisa"
 include "./rh_aggregates.elisa"
 include "./rh_index.elisa"
@@ -232,6 +233,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli mapping --input <file> --out <file>")
     rh_cli_err("       rh_cli project-map --graph <rh-dep-graph/1> --input <rh-project-node-map-input/1> --out <file>")
     rh_cli_err("       rh_cli coverage --input <file> --out <file>")
+    rh_cli_err("       rh_cli coverage-continuity --input <ordered-reports.json> --out <file>")
     rh_cli_err("       rh_cli snapshot --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli aggregate --input <file> --out <file> [--state-store <dir>]")
     rh_cli_err("       rh_cli index --input <rh-dep-graph/1> --out <file>")
@@ -3092,6 +3094,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 ccq <- ccq + 1
         return rh_cli_usage(2) if ci_idx < 0 or co_idx < 0
         return rh_do_coverage(slots[ci_idx], slots[co_idx])
+    if Base::rh_streq(cmd, "coverage-continuity"):
+        cci_idx, cco_idx =
+            while cccq < argc |cci_idx: i64 = -1, cco_idx: i64 = -1, cccq: i64 = 2, slots| -> cci_idx, cco_idx:
+                option: u8& = slots[cccq].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(option, "--input"):
+                    if cccq + 1 < argc:
+                        cccq <- cccq + 1
+                        cci_idx <- cccq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(option, "--out"):
+                    if cccq + 1 < argc:
+                        cccq <- cccq + 1
+                        cco_idx <- cccq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                cccq <- cccq + 1
+        return rh_cli_usage(2) if cci_idx < 0 or cco_idx < 0
+        return rh_do_coverage_continuity(slots[cci_idx], slots[cco_idx])
     if Base::rh_streq(cmd, "snapshot"):
         si_idx, so_idx =
             while ssq < argc |si_idx: i64 = -1, so_idx: i64 = -1, ssq: i64 = 2, slots| -> si_idx, so_idx:
@@ -10488,6 +10511,28 @@ def rh_do_coverage(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
         rh_cli_err("coverage: cannot write transformation report")
         return 4
     rh_cli_out("coverage: evidence observed")
+    0
+
+def rh_do_coverage_continuity(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    return 3 if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path)
+    input_buffer: mutable darray[u8] =
+        input_buffer: mutable darray[u8] = []
+        Base::rh_push_cstr(input_buffer, input_path)
+        input_buffer.push(0)
+        input_buffer
+    input_ptr: cstr = (&input_buffer[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    return 4 if Base::rh_io_read(input_ptr, raw) < 0
+    body: mutable darray[u8] = []
+    if CoverageContinuity::rh_coverage_continuity_report(raw, body) != 0:
+        rh_cli_err("coverage-continuity: malformed, overlapping, or out-of-order source intervals (fail closed)")
+        return 4
+    body.push(10)
+    return 4 if not Base::rh_io_write(out_path, body)
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "source-capability-continuity", "rh-coverage-continuity-result/1", "repo-health/source-capability-continuity/1", "[{\"source\":\"ordered source-specific capability reports\",\"target\":\"bounded interval sequence\",\"state\":\"transformed\"},{\"source\":\"adjacent observed intervals\",\"target\":\"continuous reported window\",\"state\":\"transformed\"},{\"source\":\"separated observed intervals\",\"target\":\"explicit temporal gaps\",\"state\":\"preserved\"},{\"source\":\"missing, non-observed, or unknown endpoints\",\"target\":\"unknown continuity\",\"state\":\"unknown\"},{\"source\":\"cross-source completeness outside reported bounds\",\"target\":\"continuity claim\",\"state\":\"unsupported\"}]", out_path):
+        rh_cli_err("coverage-continuity: cannot write transformation report")
+        return 4
+    rh_cli_out("coverage-continuity: bounded interval result emitted")
     0
 
 # --- M10 rebuildable columnar snapshot execution path. ---
