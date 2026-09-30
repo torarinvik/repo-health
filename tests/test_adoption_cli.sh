@@ -15,9 +15,10 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-adoption-input/2","cutoff":1000,"support_assertion":{"supported_major":2,"source":"fixture/support-policy","reviewer_id":77,"reviewed_at":500,"evidence_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"adoptions":[{"first_seen":0,"confirmed_introduction":null,"confirmed_removal":null,"last_seen":900,"first_version_ord":1001001,"latest_version_ord":2000001},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":null,"last_seen":850,"first_version_ord":1001001,"latest_version_ord":1001000},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":500,"last_seen":500,"first_version_ord":1001001,"latest_version_ord":1001001},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":500},{"first_seen":null,"confirmed_introduction":0,"confirmed_removal":null,"last_seen":900}]}
 JSON
 "$ROOT/build/rh_cli" adoption --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "adoption run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
+python3 - "$T/in.json" "$T/out.json" <<'PY'
+import hashlib, json, sys
+source, output = sys.argv[1:]
+d = json.load(open(output))
 assert d["schema"] == "rh-adoption-result/2", d
 assert d["cutoff"] == 1000, d
 assert [a["status"] for a in d["adoptions"]] == ["first_seen_only", "confirmed_introduced", "confirmed_removal", "unknown", "confirmed_removal", "confirmed_introduced"], d
@@ -84,6 +85,13 @@ assert metrics["adoption.right_censored_duration_distribution"]["value"] == {
     "bucket_upper_seconds": [604799, 2591999, 7775999, 31535999, None], "counts": [2, 0, 0, 0, 0], "population_count": 2
 }, metrics["adoption.right_censored_duration_distribution"]
 assert "not proof of migration" in d["note"], d
+sidecar = json.load(open(output + ".transformations.json"))
+assert sidecar["schema"] == "rh-adapter-transformation-report/1" and sidecar["adapter"] == "staged-dependency-adoption", sidecar
+assert sidecar["output_schema"] == "rh-adoption-result/2" and sidecar["normalizer_version"] == "1.0.0", sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/staged-adoption/2;coverage=caller-supplied-runs").hexdigest(), sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(open(source, "rb").read()).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(open(output, "rb").read()).hexdigest(), sidecar
+assert {field["state"] for field in sidecar["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, sidecar
 print("[adoption] staged states + right censoring OK")
 PY
 
@@ -150,12 +158,22 @@ cat > "$T/store-backed.json" <<'JSON'
 {"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"coverage_source":"repo-a","coverage_capability":"resolution"}]}
 JSON
 "$ROOT/build/rh_cli" adoption --input "$T/store-backed.json" --store-root "$T/store" --out "$T/store-backed.out" >/dev/null || fail "store-backed adoption coverage"
-python3 - "$T/store-backed.out" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
+python3 - "$T/store-backed.json" "$T/store-backed.out" <<'PY'
+import hashlib, json, sys
+source, output = sys.argv[1:]
+d = json.load(open(output))
 a = d["adoptions"][0]
 assert a["snapshot_coverage"] == {"status": "reconstructed", "interval_count": 3, "gap_count": 1, "uncovered_seconds": 100}, a
 assert a["upgrade_lag"]["status"] == "unknown", a
+effective = open(source, "rb").read().replace(
+    b'"coverage_capability":"resolution"}',
+    b'"coverage_capability":"resolution","snapshot_runs":[{"from":100,"through":900,"complete":true},{"from":900,"through":1000,"complete":false},{"from":1000,"through":2000,"complete":true}]}',
+    1,
+)
+sidecar = json.load(open(output + ".transformations.json"))
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/staged-adoption/2;coverage=filesystem-collection-runs;run-limit=4096").hexdigest(), sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(effective).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(open(output, "rb").read()).hexdigest(), sidecar
 print("[adoption] temporal store intervals reconstruct adoption coverage")
 PY
 mkdir -p "$T/empty-store"
@@ -259,6 +277,7 @@ PY
 echo "[adoption] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" adoption --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "adoption output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "adoption transformation report not deterministic"
 set +e
 sed 's/"confirmed_removal":500/"confirmed_removal":50/' "$T/in.json" > "$T/bad-order.json"
 "$ROOT/build/rh_cli" adoption --input "$T/bad-order.json" --out "$T/x" >/dev/null 2>&1; rc_order=$?
@@ -294,11 +313,21 @@ cat > "$T/postgres-backed.json" <<'JSON'
 {"schema":"rh-adoption-input/1","cutoff":2000,"adoptions":[{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null,"upstream_release_at":100,"target_version_ord":2000000,"complete_followup_through":2000,"coverage_source":"00000000-0000-0000-0000-000000000001","coverage_capability":"issues"}]}
 JSON
 RH_DATABASE_URL="host=fake dbname=repo_health" RH_LIBPQ_PATH="$LIBPQ" RH_FAKE_PG_OPERATION=adoption_history RH_FAKE_PG_EXPECT=committed "$ROOT/build/rh_cli" adoption --input "$T/postgres-backed.json" --postgres --out "$T/postgres-backed.out" >/dev/null || fail "PostgreSQL-backed adoption coverage"
-python3 - "$T/postgres-backed.out" <<'PY'
-import json, sys
-a = json.load(open(sys.argv[1]))["adoptions"][0]
+python3 - "$T/postgres-backed.json" "$T/postgres-backed.out" <<'PY'
+import hashlib, json, sys
+source, output = sys.argv[1:]
+a = json.load(open(output))["adoptions"][0]
 assert a["snapshot_coverage"] == {"status": "reconstructed", "interval_count": 3, "gap_count": 1, "uncovered_seconds": 100}, a
 assert a["upgrade_lag"]["status"] == "unknown", a
+effective = open(source, "rb").read().replace(
+    b'"coverage_capability":"issues"}',
+    b'"coverage_capability":"issues","snapshot_runs":[{"from":100,"through":900,"complete":true},{"from":900,"through":1000,"complete":false},{"from":1000,"through":2000,"complete":true}]}',
+    1,
+)
+sidecar = json.load(open(output + ".transformations.json"))
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/staged-adoption/2;coverage=postgres-collection-runs;run-limit=4096").hexdigest(), sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(effective).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(open(output, "rb").read()).hexdigest(), sidecar
 print("[adoption] PostgreSQL run history reconstructs bounded coverage")
 PY
 

@@ -10765,14 +10765,28 @@ def rh_do_adoption(input_path: cstr, out_path: cstr, store_root: cstr, has_store
     if Base::rh_io_read(ipp, raw) < 0:
         rh_cli_err("adoption: cannot read --input")
         return 4
+    effective_input: mutable darray[u8] = []
+    if not Adoption::rh_adoption_prepare_report_input(raw, store_root, conninfo, has_store, has_postgres, effective_input):
+        rh_cli_err("adoption: cannot prepare bounded coverage history (fail closed)")
+        return 4
     body: mutable darray[u8] = []
-    report_status: i64 = Adoption::rh_adoption_report_from_store(raw, store_root, conninfo, has_postgres, body) if has_store or has_postgres else Adoption::rh_adoption_report(raw, body)
-    if report_status != 0:
+    if Adoption::rh_adoption_report(effective_input, body) != 0:
         rh_cli_err("adoption: unsupported or malformed adoption envelope (fail closed)")
         return 4
     body.push(10)
     if not Base::rh_io_write(out_path, body):
         rh_cli_err("adoption: cannot write --out")
+        return 4
+    adoption_configuration: cstr =
+        if has_postgres:
+            "repo-health/staged-adoption/2;coverage=postgres-collection-runs;run-limit=4096"
+        elif has_store:
+            "repo-health/staged-adoption/2;coverage=filesystem-collection-runs;run-limit=4096"
+        else:
+            "repo-health/staged-adoption/2;coverage=caller-supplied-runs"
+    adoption_fields: cstr = "[{\"source\":\"input schema, focal cohort, and cutoff\",\"target\":\"report scope metadata\",\"state\":\"preserved\"},{\"source\":\"adoption records, temporal assertions, and reviewed support evidence\",\"target\":\"staged observations, duration states, and support-line assessments\",\"state\":\"transformed\"},{\"source\":\"caller-supplied or retained complete collection runs\",\"target\":\"snapshot coverage gaps and right-censored follow-up\",\"state\":\"transformed\"},{\"source\":\"missing follow-up, incomplete coverage, or absent review evidence\",\"target\":\"explicit unknown and not-applicable states\",\"state\":\"unknown\"},{\"source\":\"package-version comparison without observed installation evidence\",\"target\":\"migration claims\",\"state\":\"unsupported\"},{\"source\":\"unmodeled adoption envelope fields\",\"target\":\"canonical adoption result\",\"state\":\"discarded\"}]"
+    if not AdapterTransformationCli::rh_write_sidecar(effective_input, body, "staged-dependency-adoption", "rh-adoption-result/2", adoption_configuration, adoption_fields, out_path):
+        rh_cli_err("adoption: cannot write transformation report")
         return 4
     rh_cli_out("adoption: staged evidence observed")
     0
