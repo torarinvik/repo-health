@@ -448,6 +448,8 @@ Evidence lists use Elisa `InlineVec` with two compact stored-link entries before
 
 **M00-02 identity-cycle oracle increment:** `tests/test_identity_cli.sh` also exhausts all 256 accepted/proposed/rejected/revoked combinations across a four-edge cycle and four actors. An independent union-find oracle checks connected components when accepted edges close or partially break the cycle, while the ledger oracle checks revision watermarks independently. This covers a cyclic graph shape; longer identity histories and cross-products with actor metadata remain open.
 
+**M00-02 identity-star oracle increment:** `tests/test_identity_cli.sh` exhausts all 256 lifecycle combinations across a four-spoke star and five actors. A separate independent union-find oracle checks accepted spokes and isolated leaves, while the lifecycle ledger independently checks accepted/revoked revision watermarks. Chain, cycle, and star topologies now have exhaustive four-edge state products; other graph shapes and longer histories remain open.
+
 **M00-02 identity-order oracle increment:** four representative cyclic lifecycle patterns now run through every edge permutation and all 16 endpoint-direction masks. The test independently derives undirected accepted components and accepted/revoked revision watermarks, then checks all 1,536 production CLI outputs. This verifies order and endpoint-orientation invariance for the cycle patterns; other graph shapes, longer histories, and actor-metadata cross-products remain open.
 
 ### 5.3 Essential invariants
