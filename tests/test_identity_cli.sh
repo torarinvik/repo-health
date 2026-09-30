@@ -190,6 +190,58 @@ for case, contract in expected.items():
 print("[identity] all 64 three-edge lifecycle combinations match independent cluster/revision oracle")
 PY
 
+echo "[identity] exhaustive four-edge cycle lifecycle cross-product"
+python3 - "$T" <<'PY'
+import itertools, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+states = ("accepted", "proposed", "rejected", "revoked")
+edges = ((0, 1), (1, 2), (2, 3), (3, 0))
+expected = {}
+for case, cycle in enumerate(itertools.product(states, repeat=len(edges))):
+    links = [
+        {"a": a, "b": b, "state": state, "revision_added": index + 1}
+        for index, ((a, b), state) in enumerate(zip(edges, cycle))
+    ]
+    source = {"schema": "rh-identity-input/1", "actor_count": 4, "links": links}
+    (root / f"cycle-{case:03d}.json").write_text(json.dumps(source, separators=(",", ":")) + "\n")
+
+    # This oracle is independent of the CLI's clustering implementation:
+    # accepted cycle edges union components; lifecycle watermark advances
+    # only for accepted or revoked links.
+    parent = list(range(4))
+
+    def find(actor):
+        while parent[actor] != actor:
+            actor = parent[actor]
+        return actor
+
+    for link in links:
+        if link["state"] == "accepted":
+            left, right = find(link["a"]), find(link["b"])
+            parent[max(left, right)] = min(left, right)
+    clusters = {}
+    for actor in range(4):
+        clusters.setdefault(find(actor), []).append(actor)
+    expected[f"{case:03d}"] = {
+        "clusters": list(clusters.values()),
+        "revision": max((link["revision_added"] for link in links
+                         if link["state"] in ("accepted", "revoked")), default=0),
+    }
+(root / "cycle-expected.json").write_text(json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+python3 - "$ROOT/build/rh_cli" "$T" <<'PY'
+import json, pathlib, subprocess, sys
+binary, root = sys.argv[1], pathlib.Path(sys.argv[2])
+expected = json.load(open(root / "cycle-expected.json"))
+for case, contract in expected.items():
+    source, output = root / f"cycle-{case}.json", root / f"cycle-{case}.out"
+    subprocess.run([binary, "identity", "--input", str(source), "--out", str(output)], check=True, stdout=subprocess.DEVNULL)
+    actual = json.load(open(output))
+    assert actual["clusters"] == contract["clusters"], (case, actual, contract)
+    assert actual["identity_revision"] == contract["revision"], (case, actual, contract)
+print("[identity] all 256 four-edge cycle lifecycle combinations match independent cluster/revision oracle")
+PY
+
 echo "[identity] determinism"
 "$ROOT/build/rh_cli" identity --input "$T/a.json" --out "$T/a2.out" >/dev/null || fail "rerun"
 cmp -s "$T/a.out" "$T/a2.out" || fail "identity output not deterministic"

@@ -424,6 +424,8 @@ Evidence lists use Elisa `InlineVec` with two compact stored-link entries before
 
 **M00-02 identity-chain oracle increment:** `tests/test_identity_cli.sh` now exhausts all 64 accepted/proposed/rejected/revoked combinations across a three-edge chain and four actors. An independent union-find oracle checks canonical clusters, and a separate ledger rule checks the revision watermark from accepted/revoked entries. The complete three-edge chain product passes; additional graph shapes and longer identity histories remain open.
 
+**M00-02 identity-cycle oracle increment:** `tests/test_identity_cli.sh` also exhausts all 256 accepted/proposed/rejected/revoked combinations across a four-edge cycle and four actors. An independent union-find oracle checks connected components when accepted edges close or partially break the cycle, while the ledger oracle checks revision watermarks independently. This covers a cyclic graph shape; longer identity histories and cross-products with actor metadata remain open.
+
 ### 5.3 Essential invariants
 
 ```text
