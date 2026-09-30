@@ -11,6 +11,7 @@ include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_identity.elisa"
 include "./rh_domain.elisa"
+include "./rh_observation.elisa"
 
 module IdentityReport:
     private:
@@ -60,6 +61,18 @@ module IdentityReport:
             idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
             return 0 if idx < 0
             Json::rh_json_int(nodes, raw, idx, ok_out)
+
+        def rh_ir_emit_metric(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if status == Observation::RH_ST_OBSERVED else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked
+            }
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+            Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.IdentityInput)
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(status, value, false, quality, evidence)
+            Observation::rh_observation_emit_metric(out, key, "1.0.0", reason, observation)
 
         struct RhIdentityActor:
             native_identity: Domain::RhNativeRef
@@ -398,13 +411,12 @@ module IdentityReport:
                     Base::rh_push_text(out, "]}")
                     i <- i + 1
                 Base::rh_push_text(out, "]")
-            Base::rh_push_text(out, ",\"metrics\":[{\"key\":\"contributor.accepted_actor_clusters\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, clusters)
-            Base::rh_push_text(out, ",\"evidence\":[\"identity-input\"]}, {\"key\":\"contributor.known_human_accounts\",\"version\":\"1.0.0\",\"status\":\"")
+            Base::rh_push_text(out, ",\"metrics\":[")
+            return -1 if not IdentityReport::rh_ir_emit_metric(out, "contributor.accepted_actor_clusters", Observation::RhMetricValue.Count(clusters), Observation::RH_ST_OBSERVED, "")
+            out.push(44)
             if has_kinds:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, humans)
+                return -1 if not IdentityReport::rh_ir_emit_metric(out, "contributor.known_human_accounts", Observation::RhMetricValue.Count(humans), Observation::RH_ST_OBSERVED, "")
             else:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"actor-kind-classification-not-supplied\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"identity-input\"]}],\"note\":\"clusters derive only from ACCEPTED links; proposed/rejected links do not change the identity revision; accepted/revoked link ledger revisions provide a monotonic snapshot watermark; revoking recomputes clusters without rewriting raw records; unresolved never forced human\"}")
+                return -1 if not IdentityReport::rh_ir_emit_metric(out, "contributor.known_human_accounts", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "actor-kind-classification-not-supplied")
+            Base::rh_push_text(out, "],\"note\":\"clusters derive only from ACCEPTED links; proposed/rejected links do not change the identity revision; accepted/revoked link ledger revisions provide a monotonic snapshot watermark; revoking recomputes clusters without rewriting raw records; unresolved never forced human\"}")
             0

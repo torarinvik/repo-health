@@ -49,6 +49,15 @@ assert d["actor_count"] == 5 and d["identity_revision"] == 2, d
 assert d["cluster_count"] == 3, d
 assert d["metrics"][0]["key"] == "contributor.accepted_actor_clusters" and d["metrics"][0]["value"] == 3, d
 assert d["metrics"][1]["key"] == "contributor.known_human_accounts" and d["metrics"][1]["value"] == 2, d
+for metric in d["metrics"]:
+    assert metric["status"] == "observed", metric
+    assert metric["evidence"] == ["identity-input"], metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "complete",
+        "freshness": "unknown",
+        "validity": "valid",
+        "provenance": "evidence_backed",
+    }, metric
 assert d["clusters"] == [[0, 1, 2], [3], [4]], d["clusters"]
 assert d["cluster_id_by_actor"] == [0, 0, 0, 3, 4], d["cluster_id_by_actor"]
 assert d["actor_kinds"] == {"human": 2, "bot_known": 1, "service_known": 1, "unresolved": 1}, d["actor_kinds"]
@@ -143,6 +152,21 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["identity_revision"] == 0 and d["cluster_count"] == 3, d
 assert d["metrics"][0]["value"] == 3, d
+assert d["metrics"][0]["quality_dimensions"] == {
+    "completeness": "complete",
+    "freshness": "unknown",
+    "validity": "valid",
+    "provenance": "evidence_backed",
+}, d
+assert d["metrics"][1]["status"] == "unsupported" and d["metrics"][1]["value"] is None, d
+assert d["metrics"][1]["reason"] == "actor-kind-classification-not-supplied", d
+assert d["metrics"][1]["evidence"] == ["identity-input"], d
+assert d["metrics"][1]["quality_dimensions"] == {
+    "completeness": "unknown",
+    "freshness": "unknown",
+    "validity": "unknown",
+    "provenance": "evidence_backed",
+}, d
 assert d["clusters"] == [[0], [1], [2]], d["clusters"]
 print("[identity] no-op links OK")
 PY
