@@ -30,8 +30,15 @@ python3 - "$T/input.json" "$T/out.json" <<'PY'
 import hashlib, json, sys
 source = open(sys.argv[1], "rb").read()
 result = json.load(open(sys.argv[2]))
+report = json.load(open(sys.argv[2] + ".transformations.json"))
 assert result["schema"] == "rh-maintenance-exposure-result/1", result
 assert result["source_input_sha256"] == hashlib.sha256(source).hexdigest(), result
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "verified-maintenance-exposure" and report["output_schema"] == "rh-maintenance-exposure-result/1", report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/verified-maintenance-exposure/1;role-result=content-addressed").hexdigest(), report
+assert report["source_input_sha256"] == hashlib.sha256(source).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), report
+assert {field["state"] for field in report["fields"]} == {"transformed", "unknown", "discarded", "unsupported"}, report
 assert result["mapping_revision"] == 7 and result["subject_node"] == 0, result
 pairs = {item["node"]: item for item in result["dependents"]}
 assert pairs[1]["state"] == "known" and pairs[1]["shared_actor_count"] == 1, pairs[1]
@@ -44,6 +51,9 @@ for actor in ("alice", "bob", "carol", "dave"):
     assert actor not in serialized, serialized
 print("[maintenance-exposure] accepted evidence, overlap, unknowns, privacy, and lineage OK")
 PY
+"$ROOT/build/rh_cli" maintenance-exposure --input "$T/input.json" --out "$T/out2.json" --evidence-store "$T/evidence-store" >/dev/null || fail "deterministic replay"
+cmp -s "$T/out.json" "$T/out2.json" || fail "maintenance exposure output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "maintenance exposure transformation report not deterministic"
 
 python3 - "$T/input.json" "$T" <<'PY'
 import json, os, sys
