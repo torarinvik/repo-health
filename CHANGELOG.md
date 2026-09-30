@@ -59,6 +59,9 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- Identity CLI tests now exhaust 64 three-edge accepted/proposed/rejected/
+  revoked combinations over four actors. An independent union-find oracle
+  checks cluster membership and accepted/revoked revision watermarks.
 - Temporal oracles now cover the first proleptic Gregorian date: year 1
   January 1 is calendar-valid, its non-leap February 29 is rejected, and its
   pre-epoch conversion preserves the output value.
