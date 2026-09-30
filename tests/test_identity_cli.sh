@@ -397,6 +397,57 @@ for case, contract in expected.items():
 print("[identity] all 1,024 five-edge chain lifecycle combinations match independent cluster/revision oracle")
 PY
 
+echo "[identity] exhaustive triangle-with-tail lifecycle cross-product"
+python3 - "$T" <<'PY'
+import itertools, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+states = ("accepted", "proposed", "rejected", "revoked")
+edges = ((0, 1), (1, 2), (2, 0), (2, 3), (3, 4))
+expected = {}
+for case, graph in enumerate(itertools.product(states, repeat=len(edges))):
+    links = [
+        {"a": a, "b": b, "state": state, "revision_added": index + 1}
+        for index, ((a, b), state) in enumerate(zip(edges, graph))
+    ]
+    source = {"schema": "rh-identity-input/1", "actor_count": 5, "links": links}
+    (root / f"triangle-tail-{case:04d}.json").write_text(json.dumps(source, separators=(",", ":")) + "\n")
+
+    # Independent branched-cycle oracle: union accepted edges in the triangle
+    # and tail; revision follows accepted/revoked ledger entries only.
+    parent = list(range(5))
+
+    def find(actor):
+        while parent[actor] != actor:
+            actor = parent[actor]
+        return actor
+
+    for link in links:
+        if link["state"] == "accepted":
+            left, right = find(link["a"]), find(link["b"])
+            parent[max(left, right)] = min(left, right)
+    clusters = {}
+    for actor in range(5):
+        clusters.setdefault(find(actor), []).append(actor)
+    expected[f"{case:04d}"] = {
+        "clusters": list(clusters.values()),
+        "revision": max((link["revision_added"] for link in links
+                         if link["state"] in ("accepted", "revoked")), default=0),
+    }
+(root / "triangle-tail-expected.json").write_text(json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+python3 - "$ROOT/build/rh_cli" "$T" <<'PY'
+import json, pathlib, subprocess, sys
+binary, root = sys.argv[1], pathlib.Path(sys.argv[2])
+expected = json.load(open(root / "triangle-tail-expected.json"))
+for case, contract in expected.items():
+    source, output = root / f"triangle-tail-{case}.json", root / f"triangle-tail-{case}.out"
+    subprocess.run([binary, "identity", "--input", str(source), "--out", str(output)], check=True, stdout=subprocess.DEVNULL)
+    actual = json.load(open(output))
+    assert actual["clusters"] == contract["clusters"], (case, actual, contract)
+    assert actual["identity_revision"] == contract["revision"], (case, actual, contract)
+print("[identity] all 1,024 triangle-with-tail lifecycle combinations match independent cluster/revision oracle")
+PY
+
 echo "[identity] endpoint orientation and link-order invariance"
 python3 - "$ROOT/build/rh_cli" "$T" <<'PY'
 import itertools, json, pathlib, subprocess, sys
