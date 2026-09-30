@@ -256,7 +256,7 @@ PATH="$T/probe-bin:$PATH" RH_GITHUB_TOKEN="ghp_probe_fixture" RH_PROBE_HTTP=200 
   RH_PROBE_CURL_ARGS="$T/probe.args" RH_PROBE_CURL_CONFIG="$T/probe.config" \
   "$ROOT/build/rh_cli" connector probe --github-repo example/project --out "$T/traffic-probe.out" >/dev/null || fail "GitHub traffic probe"
 python3 - "$T/traffic-probe.out" "$T" <<'PY'
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 t = pathlib.Path(sys.argv[2])
 assert d["schema"] == "rh-github-capability-probe-result/1", d
@@ -267,11 +267,34 @@ published = open(sys.argv[1]).read()
 assert "count" not in d and '"count":12' not in published and '"uniques":8' not in published and '"views":[]' not in published, d
 for ext in ("json", "status", "err", "url"):
     assert (t / f"traffic-probe.out.github-traffic-views.{ext}").exists(), ext
-assert (t / "traffic-probe.out.github-traffic-views.url").read_text().strip() == "https://api.github.com/repos/example/project/traffic/views"
+url = (t / "traffic-probe.out.github-traffic-views.url").read_bytes()
+assert url == b"https://api.github.com/repos/example/project/traffic/views\n"
+def frame(label, value, read_status=None):
+    status = len(value) if read_status is None else read_status
+    return label.encode() + b":" + str(status).encode() + b":" + str(len(value)).encode() + b":" + value + b"\n"
+source_material = b"repo-health/github-traffic-probe-source/1\n"
+source_material += frame("request_url", url)
+source_material += frame("http_status", (t / "traffic-probe.out.github-traffic-views.status").read_bytes())
+source_material += frame("response_body", (t / "traffic-probe.out.github-traffic-views.json").read_bytes())
+source_material += frame("transport_error", (t / "traffic-probe.out.github-traffic-views.err").read_bytes())
+sidecar = json.load(open(sys.argv[1] + ".transformations.json"))
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "github-traffic-capability-probe", sidecar
+assert sidecar["output_schema"] == "rh-github-capability-probe-result/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(source_material).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(
+    b"repo-health/github-traffic-capability-probe/1|repository=example/project|route=/traffic/views|window=14d|authorization=configured"
+).hexdigest(), sidecar
+assert {field["state"] for field in sidecar["fields"]} == {
+    "preserved", "transformed", "discarded", "unknown", "unsupported"
+}, sidecar
 print("[connector] traffic probe reports access without publishing the traffic payload")
+print("[connector] traffic probe sidecar binds framed request/response evidence and output")
 PY
 grep -Fxq 'header = "Authorization: Bearer ghp_probe_fixture"' "$T/probe.config" || fail "probe token header absent from curl stdin config"
 ! grep -Fq 'ghp_probe_fixture' "$T/probe.args" || fail "probe token leaked into curl arguments"
+! grep -Fq 'ghp_probe_fixture' "$T/traffic-probe.out.transformations.json" || fail "probe token leaked into transformation sidecar"
 for evidence in "$T"/traffic-probe.out.github-traffic-views.*; do
   [[ ! -f "$evidence" ]] || ! grep -Fq 'ghp_probe_fixture' "$evidence" || fail "probe token leaked into evidence"
 done
@@ -282,13 +305,31 @@ PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_EXIT=23 RH_PROBE_CURL_ARGS="$T/probe-pro
   "$ROOT/build/rh_cli" connector probe --github-repo example/project --out "$T/probe-process-failure.out" >/dev/null \
   || fail "transport process failure should be reported as probe evidence"
 python3 - "$T/probe-process-failure.out" "$T" <<'PY'
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 t = pathlib.Path(sys.argv[2])
 assert d["capabilities"]["traffic"]["status"] == "unavailable", d
 assert d["capabilities"]["traffic"]["http_status"] is None, d
 assert d["capabilities"]["traffic"]["coverage_state"] == "unavailable", d
 assert (t / "probe-process-failure.out.github-traffic-views.err").exists()
+def frame(label, value, read_status=None):
+    status = len(value) if read_status is None else read_status
+    return label.encode() + b":" + str(status).encode() + b":" + str(len(value)).encode() + b":" + value + b"\n"
+source_material = b"repo-health/github-traffic-probe-source/1\n"
+for ext, label in (("url", "request_url"), ("status", "http_status"), ("json", "response_body"), ("err", "transport_error")):
+    path = t / f"probe-process-failure.out.github-traffic-views.{ext}"
+    try:
+        value = path.read_bytes()
+        read_status = len(value)
+    except FileNotFoundError:
+        value, read_status = b"", -1
+    source_material += frame(label, value, read_status)
+sidecar = json.load(open(sys.argv[1] + ".transformations.json"))
+assert sidecar["source_input_sha256"] == hashlib.sha256(source_material).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(
+    b"repo-health/github-traffic-capability-probe/1|repository=example/project|route=/traffic/views|window=14d|authorization=absent"
+).hexdigest(), sidecar
 print("[connector] runner failure stays distinct from upstream HTTP status")
 PY
 
