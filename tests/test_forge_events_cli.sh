@@ -232,7 +232,7 @@ set -e
 [[ "$rc_records" -eq 4 ]] || fail "record attempt cap must fail closed (got $rc_records)"
 [[ ! -e "$T/over-limit.out" ]] || fail "over-limit capture wrote partial output"
 
-python3 - "$T/repository-reviews-input.json" "$T/duplicate-review-groups.json" "$T/over-limit-review-groups.json" "$T/duplicate-batch-pulls.json" "$T/malformed-batch-merge-time.json" <<'PY'
+python3 - "$T/repository-reviews-input.json" "$T/duplicate-review-groups.json" "$T/over-limit-review-groups.json" "$T/duplicate-batch-pulls.json" "$T/malformed-batch-merge-time.json" "$T/malformed-batch-request.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 d["reviews_by_pull"] = [{"pull_number":7,"reviews":[]}, {"pull_number":7,"reviews":[]}]
@@ -244,6 +244,9 @@ d["review_collection"]["batch_pull_requests"] = [{"number":7,"merged_at":1700172
 json.dump(d, open(sys.argv[4], "w", encoding="utf-8"), separators=(",", ":"))
 d["review_collection"]["batch_pull_requests"] = [{"number":7,"merged_at":"later"}]
 json.dump(d, open(sys.argv[5], "w", encoding="utf-8"), separators=(",", ":"))
+d["review_collection"]["batch_pull_requests"] = []
+d["review_collection"]["batch_request"] = {"resumed_from_sha256":"A" * 64,"pull_page":2,"review_pages":[]}
+json.dump(d, open(sys.argv[6], "w", encoding="utf-8"), separators=(",", ":"))
 PY
 set +e
 "$ROOT/build/rh_cli" forge events --input "$T/duplicate-review-groups.json" --out "$T/duplicate-review-groups.out" >/dev/null 2>&1
@@ -254,9 +257,11 @@ rc_review_groups=$?
 rc_duplicate_batch_pulls=$?
 "$ROOT/build/rh_cli" forge events --input "$T/malformed-batch-merge-time.json" --out "$T/malformed-batch-merge-time.out" >/dev/null 2>&1
 rc_batch_merge_time=$?
+"$ROOT/build/rh_cli" forge events --input "$T/malformed-batch-request.json" --out "$T/malformed-batch-request.out" >/dev/null 2>&1
+rc_batch_request=$?
 set -e
-[[ "$rc_duplicate_review_groups" -eq 4 && "$rc_review_groups" -eq 4 && "$rc_duplicate_batch_pulls" -eq 4 && "$rc_batch_merge_time" -eq 4 ]] || fail "duplicate/over-limit review groups or invalid pull metadata were accepted"
-[[ ! -e "$T/duplicate-review-groups.out" && ! -e "$T/over-limit-review-groups.out" && ! -e "$T/duplicate-batch-pulls.out" && ! -e "$T/malformed-batch-merge-time.out" ]] || fail "invalid review groups or pull metadata wrote output"
+[[ "$rc_duplicate_review_groups" -eq 4 && "$rc_review_groups" -eq 4 && "$rc_duplicate_batch_pulls" -eq 4 && "$rc_batch_merge_time" -eq 4 && "$rc_batch_request" -eq 4 ]] || fail "duplicate/over-limit review groups or invalid pull metadata were accepted"
+[[ ! -e "$T/duplicate-review-groups.out" && ! -e "$T/over-limit-review-groups.out" && ! -e "$T/duplicate-batch-pulls.out" && ! -e "$T/malformed-batch-merge-time.out" && ! -e "$T/malformed-batch-request.out" ]] || fail "invalid review groups or pull metadata wrote output"
 
 echo "[forge-events] malformed envelopes fail closed"
 set +e
@@ -611,7 +616,8 @@ assert d["authorization"]["state"] == "authorized", d["authorization"]
 assert d["capabilities"]["reviews"]["count"] == 101, d["capabilities"]
 assert len(d["events"]) == 101, len(d["events"])
 assert {event["pull_request"] for event in d["events"]} == {7, 8}, d["events"][:2]
-assert state == {"pending_pull_requests":[{"number":7,"next_review_page":2}], "batch_pull_requests":[{"number":7,"merged_at":1700172800},{"number":8,"merged_at":None}], "next_pull_page":2, "pulls_complete":False, "complete":False}, state
+assert {k:v for k,v in state.items() if k != "batch_request"} == {"pending_pull_requests":[{"number":7,"next_review_page":2}], "batch_pull_requests":[{"number":7,"merged_at":1700172800},{"number":8,"merged_at":None}], "next_pull_page":2, "pulls_complete":False, "complete":False}, state
+assert state["batch_request"] == {"resumed_from_sha256":None,"pull_page":1,"review_pages":[]}, state
 assert d["pagination"]["reviews"] == {"next":None,"complete":False}, d["pagination"]
 assert (t / "repo-reviews-1.out.github-review-pulls-page-1.url").read_text().strip().endswith("pulls?state=all&sort=updated&direction=desc&per_page=2&page=1")
 assert (t / "repo-reviews-1.out.github-reviews-pr-7-page-1.url").read_text().strip().endswith("/pulls/7/reviews?per_page=100&page=1")
@@ -632,10 +638,11 @@ PATH="$T/bin:$PATH" RH_CURL_REPO_PULLS_PAGE1="$T/repo-pulls-page-1.json" RH_CURL
   RH_CURL_LOG="$T/repo-reviews-2-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
   "$ROOT/build/rh_cli" forge events --github-repo example/project --review-repository --max-pulls 2 --max-pages 1 --resume-from "$T/repo-reviews-1.out" --out "$T/repo-reviews-2.out" >/dev/null || fail "repository review cursor resume"
 python3 - "$T/repo-reviews-2.out" "$T" <<'PY'
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 t = pathlib.Path(sys.argv[2])
-assert d["review_collection"] == {"pending_pull_requests":[], "batch_pull_requests":[], "next_pull_page":2, "pulls_complete":False, "complete":False}, d["review_collection"]
+assert {k:v for k,v in d["review_collection"].items() if k != "batch_request"} == {"pending_pull_requests":[], "batch_pull_requests":[], "next_pull_page":2, "pulls_complete":False, "complete":False}, d["review_collection"]
+assert d["review_collection"]["batch_request"] == {"resumed_from_sha256":hashlib.sha256((t / "repo-reviews-1.out").read_bytes()).hexdigest(),"pull_page":None,"review_pages":[{"number":7,"next_review_page":2}]}, d["review_collection"]
 assert len(d["events"]) == 1 and d["events"][0]["native_id"] == "github:101" and d["events"][0]["pull_request"] == 7, d["events"]
 assert (t / "repo-reviews-2.out.github-reviews-pr-7-page-2.url").read_text().strip().endswith("/pulls/7/reviews?per_page=100&page=2")
 assert "/pulls?state=all" not in open(t / "repo-reviews-2-curl.args").read(), open(t / "repo-reviews-2-curl.args").read()
@@ -649,10 +656,11 @@ PATH="$T/bin:$PATH" RH_CURL_REPO_PULLS_PAGE1="$T/repo-pulls-page-1.json" RH_CURL
   RH_CURL_LOG="$T/repo-reviews-3-curl.args" RH_CURL_CONFIG_LOG="$T/unused-config" \
   "$ROOT/build/rh_cli" forge events --github-repo example/project --review-repository --max-pulls 2 --max-pages 1 --resume-from "$T/repo-reviews-2.out" --out "$T/repo-reviews-3.out" >/dev/null || fail "repository pull-list cursor resume"
 python3 - "$T/repo-reviews-3.out" "$T" <<'PY'
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 t = pathlib.Path(sys.argv[2])
-assert d["review_collection"] == {"pending_pull_requests":[], "batch_pull_requests":[{"number":9,"merged_at":1700172800}], "next_pull_page":None, "pulls_complete":True, "complete":True}, d["review_collection"]
+assert {k:v for k,v in d["review_collection"].items() if k != "batch_request"} == {"pending_pull_requests":[], "batch_pull_requests":[{"number":9,"merged_at":1700172800}], "next_pull_page":None, "pulls_complete":True, "complete":True}, d["review_collection"]
+assert d["review_collection"]["batch_request"] == {"resumed_from_sha256":hashlib.sha256((t / "repo-reviews-2.out").read_bytes()).hexdigest(),"pull_page":2,"review_pages":[]}, d["review_collection"]
 assert len(d["events"]) == 1 and d["events"][0]["native_id"] == "github:301" and d["events"][0]["pull_request"] == 9, d["events"]
 assert (t / "repo-reviews-3.out.github-review-pulls-page-2.url").read_text().strip().endswith("pulls?state=all&sort=updated&direction=desc&per_page=2&page=2")
 assert (t / "repo-reviews-3.out.github-reviews-pr-9-page-1.url").read_text().strip().endswith("/pulls/9/reviews?per_page=100&page=1")
@@ -668,7 +676,7 @@ python3 - "$T/repo-reviews-empty.out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["capabilities"]["reviews"] == {"status":"observed","attempted":0,"normalized":0,"duplicate_replacements":0,"count":0,"rejected":0}, d["capabilities"]
-assert d["review_collection"] == {"pending_pull_requests":[],"batch_pull_requests":[],"next_pull_page":None,"pulls_complete":True,"complete":True}, d["review_collection"]
+assert d["review_collection"] == {"pending_pull_requests":[],"batch_request":{"resumed_from_sha256":None,"pull_page":1,"review_pages":[]},"batch_pull_requests":[],"next_pull_page":None,"pulls_complete":True,"complete":True}, d["review_collection"]
 assert d["events"] == [], d["events"]
 print("[forge-events] successful empty repository review scan is observed and complete")
 PY

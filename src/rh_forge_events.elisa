@@ -61,6 +61,10 @@ module ForgeEvents:
             merged_at: i64
             has_merged_at: bool
 
+        struct RhForgeReviewRequestCursor:
+            pull_number: i64
+            next_review_page: i64
+
         def rh_fe_eq(texts: darray[u8]&, s: i64, e: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, literal)
 
@@ -123,6 +127,14 @@ module ForgeEvents:
                 else:
                     hex: bool = (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 70) or (byte >= 97 and byte <= 102)
                     return false if not hex
+                index <- index + 1
+            true
+
+        def rh_fe_sha256(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != 64
+            while index < 64 |index: i64 = 0, texts, start|:
+                byte: u8 = texts[(start + index).usize()]
+                return false if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
                 index <- index + 1
             true
 
@@ -525,6 +537,12 @@ module ForgeEvents:
             review_collection_present: bool = review_collection_idx >= 0
             review_cursors: mutable darray[RhForgeReviewCursor] = []
             pull_batch: mutable darray[RhForgePullBatch] = []
+            requested_review_cursors: mutable darray[RhForgeReviewRequestCursor] = []
+            requested_pull_page: mutable i64 = 0
+            requested_pull_page_present: mutable bool = false
+            resumed_digest_s: mutable i64 = -1
+            resumed_digest_e: mutable i64 = -1
+            resumed_digest_present: mutable bool = false
             next_pull_page: mutable i64 = 0
             next_pull_page_present: mutable i64 = 0
             pulls_complete: mutable bool = false
@@ -567,6 +585,40 @@ module ForgeEvents:
                             has_merged_at <- true
                         pull_batch.push(RhForgePullBatch{pull_number: pull_number, merged_at: merged_at, has_merged_at: has_merged_at})
                         pull_node <- nodes[pull_node.usize()].next_sibling
+                batch_request_idx: i64 = Json::rh_json_obj_get(nodes, texts, review_collection_idx, "batch_request")
+                if batch_request_idx >= 0:
+                    return -1 if nodes[batch_request_idx.usize()].kind != Json::RH_JSON_OBJ
+                    resumed_digest_idx: i64 = Json::rh_json_obj_get(nodes, texts, batch_request_idx, "resumed_from_sha256")
+                    return -1 if resumed_digest_idx < 0
+                    if nodes[resumed_digest_idx.usize()].kind != Json::RH_JSON_NULL:
+                        return -1 if not Json::rh_json_str_span(nodes, resumed_digest_idx, &resumed_digest_s, &resumed_digest_e) or not ForgeEvents::rh_fe_sha256(texts, resumed_digest_s, resumed_digest_e)
+                        resumed_digest_present <- true
+                    requested_page_idx: i64 = Json::rh_json_obj_get(nodes, texts, batch_request_idx, "pull_page")
+                    return -1 if requested_page_idx < 0
+                    if nodes[requested_page_idx.usize()].kind != Json::RH_JSON_NULL:
+                        page_ok: mutable i64 = 0
+                        requested_pull_page <- Json::rh_json_int(nodes, raw, requested_page_idx, &page_ok)
+                        return -1 if page_ok == 0 or requested_pull_page < 1 or requested_pull_page > 2147483640
+                        requested_pull_page_present <- true
+                    requested_reviews_idx: i64 = Json::rh_json_obj_get(nodes, texts, batch_request_idx, "review_pages")
+                    return -1 if requested_reviews_idx < 0 or nodes[requested_reviews_idx.usize()].kind != Json::RH_JSON_ARR or nodes[requested_reviews_idx.usize()].child_count > 10
+                    while request_node >= 0 |request_node: i64 = nodes[requested_reviews_idx.usize()].first_child, nodes, raw, texts, requested_review_cursors|:
+                        return -1 if nodes[request_node.usize()].kind != Json::RH_JSON_OBJ
+                        number_ok: mutable i64 = 0
+                        pull_number: mutable i64 = 0
+                        return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, request_node, "number", &pull_number, &number_ok) or number_ok == 0 or pull_number < 1
+                        page_ok: mutable i64 = 0
+                        next_review_page: mutable i64 = 0
+                        return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, request_node, "next_review_page", &next_review_page, &page_ok) or page_ok == 0 or next_review_page < 1 or next_review_page > 2147483640
+                        while prior_request_idx < requested_review_cursors.count.i64() |prior_request_idx: i64 = 0, requested_review_cursors, pull_number|:
+                            return -1 if requested_review_cursors[prior_request_idx.usize()].pull_number == pull_number
+                            prior_request_idx <- prior_request_idx + 1
+                        requested_review_cursors.push(RhForgeReviewRequestCursor{pull_number: pull_number, next_review_page: next_review_page})
+                        request_node <- nodes[request_node.usize()].next_sibling
+                    if resumed_digest_present:
+                        return -1 if requested_pull_page_present == (requested_review_cursors.count > 0)
+                    else:
+                        return -1 if not requested_pull_page_present or requested_pull_page != 1 or requested_review_cursors.count > 0
                 next_pull_idx: i64 = Json::rh_json_obj_get(nodes, texts, review_collection_idx, "next_pull_page")
                 return -1 if next_pull_idx < 0
                 if nodes[next_pull_idx.usize()].kind != Json::RH_JSON_NULL:
@@ -659,7 +711,28 @@ module ForgeEvents:
                     Base::rh_push_decimal_i64(out, review_cursors[cursor_idx.usize()].next_review_page)
                     Base::rh_push_text(out, "}")
                     cursor_idx <- cursor_idx + 1
-                Base::rh_push_text(out, "],\"batch_pull_requests\":[")
+                Base::rh_push_text(out, "],\"batch_request\":{\"resumed_from_sha256\":")
+                if resumed_digest_present:
+                    out.push(34)
+                    Base::rh_json_escape(out, texts, resumed_digest_s.usize(), resumed_digest_e.usize())
+                    out.push(34)
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"pull_page\":")
+                if requested_pull_page_present:
+                    Base::rh_push_decimal_i64(out, requested_pull_page)
+                else:
+                    Base::rh_push_text(out, "null")
+                Base::rh_push_text(out, ",\"review_pages\":[")
+                while request_idx < requested_review_cursors.count.i64() |request_idx: usize = 0, requested_review_cursors, out|:
+                    out.push(44) if request_idx > 0
+                    Base::rh_push_text(out, "{\"number\":")
+                    Base::rh_push_decimal_i64(out, requested_review_cursors[request_idx].pull_number)
+                    Base::rh_push_text(out, ",\"next_review_page\":")
+                    Base::rh_push_decimal_i64(out, requested_review_cursors[request_idx].next_review_page)
+                    out.push(125)
+                    request_idx <- request_idx + 1
+                Base::rh_push_text(out, "]},\"batch_pull_requests\":[")
                 while pull_idx < pull_batch.count.i64() |pull_idx: usize = 0, pull_batch, out|:
                     out.push(44) if pull_idx > 0
                     Base::rh_push_text(out, "{\"number\":")

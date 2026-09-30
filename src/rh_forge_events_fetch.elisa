@@ -5,6 +5,7 @@ include "./rh_forge_events.elisa"
 include "./rh_git.elisa"
 include "./rh_json.elisa"
 include "./rh_roles_provider.elisa"
+include "./rh_sha256.elisa"
 
 module ForgeEventsFetch:
     private:
@@ -315,7 +316,7 @@ module ForgeEventsFetch:
             return true if pull_total == 0
             ForgeEventsFetch::rh_fef_pull_requests(pulls, pull_limit, pull_requests)
 
-        def rh_fef_report_repository_reviews(repository: cstr, groups: darray[u8]&, pending: darray[RhFefReviewCursor]&, pull_requests: darray[RhFefPullRequest]&, next_pull_page: i64, pulls_complete: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_report_repository_reviews(repository: cstr, groups: darray[u8]&, pending: darray[RhFefReviewCursor]&, requested_reviews: darray[RhFefReviewCursor]&, pull_requests: darray[RhFefPullRequest]&, requested_pull_page: i64, resumed_from_sha256: darray[u8]&, next_pull_page: i64, pulls_complete: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Memory.Release, Unsafe.PointerCast]:
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             token: u8&? = getenv("RH_GITHUB_TOKEN")
@@ -339,7 +340,28 @@ module ForgeEventsFetch:
                 Base::rh_push_decimal_i64(capture, pending[cursor_idx].next_page)
                 Base::rh_push_text(capture, "}")
                 cursor_idx <- cursor_idx + 1
-            Base::rh_push_text(capture, "],\"next_pull_page\":")
+            Base::rh_push_text(capture, "],\"batch_request\":{\"resumed_from_sha256\":")
+            if resumed_from_sha256.count == 64:
+                capture.push(34)
+                capture.extend(bytes_view(resumed_from_sha256))
+                capture.push(34)
+            else:
+                Base::rh_push_text(capture, "null")
+            Base::rh_push_text(capture, ",\"pull_page\":")
+            if requested_pull_page > 0:
+                Base::rh_push_decimal_i64(capture, requested_pull_page)
+            else:
+                Base::rh_push_text(capture, "null")
+            Base::rh_push_text(capture, ",\"review_pages\":[")
+            while request_idx < requested_reviews.count.i64() |request_idx: usize = 0, requested_reviews, capture|:
+                capture.push(44) if request_idx > 0
+                Base::rh_push_text(capture, "{\"number\":")
+                Base::rh_push_decimal_i64(capture, requested_reviews[request_idx].pull_number)
+                Base::rh_push_text(capture, ",\"next_review_page\":")
+                Base::rh_push_decimal_i64(capture, requested_reviews[request_idx].next_page)
+                capture.push(125)
+                request_idx <- request_idx + 1
+            Base::rh_push_text(capture, "]},\"next_pull_page\":")
             if pulls_complete:
                 Base::rh_push_text(capture, "null")
             else:
@@ -367,10 +389,14 @@ module ForgeEventsFetch:
             pending: mutable darray[RhFefReviewCursor] = []
             next_pull_page: mutable i64 = 1
             pulls_complete: mutable bool = false
+            requested_pull_page: mutable i64 = 1
+            resumed_from_sha256: mutable darray[u8] = []
             if previous.count > 0:
                 pulls_complete_flag: mutable i64 = 0
                 return -1 if not ForgeEventsFetch::rh_fef_review_resume(previous, repository, pending, &next_pull_page, &pulls_complete_flag)
                 pulls_complete <- pulls_complete_flag == 1
+                requested_pull_page <- next_pull_page if pending.count == 0 else 0
+                Sha256::rh_sha256(previous, resumed_from_sha256)
                 return -1 if pending.count == 0 and pulls_complete
 
             byte_total: mutable i64 = 0
@@ -393,7 +419,7 @@ module ForgeEventsFetch:
                     pull_number: i64 = pull_batch[pull_idx].number
                     return -1 if not ForgeEventsFetch::rh_fef_fetch_reviews_for_pull(repository, pull_number, 1, review_page_limit, evidence_base, &byte_total, reviews_by_pull, &group_count, next_pending)
                     pull_idx <- pull_idx + 1
-            ForgeEventsFetch::rh_fef_report_repository_reviews(repository, reviews_by_pull, next_pending, pull_batch, next_pull_page, pulls_complete, out)
+            ForgeEventsFetch::rh_fef_report_repository_reviews(repository, reviews_by_pull, next_pending, pending, pull_batch, requested_pull_page, resumed_from_sha256, next_pull_page, pulls_complete, out)
 
         def rh_fef_fetch_pages_from(repository: cstr, endpoint: cstr, capability: cstr, start_page: i64, max_pages: i64, page_size: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return false if start_page < 1 or max_pages < 1 or start_page > 2147483640 or max_pages > RH_FEF_MAX_PAGES or page_size < 1 or page_size > RH_FEF_PAGE_SIZE
