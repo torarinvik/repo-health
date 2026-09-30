@@ -181,7 +181,12 @@ Trigger: scheduled drill, or recovery after corruption/loss.
    `tools/restore-postgres-backup.sh <backup-directory> <new-evidence-root>`.
    It validates the custom-format dump, imports evidence into a staging root,
    restores PostgreSQL in one transaction, then publishes the evidence root
-   and verifies the pair binding again. The URL stays out of command arguments.
+   and verifies the pair binding again. A temporary owner-only libpq service
+   file supplies the connection settings because `pg_restore` requires an
+   explicit database target; the URL and credentials stay out of command
+   arguments. `RH_PG_BACKUP_LIVE=1 tests/test_postgres_backup_live.sh` exercises
+   the production drivers against PostgreSQL 16 and checks a restored row,
+   evidence digest, report replay, and pair binding.
 4. Rebuild projections from the restored database and evidence, then replay a sample
    report; compare against the pinned expected outputs.
 6. State the restored/unavailable/unknown sets in writing. An unrestored

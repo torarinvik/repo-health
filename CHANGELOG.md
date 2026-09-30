@@ -8,6 +8,7 @@ on the real execution path.
 ## [Unreleased]
 
 ### Fixed
+- PostgreSQL restore now gives `pg_restore` its required explicit target through a temporary owner-only libpq service file, keeping connection credentials out of argv. An opt-in PostgreSQL 16 test exercises the production backup/restore scripts and verifies database rows, restored evidence, and byte-identical report replay.
 - The M07 source-rights register now matches forge manifests: GitLab project-member collection is declared, while Bitbucket releases/traffic and Gitea/Forgejo permissions/traffic are explicitly unsupported. A regression checks that each forge capability appears in exactly one rights-scope bucket.
 - The M07 monitor now accepts explicit policy-evaluation and policy-unknown
   observations and reports the unknown share with a real denominator; absent

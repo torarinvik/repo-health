@@ -41,8 +41,15 @@ if [[ "${1:-}" == "--list" ]]; then
   [[ -f "$2" ]] || exit 53
   exit 0
 fi
-[[ "${PGDATABASE:-}" == "${EXPECTED_DATABASE_URL:-}" ]] || exit 51
-[[ $# -eq 3 && "$1" == "--exit-on-error" && "$2" == "--single-transaction" && -f "$3" ]] || exit 54
+[[ $# -eq 4 && "$1" == "--dbname=service=repo-health-restore" && "$2" == "--exit-on-error" && "$3" == "--single-transaction" && -f "$4" ]] || exit 54
+[[ -f "${PGSERVICEFILE:-}" ]] || exit 55
+python3 - "$PGSERVICEFILE" <<'PY'
+import os, sys
+path = sys.argv[1]
+assert os.stat(path).st_mode & 0o777 == 0o600, oct(os.stat(path).st_mode & 0o777)
+text = open(path, encoding="utf-8").read()
+assert "[repo-health-restore]" in text and "restore-secret" in text and "restored_db" in text, text
+PY
 SH
 chmod +x "$T/bin/psql" "$T/bin/pg_restore"
 

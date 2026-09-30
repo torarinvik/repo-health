@@ -82,7 +82,13 @@ verified/missing/corrupt separately (missing was previously conflated with
 corrupt — fixed), and a restore that copies only digest-verified objects.
 `tests/test_store_cli.sh` covers all of it, including twelve concurrent
 identical puts converging on one verified object and a corrupt object being
-skipped by restore. Job leasing is a real path too: `rh_cli store
+skipped by restore. `tests/test_postgres_backup.sh` verifies the mocked shell
+workflow and protected connection handling; the opt-in
+`RH_PG_BACKUP_LIVE=1 tests/test_postgres_backup_live.sh` runs the production
+backup and restore drivers against PostgreSQL 16, then checks a restored row,
+evidence digest, byte-identical report replay, and pair binding. The restore
+driver uses a temporary owner-only libpq service file to satisfy `pg_restore`
+without putting credentials in argv. Job leasing is a real path too: `rh_cli store
 lease --root <dir> --job <name> --input <file> --out <file>` applies a
 claim/heartbeat/release/status sequence to a real `<root>/leases/<job>.lease`
 (+ attempt `.log`) and enforces fencing — a live lease is held, an expired
