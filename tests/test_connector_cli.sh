@@ -616,7 +616,7 @@ PATH="$T/probe-bin:$PATH" RH_GITHUB_TOKEN="ghp_probe_fixture" \
   RH_PROBE_CURL_ARGS="$T/matrix.args" RH_PROBE_CURL_CONFIG="$T/matrix.config" \
   "$ROOT/build/rh_cli" connector probe --github-repo example/project --out "$T/capability-matrix.out" --all >/dev/null || fail "GitHub capability matrix probe"
 python3 - "$T/capability-matrix.out" "$T" <<'PY'
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 t = pathlib.Path(sys.argv[2])
 assert d["schema"] == "rh-github-capability-matrix/1", d
@@ -634,10 +634,29 @@ for key in ("issues", "pull_requests", "releases", "traffic"):
 assert (t / "capability-matrix.out.github-issues.url").read_text().strip().endswith("/issues?per_page=1")
 assert (t / "capability-matrix.out.github-pulls.url").read_text().strip().endswith("/pulls?per_page=1")
 assert (t / "capability-matrix.out.github-releases.url").read_text().strip().endswith("/releases?per_page=1")
+def frame(label, value):
+    return label.encode() + b":" + str(len(value)).encode() + b":" + str(len(value)).encode() + b":" + value + b"\n"
+source_material = b"repo-health/github-capability-matrix-source/1\n"
+for capability in ("issues", "pulls", "releases", "traffic-views"):
+    for extension, label_suffix in (("url", "request_url"), ("status", "http_status"), ("json", "response_body"), ("err", "transport_error")):
+        evidence = t / f"capability-matrix.out.github-{capability}.{extension}"
+        source_material += frame(f"{capability}_{label_suffix}", evidence.read_bytes())
+sidecar = json.load(open(sys.argv[1] + ".transformations.json"))
+assert sidecar["adapter"] == "github-capability-matrix-probe", sidecar
+assert sidecar["output_schema"] == "rh-github-capability-matrix/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(source_material).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(
+    b"repo-health/github-capability-matrix/1|repository=example/project|routes=issues,pulls,releases,traffic-views|per_page=1|traffic_window=14d|authorization=configured"
+).hexdigest(), sidecar
+assert {field["state"] for field in sidecar["fields"]} == {
+    "preserved", "transformed", "discarded", "unknown", "unsupported"
+}, sidecar
 print("[connector] matrix distinguishes route availability, authorization, and hidden-repository states")
 PY
 grep -Fxq 'header = "Authorization: Bearer ghp_probe_fixture"' "$T/matrix.config" || fail "matrix token header absent from curl stdin config"
 ! grep -Fq 'ghp_probe_fixture' "$T/matrix.args" || fail "matrix token leaked into curl arguments"
+! grep -Fq 'ghp_probe_fixture' "$T/capability-matrix.out.transformations.json" || fail "matrix token leaked into transformation sidecar"
 [[ "$(grep -c 'api.github.com/repos/example/project/' "$T/matrix.args")" -eq 4 ]] || fail "matrix must issue exactly four fixed requests"
 for evidence in "$T"/capability-matrix.out.github-*; do
   ! grep -Fq 'ghp_probe_fixture' "$evidence" || fail "matrix token leaked into evidence"
