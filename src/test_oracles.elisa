@@ -54,6 +54,32 @@ def observation_decode_rejects_overbound_evidence() -> bool can[Memory.Allocate,
     decoded: mutable Observation::RhObservation = Observation::rh_observation_make(Observation::RH_ST_UNAVAILABLE, Observation::RhMetricValue.Absent, false)
     not ObservationCodec::rh_observation_decode(raw, &decoded)
 
+def bitemporal_cross_product_oracle(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    # Compare the public predicates with the plan's interval definition over
+    # every small endpoint combination. End modes 0..3 name a fixed endpoint;
+    # mode 4 names an open endpoint.
+    for valid_start in 0..<4 |valid_start, fails|:
+        for valid_end_mode in 0..<5 |valid_end_mode, valid_start, fails|:
+            valid_end_known: bool = valid_end_mode < 4
+            valid_end: i64 = valid_end_mode if valid_end_known else 0
+            for known_start in 0..<4 |known_start, valid_start, valid_end, valid_end_known, fails|:
+                for known_end_mode in 0..<5 |known_end_mode, valid_start, valid_end, valid_end_known, known_start, fails|:
+                    known_end_known: bool = known_end_mode < 4
+                    known_end: i64 = known_end_mode if known_end_known else 0
+                    fact: Temporal::RhBitemporal = Temporal::rh_bitemporal_make(valid_start, valid_end, valid_end_known, known_start, known_end, known_end_known)
+                    expected_valid: bool = (not valid_end_known or valid_end > valid_start) and (not known_end_known or known_end > known_start)
+                    check(Temporal::rh_bitemporal_valid(fact) == expected_valid, "bitemporal-cross-product-validity", fails)
+                    for known_at in -1..<5 |known_at, fact, expected_valid, fails|:
+                        expected_as_of: bool = expected_valid and known_at >= fact.known_start and (not fact.known_end_known or known_at < fact.known_end)
+                        check(Temporal::rh_visible_as_of(fact, known_at) == expected_as_of, "bitemporal-cross-product-system-time", fails)
+                        for valid_at in -1..<5 |valid_at, known_at, fact, expected_valid, fails|:
+                            expected_visible: bool = expected_valid and valid_at >= fact.valid_start and (not fact.valid_end_known or valid_at < fact.valid_end) and known_at >= fact.known_start and (not fact.known_end_known or known_at < fact.known_end)
+                            check(Temporal::rh_bitemporal_visible_at(fact, valid_at, known_at) == expected_visible, "bitemporal-cross-product-two-axis-visibility", fails)
+    malformed_open_valid: Temporal::RhBitemporal = Temporal::RhBitemporal{valid_start: 0, valid_end: 1, valid_end_known: false, known_start: 0, known_end: 0, known_end_known: false}
+    malformed_open_known: Temporal::RhBitemporal = Temporal::RhBitemporal{valid_start: 0, valid_end: 0, valid_end_known: false, known_start: 0, known_end: 1, known_end_known: false}
+    check(not Temporal::rh_bitemporal_valid(malformed_open_valid), "bitemporal-open-valid-end-canonicalized", fails)
+    check(not Temporal::rh_bitemporal_valid(malformed_open_known), "bitemporal-open-known-end-canonicalized", fails)
+
 def observation_evidence_roundtrip() -> bool can[Memory.Allocate, Abort.Panic]:
     quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Unknown, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Unknown, provenance: Observation::RhProvenanceQuality.Unknown}
     evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
@@ -406,6 +432,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check(not Temporal::rh_visible_as_of(corrected, Temporal::rh_unix_from_civil(2027, 1, 10)), "system-end-exclusive", &fails)
     malformed_bitemporal: Temporal::RhBitemporal = Temporal::rh_bitemporal_make(20, 10, true, 0, 0, false)
     check(not Temporal::rh_bitemporal_valid(malformed_bitemporal), "inverted-bitemporal-valid-range-rejected", &fails)
+    bitemporal_cross_product_oracle(&fails)
 
 # --- M04-07 numerical oracles (plan §9.4), computed here first ---
     c1: mutable darray[u64] =
