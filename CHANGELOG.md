@@ -58,6 +58,7 @@ on the real execution path.
 
 ### Added
 - `rh_cli forge review-chain` assembles bounded GitHub repository-review segments only when their exact-byte SHA-256 predecessor links, repository scope, and consumed pull/review cursors form one chain. It merges each pull request’s validated merge timestamp and replaces repeated review IDs with their last observation; unfinished chains stay partial, and completed traversal does not claim an atomic GitHub snapshot.
+- Review-chain assembly allows an unmerged observation to gain its later `merged_at`, while rejecting a later attempt to clear or change an already observed merge timestamp.
 - `rh_cli postgres` now exposes the durable M02-06 current-state transaction
   as `reconcile_source_objects`. It validates bounded scope and observed IDs
   before connecting, binds all values through libpq parameters, and retains

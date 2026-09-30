@@ -91,6 +91,39 @@ mixed_capabilities = copy.deepcopy(first)
 mixed_capabilities["capabilities"]["issues"]["status"] = "observed"
 p8 = write("mixed-capabilities.json", mixed_capabilities)
 write("mixed-capabilities-input.json", {"schema":"rh-forge-review-chain-input/1","segments":[str(p8)]})
+
+merge_first = copy.deepcopy(first)
+merge_first["captured_at"] = 1700000010
+merge_first["events"] = []
+merge_first["capabilities"]["reviews"].update(attempted=0, normalized=0, count=0)
+merge_first["review_collection"] = {
+    "pending_pull_requests":[],
+    "batch_request":{"resumed_from_sha256":None,"pull_page":1,"review_pages":[]},
+    "batch_pull_requests":[{"number":7,"merged_at":None}],
+    "next_pull_page":2,"pulls_complete":False,"complete":False
+}
+merge_p1 = write("merge-first.json", merge_first)
+
+def merge_second(merged_at, previous=merge_p1):
+    later = copy.deepcopy(merge_first)
+    later["captured_at"] = 1700000011
+    later["review_collection"] = {
+        "pending_pull_requests":[],
+        "batch_request":{"resumed_from_sha256":hashlib.sha256(previous.read_bytes()).hexdigest(),"pull_page":2,"review_pages":[]},
+        "batch_pull_requests":[{"number":7,"merged_at":merged_at}],
+        "next_pull_page":None,"pulls_complete":True,"complete":True
+    }
+    return later
+
+merge_p2 = write("merge-second.json", merge_second(1700172800))
+write("merge-update-input.json", {"schema":"rh-forge-review-chain-input/1","segments":[str(merge_p1),str(merge_p2)]})
+merge_p1_merged = copy.deepcopy(merge_first)
+merge_p1_merged["review_collection"]["batch_pull_requests"][0]["merged_at"] = 1700172800
+merge_p1_merged_path = write("merge-first-merged.json", merge_p1_merged)
+merge_cleared = write("merge-cleared.json", merge_second(None, merge_p1_merged_path))
+write("merge-cleared-input.json", {"schema":"rh-forge-review-chain-input/1","segments":[str(merge_p1_merged_path),str(merge_cleared)]})
+merge_rewritten = write("merge-rewritten.json", merge_second(1700172801, merge_p1_merged_path))
+write("merge-rewritten-input.json", {"schema":"rh-forge-review-chain-input/1","segments":[str(merge_p1_merged_path),str(merge_rewritten)]})
 PY
 
 "$ROOT/build/rh_cli" forge review-chain --input "$T/chain.json" --out "$T/chain-result.json" >/dev/null
@@ -106,6 +139,13 @@ assert d["schema"] == "rh-forge-review-chain-result/1", d
 assert d["status"] == "partial" and d["complete"] is False, d
 assert d["segment_count"] == 1 and d["pull_request_count"] == 2, d
 print("[forge-review-chain] valid unfinished chain remains partial")
+PY
+"$ROOT/build/rh_cli" forge review-chain --input "$T/merge-update-input.json" --out "$T/merge-update-result.json" >/dev/null
+python3 - "$T/merge-update-result.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["complete"] is True and d["pull_request_count"] == 1, d
+assert d["merged_pull_request_count"] == 1 and d["pull_requests"][0]["merged_at"] == 1700172800, d
 PY
 python3 - "$T/chain-result.json" <<'PY'
 import json, sys
@@ -136,12 +176,16 @@ rc_id=$?
 rc_time=$?
 "$ROOT/build/rh_cli" forge review-chain --input "$T/mixed-capabilities-input.json" --out "$T/mixed-capabilities-result.json" >/dev/null 2>&1
 rc_capabilities=$?
+"$ROOT/build/rh_cli" forge review-chain --input "$T/merge-cleared-input.json" --out "$T/merge-cleared-result.json" >/dev/null 2>&1
+rc_merge_cleared=$?
+"$ROOT/build/rh_cli" forge review-chain --input "$T/merge-rewritten-input.json" --out "$T/merge-rewritten-result.json" >/dev/null 2>&1
+rc_merge_rewritten=$?
 set -e
-[[ "$rc_gap" -eq 4 && "$rc_order" -eq 4 && "$rc_scope" -eq 4 && "$rc_cursor" -eq 4 && "$rc_id" -eq 4 && "$rc_time" -eq 4 && "$rc_capabilities" -eq 4 ]] || {
-  echo "expected gap/order/scope/cursor/id/time/capability failures: $rc_gap/$rc_order/$rc_scope/$rc_cursor/$rc_id/$rc_time/$rc_capabilities" >&2
+[[ "$rc_gap" -eq 4 && "$rc_order" -eq 4 && "$rc_scope" -eq 4 && "$rc_cursor" -eq 4 && "$rc_id" -eq 4 && "$rc_time" -eq 4 && "$rc_capabilities" -eq 4 && "$rc_merge_cleared" -eq 4 && "$rc_merge_rewritten" -eq 4 ]] || {
+  echo "expected gap/order/scope/cursor/id/time/capability/merge failures: $rc_gap/$rc_order/$rc_scope/$rc_cursor/$rc_id/$rc_time/$rc_capabilities/$rc_merge_cleared/$rc_merge_rewritten" >&2
   exit 1
 }
-[[ ! -e "$T/gap-result.json" && ! -e "$T/reordered-result.json" && ! -e "$T/wrong-scope-result.json" && ! -e "$T/cursor-jump-result.json" && ! -e "$T/bad-review-id-result.json" && ! -e "$T/time-reversal-result.json" && ! -e "$T/mixed-capabilities-result.json" ]] || {
+[[ ! -e "$T/gap-result.json" && ! -e "$T/reordered-result.json" && ! -e "$T/wrong-scope-result.json" && ! -e "$T/cursor-jump-result.json" && ! -e "$T/bad-review-id-result.json" && ! -e "$T/time-reversal-result.json" && ! -e "$T/mixed-capabilities-result.json" && ! -e "$T/merge-cleared-result.json" && ! -e "$T/merge-rewritten-result.json" ]] || {
   echo "invalid review chain wrote a result" >&2
   exit 1
 }
