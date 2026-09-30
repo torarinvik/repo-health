@@ -54,6 +54,13 @@ for key in (
     "roles.provider_declaration_count",
     "roles.file_declaration_count",
     "roles.operator_declaration_count",
+    "maintainer.role_assignments_with_end_dates",
+    "maintainer.observed_release_actors",
+    "maintainer.observed_merge_actors",
+    "maintainer.observed_review_actors",
+    "maintainer.unattributed_release_count",
+    "concentration.release_actor_count_80",
+    "concentration.review_actor_count_80",
 ):
     metric = metrics[key]
     assert metric["status"] == "observed", metric
@@ -125,6 +132,28 @@ assert m["maintainer.permission_inventory_coverage"]["reason"] == "permission-in
 print("[roles] missing activity and permission completeness evidence stays unsupported")
 PY
 
+echo "[roles] empty action populations are not applicable"
+printf '{"schema":"rh-roles-input/1","declarations":[],"observed_actions":[{"actor_id":1,"kind":"merge","at":10}]}' > "$T/no-release-review.json"
+"$ROOT/build/rh_cli" roles --input "$T/no-release-review.json" --out "$T/no-release-review.out.json" >/dev/null || fail "empty release and review populations run"
+python3 - "$T/no-release-review.out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {x["key"]: x for x in d["metrics"]}
+for key, reason in (
+    ("concentration.release_actor_count_80", "no-release-actions"),
+    ("concentration.review_actor_count_80", "no-review-actions"),
+):
+    assert m[key]["status"] == "not_applicable" and m[key]["value"] is None, m[key]
+    assert m[key]["reason"] == reason, m[key]
+    assert m[key]["quality_dimensions"] == {
+        "completeness": "unknown",
+        "freshness": "unknown",
+        "validity": "unknown",
+        "provenance": "evidence_backed",
+    }, m[key]
+print("[roles] empty action populations remain reasoned not-applicable")
+PY
+
 echo "[roles] bounded file URL capture retains transport evidence"
 file_url="file://$T/in.json"
 "$ROOT/build/rh_cli" roles --url "$file_url" --out "$T/url-out.json" >/dev/null || fail "file URL run"
@@ -155,6 +184,23 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["authorization_state"] == "unknown", d
 assert d["action_events_by_actor_type"]["status"] == "unsupported", d
+m = {x["key"]: x for x in d["metrics"]}
+for key in (
+    "maintainer.observed_release_actors",
+    "maintainer.observed_merge_actors",
+    "maintainer.observed_review_actors",
+    "maintainer.unattributed_release_count",
+    "concentration.release_actor_count_80",
+    "concentration.review_actor_count_80",
+):
+    assert m[key]["status"] == "unsupported" and m[key]["value"] is None, m[key]
+    assert m[key]["reason"] == "observed-actions-not-supplied", m[key]
+    assert m[key]["quality_dimensions"] == {
+        "completeness": "unknown",
+        "freshness": "unknown",
+        "validity": "unknown",
+        "provenance": "evidence_backed",
+    }, m[key]
 print("[roles] absent authorization is explicit unknown")
 PY
 

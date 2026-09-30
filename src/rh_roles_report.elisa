@@ -66,23 +66,26 @@ module RolesReport:
             Base::rh_push_decimal_i64(out, counts[Roles::RH_ACTOR_KIND_UNKNOWN.usize()])
             Base::rh_push_text(out, "}")
 
-        def rh_rr_emit_count_metric(out: mutable darray[u8]&, key: cstr, count: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_rr_emit_typed_metric(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
             quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
-                completeness: Observation::RhCompleteness.Complete,
+                completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Unknown,
                 freshness: Observation::RhFreshness.Unknown,
-                validity: Observation::RhValidity.Valid,
+                validity: Observation::RhValidity.Valid if status == Observation::RH_ST_OBSERVED else Observation::RhValidity.Unknown,
                 provenance: Observation::RhProvenanceQuality.EvidenceBacked
             }
             evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
             Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.RolesInput)
             observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(
-                Observation::RH_ST_OBSERVED,
-                Observation::RhMetricValue.Count(count),
+                status,
+                value,
                 false,
                 quality,
                 evidence
             )
-            Observation::rh_observation_emit_metric(out, key, "1.0.0", "", observation)
+            Observation::rh_observation_emit_metric(out, key, "1.0.0", reason, observation)
+
+        def rh_rr_emit_count_metric(out: mutable darray[u8]&, key: cstr, count: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_rr_emit_typed_metric(out, key, Observation::RhMetricValue.Count(count), Observation::RH_ST_OBSERVED, "")
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_rr_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -454,9 +457,8 @@ module RolesReport:
             out.push(44)
             return -1 if not RolesReport::rh_rr_emit_count_metric(out, "roles.operator_declaration_count", o)
             out.push(44)
-            Base::rh_push_text(out, "{\"key\":\"maintainer.role_assignments_with_end_dates\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, ended_count)
-            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
+            return -1 if not RolesReport::rh_rr_emit_count_metric(out, "maintainer.role_assignments_with_end_dates", ended_count)
+            out.push(44)
             Base::rh_push_text(out, "{\"key\":\"maintainer.declared_current\",\"version\":\"1.0.0\",\"status\":\"")
             if has_as_of:
                 Base::rh_push_text(out, "observed\",\"value\":")
@@ -483,28 +485,26 @@ module RolesReport:
             else:
                 Base::rh_push_text(out, "null")
             Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"maintainer.observed_release_actors\",\"version\":\"1.0.0\",\"status\":\"")
-            Base::rh_push_text(out, "observed\",\"value\":") if has_actions
-            Base::rh_push_decimal_i64(out, observed_release_actors) if has_actions
-            Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"" ) if not has_actions
-            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"maintainer.observed_merge_actors\",\"version\":\"1.0.0\",\"status\":\"")
-            Base::rh_push_text(out, "observed\",\"value\":") if has_actions
-            Base::rh_push_decimal_i64(out, observed_merge_actors) if has_actions
-            Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"" ) if not has_actions
-            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"maintainer.observed_review_actors\",\"version\":\"1.0.0\",\"status\":\"")
-            Base::rh_push_text(out, "observed\",\"value\":") if has_actions
-            Base::rh_push_decimal_i64(out, observed_review_actors) if has_actions
-            Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"" ) if not has_actions
-            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"maintainer.unattributed_release_count\",\"version\":\"1.0.0\",\"status\":\"")
-            if not has_actions:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"")
+            if has_actions:
+                return -1 if not RolesReport::rh_rr_emit_count_metric(out, "maintainer.observed_release_actors", observed_release_actors)
             else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, unattributed_release_count)
-            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
+                return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "maintainer.observed_release_actors", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "observed-actions-not-supplied")
+            out.push(44)
+            if has_actions:
+                return -1 if not RolesReport::rh_rr_emit_count_metric(out, "maintainer.observed_merge_actors", observed_merge_actors)
+            else:
+                return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "maintainer.observed_merge_actors", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "observed-actions-not-supplied")
+            out.push(44)
+            if has_actions:
+                return -1 if not RolesReport::rh_rr_emit_count_metric(out, "maintainer.observed_review_actors", observed_review_actors)
+            else:
+                return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "maintainer.observed_review_actors", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "observed-actions-not-supplied")
+            out.push(44)
+            if has_actions:
+                return -1 if not RolesReport::rh_rr_emit_count_metric(out, "maintainer.unattributed_release_count", unattributed_release_count)
+            else:
+                return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "maintainer.unattributed_release_count", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "observed-actions-not-supplied")
+            out.push(44)
             Base::rh_push_text(out, "{\"key\":\"maintainer.review_share\",\"version\":\"1.0.0\",\"status\":\"")
             if not has_actions:
                 Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"")
@@ -531,24 +531,20 @@ module RolesReport:
                 Base::rh_push_decimal_i64(out, attributed_release_actions)
                 Base::rh_push_text(out, "}")
             Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"concentration.release_actor_count_80\",\"version\":\"1.0.0\",\"status\":\"")
             if not has_actions:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"")
+                return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "concentration.release_actor_count_80", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "observed-actions-not-supplied")
             elif release_actor_count_80 == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-release-actions\"")
+                return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "concentration.release_actor_count_80", Observation::RhMetricValue.Absent, Observation::RH_ST_NOT_APPLICABLE, "no-release-actions")
             else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, release_actor_count_80)
-            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"concentration.review_actor_count_80\",\"version\":\"1.0.0\",\"status\":\"")
+                return -1 if not RolesReport::rh_rr_emit_count_metric(out, "concentration.release_actor_count_80", release_actor_count_80)
+            out.push(44)
             if not has_actions:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"observed-actions-not-supplied\"")
+                return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "concentration.review_actor_count_80", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "observed-actions-not-supplied")
             elif review_actor_count_80 == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-review-actions\"")
+                return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "concentration.review_actor_count_80", Observation::RhMetricValue.Absent, Observation::RH_ST_NOT_APPLICABLE, "no-review-actions")
             else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, review_actor_count_80)
-            Base::rh_push_text(out, ",\"evidence\":[\"roles-input\"]},")
+                return -1 if not RolesReport::rh_rr_emit_count_metric(out, "concentration.review_actor_count_80", review_actor_count_80)
+            out.push(44)
             Base::rh_push_text(out, "{\"key\":\"maintainer.permission_observed_current\",\"version\":\"1.0.0\",\"status\":\"")
             if auth_state == 2:
                 Base::rh_push_text(out, "unauthorized\",\"reason\":\"provider-permission-enumeration-unauthorized\"")
