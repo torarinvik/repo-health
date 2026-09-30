@@ -8311,18 +8311,25 @@ def rh_do_gitlab_capability_matrix(project: cstr, out_path: cstr) -> i32 can[Mem
     0
 
 def rh_do_forge_instance_capability_matrix(instance_path: cstr, repository: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-    return 3 if not Git::rh_arg_safe(out_path)
+    return 3 if not Git::rh_arg_safe(instance_path) or not Git::rh_arg_safe(out_path)
+    instance_size: i64 = Base::rh_file_size(instance_path)
+    if instance_size < 0 or instance_size > 65536:
+        rh_cli_err("connector: cannot read bounded approved forge instance")
+        return 4
+    instance_input: mutable darray[u8] = []
+    instance_read: i64 = Base::rh_io_read(instance_path, instance_input)
+    if instance_read < 0 or instance_read > 65536:
+        rh_cli_err("connector: cannot read bounded approved forge instance")
+        return 4
     body: mutable darray[u8] = []
-    if ForgeInstanceProbe::rh_forge_instance_capability_matrix(instance_path, repository, out_path, body) != 0:
+    if ForgeInstanceProbe::rh_forge_instance_capability_matrix(instance_input, repository, out_path, body) != 0:
         rh_cli_err("connector: approved Gitea/Forgejo instance capability probe failed")
         return 4
     body.push(10)
     return 4 if not Base::rh_io_write(out_path, body)
     source_material: mutable darray[u8] = []
     Base::rh_push_text(source_material, "repo-health/approved-forge-capability-matrix-source/1\n")
-    if not AdapterTransformationCli::rh_append_path_file_frame(source_material, instance_path, "connector_instance", 65536):
-        rh_cli_err("connector: cannot read approved forge instance evidence")
-        return 4
+    AdapterTransformationCli::rh_append_bytes_frame(source_material, "connector_instance", instance_read, instance_input)
     while route_index < 3 |route_index: i64 = 0, source_material, out_path|:
         capability: cstr =
             if route_index == 0:
