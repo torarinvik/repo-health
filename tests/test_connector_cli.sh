@@ -452,7 +452,7 @@ PATH="$T/probe-bin:$PATH" RH_GITLAB_TOKEN="glpat_fixture_token" \
   "$ROOT/build/rh_cli" connector probe --gitlab-project group/subgroup/project --all \
     --out "$T/gitlab-probe.out" >/dev/null || fail "GitLab capability matrix probe"
 python3 - "$T/gitlab-probe.out" "$T" <<'PY'
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 t = pathlib.Path(sys.argv[2])
 assert d["schema"] == "rh-gitlab-capability-matrix/1", d
@@ -467,10 +467,29 @@ for route in ("issues", "merge_requests", "releases"):
     assert (t / f"gitlab-probe.out.gitlab-{route.replace('_','-')}.url").read_text().strip() == f"https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/{route}?per_page=1"
     for ext in ("json", "status", "err", "url"):
         assert (t / f"gitlab-probe.out.gitlab-{route.replace('_','-')}.{ext}").exists()
+def frame(label, value):
+    return label.encode() + b":" + str(len(value)).encode() + b":" + str(len(value)).encode() + b":" + value + b"\n"
+source_material = b"repo-health/gitlab-capability-matrix-source/1\n"
+for capability in ("issues", "merge-requests", "releases"):
+    for extension, label_suffix in (("url", "request_url"), ("status", "http_status"), ("json", "response_body"), ("err", "transport_error")):
+        evidence = t / f"gitlab-probe.out.gitlab-{capability}.{extension}"
+        source_material += frame(f"{capability}_{label_suffix}", evidence.read_bytes())
+sidecar = json.load(open(sys.argv[1] + ".transformations.json"))
+assert sidecar["adapter"] == "gitlab-capability-matrix-probe", sidecar
+assert sidecar["output_schema"] == "rh-gitlab-capability-matrix/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(source_material).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(
+    b"repo-health/gitlab-capability-matrix/1|project_path=group/subgroup/project|host=https://gitlab.com/api/v4|routes=issues,merge_requests,releases|per_page=1|authorization=configured"
+).hexdigest(), sidecar
+assert {field["state"] for field in sidecar["fields"]} == {
+    "preserved", "transformed", "discarded", "unknown", "unsupported"
+}, sidecar
 print("[connector] GitLab preserves endpoint status and maps to shared coverage without publishing response records")
 PY
 grep -Fxq 'header = "PRIVATE-TOKEN: glpat_fixture_token"' "$T/gitlab-probe.config" || fail "GitLab token header absent from curl stdin config"
 ! grep -Fq 'glpat_fixture_token' "$T/gitlab-probe.args" || fail "GitLab token leaked into curl arguments"
+! grep -Fq 'glpat_fixture_token' "$T/gitlab-probe.out.transformations.json" || fail "GitLab token leaked into transformation sidecar"
 [[ "$(grep -c 'https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject/' "$T/gitlab-probe.args")" -eq 3 ]] || fail "GitLab matrix must issue exactly three fixed requests"
 for evidence in "$T"/gitlab-probe.out.gitlab-*; do
   ! grep -Fq 'glpat_fixture_token' "$evidence" || fail "GitLab token leaked into evidence"
