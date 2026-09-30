@@ -45,6 +45,25 @@ assert metrics["roles.unknown_declaration_count"]["value"] == 1, metrics
 assert metrics["roles.provider_declaration_count"]["value"] == 1, metrics
 assert metrics["roles.file_declaration_count"]["value"] == 2, metrics
 assert metrics["roles.operator_declaration_count"]["value"] == 1, metrics
+for key in (
+    "roles.owner_declaration_count",
+    "roles.maintainer_declaration_count",
+    "roles.triager_declaration_count",
+    "roles.member_declaration_count",
+    "roles.unknown_declaration_count",
+    "roles.provider_declaration_count",
+    "roles.file_declaration_count",
+    "roles.operator_declaration_count",
+):
+    metric = metrics[key]
+    assert metric["status"] == "observed", metric
+    assert metric["evidence"] == ["roles-input"], metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "complete",
+        "freshness": "unknown",
+        "validity": "valid",
+        "provenance": "evidence_backed",
+    }, metric
 assert metrics["maintainer.role_assignments_with_end_dates"]["value"] == 1, metrics
 assert metrics["maintainer.declared_current"]["value"] == 1 and metrics["maintainer.declared_current"]["as_of"] == 350, metrics
 assert metrics["maintainer.permission_observed_current"]["value"] == 1, metrics
