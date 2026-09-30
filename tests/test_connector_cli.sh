@@ -533,12 +533,29 @@ PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/forge.args" RH_PROBE_CURL_CONFI
   "$ROOT/build/rh_cli" connector probe --instance "$T/forge-instance.json" --repository owner/project --all \
     --out "$T/forge-probe.out" >/dev/null || fail "approved Gitea capability probe"
 python3 - "$T/forge-probe.out" <<'PY'
-import json, sys
+import hashlib, json, pathlib, sys
 d = json.load(open(sys.argv[1]))
+t = pathlib.Path(sys.argv[1]).parent
 assert d["schema"] == "rh-forge-capability-matrix/1", d
 assert d["provider"] == "gitea" and d["repository"] == "owner/project", d
 assert all(d["capabilities"][name]["status"] == "observed" for name in ("issues", "pulls", "releases")), d
 assert "private" not in open(sys.argv[1]).read()
+def frame(label, value):
+    return label.encode() + b":" + str(len(value)).encode() + b":" + str(len(value)).encode() + b":" + value + b"\n"
+source_material = b"repo-health/approved-forge-capability-matrix-source/1\n"
+source_material += frame("connector_instance", (t / "forge-instance.json").read_bytes())
+for capability in ("issues", "pulls", "releases"):
+    for extension, label_suffix in (("url", "request_url"), ("status", "http_status"), ("json", "response_body"), ("err", "transport_error")):
+        evidence = t / f"forge-probe.out.forge-{capability}.{extension}"
+        source_material += frame(f"{capability}_{label_suffix}", evidence.read_bytes())
+sidecar = json.load(open(sys.argv[1] + ".transformations.json"))
+assert sidecar["adapter"] == "approved-self-hosted-forge-capability-matrix", sidecar
+assert sidecar["output_schema"] == "rh-forge-capability-matrix/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(source_material).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(
+    b"repo-health/approved-forge-capability-matrix/1|repository=owner/project|routes=issues?limit=1&type=issues,pulls?limit=1,releases?limit=1|authorization=not_requested"
+).hexdigest(), sidecar
 PY
 [[ "$(grep -c 'https://codeberg.example.org/api/v1/repos/owner/project/' "$T/forge.args")" -eq 3 ]] || fail "forge matrix must issue three fixed requests"
 PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_EXIT=23 RH_PROBE_CURL_ARGS="$T/forge-process-failure.args" \
