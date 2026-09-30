@@ -59,6 +59,10 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- The M00 temporal oracle now checks 200 timezone-offset conversions against
+  epoch seconds derived independently from Gregorian year and month lengths.
+  Cases cover epoch crossing, leap days, century behavior, cycle end, and both
+  accepted offset limits; invalid offset bounds must preserve the output.
 - The shared observation module now owns metric JSON serialization for every
   tagged value variant, with validation, escaped evidence, reasoned non-observed
   states, and quality dimensions in one writer. Coverage and downstream reports

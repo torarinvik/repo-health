@@ -123,6 +123,53 @@ def gregorian_cycle_oracle(fails: mutable i64&) -> void can[Memory.Allocate, Abo
                 check(matches, "gregorian-400-year-cycle-roundtrip", fails)
                 expected_days <- expected_days + 1
 
+def oracle_days_from_epoch(year: i64, month: i64, day: i64) -> i64:
+    days: mutable i64 = 0
+    for current_year in 1970..<year |current_year, days|:
+        leap: bool = current_year % 4 == 0 and (current_year % 100 != 0 or current_year % 400 == 0)
+        days <- days + 365
+        days <- days + 1 if leap
+    for current_month in 1..<month |current_month, year, days|:
+        leap: bool = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+        days_in_month: i64 =
+            if current_month == 2:
+                29 if leap else 28
+            elif current_month == 4 or current_month == 6 or current_month == 9 or current_month == 11:
+                30
+            else:
+                31
+        days <- days + days_in_month
+    days + day - 1
+
+def timezone_offset_case(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64, offset_seconds: i64, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    local_seconds: i64 = oracle_days_from_epoch(year, month, day) * 86400 + hour * 3600 + minute * 60 + second
+    expected_utc: i64 = local_seconds - offset_seconds
+    instant: mutable i64 = 123
+    converted: bool = Temporal::rh_unix_from_civil_time_checked(year, month, day, hour, minute, second, offset_seconds, &instant)
+    matches: bool = instant == expected_utc if converted else expected_utc < 0 and instant == 123
+    check(matches, "timezone-offset-independent-cross-product", fails)
+
+def timezone_offset_date_oracle(year: i64, month: i64, day: i64, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
+    for hour_mode in 0..<2 |hour_mode, year, month, day, fails|:
+        hour: i64 = 23 if hour_mode == 1 else 0
+        for minute_mode in 0..<2 |minute_mode, year, month, day, hour, fails|:
+            minute: i64 = 59 if minute_mode == 1 else 0
+            for second_mode in 0..<2 |second_mode, year, month, day, hour, minute, fails|:
+                second: i64 = 59 if second_mode == 1 else 0
+                for offset_mode in 0..<5 |offset_mode, year, month, day, hour, minute, second, fails|:
+                    offset_seconds: i64 =
+                        if offset_mode == 0:
+                            -86340
+                        elif offset_mode == 1:
+                            -3600
+                        elif offset_mode == 2:
+                            0
+                        elif offset_mode == 3:
+                            3600
+                        else:
+                            86340
+                    timezone_offset_case(year, month, day, hour, minute, second, offset_seconds, fails)
+
 def observation_evidence_roundtrip() -> bool can[Memory.Allocate, Abort.Panic]:
     quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Unknown, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Unknown, provenance: Observation::RhProvenanceQuality.Unknown}
     evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
@@ -484,6 +531,15 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     check(not Temporal::rh_bitemporal_valid(malformed_bitemporal), "inverted-bitemporal-valid-range-rejected", &fails)
     bitemporal_cross_product_oracle(&fails)
     gregorian_cycle_oracle(&fails)
+    timezone_offset_date_oracle(1970, 1, 1, &fails)
+    timezone_offset_date_oracle(1972, 2, 29, &fails)
+    timezone_offset_date_oracle(2000, 2, 29, &fails)
+    timezone_offset_date_oracle(2100, 3, 1, &fails)
+    timezone_offset_date_oracle(2399, 12, 31, &fails)
+    checked_instant <- 123
+    check(not Temporal::rh_unix_from_civil_time_checked(2000, 1, 1, 0, 0, 0, -86341, &checked_instant) and checked_instant == 123, "offset-below-iso-bound-rejected-with-output-preserved", &fails)
+    checked_instant <- 123
+    check(not Temporal::rh_unix_from_civil_time_checked(2000, 1, 1, 0, 0, 0, 86341, &checked_instant) and checked_instant == 123, "offset-above-iso-bound-rejected-with-output-preserved", &fails)
 
 # --- M04-07 numerical oracles (plan §9.4), computed here first ---
     c1: mutable darray[u64] =
