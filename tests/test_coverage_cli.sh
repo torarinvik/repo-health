@@ -36,6 +36,15 @@ assert metrics["coverage.available_capability_share"]["value"] == {"num": 2, "de
 assert metrics["coverage.unauthorized_capabilities"]["value"] == 1, metrics
 assert metrics["coverage.partial_collection_count"]["value"] == 1, metrics
 assert metrics["coverage.source_freshness_hours"]["value"] == 1, metrics
+for metric in metrics.values():
+    assert metric["status"] == "observed", metric
+    assert metric["evidence"] == ["coverage-input"], metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "complete",
+        "freshness": "unknown",
+        "validity": "valid",
+        "provenance": "evidence_backed",
+    }, metric
 assert d["capabilities"][0]["valid_start"] is None, d
 assert d["capabilities"][1]["valid_end"] is None, d
 assert "source-specific" in d["note"], d
@@ -74,6 +83,29 @@ d = json.load(open(sys.argv[1]))
 assert d["capabilities"][0]["valid_start"] == 0, d
 assert d["capabilities"][0]["known_as_of"] == 0, d
 print("[coverage] epoch zero remains a valid instant")
+PY
+
+printf '%s\n' '{"schema":"rh-coverage-input/1","source":"test","source_instance":"test/no-applicable","collected_at":1700000000,"capabilities":[{"capability":"events","state":"not_applicable","reason":"source has no event API","valid_start":null,"valid_end":null,"known_as_of":1700000000}]}' > "$T/no-applicable.json"
+"$ROOT/build/rh_cli" coverage --input "$T/no-applicable.json" --out "$T/no-applicable.out" >/dev/null || fail "no-applicable coverage run"
+python3 - "$T/no-applicable.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+metrics = {m["key"]: m for m in d["metrics"]}
+for key, reason in (
+    ("coverage.available_capability_share", "no-applicable-capabilities"),
+    ("coverage.source_freshness_hours", "missing-complete-collection-timestamp"),
+):
+    metric = metrics[key]
+    assert metric["status"] == "not_applicable" and metric["value"] is None, metric
+    assert metric["reason"] == reason, metric
+    assert metric["evidence"] == ["coverage-input"], metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "unknown",
+        "freshness": "unknown",
+        "validity": "unknown",
+        "provenance": "evidence_backed",
+    }, metric
+print("[coverage] not-applicable metrics use absent values and unknown quality")
 PY
 
 echo "test_coverage_cli OK"

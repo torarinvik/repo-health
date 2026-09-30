@@ -6,6 +6,7 @@
 
 include "./rh_base.elisa"
 include "./rh_json.elisa"
+include "./rh_observation.elisa"
 
 module Coverage:
     private:
@@ -65,6 +66,79 @@ module Coverage:
             Base::rh_push_decimal_i64(out, value)
             value_out[0] <- value
             present_out[0] <- 1
+            true
+
+        def rh_coverage_observation(value: Observation::RhMetricValue, observed: bool) -> Observation::RhObservation can[Memory.Allocate, Abort.Panic]:
+            status: u8 = Observation::RH_ST_OBSERVED if observed else Observation::RH_ST_NOT_APPLICABLE
+            metric_value: Observation::RhMetricValue = value if observed else Observation::RhMetricValue.Absent
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete if observed else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if observed else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked
+            }
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+            Observation::rh_evidence_links_push_external(&evidence, string_view_slice(bytes_view("coverage-input"), 0, 14))
+            Observation::rh_observation_make_with_evidence(status, metric_value, false, quality, evidence)
+
+        def rh_coverage_metric(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, observed: bool, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            observation: Observation::RhObservation = Coverage::rh_coverage_observation(value, observed)
+            return false if not Observation::rh_observation_valid(observation)
+            Base::rh_push_text(out, "{\"key\":\"")
+            Base::rh_push_cstr(out, key)
+            Base::rh_push_text(out, "\",\"version\":\"1.0.0\",\"status\":\"")
+            Base::rh_push_text(out, Observation::rh_status_label(observation.status))
+            Base::rh_push_text(out, "\",\"value\":")
+            match observation.value:
+                Observation::RhMetricValue.Absent:
+                    Base::rh_push_text(out, "null")
+                Observation::RhMetricValue.Count(count):
+                    Base::rh_push_decimal_i64(out, count)
+                Observation::RhMetricValue.CountPair(first, second):
+                    Base::rh_push_text(out, "{\"first\":")
+                    Base::rh_push_decimal_i64(out, first)
+                    Base::rh_push_text(out, ",\"second\":")
+                    Base::rh_push_decimal_i64(out, second)
+                    Base::rh_push_text(out, "}")
+                Observation::RhMetricValue.CountHistogram5(bin_0, bin_1, bin_2, bin_3, bin_4, population_count):
+                    Base::rh_push_text(out, "{\"bins\":[")
+                    Base::rh_push_decimal_i64(out, bin_0)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_1)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_2)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_3)
+                    Base::rh_push_text(out, ",")
+                    Base::rh_push_decimal_i64(out, bin_4)
+                    Base::rh_push_text(out, "],\"population_count\":")
+                    Base::rh_push_decimal_i64(out, population_count)
+                    Base::rh_push_text(out, "}")
+                Observation::RhMetricValue.Timestamp(unix_seconds):
+                    Base::rh_push_decimal_i64(out, unix_seconds)
+                Observation::RhMetricValue.Ratio(num, den):
+                    Base::rh_push_text(out, "{\"num\":")
+                    Base::rh_push_decimal_i64(out, num)
+                    Base::rh_push_text(out, ",\"den\":")
+                    Base::rh_push_decimal_i64(out, den)
+                    Base::rh_push_text(out, "}")
+                Observation::RhMetricValue.Boolean(value):
+                    Base::rh_push_text(out, "true") if value else Base::rh_push_text(out, "false")
+                Observation::RhMetricValue.Enumeration(code):
+                    Base::rh_push_decimal_i64(out, code)
+            if not observed:
+                Base::rh_push_text(out, ",\"reason\":\"")
+                Base::rh_push_cstr(out, reason)
+                Base::rh_push_text(out, "\"")
+            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"],\"quality_dimensions\":{\"completeness\":\"")
+            Base::rh_push_text(out, Observation::rh_completeness_label(observation.quality.completeness))
+            Base::rh_push_text(out, "\",\"freshness\":\"")
+            Base::rh_push_text(out, Observation::rh_freshness_label(observation.quality.freshness))
+            Base::rh_push_text(out, "\",\"validity\":\"")
+            Base::rh_push_text(out, Observation::rh_validity_label(observation.quality.validity))
+            Base::rh_push_text(out, "\",\"provenance\":\"")
+            Base::rh_push_text(out, Observation::rh_provenance_quality_label(observation.quality.provenance))
+            Base::rh_push_text(out, "\"}}")
             true
 
     public:
@@ -178,55 +252,34 @@ module Coverage:
             Base::rh_push_text(out, ",\"unsupported\":")
             Base::rh_push_decimal_i64(out, unsupported)
             Base::rh_push_text(out, "},\"metrics\":[")
-            Base::rh_push_text(out, "{\"key\":\"coverage.observed_capability_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, observed)
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"coverage.partial_capability_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, partial)
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"coverage.stale_capability_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, stale)
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"coverage.unavailable_capability_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, unavailable)
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"coverage.unauthorized_capability_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, unauthorized)
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"coverage.unsupported_capability_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, unsupported)
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"coverage.not_applicable_capability_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, not_applicable)
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]},")
             total_capabilities: i64 = observed + partial + stale + unavailable + unauthorized + not_applicable + unsupported
             applicable_capabilities: i64 = total_capabilities - not_applicable
             available_capabilities: i64 = observed + partial + stale
             partial_collections: i64 = 1 if partial > 0 else 0
-            Base::rh_push_text(out, "{\"key\":\"coverage.requested_capabilities\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_capabilities)
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"coverage.available_capability_share\",\"version\":\"1.0.0\",\"status\":\"")
-            if applicable_capabilities > 0:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_i64(out, available_capabilities)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_i64(out, applicable_capabilities)
-                Base::rh_push_text(out, "},\"evidence\":[\"coverage-input\"]},")
-            else:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-applicable-capabilities\",\"evidence\":[\"coverage-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"coverage.unauthorized_capabilities\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, unauthorized)
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"coverage.partial_collection_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, partial_collections)
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"coverage.source_freshness_hours\",\"version\":\"1.0.0\",\"status\":\"")
             freshness_hours: i64 = (collected_at - latest_observed_as_of) / 3600 if collection_ok != 0 and latest_observed_as_of >= 0 and collected_at >= latest_observed_as_of else -1
-            if freshness_hours >= 0:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, freshness_hours)
-            else:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"missing-complete-collection-timestamp\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"coverage-input\"]}],\"note\":\"coverage intervals are source-specific; unknown endpoints remain null and capability state is not an activity or project verdict; availability excludes not_applicable capabilities from its denominator; a collection is partial when at least one requested capability is partial; freshness compares collected_at with the latest observed capability known_as_of\"}")
+            return -1 if applicable_capabilities > 0 and not Observation::rh_ratio_valid(available_capabilities, applicable_capabilities)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.observed_capability_count", Observation::RhMetricValue.Count(observed), true, "")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.partial_capability_count", Observation::RhMetricValue.Count(partial), true, "")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.stale_capability_count", Observation::RhMetricValue.Count(stale), true, "")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.unavailable_capability_count", Observation::RhMetricValue.Count(unavailable), true, "")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.unauthorized_capability_count", Observation::RhMetricValue.Count(unauthorized), true, "")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.unsupported_capability_count", Observation::RhMetricValue.Count(unsupported), true, "")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.not_applicable_capability_count", Observation::RhMetricValue.Count(not_applicable), true, "")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.requested_capabilities", Observation::RhMetricValue.Count(total_capabilities), true, "")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.available_capability_share", Observation::RhMetricValue.Ratio(available_capabilities, applicable_capabilities), applicable_capabilities > 0, "no-applicable-capabilities")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.unauthorized_capabilities", Observation::RhMetricValue.Count(unauthorized), true, "")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.partial_collection_count", Observation::RhMetricValue.Count(partial_collections), true, "")
+            out.push(44)
+            return -1 if not Coverage::rh_coverage_metric(out, "coverage.source_freshness_hours", Observation::RhMetricValue.Count(freshness_hours), freshness_hours >= 0, "missing-complete-collection-timestamp")
+            Base::rh_push_text(out, "],\"note\":\"coverage intervals are source-specific; unknown endpoints remain null and capability state is not an activity or project verdict; availability excludes not_applicable capabilities from its denominator; a collection is partial when at least one requested capability is partial; freshness compares collected_at with the latest observed capability known_as_of\"}")
             0

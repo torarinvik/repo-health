@@ -59,6 +59,12 @@ on the real execution path.
   its own right, so this is a correctness fix, not cosmetics.
 
 ### Added
+- Source-specific capability coverage metrics now pass through shared typed
+  observations before serialization. Reports retain their existing keys and
+  values while adding explicit quality dimensions; metrics with no applicable
+  denominator emit a null value, `not_applicable` status, and a reason.
+  `tests/test_coverage_cli.sh` checks observed and absent contracts alongside
+  the exact-input/output transformation digests.
 - M07 backup binding now hashes database dumps incrementally with a fixed
   64 KiB buffer, so `bind` and `verify-binding` support dumps above the former
   64 MiB whole-file read cap. The store CLI regression compares a 64 MiB-plus
