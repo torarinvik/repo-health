@@ -361,7 +361,7 @@ PATH="$T/probe-bin:$PATH" RH_GITHUB_TOKEN="ghp_review_probe_fixture" \
   "$ROOT/build/rh_cli" connector probe --github-repo example/project --review-pull 23 \
     --out "$T/review-probe.out" >/dev/null || fail "GitHub pull-request review probe"
 python3 - "$T/review-probe.out" "$T" <<'PY'
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 d = json.load(open(sys.argv[1]))
 t = pathlib.Path(sys.argv[2])
 assert d["schema"] == "rh-github-review-capability-probe-result/1", d
@@ -371,10 +371,25 @@ assert d["capabilities"]["reviews"] == {"declaration":"read-one-item", "status":
 assert (t / "review-probe.out.github-pull-reviews.url").read_text().strip() == "https://api.github.com/repos/example/project/pulls/23/reviews?per_page=1"
 for ext in ("json", "status", "err", "url"):
     assert (t / f"review-probe.out.github-pull-reviews.{ext}").exists(), ext
+def frame(label, value):
+    return label.encode() + b":" + str(len(value)).encode() + b":" + str(len(value)).encode() + b":" + value + b"\n"
+source_material = b"repo-health/github-review-probe-source/1\n"
+source_material += frame("request_url", (t / "review-probe.out.github-pull-reviews.url").read_bytes())
+source_material += frame("http_status", (t / "review-probe.out.github-pull-reviews.status").read_bytes())
+source_material += frame("response_body", (t / "review-probe.out.github-pull-reviews.json").read_bytes())
+source_material += frame("transport_error", (t / "review-probe.out.github-pull-reviews.err").read_bytes())
+sidecar = json.load(open(sys.argv[1] + ".transformations.json"))
+assert sidecar["adapter"] == "github-review-capability-probe", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(source_material).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(
+    b"repo-health/github-review-probe/1|repository=example/project|pull_request=23|route=/pulls/23/reviews?per_page=1|authorization=configured"
+).hexdigest(), sidecar
 print("[connector] one-item review probe preserves scope and ambiguous access state")
 PY
 grep -Fxq 'header = "Authorization: Bearer ghp_review_probe_fixture"' "$T/review-probe.config" || fail "review probe token header absent"
 ! grep -Fq 'ghp_review_probe_fixture' "$T/review-probe.args" || fail "review probe token leaked into curl arguments"
+! grep -Fq 'ghp_review_probe_fixture' "$T/review-probe.out.transformations.json" || fail "review probe token leaked into transformation sidecar"
 [[ "$(grep -c 'api.github.com/repos/example/project/pulls/23/reviews?per_page=1' "$T/review-probe.args")" -eq 1 ]] || fail "review probe must issue exactly one fixed request"
 set +e
 PATH="$T/probe-bin:$PATH" RH_PROBE_CURL_ARGS="$T/review-invalid.args" \
