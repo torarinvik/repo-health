@@ -194,4 +194,76 @@ for history_size, graph_size, revoked_at in itertools.product(history_sizes, gra
 print("[synthetic] all 27 history/graph/revocation cross-product cases match independent expectations")
 PY
 
+python3 - "$ROOT" "$T/ranges" "$CLI" <<'PY'
+import json, pathlib, subprocess, sys
+root, destination, cli = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+generator = root / "tools/generate_synthetic_fixtures.py"
+
+# Exhaust each supported input range independently while retaining the
+# representative 3x3x3 joint product above.
+for history_size in range(1, 13):
+    case = destination / f"history-{history_size}"
+    subprocess.run([
+        sys.executable, str(generator), "--out", str(case),
+        "--history-commits", str(history_size),
+    ], check=True, stdout=subprocess.DEVNULL)
+    report_dir = case / "scan"
+    subprocess.run([
+        cli, "scan", "--repo", str(case / "history/repo"), "--out", str(report_dir),
+        "--window-days", "36500",
+    ], check=True, stdout=subprocess.DEVNULL)
+    report = json.load(open(report_dir / "report.json"))
+    metrics = {metric["key"]: metric for metric in report["metrics"]}
+    assert metrics["history.commit_count"]["value"] == history_size, (history_size, metrics)
+    assert metrics["contributors.raw_identity_count"]["value"] == (1 if history_size == 1 else 2), (history_size, metrics)
+    assert metrics["activity.active_months"]["value"] == history_size, (history_size, metrics)
+
+for graph_size in range(2, 33):
+    case = destination / f"graph-{graph_size}"
+    subprocess.run([
+        sys.executable, str(generator), "--out", str(case),
+        "--graph-chain-nodes", str(graph_size),
+    ], check=True, stdout=subprocess.DEVNULL)
+    graph_out, index_out = case / "snapshot.json", case / "index.json"
+    subprocess.run([cli, "snapshot", "--input", str(case / "graph/chain-input.json"), "--out", str(graph_out)], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([cli, "index", "--input", str(case / "graph/chain-input.json"), "--out", str(index_out)], check=True, stdout=subprocess.DEVNULL)
+    snapshot, index = json.load(open(graph_out)), json.load(open(index_out))
+    assert snapshot["row_counts"] == {"nodes": graph_size, "edges": graph_size - 1}, (graph_size, snapshot)
+    assert index["degree_summary"] == {
+        "max_out": 1, "max_out_node": 0, "max_in": 1, "max_in_node": 1,
+    }, (graph_size, index)
+
+for revoked_at in range(91, 1001):
+    roles_input = {
+        "schema":"rh-roles-input/1",
+        "authorization":{"state":"authorized"},
+        "permission_inventory_complete":True,
+        "as_of":revoked_at + 50,
+        "declarations":[
+            {"actor_id":101,"role":"owner","permission":1,"source":"provider","declared_at":100},
+            {"actor_id":102,"role":"member","permission":4,"source":"file","declared_at":110},
+            {"actor_id":103,"role":"maintainer","permission":2,"source":"operator","declared_at":90,"revoked_at":revoked_at},
+        ],
+        "observed_actions":[
+            {"actor_id":101,"actor_type":"human","kind":"release","at":120},
+            {"actor_id":103,"actor_type":"human","kind":"release","at":revoked_at - 1},
+            {"actor_id":102,"actor_type":"human","kind":"review","at":130},
+        ],
+        "queries":[
+            {"actor_id":101,"as_of":99}, {"actor_id":101,"as_of":100},
+            {"actor_id":103,"as_of":revoked_at - 1}, {"actor_id":103,"as_of":revoked_at},
+        ],
+        "permission_queries":[],
+    }
+    source, output = destination / f"roles-{revoked_at}.json", destination / f"roles-{revoked_at}.out"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(json.dumps(roles_input, separators=(",", ":")) + "\n")
+    subprocess.run([cli, "roles", "--input", str(source), "--out", str(output)], check=True, stdout=subprocess.DEVNULL)
+    roles = json.load(open(output))
+    assert [query["declared_role"] for query in roles["queries"]] == ["unknown", "owner", "maintainer", "unknown"], (revoked_at, roles)
+    assert roles["action_events_by_actor_type"]["release"]["human"] == 2, (revoked_at, roles)
+
+print("[synthetic] complete history, graph, and role-revocation ranges match independent expectations")
+PY
+
 echo "test_synthetic_fixtures OK"
