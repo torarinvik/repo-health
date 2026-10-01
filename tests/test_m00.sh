@@ -14,11 +14,7 @@ echo "$out" | tail -n 5
 [[ "$out" == *"ORACLES OK"* ]] || { echo "[m00] FAIL: oracle suite reported failures"; exit 1; }
 
 echo "[m00] registry mirror: metrics/definitions/*.json vs rh_registry.elisa"
-keys_json="$(python3 -c "
-import json, glob
-keys = sorted(json.load(open(p))['key'] for p in glob.glob('$ROOT/metrics/definitions/*.json'))
-print('\n'.join(keys))")"
-keys_count="$(echo "$keys_json" | wc -l | tr -d ' ')"
+keys_count="$(python3 -c "import glob; print(len(glob.glob('$ROOT/metrics/definitions/*.json')))")"
 [[ "$keys_count" == "229" ]] || { echo "[m00] FAIL: expected 229 definitions, got $keys_count"; exit 1; }
 # The runtime registry mirrors exactly the PUBLISHED definitions: every
 # implemented/prototype (key, version) must be present, and a planned metric

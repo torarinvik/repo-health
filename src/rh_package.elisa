@@ -4502,6 +4502,168 @@ module Package:
                 r <- r + 1
 
     private:
+        struct RhDepsDigestCoverage:
+            known: i64
+            total: i64
+
+        enum RhDepsSecuritySummary:
+            Unavailable
+            Observed(advisory_unknown_nodes: i64, fixed_version_available: bool, advisory_records: i64, advisories: i64, affected_nodes: i64, affected_direct_nodes: i64, affected_transitive_nodes: i64, affected_unreachable_nodes: i64, withdrawn: i64)
+
+        # The public by_ecosystem object is a compatibility projection. Keep its
+        # values in one inline record while validating and writing each row so
+        # counters from separate parallel columns cannot be mixed accidentally.
+        struct RhDepsEcosystemSummary:
+            ecosystem_code: i64
+            declared_requirements: i64
+            resolved_edges: i64
+            unresolved_requirements: i64
+            unsupported_range_count: i64
+            requirements_direct: i64
+            resolved_direct_versions: i64
+            unresolved_direct_requirements: i64
+            resolved_transitive_versions: i64
+            runtime_requirements: i64
+            development_requirements: i64
+            optional_requirements: i64
+            peer_requirements: i64
+            unknown_scope_requirements: i64
+            runtime_direct_count: i64
+            build_direct_count: i64
+            optional_direct_count: i64
+            unknown_scope_count: i64
+            unpinned_requirement_count: i64
+            artifact_digest_coverage: RhDepsDigestCoverage
+            maximum_observed_depth: i64
+            resolution_complete: bool
+            node_count: i64
+            edge_count: i64
+            runtime_resolved_edges: i64
+            development_resolved_edges: i64
+            optional_resolved_edges: i64
+            peer_resolved_edges: i64
+            unknown_scope_resolved_edges: i64
+            security: RhDepsSecuritySummary
+
+        def rh_deps_security_columns_valid(advisory_unknown_nodes: i64, fixed_version_available: i64, advisories: i64, advisory_records: i64, affected_nodes: i64, affected_direct_nodes: i64, affected_transitive_nodes: i64, affected_unreachable_nodes: i64, withdrawn: i64) -> bool:
+            return false if advisory_unknown_nodes < -1 or fixed_version_available < -1 or advisories < -1 or advisory_records < -1 or affected_nodes < -1 or affected_direct_nodes < -1 or affected_transitive_nodes < -1 or affected_unreachable_nodes < -1 or withdrawn < -1
+            unavailable: bool = advisories == -1
+            return false if (advisory_unknown_nodes == -1) != unavailable or (fixed_version_available == -1) != unavailable or (advisory_records == -1) != unavailable or (affected_nodes == -1) != unavailable or (affected_direct_nodes == -1) != unavailable or (affected_transitive_nodes == -1) != unavailable or (affected_unreachable_nodes == -1) != unavailable or (withdrawn == -1) != unavailable
+            return false if not unavailable and fixed_version_available > 1
+            true
+
+        def rh_deps_ecosystem_summary_valid(summary: RhDepsEcosystemSummary) -> bool:
+            return false if summary.ecosystem_code < 0 or summary.ecosystem_code > 8
+            return false if summary.declared_requirements < 0 or summary.resolved_edges < 0 or summary.unresolved_requirements < 0 or summary.unsupported_range_count < 0
+            return false if summary.requirements_direct < 0 or summary.resolved_direct_versions < 0 or summary.unresolved_direct_requirements < 0 or summary.resolved_transitive_versions < 0
+            return false if summary.runtime_requirements < 0 or summary.development_requirements < 0 or summary.optional_requirements < 0 or summary.peer_requirements < 0 or summary.unknown_scope_requirements < 0
+            return false if summary.runtime_direct_count < 0 or summary.build_direct_count < 0 or summary.optional_direct_count < 0 or summary.unknown_scope_count < 0 or summary.unpinned_requirement_count < 0
+            return false if summary.maximum_observed_depth < 0 or summary.node_count < 0 or summary.edge_count < 0
+            return false if summary.runtime_resolved_edges < 0 or summary.development_resolved_edges < 0 or summary.optional_resolved_edges < 0 or summary.peer_resolved_edges < 0 or summary.unknown_scope_resolved_edges < 0
+            return false if not Observation::rh_metric_value_valid(Observation::RhMetricValue.CountPair(summary.artifact_digest_coverage.known, summary.artifact_digest_coverage.total))
+            match summary.security:
+                RhDepsSecuritySummary.Unavailable:
+                    true
+                RhDepsSecuritySummary.Observed(advisory_unknown_nodes, fixed_version_available, advisory_records, advisories, affected_nodes, affected_direct_nodes, affected_transitive_nodes, affected_unreachable_nodes, withdrawn):
+                    advisory_unknown_nodes >= 0 and advisory_records >= 0 and advisories >= 0 and affected_nodes >= 0 and affected_direct_nodes >= 0 and affected_transitive_nodes >= 0 and affected_unreachable_nodes >= 0 and withdrawn >= 0
+
+        def rh_deps_security_summary_emit(out: mutable darray[u8]&, security: RhDepsSecuritySummary) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, ",\"known_advisory_records\":")
+            match security:
+                RhDepsSecuritySummary.Unavailable:
+                    Base::rh_push_text(out, "null,\"known_unique_advisories\":null,\"affected_resolved_nodes\":null,\"affected_direct_nodes\":null,\"affected_transitive_nodes\":null,\"affected_unreachable_nodes\":null,\"advisory_match_unknown_nodes\":null,\"fixed_version_available\":null,\"withdrawn_advisory_count\":null")
+                RhDepsSecuritySummary.Observed(advisory_unknown_nodes, fixed_version_available, advisory_records, advisories, affected_nodes, affected_direct_nodes, affected_transitive_nodes, affected_unreachable_nodes, withdrawn):
+                    Base::rh_push_decimal_i64(out, advisory_records)
+                    Base::rh_push_text(out, ",\"known_unique_advisories\":")
+                    Base::rh_push_decimal_i64(out, advisories)
+                    Base::rh_push_text(out, ",\"affected_resolved_nodes\":")
+                    Base::rh_push_decimal_i64(out, affected_nodes)
+                    Base::rh_push_text(out, ",\"affected_direct_nodes\":")
+                    Base::rh_push_decimal_i64(out, affected_direct_nodes)
+                    Base::rh_push_text(out, ",\"affected_transitive_nodes\":")
+                    Base::rh_push_decimal_i64(out, affected_transitive_nodes)
+                    Base::rh_push_text(out, ",\"affected_unreachable_nodes\":")
+                    Base::rh_push_decimal_i64(out, affected_unreachable_nodes)
+                    Base::rh_push_text(out, ",\"advisory_match_unknown_nodes\":")
+                    Base::rh_push_decimal_i64(out, advisory_unknown_nodes)
+                    Base::rh_push_text(out, ",\"fixed_version_available\":")
+                    Base::rh_push_text(out, "true" if fixed_version_available else "false")
+                    Base::rh_push_text(out, ",\"withdrawn_advisory_count\":")
+                    Base::rh_push_decimal_i64(out, withdrawn)
+
+        def rh_deps_ecosystem_summary_emit(out: mutable darray[u8]&, summary: RhDepsEcosystemSummary) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not rh_deps_ecosystem_summary_valid(summary)
+            Base::rh_push_text(out, "{\"ecosystem\":\"")
+            Base::rh_push_text(out, rh_deps_eco(summary.ecosystem_code))
+            Base::rh_push_text(out, "\",\"evidence\":\"")
+            Base::rh_push_text(out, rh_deps_spec(summary.ecosystem_code))
+            Base::rh_push_text(out, "\",\"declared_requirements\":")
+            Base::rh_push_decimal_i64(out, summary.declared_requirements)
+            Base::rh_push_text(out, ",\"resolved_edges\":")
+            Base::rh_push_decimal_i64(out, summary.resolved_edges)
+            Base::rh_push_text(out, ",\"unresolved_requirements\":")
+            Base::rh_push_decimal_i64(out, summary.unresolved_requirements)
+            Base::rh_push_text(out, ",\"unsupported_range_count\":")
+            Base::rh_push_decimal_i64(out, summary.unsupported_range_count)
+            Base::rh_push_text(out, ",\"requirements_direct\":")
+            Base::rh_push_decimal_i64(out, summary.requirements_direct)
+            Base::rh_push_text(out, ",\"resolved_direct_versions\":")
+            Base::rh_push_decimal_i64(out, summary.resolved_direct_versions)
+            Base::rh_push_text(out, ",\"unresolved_direct_requirements\":")
+            Base::rh_push_decimal_i64(out, summary.unresolved_direct_requirements)
+            Base::rh_push_text(out, ",\"resolved_transitive_versions\":")
+            Base::rh_push_decimal_i64(out, summary.resolved_transitive_versions)
+            Base::rh_push_text(out, ",\"runtime_requirements\":")
+            Base::rh_push_decimal_i64(out, summary.runtime_requirements)
+            Base::rh_push_text(out, ",\"development_requirements\":")
+            Base::rh_push_decimal_i64(out, summary.development_requirements)
+            Base::rh_push_text(out, ",\"optional_requirements\":")
+            Base::rh_push_decimal_i64(out, summary.optional_requirements)
+            Base::rh_push_text(out, ",\"peer_requirements\":")
+            Base::rh_push_decimal_i64(out, summary.peer_requirements)
+            Base::rh_push_text(out, ",\"unknown_scope_requirements\":")
+            Base::rh_push_decimal_i64(out, summary.unknown_scope_requirements)
+            Base::rh_push_text(out, ",\"runtime_direct_count\":")
+            Base::rh_push_decimal_i64(out, summary.runtime_direct_count)
+            Base::rh_push_text(out, ",\"build_direct_count\":")
+            Base::rh_push_decimal_i64(out, summary.build_direct_count)
+            Base::rh_push_text(out, ",\"optional_direct_count\":")
+            Base::rh_push_decimal_i64(out, summary.optional_direct_count)
+            Base::rh_push_text(out, ",\"unknown_scope_count\":")
+            Base::rh_push_decimal_i64(out, summary.unknown_scope_count)
+            Base::rh_push_text(out, ",\"unpinned_requirement_count\":")
+            Base::rh_push_decimal_i64(out, summary.unpinned_requirement_count)
+            Base::rh_push_text(out, ",\"artifact_digest_coverage\":")
+            if summary.artifact_digest_coverage.total > 0:
+                Base::rh_push_text(out, "{\"num\":")
+                Base::rh_push_decimal_i64(out, summary.artifact_digest_coverage.known)
+                Base::rh_push_text(out, ",\"den\":")
+                Base::rh_push_decimal_i64(out, summary.artifact_digest_coverage.total)
+                Base::rh_push_text(out, "}")
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"maximum_observed_depth\":")
+            Base::rh_push_decimal_i64(out, summary.maximum_observed_depth)
+            Base::rh_push_text(out, ",\"resolution_complete\":")
+            Base::rh_push_text(out, "true" if summary.resolution_complete else "false")
+            Base::rh_push_text(out, ",\"node_count\":")
+            Base::rh_push_decimal_i64(out, summary.node_count)
+            Base::rh_push_text(out, ",\"edge_count\":")
+            Base::rh_push_decimal_i64(out, summary.edge_count)
+            Base::rh_push_text(out, ",\"runtime_resolved_edges\":")
+            Base::rh_push_decimal_i64(out, summary.runtime_resolved_edges)
+            Base::rh_push_text(out, ",\"development_resolved_edges\":")
+            Base::rh_push_decimal_i64(out, summary.development_resolved_edges)
+            Base::rh_push_text(out, ",\"optional_resolved_edges\":")
+            Base::rh_push_decimal_i64(out, summary.optional_resolved_edges)
+            Base::rh_push_text(out, ",\"peer_resolved_edges\":")
+            Base::rh_push_decimal_i64(out, summary.peer_resolved_edges)
+            Base::rh_push_text(out, ",\"unknown_scope_resolved_edges\":")
+            Base::rh_push_decimal_i64(out, summary.unknown_scope_resolved_edges)
+            rh_deps_security_summary_emit(out, summary.security)
+            Base::rh_push_text(out, "}")
+            true
+
         def rh_deps_emit_metric(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, reason: cstr, dependency_evidence: bool, osv_evidence: bool) -> bool can[Memory.Allocate, Abort.Panic]:
             evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
             Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.DependencyInput) if dependency_evidence
@@ -4541,6 +4703,9 @@ module Package:
         # the denominator-free count can be audited. It never claims a dependency
         # is safe or that the graph is complete (R009/F022/R030).
         def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, transitive_resolved: mutable darray[i64]&, runtime_requirements: mutable darray[i64]&, development_requirements: mutable darray[i64]&, optional_requirements: mutable darray[i64]&, peer_requirements: mutable darray[i64]&, unknown_scope_requirements: mutable darray[i64]&, runtime_direct: mutable darray[i64]&, build_direct: mutable darray[i64]&, optional_direct: mutable darray[i64]&, unknown_scope_direct: mutable darray[i64]&, unpinned: mutable darray[i64]&, digest_known: mutable darray[i64]&, digest_total: mutable darray[i64]&, maximum_depth: mutable darray[i64]&, resolution_complete: mutable darray[i64]&, node_count: mutable darray[i64]&, edge_count: mutable darray[i64]&, advisory_unknown_nodes: mutable darray[i64]&, fixed_version_available: mutable darray[i64]&, runtime_edges: mutable darray[i64]&, development_edges: mutable darray[i64]&, optional_edges: mutable darray[i64]&, peer_edges: mutable darray[i64]&, unknown_scope_edges: mutable darray[i64]&, advisories: mutable darray[i64]&, advisory_records: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, affected_direct_nodes: mutable darray[i64]&, affected_transitive_nodes: mutable darray[i64]&, affected_unreachable_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if eco_codes.count > 8
+            return false if declared.count != eco_codes.count or resolved.count != eco_codes.count or unresolved.count != eco_codes.count or unsupported.count != eco_codes.count or direct_declared.count != eco_codes.count or direct_resolved.count != eco_codes.count or direct_unresolved.count != eco_codes.count or transitive_resolved.count != eco_codes.count or runtime_requirements.count != eco_codes.count or development_requirements.count != eco_codes.count or optional_requirements.count != eco_codes.count or peer_requirements.count != eco_codes.count or unknown_scope_requirements.count != eco_codes.count or runtime_direct.count != eco_codes.count or build_direct.count != eco_codes.count or optional_direct.count != eco_codes.count or unknown_scope_direct.count != eco_codes.count or unpinned.count != eco_codes.count or digest_known.count != eco_codes.count or digest_total.count != eco_codes.count or maximum_depth.count != eco_codes.count or resolution_complete.count != eco_codes.count or node_count.count != eco_codes.count or edge_count.count != eco_codes.count or advisory_unknown_nodes.count != eco_codes.count or fixed_version_available.count != eco_codes.count or runtime_edges.count != eco_codes.count or development_edges.count != eco_codes.count or optional_edges.count != eco_codes.count or peer_edges.count != eco_codes.count or unknown_scope_edges.count != eco_codes.count or advisories.count != eco_codes.count or advisory_records.count != eco_codes.count or affected_nodes.count != eco_codes.count or affected_direct_nodes.count != eco_codes.count or affected_transitive_nodes.count != eco_codes.count or affected_unreachable_nodes.count != eco_codes.count or withdrawn.count != eco_codes.count
+
             total_declared: i64 =
                 while i < eco_codes.count.i64() |total_declared: i64 = 0, i: i64 = 0| -> total_declared:
                     total_declared <- total_declared + declared[i.usize()]
@@ -4776,122 +4941,51 @@ module Package:
             return false if not metrics_ok
             Base::rh_push_text(out, "],\"by_ecosystem\":[")
             while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, transitive_resolved, runtime_requirements, development_requirements, optional_requirements, peer_requirements, unknown_scope_requirements, runtime_direct, build_direct, optional_direct, unknown_scope_direct, unpinned, digest_known, digest_total, maximum_depth, resolution_complete, node_count, edge_count, advisory_unknown_nodes, fixed_version_available, runtime_edges, development_edges, optional_edges, peer_edges, unknown_scope_edges, advisories, advisory_records, affected_nodes, affected_direct_nodes, affected_transitive_nodes, affected_unreachable_nodes, withdrawn, out|:
+                index: usize = k.usize()
+                duplicate_ecosystem: bool =
+                    for prior in 0..<k |duplicate: bool = false| -> duplicate:
+                        duplicate <- true if eco_codes[prior.usize()] == eco_codes[index]
+                return false if duplicate_ecosystem
+                return false if resolution_complete[index] != 0 and resolution_complete[index] != 1
+                return false if not rh_deps_security_columns_valid(advisory_unknown_nodes[index], fixed_version_available[index], advisories[index], advisory_records[index], affected_nodes[index], affected_direct_nodes[index], affected_transitive_nodes[index], affected_unreachable_nodes[index], withdrawn[index])
+                return false if (advisories[index] >= 0) != security_observed
+                security: RhDepsSecuritySummary = RhDepsSecuritySummary.Unavailable if advisories[index] < 0 else RhDepsSecuritySummary.Observed(advisory_unknown_nodes[index], fixed_version_available[index] == 1, advisory_records[index], advisories[index], affected_nodes[index], affected_direct_nodes[index], affected_transitive_nodes[index], affected_unreachable_nodes[index], withdrawn[index])
+                summary: RhDepsEcosystemSummary = RhDepsEcosystemSummary{
+                    ecosystem_code: eco_codes[index],
+                    declared_requirements: declared[index],
+                    resolved_edges: resolved[index],
+                    unresolved_requirements: unresolved[index],
+                    unsupported_range_count: unsupported[index],
+                    requirements_direct: direct_declared[index],
+                    resolved_direct_versions: direct_resolved[index],
+                    unresolved_direct_requirements: direct_unresolved[index],
+                    resolved_transitive_versions: transitive_resolved[index],
+                    runtime_requirements: runtime_requirements[index],
+                    development_requirements: development_requirements[index],
+                    optional_requirements: optional_requirements[index],
+                    peer_requirements: peer_requirements[index],
+                    unknown_scope_requirements: unknown_scope_requirements[index],
+                    runtime_direct_count: runtime_direct[index],
+                    build_direct_count: build_direct[index],
+                    optional_direct_count: optional_direct[index],
+                    unknown_scope_count: unknown_scope_direct[index],
+                    unpinned_requirement_count: unpinned[index],
+                    artifact_digest_coverage: RhDepsDigestCoverage{known: digest_known[index], total: digest_total[index]},
+                    maximum_observed_depth: maximum_depth[index],
+                    resolution_complete: resolution_complete[index] == 1,
+                    node_count: node_count[index],
+                    edge_count: edge_count[index],
+                    runtime_resolved_edges: runtime_edges[index],
+                    development_resolved_edges: development_edges[index],
+                    optional_resolved_edges: optional_edges[index],
+                    peer_resolved_edges: peer_edges[index],
+                    unknown_scope_resolved_edges: unknown_scope_edges[index],
+                    security: security
+                }
+                return false if not rh_deps_ecosystem_summary_valid(summary)
                 if k > 0:
                     out.push(44)
-                ec: i64 = eco_codes[k.usize()]
-                Base::rh_push_text(out, "{\"ecosystem\":\"")
-                Base::rh_push_text(out, rh_deps_eco(ec))
-                Base::rh_push_text(out, "\",\"evidence\":\"")
-                Base::rh_push_text(out, rh_deps_spec(ec))
-                Base::rh_push_text(out, "\",\"declared_requirements\":")
-                Base::rh_push_decimal_i64(out, declared[k.usize()])
-                Base::rh_push_text(out, ",\"resolved_edges\":")
-                Base::rh_push_decimal_i64(out, resolved[k.usize()])
-                Base::rh_push_text(out, ",\"unresolved_requirements\":")
-                Base::rh_push_decimal_i64(out, unresolved[k.usize()])
-                Base::rh_push_text(out, ",\"unsupported_range_count\":")
-                Base::rh_push_decimal_i64(out, unsupported[k.usize()])
-                Base::rh_push_text(out, ",\"requirements_direct\":")
-                Base::rh_push_decimal_i64(out, direct_declared[k.usize()])
-                Base::rh_push_text(out, ",\"resolved_direct_versions\":")
-                Base::rh_push_decimal_i64(out, direct_resolved[k.usize()])
-                Base::rh_push_text(out, ",\"unresolved_direct_requirements\":")
-                Base::rh_push_decimal_i64(out, direct_unresolved[k.usize()])
-                Base::rh_push_text(out, ",\"resolved_transitive_versions\":")
-                Base::rh_push_decimal_i64(out, transitive_resolved[k.usize()])
-                Base::rh_push_text(out, ",\"runtime_requirements\":")
-                Base::rh_push_decimal_i64(out, runtime_requirements[k.usize()])
-                Base::rh_push_text(out, ",\"development_requirements\":")
-                Base::rh_push_decimal_i64(out, development_requirements[k.usize()])
-                Base::rh_push_text(out, ",\"optional_requirements\":")
-                Base::rh_push_decimal_i64(out, optional_requirements[k.usize()])
-                Base::rh_push_text(out, ",\"peer_requirements\":")
-                Base::rh_push_decimal_i64(out, peer_requirements[k.usize()])
-                Base::rh_push_text(out, ",\"unknown_scope_requirements\":")
-                Base::rh_push_decimal_i64(out, unknown_scope_requirements[k.usize()])
-                Base::rh_push_text(out, ",\"runtime_direct_count\":")
-                Base::rh_push_decimal_i64(out, runtime_direct[k.usize()])
-                Base::rh_push_text(out, ",\"build_direct_count\":")
-                Base::rh_push_decimal_i64(out, build_direct[k.usize()])
-                Base::rh_push_text(out, ",\"optional_direct_count\":")
-                Base::rh_push_decimal_i64(out, optional_direct[k.usize()])
-                Base::rh_push_text(out, ",\"unknown_scope_count\":")
-                Base::rh_push_decimal_i64(out, unknown_scope_direct[k.usize()])
-                Base::rh_push_text(out, ",\"unpinned_requirement_count\":")
-                Base::rh_push_decimal_i64(out, unpinned[k.usize()])
-                Base::rh_push_text(out, ",\"artifact_digest_coverage\":")
-                if digest_total[k.usize()] > 0:
-                    Base::rh_push_text(out, "{\"num\":")
-                    Base::rh_push_decimal_i64(out, digest_known[k.usize()])
-                    Base::rh_push_text(out, ",\"den\":")
-                    Base::rh_push_decimal_i64(out, digest_total[k.usize()])
-                    Base::rh_push_text(out, "}")
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, ",\"maximum_observed_depth\":")
-                Base::rh_push_decimal_i64(out, maximum_depth[k.usize()])
-                Base::rh_push_text(out, ",\"resolution_complete\":")
-                Base::rh_push_text(out, "true" if resolution_complete[k.usize()] == 1 else "false")
-                Base::rh_push_text(out, ",\"node_count\":")
-                Base::rh_push_decimal_i64(out, node_count[k.usize()])
-                Base::rh_push_text(out, ",\"edge_count\":")
-                Base::rh_push_decimal_i64(out, edge_count[k.usize()])
-                Base::rh_push_text(out, ",\"runtime_resolved_edges\":")
-                Base::rh_push_decimal_i64(out, runtime_edges[k.usize()])
-                Base::rh_push_text(out, ",\"development_resolved_edges\":")
-                Base::rh_push_decimal_i64(out, development_edges[k.usize()])
-                Base::rh_push_text(out, ",\"optional_resolved_edges\":")
-                Base::rh_push_decimal_i64(out, optional_edges[k.usize()])
-                Base::rh_push_text(out, ",\"peer_resolved_edges\":")
-                Base::rh_push_decimal_i64(out, peer_edges[k.usize()])
-                Base::rh_push_text(out, ",\"unknown_scope_resolved_edges\":")
-                Base::rh_push_decimal_i64(out, unknown_scope_edges[k.usize()])
-                Base::rh_push_text(out, ",\"known_advisory_records\":")
-                if security_observed:
-                    Base::rh_push_decimal_i64(out, advisory_records[k.usize()])
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, ",\"known_unique_advisories\":")
-                if security_observed:
-                    Base::rh_push_decimal_i64(out, advisories[k.usize()])
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, ",\"affected_resolved_nodes\":")
-                if security_observed:
-                    Base::rh_push_decimal_i64(out, affected_nodes[k.usize()])
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, ",\"affected_direct_nodes\":")
-                if security_observed:
-                    Base::rh_push_decimal_i64(out, affected_direct_nodes[k.usize()])
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, ",\"affected_transitive_nodes\":")
-                if security_observed:
-                    Base::rh_push_decimal_i64(out, affected_transitive_nodes[k.usize()])
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, ",\"affected_unreachable_nodes\":")
-                if security_observed:
-                    Base::rh_push_decimal_i64(out, affected_unreachable_nodes[k.usize()])
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, ",\"advisory_match_unknown_nodes\":")
-                if security_observed:
-                    Base::rh_push_decimal_i64(out, advisory_unknown_nodes[k.usize()])
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, ",\"fixed_version_available\":")
-                if security_observed:
-                    Base::rh_push_text(out, "true" if fixed_version_available[k.usize()] == 1 else "false")
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, ",\"withdrawn_advisory_count\":")
-                if security_observed:
-                    Base::rh_push_decimal_i64(out, withdrawn[k.usize()])
-                else:
-                    Base::rh_push_text(out, "null")
-                Base::rh_push_text(out, "}")
+                return false if not rh_deps_ecosystem_summary_emit(out, summary)
                 k <- k + 1
             Base::rh_push_text(out, "]}")
             true
