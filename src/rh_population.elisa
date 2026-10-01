@@ -128,12 +128,6 @@ module Population:
             return RH_POP_STATUS_UNKNOWN if Population::rh_population_eq(texts, s, e, "unknown")
             -1
 
-        def rh_population_status_label(status: u8) -> u8&:
-            return "observed" if status == RH_POP_STATUS_OBSERVED
-            return "partial" if status == RH_POP_STATUS_PARTIAL
-            return "unavailable" if status == RH_POP_STATUS_UNAVAILABLE
-            "unknown"
-
         def rh_population_policy(texts: darray[u8]&, s: i64, e: i64) -> i64:
             return RH_POP_POLICY_PASS if Population::rh_population_eq(texts, s, e, "pass")
             return RH_POP_POLICY_FAIL if Population::rh_population_eq(texts, s, e, "fail")
@@ -174,6 +168,30 @@ module Population:
             out.push(34)
             Base::rh_json_escape(out, texts, s.usize(), e.usize())
             out.push(34)
+
+        def rh_population_emit_cell_metric(out: mutable darray[u8]&, texts: darray[u8]&, metric: RhPopulationMetric, cell: RhPopulationCell) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if cell.status > RH_POP_STATUS_UNKNOWN
+            emitted: bool =
+                observed: bool = cell.status == RH_POP_STATUS_OBSERVED
+                incomplete: bool = cell.status == RH_POP_STATUS_PARTIAL
+                status: u8 = Observation::RH_ST_OBSERVED if observed else Observation::RH_ST_PARTIAL if incomplete else Observation::RH_ST_UNAVAILABLE if cell.status == RH_POP_STATUS_UNAVAILABLE else Observation::RH_ST_NOT_OBSERVED
+                value: Observation::RhMetricValue = Observation::RhMetricValue.Count(cell.value) if observed else Observation::RhMetricValue.Absent
+                completeness: Observation::RhCompleteness = Observation::RhCompleteness.Complete if observed else Observation::RhCompleteness.Partial if incomplete else Observation::RhCompleteness.Unknown
+                validity: Observation::RhValidity = Observation::RhValidity.Valid if observed else Observation::RhValidity.Unknown
+                quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: completeness, freshness: Observation::RhFreshness.Unknown, validity: validity, provenance: Observation::RhProvenanceQuality.EvidenceBacked}
+                evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+                Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.PopulationInput)
+                reason: cstr = "population-cell-partial" if incomplete else "population-cell-unavailable" if cell.status == RH_POP_STATUS_UNAVAILABLE else "population-cell-unknown" if cell.status == RH_POP_STATUS_UNKNOWN else ""
+                observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(status, value, incomplete, quality, evidence)
+                key: sview = string_view_slice(bytes_view(texts), metric.key_s.usize(), metric.key_e.usize())
+                version: sview = string_view_slice(bytes_view(texts), metric.version_s.usize(), metric.version_e.usize())
+                Observation::rh_observation_emit_metric_views(out, key, version, reason, observation)
+            return false if not emitted
+            out.pop()
+            Base::rh_push_text(out, ",\"policy\":\"")
+            Base::rh_push_text(out, Population::rh_population_policy_label(cell.policy))
+            Base::rh_push_text(out, "\"}")
+            true
 
         def rh_population_metric_index(metrics: darray[RhPopulationMetric]&, texts: darray[u8]&, key_s: i64, key_e: i64, version_s: i64, version_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             while i < metrics.count |i: usize = 0, metrics, texts, key_s, key_e, version_s, version_e|:
@@ -624,7 +642,7 @@ module Population:
                 reason_e: mutable i64 = 0
                 return -1 if not Population::rh_population_str(nodes, texts, unresolved, "package", &us, &ue) or not Population::rh_population_str(nodes, texts, unresolved, "reason", &reason_s, &reason_e) or us == ue or reason_s == reason_e
                 unresolved <- nodes[unresolved.usize()].next_sibling
-            Base::rh_push_text(out, "{\"schema\":\"rh-population-result/2\",\"focal\":{\"package\":")
+            Base::rh_push_text(out, "{\"schema\":\"rh-population-result/3\",\"focal\":{\"package\":")
             Population::rh_population_emit_span(out, texts, focal_s, focal_e)
             Base::rh_push_text(out, ",\"version_policy\":")
             Population::rh_population_emit_span(out, texts, policy_s, policy_e)
@@ -713,18 +731,7 @@ module Population:
                         out.push(44)
                     c: RhPopulationCell = cells[(d.cell_start + j).usize()]
                     m: RhPopulationMetric = metrics[c.metric_index.usize()]
-                    Base::rh_push_text(out, "{\"key\":")
-                    Population::rh_population_emit_span(out, texts, m.key_s, m.key_e)
-                    Base::rh_push_text(out, ",\"version\":")
-                    Population::rh_population_emit_span(out, texts, m.version_s, m.version_e)
-                    Base::rh_push_text(out, ",\"status\":\"")
-                    Base::rh_push_text(out, Population::rh_population_status_label(c.status))
-                    Base::rh_push_text(out, "\",\"value\":")
-                    Base::rh_push_decimal_i64(out, c.value) if c.has_value
-                    Base::rh_push_text(out, "null") if not c.has_value
-                    Base::rh_push_text(out, ",\"policy\":\"")
-                    Base::rh_push_text(out, Population::rh_population_policy_label(c.policy))
-                    Base::rh_push_text(out, "\"}")
+                    return -1 if not Population::rh_population_emit_cell_metric(out, texts, m, c)
                     j <- j + 1
                 Base::rh_push_text(out, "]}")
                 i <- i + 1

@@ -30,7 +30,7 @@ for p in sorted(glob.glob(os.path.join(root, "schemas", "*.schema.json"))):
     assert s["schema"] == "rh-jsonschema/1", p
     assert s["targets"], p
     names.add(s["name"])
-for want in ("connector-manifest", "canonical-repo", "dep-graph", "adapter-transformation", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result", "pylock-artifact-observation-result", "pylock-marker-evaluation", "projection-snapshot", "cyclonedx", "spdx", "inventory-result", "continuity-metrics", "succession-result", "parser-diff-result", "policy-result", "replay-result", "registry-meta", "registry-meta-result", "distribution", "archive", "role-publication", "homebrew", "osv-query-input", "osv-commit-query-input", "osv-query-batch-result", "osv-query-batch-pages-result", "osv-query-batch-hydrated-result", "snapshot-reconcile-input", "snapshot-reconcile-result", "forge-events-input", "ingest-input", "postgres-legacy-ingest-input", "postgres-command", "postgres-result", "github-review-capability-probe-result", "github-collaborator-probe-result", "gitlab-capability-matrix", "forge-capability-matrix", "bitbucket-capability-matrix", "correction-evidence-policy", "correction-evidence-verification", "privacy-history"):
+for want in ("connector-manifest", "canonical-repo", "dep-graph", "adapter-transformation", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result", "pylock-artifact-observation-result", "pylock-marker-evaluation", "projection-snapshot", "cyclonedx", "spdx", "inventory-result", "continuity-metrics", "succession-result", "parser-diff-result", "policy-result", "population-result", "replay-result", "registry-meta", "registry-meta-result", "distribution", "archive", "role-publication", "homebrew", "osv-query-input", "osv-commit-query-input", "osv-query-batch-result", "osv-query-batch-pages-result", "osv-query-batch-hydrated-result", "snapshot-reconcile-input", "snapshot-reconcile-result", "forge-events-input", "ingest-input", "postgres-legacy-ingest-input", "postgres-command", "postgres-result", "github-review-capability-probe-result", "github-collaborator-probe-result", "gitlab-capability-matrix", "forge-capability-matrix", "bitbucket-capability-matrix", "correction-evidence-policy", "correction-evidence-verification", "privacy-history"):
     assert want in names, ("missing schema", want)
 print("[schemas] families OK:", ", ".join(sorted(names)))
 PY
@@ -153,6 +153,27 @@ PY
 done
 rm -f "$policy_negative"
 echo "[schemas] policy observed and not-applicable values are constrained"
+
+echo "[schemas] population cells constrain observation value and quality states"
+population_negative="$ROOT/fixtures/population/result-negative.json"
+for invalid in unknown-value partial-quality; do
+  python3 - "$ROOT/fixtures/population/result.json" "$population_negative" "$invalid" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+cell = document["dependents"][0]["metrics"][1] if sys.argv[3] == "unknown-value" else document["dependents"][1]["metrics"][0]
+if sys.argv[3] == "unknown-value":
+    cell["value"] = 1
+else:
+    cell["quality_dimensions"]["completeness"] = "complete"
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+  if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+    rm -f "$population_negative"
+    fail "population schema accepted $invalid cell state"
+  fi
+done
+rm -f "$population_negative"
+echo "[schemas] population observed, partial, and not-observed cells are constrained"
 
 echo "[schemas] replay ratio requires a positive denominator and retained evidence"
 replay_negative="$ROOT/fixtures/replay/replay-result-negative.json"

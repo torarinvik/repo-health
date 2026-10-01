@@ -18,7 +18,7 @@ JSON
 python3 - "$T/out.json" "$T/in.json" <<'PY'
 import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema"] == "rh-population-result/2", d
+assert d["schema"] == "rh-population-result/3", d
 assert d["discovery"]["truncated"] is True and d["discovery"]["page_limit"] == 100, d
 assert d["discovery"]["context"] == "cargo registry snapshot; focal release 1.2.0", d
 assert d["discovery"]["provider_status"] == "rate_limit" and d["discovery"]["replay_attempts"] == 2, d
@@ -47,6 +47,19 @@ assert by[("history.months_active", "1")]["coverage"] == {"observed": 1, "select
 assert by[("review.coverage", "2")]["coverage"] == {"observed": 2, "selected_dependents": 3}, by
 assert by[("review.coverage", "2")]["distribution"] == {"count": 2, "sum": 8, "min": 3, "max": 5}, by
 assert by[("review.coverage", "2")]["policy_counts"] == {"pass": 1, "fail": 1, "unknown": 1}, by
+cells = {(row["id"], cell["key"]): cell for row in d["dependents"] for cell in row["metrics"]}
+observed = cells[("repo-a", "history.months_active")]
+assert observed["status"] == "observed" and observed["value"] == 12 and observed["policy"] == "pass", observed
+assert observed["evidence"] == ["population-input"] and observed["quality_dimensions"] == {
+    "completeness":"complete", "freshness":"unknown", "validity":"valid", "provenance":"evidence_backed"}, observed
+partial = cells[("repo-b", "history.months_active")]
+assert partial["status"] == "partial" and partial["value"] is None and partial["reason"] == "population-cell-partial", partial
+assert partial["quality_dimensions"]["completeness"] == "partial" and partial["evidence"] == ["population-input"], partial
+unavailable = cells[("repo-c", "history.months_active")]
+assert unavailable["status"] == "unavailable" and unavailable["value"] is None and unavailable["reason"] == "population-cell-unavailable", unavailable
+unknown = cells[("repo-a", "review.coverage")]
+assert unknown["status"] == "not_observed" and unknown["value"] is None and unknown["reason"] == "population-cell-unknown", unknown
+assert unknown["policy"] == "unknown" and unknown["quality_dimensions"]["validity"] == "unknown", unknown
 assert "counts projects once" in d["note"], d
 report = json.load(open(sys.argv[1] + ".transformations.json"))
 assert report["schema"] == "rh-adapter-transformation-report/1", report
@@ -118,7 +131,7 @@ python3 - "$T/identity-in.json" "$T/downstream/downstream.json" "$T/identity-out
 import hashlib, json, pathlib, sys
 population, downstream, output = [pathlib.Path(path) for path in sys.argv[1:]]
 result = json.loads(output.read_bytes())
-assert result["schema"] == "rh-population-result/2", result
+assert result["schema"] == "rh-population-result/3", result
 assert result["project_identity_mapping"] == {"revision":21,"selected":3,"accepted":2,"unknown":1,"distinct_accepted_families":1}, result
 rows = {row["graph_node_id"]: row["project_identity"] for row in result["dependents"]}
 assert rows[1]["project_id"] == "forge:acme/repo-a" and rows[1]["reviewer_id"] == 91, rows
@@ -130,7 +143,7 @@ framed = (b"rh-population-identity-input/1\npopulation:" + str(len(population_ra
           + b"\ndownstream:" + str(len(downstream_raw)).encode() + b":" + downstream_raw)
 assert sidecar["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), sidecar
 assert sidecar["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), sidecar
-assert sidecar["output_schema"] == "rh-population-result/2", sidecar
+assert sidecar["output_schema"] == "rh-population-result/3", sidecar
 assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/4;dependents=1000;unresolved=1000;metrics=63;ratio-definitions=pooled-count-pairs;identity-join=true").hexdigest(), sidecar
 print("[population] canonical identity, unknown coverage, and input binding OK")
 PY
