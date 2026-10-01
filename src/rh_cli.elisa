@@ -314,6 +314,60 @@ def rh_out_path(dir: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memo
     out.push(0)
     true
 
+module ScanTelemetry:
+    public:
+        enum RhScanProcessPurpose:
+            GitClone
+            GitVersion
+            GitPartial
+            GitShallow
+            GitFiles
+            GitLog
+            GitEmptyCheck
+            GitDefaultCount
+            GitRefs
+
+    private:
+        def rh_purpose_name(purpose: RhScanProcessPurpose) -> u8&:
+            if purpose == RhScanProcessPurpose.GitClone: "git-clone"
+            elif purpose == RhScanProcessPurpose.GitVersion: "git-version"
+            elif purpose == RhScanProcessPurpose.GitPartial: "git-partial"
+            elif purpose == RhScanProcessPurpose.GitShallow: "git-shallow"
+            elif purpose == RhScanProcessPurpose.GitFiles: "git-files"
+            elif purpose == RhScanProcessPurpose.GitLog: "git-log"
+            elif purpose == RhScanProcessPurpose.GitEmptyCheck: "git-empty-check"
+            elif purpose == RhScanProcessPurpose.GitDefaultCount: "git-default-count"
+            else: "git-refs"
+
+        def rh_process_kind_name(kind: Process::RhProcessKind) -> u8&:
+            if kind == Process::RhProcessKind.Exit: "exit"
+            elif kind == Process::RhProcessKind.Timeout: "timeout"
+            elif kind == Process::RhProcessKind.OutputLimit: "output-limit"
+            elif kind == Process::RhProcessKind.SetupError: "setup-error"
+            elif kind == Process::RhProcessKind.Signal: "signal"
+            elif kind == Process::RhProcessKind.IoError: "io-error"
+            elif kind == Process::RhProcessKind.CapacityLimit: "capacity-limit"
+            else: "resource-limit"
+
+    public:
+        def append_process(rows: mutable darray[u8]&, purpose: RhScanProcessPurpose, result: Process::RhProcessResult) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(rows, ScanTelemetry::rh_purpose_name(purpose))
+            rows.push(9)
+            Base::rh_push_text(rows, ScanTelemetry::rh_process_kind_name(result.kind))
+            rows.push(9)
+            Base::rh_push_decimal_i64(rows, result.code.i64())
+            rows.push(9)
+            Base::rh_push_decimal_i64(rows, result.elapsed_ms)
+            rows.push(9)
+            Base::rh_push_decimal_i64(rows, result.stdout_bytes.i64())
+            rows.push(9)
+            Base::rh_push_decimal_i64(rows, result.stderr_bytes.i64())
+            rows.push(9)
+            Base::rh_push_decimal_i64(rows, result.peak_group_processes.i64())
+            rows.push(9)
+            Base::rh_push_decimal_u64(rows, result.peak_group_memory_bytes)
+            rows.push(10)
+
 def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     kind: u8 = Git::rh_url_kind(repo)
     if kind == Git::RH_URL_UNSUPPORTED:
@@ -349,6 +403,8 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if Git::rh_ensure_dir(evc) != 0:
         rh_cli_err("cannot create evidence directory")
         return 4
+    process_metrics: mutable darray[u8] = []
+    Base::rh_push_text(process_metrics, "rh-process-telemetry/1\npurpose\tkind\tcode\telapsed_ms\tstdout_bytes\tstderr_bytes\tpeak_processes\tpeak_memory_bytes\n")
     scan_repo: mutable cstr = repo
     clone_here: mutable darray[u8] = []
     if kind == Git::RH_URL_HTTPS:
@@ -361,7 +417,9 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
             rh_cli_err("cannot stage clone log")
             return 4
         clerrp: cstr = (&clerr[0]).cast[cstr] can Unsafe.PointerCast
-        if not Process::rh_succeeded(Git::rh_run_git_clone(repo, dest, clerrp, full)):
+        clone_result: Process::RhProcessResult = Git::rh_run_git_clone(repo, dest, clerrp, full)
+        ScanTelemetry::append_process(process_metrics, ScanTelemetry::RhScanProcessPurpose.GitClone, clone_result)
+        if not Process::rh_succeeded(clone_result):
             rh_cli_err("clone failed; see evidence/git-clone.err (no partial report)")
             return 4
         scan_repo <- dest
@@ -425,25 +483,33 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     verp: cstr = (&verf[0]).cast[cstr] can Unsafe.PointerCast
     verep: cstr = (&vere[0]).cast[cstr] can Unsafe.PointerCast
     fileserrp: cstr = (&fileserr[0]).cast[cstr] can Unsafe.PointerCast
-    if not Process::rh_succeeded(Git::rh_run_git_version(verp, verep)):
+    version_result: Process::RhProcessResult = Git::rh_run_git_version(verp, verep)
+    ScanTelemetry::append_process(process_metrics, ScanTelemetry::RhScanProcessPurpose.GitVersion, version_result)
+    if not Process::rh_succeeded(version_result):
         rh_cli_err("git --version failed")
         return 4
     partp: cstr = (&partf[0]).cast[cstr] can Unsafe.PointerCast
     partep: cstr = (&parte[0]).cast[cstr] can Unsafe.PointerCast
-    _ = Git::rh_run_git_partial(scan_repo, partp, partep)
+    partial_result: Process::RhProcessResult = Git::rh_run_git_partial(scan_repo, partp, partep)
+    ScanTelemetry::append_process(process_metrics, ScanTelemetry::RhScanProcessPurpose.GitPartial, partial_result)
     shaep: cstr = (&shae[0]).cast[cstr] can Unsafe.PointerCast
-    if not Process::rh_succeeded(Git::rh_run_git_shallow(scan_repo, shap, shaep)):
+    shallow_result: Process::RhProcessResult = Git::rh_run_git_shallow(scan_repo, shap, shaep)
+    ScanTelemetry::append_process(process_metrics, ScanTelemetry::RhScanProcessPurpose.GitShallow, shallow_result)
+    if not Process::rh_succeeded(shallow_result):
         rh_cli_err("rev-parse failed (not a repository?)")
         return 4
     files_result: Process::RhProcessResult = Git::rh_run_git_files(scan_repo, filesp, fileserrp)
+    ScanTelemetry::append_process(process_metrics, ScanTelemetry::RhScanProcessPurpose.GitFiles, files_result)
     logep: cstr = (&loge[0]).cast[cstr] can Unsafe.PointerCast
     log_result: Process::RhProcessResult = Git::rh_run_git_log(scan_repo, logp, logep, full)
+    ScanTelemetry::append_process(process_metrics, ScanTelemetry::RhScanProcessPurpose.GitLog, log_result)
     if not Process::rh_succeeded(log_result):
         headerr: mutable darray[u8] = []
         if not rh_out_path(evc, "git-head.err", headerr):
             rh_cli_err("cannot stage head error path")
             return 4
         head_result: Process::RhProcessResult = Git::rh_run_git_head(scan_repo, (&headerr[0]).cast[cstr] can Unsafe.PointerCast)
+        ScanTelemetry::append_process(process_metrics, ScanTelemetry::RhScanProcessPurpose.GitEmptyCheck, head_result)
         if head_result.kind == Process::RhProcessKind.Exit and head_result.code == 1:
             rh_cli_err("note: repository has no commits yet; reporting observed-empty history")
             empty_log: mutable darray[u8] = []
@@ -454,7 +520,8 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
             rh_cli_err("git log failed; see evidence/git-log.err (no partial report)")
             return 4
     defaultep: cstr = (&defaulte[0]).cast[cstr] can Unsafe.PointerCast
-    _ = Git::rh_run_git_default_count(scan_repo, defaultp, defaultep)
+    default_count_result: Process::RhProcessResult = Git::rh_run_git_default_count(scan_repo, defaultp, defaultep)
+    ScanTelemetry::append_process(process_metrics, ScanTelemetry::RhScanProcessPurpose.GitDefaultCount, default_count_result)
     shab: mutable darray[u8] = []
     if Base::rh_io_read(shap, shab) < 0:
         rh_cli_err("cannot read shallow evidence")
@@ -557,22 +624,30 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
         return 4
     identities: i64 = Base::rh_count_lines(uniqb)
     bots: i64 = Report::rh_count_bot_lines(uniqb)
-    refs_bytes: mutable darray[u8] =
+    refs_result: Process::RhProcessResult =
         refs_err: mutable darray[u8] = []
         if not rh_out_path(evc, "git-refs.err", refs_err):
             rh_cli_err("cannot stage ref-list error path")
             return 4
         refs_errp: cstr = (&refs_err[0]).cast[cstr] can Unsafe.PointerCast
-        refs_result: Process::RhProcessResult = Git::rh_run_git_refs(scan_repo, refsp, refs_errp)
-        bytes: mutable darray[u8] = []
-        read: bool = Base::rh_io_read(refsp, bytes) >= 0
-        if snap.commits_all > 0 and (not Process::rh_succeeded(refs_result) or not read):
-            rh_cli_err("git ref snapshot failed; no report published")
-            return 4
-        if not read and not Base::rh_io_write(refsp, bytes):
-            rh_cli_err("cannot write empty ref evidence")
-            return 4
-        bytes
+        Git::rh_run_git_refs(scan_repo, refsp, refs_errp)
+    refs_bytes: mutable darray[u8] = []
+    refs_read: bool = Base::rh_io_read(refsp, refs_bytes) >= 0
+    if snap.commits_all > 0 and (not Process::rh_succeeded(refs_result) or not refs_read):
+        rh_cli_err("git ref snapshot failed; no report published")
+        return 4
+    if not refs_read and not Base::rh_io_write(refsp, refs_bytes):
+        rh_cli_err("cannot write empty ref evidence")
+        return 4
+    ScanTelemetry::append_process(process_metrics, ScanTelemetry::RhScanProcessPurpose.GitRefs, refs_result)
+    process_metrics_path: mutable darray[u8] = []
+    if not rh_out_path(evc, "process-metrics.txt", process_metrics_path):
+        rh_cli_err("cannot stage process telemetry path")
+        return 4
+    process_metrics_ptr: cstr = (&process_metrics_path[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(process_metrics_ptr, process_metrics):
+        rh_cli_err("cannot write process telemetry evidence")
+        return 4
     filesb: mutable darray[u8] = []
     files_read: bool = Base::rh_io_read(filesp, filesb) >= 0
     if snap.commits_all > 0 and (not Process::rh_succeeded(files_result) or not files_read):
@@ -632,7 +707,7 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
         rh_cli_err("cannot read expected markdown output")
         return 4
     manp: cstr = (&manf[0]).cast[cstr] can Unsafe.PointerCast
-    if not Report::rh_write_manifest(manp, repo, &snap, &ctx, logb, defaultb, shab, filesb, refs_bytes, git_version_bytes, partb, report_bytes, markdown_bytes):
+    if not Report::rh_write_manifest(manp, repo, &snap, &ctx, logb, defaultb, shab, filesb, refs_bytes, git_version_bytes, partb, process_metrics, report_bytes, markdown_bytes):
         rh_cli_err("cannot write bundle.manifest")
         return 4
     done: mutable darray[u8] =
@@ -784,6 +859,25 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
             return 4
         if refs_integrity < 0:
             rh_cli_err("retained Git ref digest mismatch")
+            return 5
+    if bundle_version >= 4:
+        process_metrics_path: mutable darray[u8] = []
+        has_process_metrics_dir: bool = rh_dirname(bundle, process_metrics_path)
+        if has_process_metrics_dir:
+            process_metrics_path.push(47)
+        Base::rh_push_text(process_metrics_path, "evidence/process-metrics.txt")
+        process_metrics_path.push(0)
+        process_metrics_ptr: cstr = (&process_metrics_path[0]).cast[cstr] can Unsafe.PointerCast
+        retained_process_metrics: mutable darray[u8] = []
+        if Base::rh_io_read(process_metrics_ptr, retained_process_metrics) < 0:
+            rh_cli_err("cannot read retained process telemetry evidence")
+            return 4
+        process_metrics_integrity: i64 = Report::rh_manifest_sha256_matches(manb, "object-sha256-evidence/process-metrics.txt", retained_process_metrics)
+        if process_metrics_integrity == 0:
+            rh_cli_err("bundle has no unique process telemetry digest")
+            return 4
+        if process_metrics_integrity < 0:
+            rh_cli_err("retained process telemetry digest mismatch")
             return 5
     shallowpath: mutable darray[u8] = []
     has_shallow_dir: bool = rh_dirname(bundle, shallowpath)
