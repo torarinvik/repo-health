@@ -15,6 +15,19 @@ include "./rh_observation.elisa"
 
 module RolesReport:
     private:
+        struct RhRoleActorState:
+            actor_id: i64
+            persistent: mutable bool
+            active_declared: mutable bool
+            active_provider: mutable bool
+            active_provider_permission: mutable bool
+
+        struct RhRoleActorTallies:
+            declared_current: i64
+            active_declared_12m: i64
+            permission_current: i64
+            permission_inventory_denominator: i64
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_rr_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_literal(texts, s, e, lit)
@@ -54,6 +67,76 @@ module RolesReport:
             return Roles::RH_ACTOR_KIND_SERVICE if rh_rr_eq(texts, s, e, "service")
             return Roles::RH_ACTOR_KIND_UNKNOWN if rh_rr_eq(texts, s, e, "unknown")
             255
+
+        def rh_rr_actor_hash(actor_id: i64) -> usize:
+            key: mutable u64 = actor_id.u64()
+            hash: u64 =
+                while byte_index < 8 |hash: mutable u64 = 0xcbf29ce484222325, byte_index: usize = 0, key| -> hash:
+                    shift: u64 = byte_index.u64() * 8
+                    hash <- (hash ^ ((key >> shift).u8().u64())) * 0x100000001b3
+                    byte_index <- byte_index + 1
+            hash.usize()
+
+        def rh_rr_role_actor_state_index(actor_id: i64, slots: mutable darray[i64]&, actors: mutable darray[RhRoleActorState]&) -> usize can[Memory.Allocate, Abort.Panic]:
+            slot: mutable usize = RolesReport::rh_rr_actor_hash(actor_id) % slots.count
+            while slots[slot] != 0 |slot, slots, actors, actor_id|:
+                actor_index: usize = (slots[slot] - 1).usize()
+                return actor_index if actors[actor_index].actor_id == actor_id
+                slot <- (slot + 1) % slots.count
+            actors.push(RhRoleActorState{
+                actor_id: actor_id,
+                persistent: false,
+                active_declared: false,
+                active_provider: false,
+                active_provider_permission: false
+            })
+            slots[slot] <- actors.count.i64()
+            actors.count - 1
+
+        def rh_rr_role_actor_tallies(decls: darray[Roles::RhRoleDecl]&, persistent_actors: darray[i64]&, as_of: i64, has_as_of: bool, has_persistent_profile: bool, authorized: bool) -> RhRoleActorTallies can[Memory.Allocate, Abort.Panic]:
+            if not has_as_of:
+                return RhRoleActorTallies{declared_current: 0, active_declared_12m: -1, permission_current: 0, permission_inventory_denominator: 0}
+            max_actor_keys: usize = decls.count + persistent_actors.count if has_persistent_profile else decls.count
+            capacity: usize = max_actor_keys * 2 + 1
+            slots: mutable darray[i64] = []
+            while i < capacity |i: usize = 0, capacity, slots|:
+                slots.push(0)
+                i <- i + 1
+            actors: mutable darray[RhRoleActorState] = []
+            if has_persistent_profile:
+                while i < persistent_actors.count |i: usize = 0, persistent_actors, slots, actors|:
+                    actor_index: usize = RolesReport::rh_rr_role_actor_state_index(persistent_actors[i], slots, actors)
+                    actors[actor_index].persistent <- true
+                    i <- i + 1
+            declared_current: mutable i64 = 0
+            active_declared_12m: mutable i64 = 0 if has_persistent_profile else -1
+            permission_current: mutable i64 = 0
+            permission_inventory_denominator: mutable i64 = 0
+            while i < decls.count |i: usize = 0, decls, as_of, authorized, has_persistent_profile, slots, actors, declared_current, active_declared_12m, permission_current, permission_inventory_denominator|:
+                declaration: Roles::RhRoleDecl = decls[i]
+                active: bool = declaration.declared_at <= as_of and (declaration.revoked_at == 0 or declaration.revoked_at > as_of)
+                active_role: bool = active and (declaration.role == Roles::RH_ROLE_OWNER or declaration.role == Roles::RH_ROLE_MAINTAINER)
+                active_provider: bool = authorized and active and declaration.source == Roles::RH_DECL_SOURCE_PROVIDER
+                if active_role or active_provider:
+                    actor_index: usize = RolesReport::rh_rr_role_actor_state_index(declaration.actor_id, slots, actors)
+                    actor: RhRoleActorState = actors[actor_index]
+                    if active_role and not actor.active_declared:
+                        actors[actor_index].active_declared <- true
+                        declared_current <- declared_current + 1
+                        active_declared_12m <- active_declared_12m + 1 if has_persistent_profile and actor.persistent
+                    if active_provider and not actor.active_provider:
+                        actors[actor_index].active_provider <- true
+                        permission_inventory_denominator <- permission_inventory_denominator + 1
+                    if active_provider and declaration.permission != 0 and not actor.active_provider_permission:
+                        actors[actor_index].active_provider_permission <- true
+                        permission_current <- permission_current + 1
+                i <- i + 1
+            RhRoleActorTallies{
+                declared_current: declared_current,
+                active_declared_12m: active_declared_12m,
+                permission_current: permission_current,
+                permission_inventory_denominator: permission_inventory_denominator
+            }
 
         def rh_rr_emit_actor_type_counts(out: mutable darray[u8]&, counts: Roles::RhActionActorTypeCounts&) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"human\":")
@@ -335,68 +418,7 @@ module RolesReport:
                         current_as_of <- qas
                         has_as_of <- true
                     qt <- nodes[qt.usize()].next_sibling
-            declared_current: mutable i64 = 0
-            if has_as_of:
-                while i < decls.count |i: usize = 0, decls, current_as_of, declared_current|:
-                    d: Roles::RhRoleDecl = decls[i]
-                    relevant: bool = d.role == Roles::RH_ROLE_OWNER or d.role == Roles::RH_ROLE_MAINTAINER
-                    active: bool = relevant and d.declared_at <= current_as_of and (d.revoked_at == 0 or d.revoked_at > current_as_of)
-                    seen: mutable bool = false
-                    if active:
-                        while j < i |j: usize = 0, i, decls, current_as_of, d, seen|:
-                            prior: Roles::RhRoleDecl = decls[j]
-                            prior_active: bool = prior.actor_id == d.actor_id and (prior.role == Roles::RH_ROLE_OWNER or prior.role == Roles::RH_ROLE_MAINTAINER) and prior.declared_at <= current_as_of and (prior.revoked_at == 0 or prior.revoked_at > current_as_of)
-                            seen <- true if prior_active
-                            j <- j + 1
-                    declared_current <- declared_current + 1 if active and not seen
-                    i <- i + 1
-            permission_current: mutable i64 = 0
-            if has_as_of and auth_state == 1:
-                while i < decls.count |i: usize = 0, decls, current_as_of, permission_current|:
-                    d: Roles::RhRoleDecl = decls[i]
-                    active_permission: bool = d.source == Roles::RH_DECL_SOURCE_PROVIDER and d.permission != 0 and d.declared_at <= current_as_of and (d.revoked_at == 0 or d.revoked_at > current_as_of)
-                    seen_permission: mutable bool = false
-                    if active_permission:
-                        while j < i |j: usize = 0, i, decls, current_as_of, d, seen_permission|:
-                            prior: Roles::RhRoleDecl = decls[j]
-                            prior_active: bool = prior.actor_id == d.actor_id and prior.source == Roles::RH_DECL_SOURCE_PROVIDER and prior.permission != 0 and prior.declared_at <= current_as_of and (prior.revoked_at == 0 or prior.revoked_at > current_as_of)
-                            seen_permission <- true if prior_active
-                            j <- j + 1
-                    permission_current <- permission_current + 1 if active_permission and not seen_permission
-                    i <- i + 1
-            permission_inventory_den: mutable i64 = 0
-            if has_as_of and auth_state == 1:
-                while i < decls.count |i: usize = 0, decls, current_as_of, permission_inventory_den|:
-                    d: Roles::RhRoleDecl = decls[i]
-                    active_provider: bool = d.source == Roles::RH_DECL_SOURCE_PROVIDER and d.declared_at <= current_as_of and (d.revoked_at == 0 or d.revoked_at > current_as_of)
-                    seen_provider: mutable bool = false
-                    if active_provider:
-                        while j < i |j: usize = 0, i, decls, current_as_of, d, seen_provider|:
-                            prior: Roles::RhRoleDecl = decls[j]
-                            prior_provider: bool = prior.actor_id == d.actor_id and prior.source == Roles::RH_DECL_SOURCE_PROVIDER and prior.declared_at <= current_as_of and (prior.revoked_at == 0 or prior.revoked_at > current_as_of)
-                            seen_provider <- true if prior_provider
-                            j <- j + 1
-                    permission_inventory_den <- permission_inventory_den + 1 if active_provider and not seen_provider
-                    i <- i + 1
-            active_declared_12m: mutable i64 = -1
-            if has_as_of and has_persistent_profile:
-                active_declared_12m <- 0
-                while i < decls.count |i: usize = 0, decls, current_as_of, persistent_actors, active_declared_12m|:
-                    d: Roles::RhRoleDecl = decls[i]
-                    persistent_actor: mutable bool = false
-                    while k < persistent_actors.count |k: usize = 0, persistent_actors, d, persistent_actor|:
-                        persistent_actor <- true if persistent_actors[k] == d.actor_id
-                        k <- k + 1
-                    eligible: bool = persistent_actor and (d.role == Roles::RH_ROLE_OWNER or d.role == Roles::RH_ROLE_MAINTAINER) and d.declared_at <= current_as_of and (d.revoked_at == 0 or d.revoked_at > current_as_of)
-                    seen_12m: mutable bool = false
-                    if eligible:
-                        while j < i |j: usize = 0, i, decls, current_as_of, d, seen_12m|:
-                            prior: Roles::RhRoleDecl = decls[j]
-                            prior_eligible: bool = prior.actor_id == d.actor_id and (prior.role == Roles::RH_ROLE_OWNER or prior.role == Roles::RH_ROLE_MAINTAINER) and prior.declared_at <= current_as_of and (prior.revoked_at == 0 or prior.revoked_at > current_as_of)
-                            seen_12m <- true if prior_eligible
-                            j <- j + 1
-                    active_declared_12m <- active_declared_12m + 1 if eligible and not seen_12m
-                    i <- i + 1
+            role_actor_tallies: RhRoleActorTallies = RolesReport::rh_rr_role_actor_tallies(decls, persistent_actors, current_as_of, has_as_of, has_persistent_profile, auth_state == 1)
             linked_reviewed_changes: mutable i64 = 0
             linked_merged_changes: mutable i64 = 0
             unlinked_merge_actions: mutable i64 = 0
@@ -446,12 +468,12 @@ module RolesReport:
             return -1 if not RolesReport::rh_rr_emit_count_metric(out, "maintainer.role_assignments_with_end_dates", role_summary.ended_declarations)
             out.push(44)
             if has_as_of:
-                return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.declared_current", Observation::RhMetricValue.Count(declared_current), Observation::RH_ST_OBSERVED, "", true, current_as_of)
+                return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.declared_current", Observation::RhMetricValue.Count(role_actor_tallies.declared_current), Observation::RH_ST_OBSERVED, "", true, current_as_of)
             else:
                 return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.declared_current", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "no-declaration-as-of-time", false, 0)
             out.push(44)
             if has_as_of and has_persistent_profile:
-                return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.active_declared_12m", Observation::RhMetricValue.Count(active_declared_12m), Observation::RH_ST_OBSERVED, "", true, current_as_of)
+                return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.active_declared_12m", Observation::RhMetricValue.Count(role_actor_tallies.active_declared_12m), Observation::RH_ST_OBSERVED, "", true, current_as_of)
             elif not has_as_of:
                 return -1 if not RolesReport::rh_rr_emit_metric_with_as_of(out, "maintainer.active_declared_12m", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "no-declaration-as-of-time", false, 0)
             else:
@@ -516,7 +538,7 @@ module RolesReport:
             elif not has_as_of:
                 return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "maintainer.permission_observed_current", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "no-declaration-as-of-time")
             else:
-                return -1 if not RolesReport::rh_rr_emit_count_metric(out, "maintainer.permission_observed_current", permission_current)
+                return -1 if not RolesReport::rh_rr_emit_count_metric(out, "maintainer.permission_observed_current", role_actor_tallies.permission_current)
             out.push(44)
             if auth_state == 2:
                 return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "maintainer.permission_inventory_coverage", Observation::RhMetricValue.Absent, Observation::RH_ST_UNAUTHORIZED, "provider-permission-enumeration-unauthorized")
@@ -526,10 +548,10 @@ module RolesReport:
                 return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "maintainer.permission_inventory_coverage", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "no-declaration-as-of-time")
             elif not has_permission_complete or not permission_complete:
                 return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "maintainer.permission_inventory_coverage", Observation::RhMetricValue.Absent, Observation::RH_ST_UNSUPPORTED, "permission-inventory-completeness-not-supplied")
-            elif permission_inventory_den == 0:
+            elif role_actor_tallies.permission_inventory_denominator == 0:
                 return -1 if not RolesReport::rh_rr_emit_typed_metric(out, "maintainer.permission_inventory_coverage", Observation::RhMetricValue.Absent, Observation::RH_ST_NOT_APPLICABLE, "no-active-provider-permission-actors")
             else:
-                return -1 if not RolesReport::rh_rr_emit_ratio_metric(out, "maintainer.permission_inventory_coverage", permission_inventory_den, permission_inventory_den)
+                return -1 if not RolesReport::rh_rr_emit_ratio_metric(out, "maintainer.permission_inventory_coverage", role_actor_tallies.permission_inventory_denominator, role_actor_tallies.permission_inventory_denominator)
             Base::rh_push_text(out, "],\"queries\":[")
             first: mutable bool = true
             if q_idx >= 0:

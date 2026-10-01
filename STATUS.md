@@ -513,6 +513,13 @@ tallies now share one scoped pass and return an immutable `RhRoleSummary`, repla
 repeated declaration scans and eight mutable output parameters while preserving unknown buckets.
 `tests/test_roles_cli.sh` and the M04 role oracle pass.
 
+**M04-01 actor-summary increment:** Current declared stewards, persistent
+declared stewards, authorized provider-permission actors, and the permission
+coverage denominator now share a collision-checked actor-state table. This
+replaces four declaration de-duplication scans and repeated persistent-actor
+searches while preserving time, authorization, source, and revocation rules;
+`tests/test_roles_cli.sh` covers duplicate actor/profile rows and permission states.
+
 **M04 scope (in progress):** implemented — persistence cohorts over an
 actor-by-complete-month presence matrix (one active day is one month;
 component measures returned alongside membership), a coverage basis

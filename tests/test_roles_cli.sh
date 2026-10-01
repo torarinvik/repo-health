@@ -253,6 +253,26 @@ assert m["maintainer.active_declared_12m"]["quality_dimensions"] == {
 print("[roles] twelve-month declaration metric OK")
 PY
 
+echo "[roles] role, permission, persistence, and revocation counts share actor state"
+cat > "$T/actor-summary.json" <<'JSON'
+{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":true,"as_of":1000,"persistent_actors":[1,2,4,4],"declarations":[{"actor_id":1,"role":"owner","permission":0,"source":"file","declared_at":100},{"actor_id":1,"role":"maintainer","permission":1,"source":"provider","declared_at":200},{"actor_id":1,"role":"member","permission":0,"source":"provider","declared_at":300},{"actor_id":2,"role":"maintainer","permission":0,"source":"file","declared_at":400},{"actor_id":3,"role":"owner","permission":0,"source":"file","declared_at":500},{"actor_id":4,"role":"owner","permission":0,"source":"file","declared_at":1100},{"actor_id":5,"role":"maintainer","permission":1,"source":"provider","declared_at":300,"revoked_at":900},{"actor_id":6,"role":"member","permission":0,"source":"provider","declared_at":100},{"actor_id":7,"role":"member","permission":2,"source":"provider","declared_at":100},{"actor_id":7,"role":"member","permission":0,"source":"provider","declared_at":600},{"actor_id":8,"role":"wizard","permission":0,"source":"file","declared_at":100,"revoked_at":1200}]}
+JSON
+"$ROOT/build/rh_cli" roles --input "$T/actor-summary.json" --out "$T/actor-summary-out.json" >/dev/null || fail "role actor summary"
+python3 - "$T/actor-summary-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {row["key"]: row for row in d["metrics"]}
+expected = {
+    "maintainer.role_assignments_with_end_dates": 2,
+    "maintainer.declared_current": 3,
+    "maintainer.active_declared_12m": 2,
+    "maintainer.permission_observed_current": 2,
+    "maintainer.permission_inventory_coverage": {"num": 3, "den": 3},
+}
+assert {key: m[key]["value"] for key in expected} == expected, m
+print("[roles] actor-scoped declaration metrics OK")
+PY
+
 echo "[roles] missing evidence stays unsupported"
 printf '{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"as_of":31536100,"declarations":[{"actor_id":9,"role":"maintainer","permission":1,"source":"provider","declared_at":100}]}' > "$T/incomplete.json"
 "$ROOT/build/rh_cli" roles --input "$T/incomplete.json" --out "$T/incomplete.out.json" >/dev/null || fail "incomplete evidence run"
