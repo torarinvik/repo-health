@@ -107,21 +107,71 @@ module RoleGrain:
             Base::rh_json_escape(out, texts, s.usize(), e.usize())
             out.push(34)
 
-        def rh_rg_correction(corrections: darray[RhRoleCorrection]&, texts: darray[u8]&, event: RhRoleEvent&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while i < corrections.count |i: usize = 0, corrections, texts, event|:
-                c: RhRoleCorrection = corrections[i]
-                return i.i64() if Base::rh_bytes_equal_span(texts, c.event_s, c.event_e, texts, event.id_s, event.id_e)
-                i <- i + 1
+        def rh_rg_span_hash(texts: darray[u8]&, start: i64, end: i64) -> usize:
+            hash_sview(string_view_slice(bytes_view(texts), start.usize(), end.usize())).usize()
+
+        def rh_rg_event_index(events: darray[RhRoleEvent]&, event_slots: darray[i64]&, texts: darray[u8]&, id_s: i64, id_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if event_slots.count == 0
+            slot: mutable usize = RoleGrain::rh_rg_span_hash(texts, id_s, id_e) % event_slots.count
+            while probe < event_slots.count |probe: usize = 0, slot, events, event_slots, texts, id_s, id_e|:
+                index: i64 = event_slots[slot]
+                return -1 if index == 0
+                event: RhRoleEvent = events[(index - 1).usize()]
+                return index - 1 if Base::rh_bytes_equal_span(texts, event.id_s, event.id_e, texts, id_s, id_e)
+                slot <- (slot + 1) % event_slots.count
+                probe <- probe + 1
             -1
 
-        def rh_rg_add_role(events: darray[RhRoleEvent]&, corrections: darray[RhRoleCorrection]&, texts: darray[u8]&, current: bool, counts: mutable darray[i64]&, distinct: mutable darray[i64]&, actor_slots: mutable darray[i64]&, actor_roles: mutable darray[RhRoleActorKey]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while i < events.count |i: usize = 0, events, corrections, texts, current, counts, distinct, actor_slots, actor_roles|:
+        def rh_rg_event_insert(events: mutable darray[RhRoleEvent]&, event_slots: mutable darray[i64]&, texts: darray[u8]&, event: RhRoleEvent) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if event_slots.count == 0
+            slot: mutable usize = RoleGrain::rh_rg_span_hash(texts, event.id_s, event.id_e) % event_slots.count
+            while probe < event_slots.count |probe: usize = 0, slot, events, event_slots, texts, event|:
+                index: i64 = event_slots[slot]
+                if index == 0:
+                    events.push(event)
+                    event_slots[slot] <- events.count.i64()
+                    return true
+                prior: RhRoleEvent = events[(index - 1).usize()]
+                return false if Base::rh_bytes_equal_span(texts, prior.id_s, prior.id_e, texts, event.id_s, event.id_e)
+                slot <- (slot + 1) % event_slots.count
+                probe <- probe + 1
+            false
+
+        def rh_rg_correction_index(corrections: darray[RhRoleCorrection]&, correction_slots: darray[i64]&, texts: darray[u8]&, event_s: i64, event_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if correction_slots.count == 0
+            slot: mutable usize = RoleGrain::rh_rg_span_hash(texts, event_s, event_e) % correction_slots.count
+            while probe < correction_slots.count |probe: usize = 0, slot, corrections, correction_slots, texts, event_s, event_e|:
+                index: i64 = correction_slots[slot]
+                return -1 if index == 0
+                correction: RhRoleCorrection = corrections[(index - 1).usize()]
+                return index - 1 if Base::rh_bytes_equal_span(texts, correction.event_s, correction.event_e, texts, event_s, event_e)
+                slot <- (slot + 1) % correction_slots.count
+                probe <- probe + 1
+            -1
+
+        def rh_rg_correction_insert(corrections: mutable darray[RhRoleCorrection]&, correction_slots: mutable darray[i64]&, texts: darray[u8]&, correction: RhRoleCorrection) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if correction_slots.count == 0
+            slot: mutable usize = RoleGrain::rh_rg_span_hash(texts, correction.event_s, correction.event_e) % correction_slots.count
+            while probe < correction_slots.count |probe: usize = 0, slot, corrections, correction_slots, texts, correction|:
+                index: i64 = correction_slots[slot]
+                if index == 0:
+                    corrections.push(correction)
+                    correction_slots[slot] <- corrections.count.i64()
+                    return true
+                prior: RhRoleCorrection = corrections[(index - 1).usize()]
+                return false if Base::rh_bytes_equal_span(texts, prior.event_s, prior.event_e, texts, correction.event_s, correction.event_e)
+                slot <- (slot + 1) % correction_slots.count
+                probe <- probe + 1
+            false
+
+        def rh_rg_add_role(events: darray[RhRoleEvent]&, corrections: darray[RhRoleCorrection]&, correction_slots: darray[i64]&, texts: darray[u8]&, current: bool, counts: mutable darray[i64]&, distinct: mutable darray[i64]&, actor_slots: mutable darray[i64]&, actor_roles: mutable darray[RhRoleActorKey]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < events.count |i: usize = 0, events, corrections, correction_slots, texts, current, counts, distinct, actor_slots, actor_roles|:
                 event: RhRoleEvent = events[i]
                 actor_start: mutable i64 = event.actor_s
                 actor_end: mutable i64 = event.actor_e
                 active: mutable bool = true
                 if current:
-                    ci: i64 = RoleGrain::rh_rg_correction(corrections, texts, event)
+                    ci: i64 = RoleGrain::rh_rg_correction_index(corrections, correction_slots, texts, event.id_s, event.id_e)
                     if ci >= 0:
                         c: RhRoleCorrection = corrections[ci.usize()]
                         if c.action == 1:
@@ -165,7 +215,9 @@ module RoleGrain:
             corrections_idx: i64 = RoleGrain::rh_rg_get(nodes, texts, root, "corrections")
             return -1 if events_idx < 0 or corrections_idx < 0 or nodes[events_idx.usize()].kind != Json::RH_JSON_ARR or nodes[corrections_idx.usize()].kind != Json::RH_JSON_ARR
             events: mutable darray[RhRoleEvent] = []
-            while event >= 0 |event: i64 = nodes[events_idx.usize()].first_child, nodes, texts, raw, events|:
+            event_slot_capacity: usize = (nodes[events_idx.usize()].child_count * 2 + 1).usize()
+            event_slots: mutable darray[i64] = RoleGrain::rh_rg_index_table(event_slot_capacity)
+            while event >= 0 |event: i64 = nodes[events_idx.usize()].first_child, nodes, texts, raw, events, event_slots|:
                 return -1 if nodes[event.usize()].kind != Json::RH_JSON_OBJ
                 ids: mutable i64 = 0
                 ide: mutable i64 = 0
@@ -178,13 +230,11 @@ module RoleGrain:
                 at_ok: mutable i64 = 0
                 at: i64 = RoleGrain::rh_rg_int(nodes, raw, texts, event, "at", &at_ok)
                 return -1 if ids == ide or actors == actore or role < 0 or at_ok == 0 or at < 0
-                while i < events.count |i: usize = 0, events, texts, ids, ide|:
-                    return -1 if Base::rh_bytes_equal_span(texts, events[i].id_s, events[i].id_e, texts, ids, ide)
-                    i <- i + 1
-                events.push(RhRoleEvent{id_s: ids, id_e: ide, actor_s: actors, actor_e: actore, role: role.u8(), at: at})
+                return -1 if not RoleGrain::rh_rg_event_insert(events, event_slots, texts, RhRoleEvent{id_s: ids, id_e: ide, actor_s: actors, actor_e: actore, role: role.u8(), at: at})
                 event <- nodes[event.usize()].next_sibling
             corrections: mutable darray[RhRoleCorrection] = []
-            while corr >= 0 |corr: i64 = nodes[corrections_idx.usize()].first_child, nodes, texts, raw, events, corrections|:
+            correction_slots: mutable darray[i64] = RoleGrain::rh_rg_index_table(events.count * 2 + 1)
+            while corr >= 0 |corr: i64 = nodes[corrections_idx.usize()].first_child, nodes, texts, raw, events, event_slots, corrections, correction_slots|:
                 return -1 if nodes[corr.usize()].kind != Json::RH_JSON_OBJ
                 es: mutable i64 = 0
                 ee: mutable i64 = 0
@@ -195,18 +245,13 @@ module RoleGrain:
                 return -1 if not RoleGrain::rh_rg_str(nodes, texts, corr, "event_id", &es, &ee) or not RoleGrain::rh_rg_str(nodes, texts, corr, "action", &action_s, &action_e)
                 action: i64 = RoleGrain::rh_rg_action(texts, action_s, action_e)
                 return -1 if action < 0
-                event_found: mutable bool = false
-                while i < events.count |i: usize = 0, events, texts, es, ee, event_found|:
-                    event_found <- true if Base::rh_bytes_equal_span(texts, events[i].id_s, events[i].id_e, texts, es, ee)
-                    i <- i + 1
-                return -1 if not event_found
+                return -1 if RoleGrain::rh_rg_event_index(events, event_slots, texts, es, ee) < 0
                 if action == 0:
                     return -1 if not RoleGrain::rh_rg_str(nodes, texts, corr, "actor", &as_, &ae) or as_ == ae
                 revision_ok: mutable i64 = 0
                 revision: i64 = RoleGrain::rh_rg_int(nodes, raw, texts, corr, "revision", &revision_ok)
                 return -1 if revision_ok == 0 or revision < 0
-                return -1 if RoleGrain::rh_rg_correction(corrections, texts, RhRoleEvent{id_s: es, id_e: ee, actor_s: 0, actor_e: 0, role: 0, at: 0}) >= 0
-                corrections.push(RhRoleCorrection{event_s: es, event_e: ee, action: action.u8(), actor_s: as_, actor_e: ae, revision: revision})
+                return -1 if not RoleGrain::rh_rg_correction_insert(corrections, correction_slots, texts, RhRoleCorrection{event_s: es, event_e: ee, action: action.u8(), actor_s: as_, actor_e: ae, revision: revision})
                 corr <- nodes[corr.usize()].next_sibling
             affiliations: mutable darray[RhRoleAffiliation] = []
             affiliations_idx: i64 = RoleGrain::rh_rg_get(nodes, texts, root, "affiliations")
@@ -235,8 +280,8 @@ module RoleGrain:
             known_actor_roles: mutable darray[RhRoleActorKey] = []
             current_actor_slots: mutable darray[i64] = RoleGrain::rh_rg_index_table(actor_table_capacity)
             current_actor_roles: mutable darray[RhRoleActorKey] = []
-            _ = RoleGrain::rh_rg_add_role(events, corrections, texts, false, known_counts, known_distinct, known_actor_slots, known_actor_roles)
-            _ = RoleGrain::rh_rg_add_role(events, corrections, texts, true, current_counts, current_distinct, current_actor_slots, current_actor_roles)
+            _ = RoleGrain::rh_rg_add_role(events, corrections, correction_slots, texts, false, known_counts, known_distinct, known_actor_slots, known_actor_roles)
+            _ = RoleGrain::rh_rg_add_role(events, corrections, correction_slots, texts, true, current_counts, current_distinct, current_actor_slots, current_actor_roles)
             Base::rh_push_text(out, "{\"schema\":\"rh-role-grain-result/1\",\"identity_revision\":")
             Base::rh_push_decimal_i64(out, identity_revision)
             Base::rh_push_text(out, ",\"as_known_revision\":")
@@ -320,12 +365,12 @@ module RoleGrain:
                 i <- i + 1
             Base::rh_push_text(out, "],\"current_event_ledger\":[")
             wrote_event: mutable bool = false
-            while i < events.count |i: usize = 0, events, corrections, texts, out|:
+            while i < events.count |i: usize = 0, events, corrections, correction_slots, texts, out|:
                 event: RhRoleEvent = events[i]
                 actor_start: mutable i64 = event.actor_s
                 actor_end: mutable i64 = event.actor_e
                 active: mutable bool = true
-                correction_id: i64 = RoleGrain::rh_rg_correction(corrections, texts, event)
+                correction_id: i64 = RoleGrain::rh_rg_correction_index(corrections, correction_slots, texts, event.id_s, event.id_e)
                 if correction_id >= 0:
                     correction: RhRoleCorrection = corrections[correction_id.usize()]
                     if correction.action == 1:

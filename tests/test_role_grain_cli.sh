@@ -62,6 +62,18 @@ assert current["reviewer"]["events"] == 2 and current["reviewer"]["distinct_acto
 print("[role-grain] actor-role grouping and correction counts OK")
 PY
 
+echo "[role-grain] event and correction indexes resolve colliding hashes"
+cat > "$T/collision-index.json" <<'JSON'
+{"schema":"rh-role-grain-input/1","identity_revision":5,"as_known_revision":4,"events":[{"id":"e9","actor":"alice","role":"author","at":1},{"id":"e10","actor":"bob","role":"reviewer","at":2},{"id":"e1","actor":"carol","role":"author","at":3},{"id":"e2","actor":"dana","role":"releaser","at":4}],"corrections":[{"event_id":"e9","action":"retract","revision":5},{"event_id":"e10","action":"replace","actor":"erin","revision":5}]}
+JSON
+"$ROOT/build/rh_cli" role-grain --input "$T/collision-index.json" --out "$T/collision-index-out.json" >/dev/null || fail "colliding event and correction indexes"
+python3 - "$T/collision-index-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert [(event["id"], event["actor"]) for event in d["current_event_ledger"]] == [("e10", "erin"), ("e1", "carol"), ("e2", "dana")], d
+print("[role-grain] exact-span probes survive event and correction hash collisions")
+PY
+
 echo "[role-grain] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" role-grain --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "role-grain output not deterministic"
@@ -71,6 +83,10 @@ sed 's/"role":"reviewer"/"role":"maintainer"/' "$T/in.json" > "$T/bad-role.json"
 "$ROOT/build/rh_cli" role-grain --input "$T/bad-role.json" --out "$T/x" >/dev/null 2>&1; rc_role=$?
 sed 's/"event_id":"e3"/"event_id":"missing"/' "$T/in.json" > "$T/bad-event.json"
 "$ROOT/build/rh_cli" role-grain --input "$T/bad-event.json" --out "$T/x" >/dev/null 2>&1; rc_event=$?
+sed 's/"id":"e4"/"id":"e1"/' "$T/in.json" > "$T/duplicate-event.json"
+"$ROOT/build/rh_cli" role-grain --input "$T/duplicate-event.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate_event=$?
+sed 's/"event_id":"e3"/"event_id":"e2"/' "$T/in.json" > "$T/duplicate-correction.json"
+"$ROOT/build/rh_cli" role-grain --input "$T/duplicate-correction.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate_correction=$?
 sed 's/"action":"retract"/"action":"delete"/' "$T/in.json" > "$T/bad-action.json"
 "$ROOT/build/rh_cli" role-grain --input "$T/bad-action.json" --out "$T/x" >/dev/null 2>&1; rc_action=$?
 python3 - "$T/in.json" "$T/bad-affiliation.json" <<'PY'
@@ -80,6 +96,6 @@ json.dump(d, open(sys.argv[2], "w"), separators=(",", ":"))
 PY
 "$ROOT/build/rh_cli" role-grain --input "$T/bad-affiliation.json" --out "$T/x" >/dev/null 2>&1; rc_affiliation=$?
 set -e
-[[ "$rc_role" -eq 4 && "$rc_event" -eq 4 && "$rc_action" -eq 4 && "$rc_affiliation" -eq 4 ]] || fail "invalid role-grain must exit 4 (got $rc_role/$rc_event/$rc_action/$rc_affiliation)"
+[[ "$rc_role" -eq 4 && "$rc_event" -eq 4 && "$rc_duplicate_event" -eq 4 && "$rc_duplicate_correction" -eq 4 && "$rc_action" -eq 4 && "$rc_affiliation" -eq 4 ]] || fail "invalid role-grain must exit 4 (got role=$rc_role event=$rc_event duplicate-event=$rc_duplicate_event duplicate-correction=$rc_duplicate_correction action=$rc_action affiliation=$rc_affiliation)"
 
 echo "test_role_grain_cli OK"
