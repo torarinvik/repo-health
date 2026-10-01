@@ -41,14 +41,44 @@ assert tr["configuration_sha256"] == hashlib.sha256(b"repo-health/reviewed-ident
 assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unknown", "unsupported", "discarded"}, tr
 print("[identity] absent evidence-store state is explicit and bound")
 PY
-python3 - "$T/a.out" <<'PY'
-import json, sys
+python3 - "$T/a.out" "$ROOT" <<'PY'
+import glob, json, sys
 d = json.load(open(sys.argv[1]))
+root = sys.argv[2]
 assert d["schema"] == "rh-identity-result/1", d
 assert d["actor_count"] == 5 and d["identity_revision"] == 2, d
 assert d["cluster_count"] == 3, d
 assert d["metrics"][0]["key"] == "contributor.accepted_actor_clusters" and d["metrics"][0]["value"] == 3, d
 assert d["metrics"][1]["key"] == "contributor.known_human_accounts" and d["metrics"][1]["value"] == 2, d
+metrics = {metric["key"]: metric for metric in d["metrics"]}
+definitions = {}
+for path in glob.glob(root + "/metrics/definitions/*.json"):
+    definition = json.load(open(path))
+    definitions[(definition["key"], definition["version"])] = definition
+expected = {
+    "contributor.accepted_actor_clusters": {
+        "inputs": ["actor_count", "identity_link_ledger"],
+        "unit": "clusters",
+        "denominator_rule": "none; distinct actor clusters induced by accepted identity links",
+    },
+    "contributor.known_human_accounts": {
+        "inputs": ["actor_count", "identity_actor_kind_ledger"],
+        "unit": "accounts",
+        "denominator_rule": "none; accounts explicitly classified human in the supplied identity-kind ledger",
+    },
+}
+assert set(metrics) == set(expected), metrics
+for key, metric in metrics.items():
+    identity = (key, metric["version"])
+    definition = definitions[identity]
+    assert definition["implementation_status"] == "implemented", (identity, definition)
+    assert definition["subject_kind"] == "project", (identity, definition["subject_kind"])
+    assert definition["source_requirements"] == ["identity-ledger"], (identity, definition["source_requirements"])
+    assert definition["inputs"] == expected[key]["inputs"], (identity, definition["inputs"])
+    assert definition["output"] == {"unit": expected[key]["unit"], "type": "integer"}, (identity, definition["output"])
+    assert definition["denominator_rule"] == expected[key]["denominator_rule"], (identity, definition["denominator_rule"])
+    assert metric["status"] == "observed" and type(metric["value"]) is int and metric["value"] >= 0, (identity, metric)
+print("[identity] both emitted metric rows match catalog subjects, sources, inputs, types, and denominators")
 for metric in d["metrics"]:
     assert metric["status"] == "observed", metric
     assert metric["evidence"] == ["identity-input"], metric
