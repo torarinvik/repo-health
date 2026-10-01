@@ -62,6 +62,15 @@ module IdentityReport:
             return 0 if idx < 0
             Json::rh_json_int(nodes, raw, idx, ok_out)
 
+        def rh_ir_native_identity_hash(identity: Domain::RhNativeRef) -> usize:
+            hash: mutable u64 = 0xcbf29ce484222325
+            hash <- (hash ^ hash_sview(identity.source_name)) * 0x100000001b3
+            hash <- (hash ^ identity.source_kind.u64()) * 0x100000001b3
+            hash <- (hash ^ hash_sview(identity.host_instance.key)) * 0x100000001b3
+            hash <- (hash ^ identity.object_kind.u64()) * 0x100000001b3
+            hash <- (hash ^ hash_sview(identity.native_id)) * 0x100000001b3
+            hash.usize()
+
         def rh_ir_emit_metric(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
             quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
                 completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Unknown,
@@ -270,9 +279,14 @@ module IdentityReport:
             # and aliases remain attached to their source instance and observation.
             actors: mutable darray[RhIdentityActor] = []
             aliases: mutable darray[RhIdentityAlias] = []
+            native_identity_slots: mutable darray[i64] = []
             actors_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "actors")
             if actors_idx >= 0:
                 return -1 if nodes[actors_idx.usize()].kind != Json::RH_JSON_ARR
+                native_identity_capacity: usize = actor_count.usize() * 2 + 1
+                while i < native_identity_capacity |i: usize = 0, native_identity_capacity, native_identity_slots|:
+                    native_identity_slots.push(0)
+                    i <- i + 1
                 actor_node: Json::RhJsonNode = nodes[actors_idx.usize()]
                 while actor >= 0 |actor: i64 = actor_node.first_child, nodes, texts, raw, actors, aliases, actor_count|:
                     return -1 if actors.count.i64() >= actor_count or nodes[actor.usize()].kind != Json::RH_JSON_OBJ
@@ -291,11 +305,11 @@ module IdentityReport:
                     native_key: sview = string_view_slice(bytes_view(texts), native_s.usize(), native_e.usize())
                     native_identity: Domain::RhNativeRef = Domain::rh_native_make(Domain::rh_source_kind_from_name(source_name), source_name, 0, Domain::rh_host_instance_id_make(instance_name), native_key)
                     return -1 if not Domain::rh_native_valid(native_identity)
-                    while identity_idx < actors.count.i64() |identity_idx: i64 = 0, actors, texts, source_s, source_e, instance_s, instance_e, native_s, native_e|:
-                        prior: RhIdentityActor = actors[identity_idx.usize()]
-                        duplicate_native_identity: bool = Domain::rh_native_equal(prior.native_identity, native_identity)
-                        return -1 if duplicate_native_identity
-                        identity_idx <- identity_idx + 1
+                    native_identity_slot: mutable usize = rh_ir_native_identity_hash(native_identity) % native_identity_slots.count
+                    while native_identity_slots[native_identity_slot] != 0 |native_identity_slot, native_identity_slots, actors, native_identity|:
+                        prior_index: usize = (native_identity_slots[native_identity_slot] - 1).usize()
+                        return -1 if Domain::rh_native_equal(actors[prior_index].native_identity, native_identity)
+                        native_identity_slot <- (native_identity_slot + 1) % native_identity_slots.count
                     aliases_idx: i64 = Json::rh_json_obj_get(nodes, texts, actor, "aliases")
                     return -1 if aliases_idx < 0 or nodes[aliases_idx.usize()].kind != Json::RH_JSON_ARR
                     alias_start: i64 = aliases.count.i64()
@@ -310,6 +324,7 @@ module IdentityReport:
                         aliases.push(RhIdentityAlias{value_s: alias_s, value_e: alias_e, observed_at: alias_time})
                         alias <- nodes[alias.usize()].next_sibling
                     actors.push(RhIdentityActor{native_identity: native_identity, source_s: source_s, source_e: source_e, instance_s: instance_s, instance_e: instance_e, native_s: native_s, native_e: native_e, display_s: display_s, display_e: display_e, alias_start: alias_start, alias_count: aliases.count.i64() - alias_start})
+                    native_identity_slots[native_identity_slot] <- actors.count.i64()
                     actor <- nodes[actor.usize()].next_sibling
                 return -1 if actors.count.i64() != actor_count
 
