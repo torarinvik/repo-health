@@ -20,8 +20,8 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-release-feed-input/1","first_seen":1700000123,"releases":[{"tag":"v1.0.0","published_at":1700000000,"prerelease":false,"withdrawn":true,"supported_line":"1.x","support_end_at":1800000000,"support_end_issuer":"release-policy","release_notes_retrievable":true,"source_mapped":true,"assets":[{"name":"a.tgz","digest":"sha256:abc"},{"name":"b.tgz"}]},{"tag":"v1.1.0","prerelease":true,"supported_line":"1.x","release_notes_retrievable":false,"source_mapped":false}]}
 JSON
 "$ROOT/build/rh_cli" release-feed --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
-import hashlib, json, sys
+python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" "$ROOT" <<'PY'
+import glob, hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-release-feed-result/1", d
 r = d["releases"]
@@ -42,6 +42,59 @@ for metric in metrics.values():
         assert metric["status"] in ("unsupported", "not_applicable"), metric
         assert metric["value"] is None and metric.get("reason"), metric
         assert dimensions["completeness"] == "unknown" and dimensions["validity"] == "unknown", metric
+root = sys.argv[4]
+definitions = {}
+for path in glob.glob(root + "/metrics/definitions/*.json"):
+    definition = json.load(open(path))
+    definitions[(definition["key"], definition["version"])] = definition
+expected_inputs = {
+    "release.release_count": ["accepted_release_records"],
+    "release.rejected_count": ["release_feed_records", "nonempty_tag_field"],
+    "release.asset_count": ["accepted_release_records", "release_asset_entries"],
+    "release.digest_known_count": ["accepted_release_records", "release_asset_entries", "nonempty_digest_string"],
+    "release.published_time_known_count": ["accepted_release_records", "published_valid_time"],
+    "release.stable_count": ["accepted_release_records", "explicit_prerelease_boolean"],
+    "release.prerelease_count": ["accepted_release_records", "explicit_prerelease_boolean"],
+    "release.withdrawn_publications": ["accepted_release_records", "explicit_withdrawn_boolean"],
+    "release.supported_lines": ["accepted_release_records", "nonempty_supported_line_labels", "distinct_values"],
+    "release.support_end_timestamp": ["accepted_release_records", "explicit_support_end_timestamp"],
+    "release.release_note_presence": ["accepted_release_records", "explicit_release_note_retrieval_outcome"],
+    "release.tag_target_changes": ["release_feed_records", "tag_target_observations"],
+    "release.release_source_mapping_coverage": ["accepted_release_records", "explicit_source_mapping_state"],
+    "release.latest_stable_age_days": ["release_publications", "first_seen_cutoff"],
+    "release.interrelease_median_days": ["release_publications"],
+    "release.interrelease_variance": ["release_publications"],
+}
+specific_sources = {
+    "release.support_end_timestamp": "explicit-support-end-declaration",
+    "release.release_note_presence": "explicit-release-note-retrieval-outcome",
+    "release.tag_target_changes": "explicit-tag-target",
+    "release.release_source_mapping_coverage": "explicit-source-mapping-state",
+}
+observed_ids = {(metric["key"], metric["version"]) for metric in d["metrics"]}
+assert len(observed_ids) == 16
+for metric in d["metrics"]:
+    identity = (metric["key"], metric["version"])
+    definition = definitions[identity]
+    assert definition["subject_kind"] == "project", (identity, definition)
+    assert definition["inputs"] == expected_inputs[metric["key"]], (identity, definition.get("inputs"))
+    sources = {"captured-release-feed"}
+    if metric["key"] in specific_sources:
+        sources.add(specific_sources[metric["key"]])
+    assert set(definition["source_requirements"]) == sources, (identity, definition["source_requirements"])
+    output_type = definition["output"]["type"]
+    if metric["status"] == "observed":
+        if output_type in ("integer", "timestamp"):
+            assert type(metric["value"]) is int, (identity, metric["value"])
+            assert definition["denominator_rule"] == "none" or definition["denominator_rule"].startswith("none;"), (identity, definition)
+        elif output_type == "ratio":
+            assert set(metric["value"]) == {"num", "den"} and metric["value"]["den"] > 0, (identity, metric)
+            assert definition["output"]["denominator"] and not definition["denominator_rule"].startswith("none"), (identity, definition)
+        else:
+            raise AssertionError((identity, output_type))
+digest_definition = definitions[("release.digest_known_count", "1.0.0")]
+assert "non-empty digest string" in digest_definition["params"]["scope"] and "not verified" in digest_definition["params"]["scope"]
+print("[release-feed] all 16 metric rows match catalog sources, inputs, types, and denominators")
 assert {k: metrics[k]["value"] for k in (
     "release.release_count", "release.rejected_count", "release.asset_count",
     "release.digest_known_count", "release.published_time_known_count",
