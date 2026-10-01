@@ -27,6 +27,11 @@ assert d["summary"] == {"mismatches": 0, "mapping": 0, "context": 0, "parser_sup
 metrics = {m["key"]: m for m in d["metrics"]}
 assert metrics["coverage.parser_error_count"]["value"] == 0, metrics
 assert metrics["coverage.mapping_conflict_count"]["value"] == 0, metrics
+assert set(metrics) == {"coverage.parser_error_count", "coverage.mapping_conflict_count"}, metrics
+for metric in metrics.values():
+  assert metric["status"] == "observed", metric
+  assert metric["evidence"] == ["parser-diff"], metric
+  assert metric["quality_dimensions"] == {"completeness":"complete", "freshness":"unknown", "validity":"valid", "provenance":"evidence_backed"}, metric
 assert d["parsers"] == {"native": "native-lock/1", "candidate": "alt-lock/2", "configuration": "cargo-default", "visibility": "public"}, d["parsers"]
 assert len(d["cache_key"]) == 16, d
 report = json.load(open(sys.argv[1] + ".transformations.json"))
@@ -88,6 +93,11 @@ d = json.load(open(sys.argv[1]))
 assert d["status"] == "unsupported", d
 assert "successful empty graph" in d["note"], d
 assert d["summary"]["mismatches"] == 0, d
+metrics = {row["key"]: row for row in d["metrics"]}
+assert len(metrics) == 2, metrics
+assert all(row["status"] == "unsupported" and row["value"] is None for row in metrics.values()), metrics
+assert all(row["reason"] == d["reason"] and row["evidence"] == ["parser-diff"] for row in metrics.values()), metrics
+assert all(row["quality_dimensions"]["validity"] == "unknown" for row in metrics.values()), metrics
 report = json.load(open(sys.argv[1] + ".transformations.json"))
 assert report["output_schema"] == "rh-parser-diff/1", report
 assert any(field["state"] == "unsupported" for field in report["fields"]), report

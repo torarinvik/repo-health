@@ -5,11 +5,35 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_store.elisa"
+include "./rh_observation.elisa"
 
 module ParserDiff:
     private:
         const RH_DIFF_MAX_NODES: i64 = 10000
         const RH_DIFF_MAX_MISMATCHES: i64 = 10000
+
+        def rh_diff_emit_metric(out: mutable darray[u8]&, key: cstr, count: i64, status: u8, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            value: Observation::RhMetricValue = Observation::RhMetricValue.Count(count) if status == Observation::RH_ST_OBSERVED else Observation::RhMetricValue.Absent
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if status == Observation::RH_ST_OBSERVED else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked
+            }
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+            Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.ParserDiffInput)
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(status, value, false, quality, evidence)
+            Observation::rh_observation_emit_metric(out, key, "1.0.0", reason, observation)
+
+        def rh_diff_emit_metrics(out: mutable darray[u8]&, parser_errors: i64, mapping_conflicts: i64, status: u8, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            emitted: bool = |out|
+                Base::rh_push_text(out, "[")
+                parser_ok: bool = rh_diff_emit_metric(out, "coverage.parser_error_count", parser_errors, status, reason)
+                out.push(44) if parser_ok
+                mapping_ok: bool = parser_ok and rh_diff_emit_metric(out, "coverage.mapping_conflict_count", mapping_conflicts, status, reason)
+                Base::rh_push_text(out, "]")
+                mapping_ok
+            emitted
 
         def rh_diff_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_obj_get(nodes, texts, obj, key)
@@ -149,7 +173,9 @@ module ParserDiff:
                 out.extend(bytes_view(cdigest))
                 Base::rh_push_text(out, "\",\"output_schema\":\"rh-dep-graph/1\"},\"cache_key\":\"")
                 out.extend(bytes_view(cache_key))
-                Base::rh_push_text(out, "\",\"summary\":{\"mismatches\":0},\"mismatches\":[],\"note\":\"unsupported candidate input is distinct from a successful empty graph\"}")
+                Base::rh_push_text(out, "\",\"summary\":{\"mismatches\":0},\"metrics\":")
+                return -3 if not ParserDiff::rh_diff_emit_metrics(out, 0, 0, Observation::RH_ST_UNSUPPORTED, "candidate parser did not produce a valid JSON object")
+                Base::rh_push_text(out, ",\"mismatches\":[],\"note\":\"unsupported candidate input is distinct from a successful empty graph\"}")
                 return -2
             cd_schema: i64 = ParserDiff::rh_diff_get(cn, ct, cr, "schema")
             cs: mutable i64 = -1
@@ -163,7 +189,9 @@ module ParserDiff:
                 out.extend(bytes_view(cdigest))
                 Base::rh_push_text(out, "\",\"output_schema\":\"rh-dep-graph/1\"},\"cache_key\":\"")
                 out.extend(bytes_view(cache_key))
-                Base::rh_push_text(out, "\",\"summary\":{\"mismatches\":0},\"mismatches\":[],\"note\":\"unsupported candidate schema is distinct from a successful empty graph\"}")
+                Base::rh_push_text(out, "\",\"summary\":{\"mismatches\":0},\"metrics\":")
+                return -3 if not ParserDiff::rh_diff_emit_metrics(out, 0, 0, Observation::RH_ST_UNSUPPORTED, "candidate parser emitted an unsupported schema")
+                Base::rh_push_text(out, ",\"mismatches\":[],\"note\":\"unsupported candidate schema is distinct from a successful empty graph\"}")
                 return -2
             nn_idx: i64 = ParserDiff::rh_diff_get(nn, nt, nr, "nodes")
             cn_idx: i64 = ParserDiff::rh_diff_get(cn, ct, cr, "nodes")
@@ -315,11 +343,9 @@ module ParserDiff:
             Base::rh_push_decimal_i64(out, parser_count)
             Base::rh_push_text(out, ",\"normalization\":")
             Base::rh_push_decimal_i64(out, normalization_count)
-            Base::rh_push_text(out, "},\"metrics\":[{\"key\":\"coverage.parser_error_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, parser_count)
-            Base::rh_push_text(out, ",\"evidence\":[\"parser-diff\"]},{\"key\":\"coverage.mapping_conflict_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, mapping_count)
-            Base::rh_push_text(out, ",\"evidence\":[\"parser-diff\"]}],\"mismatches\":[")
+            Base::rh_push_text(out, "},\"metrics\":")
+            return -3 if not ParserDiff::rh_diff_emit_metrics(out, parser_count, mapping_count, Observation::RH_ST_OBSERVED, "")
+            Base::rh_push_text(out, ",\"mismatches\":[")
             out.extend(bytes_view(mismatches))
             Base::rh_push_text(out, "],\"note\":\"differential comparison preserves parser/version/configuration identity; unsupported input is distinct from successful emptiness; visibility is part of the cache identity\"}")
             0

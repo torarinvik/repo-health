@@ -30,7 +30,7 @@ for p in sorted(glob.glob(os.path.join(root, "schemas", "*.schema.json"))):
     assert s["schema"] == "rh-jsonschema/1", p
     assert s["targets"], p
     names.add(s["name"])
-for want in ("connector-manifest", "canonical-repo", "dep-graph", "adapter-transformation", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result", "pylock-artifact-observation-result", "pylock-marker-evaluation", "projection-snapshot", "cyclonedx", "spdx", "inventory-result", "continuity-metrics", "succession-result", "registry-meta", "registry-meta-result", "distribution", "archive", "role-publication", "homebrew", "osv-query-input", "osv-commit-query-input", "osv-query-batch-result", "osv-query-batch-pages-result", "osv-query-batch-hydrated-result", "snapshot-reconcile-input", "snapshot-reconcile-result", "forge-events-input", "ingest-input", "postgres-legacy-ingest-input", "postgres-command", "postgres-result", "github-review-capability-probe-result", "github-collaborator-probe-result", "gitlab-capability-matrix", "forge-capability-matrix", "bitbucket-capability-matrix", "correction-evidence-policy", "correction-evidence-verification", "privacy-history"):
+for want in ("connector-manifest", "canonical-repo", "dep-graph", "adapter-transformation", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result", "pylock-artifact-observation-result", "pylock-marker-evaluation", "projection-snapshot", "cyclonedx", "spdx", "inventory-result", "continuity-metrics", "succession-result", "parser-diff-result", "registry-meta", "registry-meta-result", "distribution", "archive", "role-publication", "homebrew", "osv-query-input", "osv-commit-query-input", "osv-query-batch-result", "osv-query-batch-pages-result", "osv-query-batch-hydrated-result", "snapshot-reconcile-input", "snapshot-reconcile-result", "forge-events-input", "ingest-input", "postgres-legacy-ingest-input", "postgres-command", "postgres-result", "github-review-capability-probe-result", "github-collaborator-probe-result", "gitlab-capability-matrix", "forge-capability-matrix", "bitbucket-capability-matrix", "correction-evidence-policy", "correction-evidence-verification", "privacy-history"):
     assert want in names, ("missing schema", want)
 print("[schemas] families OK:", ", ".join(sorted(names)))
 PY
@@ -113,6 +113,27 @@ PY
 done
 rm -f "$succession_negative"
 echo "[schemas] succession observed, partial, unsupported, and absent states are constrained"
+
+echo "[schemas] parser-diff observations constrain successful and unsupported comparisons"
+parser_diff_negative="$ROOT/fixtures/parser-diff/result-negative.json"
+for invalid in observed-null unsupported-value; do
+  python3 - "$ROOT/fixtures/parser-diff/result-match.json" "$ROOT/fixtures/parser-diff/result-unsupported.json" "$parser_diff_negative" "$invalid" <<'PY'
+import json, sys
+match_path, unsupported_path, target, invalid = sys.argv[1:]
+document = json.load(open(unsupported_path if invalid == "unsupported-value" else match_path))
+if invalid == "observed-null":
+    document["metrics"][0]["value"] = None
+else:
+    document["metrics"][0]["value"] = 0
+json.dump(document, open(target, "w"), separators=(",", ":"))
+PY
+  if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+    rm -f "$parser_diff_negative"
+    fail "parser-diff schema accepted $invalid metric state"
+  fi
+done
+rm -f "$parser_diff_negative"
+echo "[schemas] parser-diff observed and unsupported value states are constrained"
 
 echo "[schemas] negative control: a malformed document is rejected"
 tmp="$ROOT/build/tmp_schema_neg"
