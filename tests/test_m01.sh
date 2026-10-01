@@ -284,6 +284,52 @@ for x in d["metrics"]:
 print("[m01] F002 exact OK")
 EOF
 
+# Snapshot path observations come from the pinned Git tree for both worktrees
+# and bare repositories; the file metric must not depend on checkout access.
+mkdir -p "$T/manifest-fixture" && git init -q -b main "$T/manifest-fixture"
+(
+  cd "$T/manifest-fixture"
+  git config user.name "Fixture"
+  git config user.email "fixture@example.com"
+  printf '{"name":"manifest-fixture"}\n' > package.json
+  git add package.json
+  GIT_AUTHOR_DATE="2025-01-05T12:00:00Z" GIT_COMMITTER_DATE="2025-01-05T12:00:00Z" git commit -qm "manifest fixture"
+)
+"$CLI" scan --repo "$T/manifest-fixture" --out "$T/manifest-worktree" --full-history >/dev/null || fail "manifest worktree scan"
+git clone -q --bare "$T/manifest-fixture" "$T/manifest-bare.git"
+"$CLI" scan --repo "$T/manifest-bare.git" --out "$T/manifest-bare" --full-history >/dev/null || fail "manifest bare scan"
+python3 - "$T/manifest-worktree/report.json" "$T/manifest-bare/report.json" <<'PY'
+import json, sys
+worktree, bare = (json.load(open(path)) for path in sys.argv[1:])
+def stable_metrics(report):
+    return [
+        (m["key"], m["version"], m["status"], m.get("value"), m["quality_dimensions"], m["evidence"])
+        for m in report["metrics"] if m["key"] != "freshness.evidence_max_age_hours"
+    ]
+assert stable_metrics(worktree) == stable_metrics(bare), "worktree and bare tree observations differ"
+manifest = next(m for m in bare["metrics"] if m["key"] == "source.manifest_presence")
+assert manifest["value"] == {"code": 1, "label": "found"}, manifest
+assert manifest["evidence"] == ["evidence/git-files.txt"], manifest
+print("[m01] retained-tree manifest metric matches for worktree and bare repository")
+PY
+
+mkdir -p "$T/broken-tree" && git init -q -b main "$T/broken-tree"
+(
+  cd "$T/broken-tree"
+  git config user.name "Fixture"
+  git config user.email "fixture@example.com"
+  printf 'tree snapshot required\n' > README.md
+  git add README.md
+  GIT_AUTHOR_DATE="2025-01-05T12:00:00Z" GIT_COMMITTER_DATE="2025-01-05T12:00:00Z" git commit -qm "tree snapshot fixture"
+)
+tree_oid="$(git -C "$T/broken-tree" rev-parse 'HEAD^{tree}')"
+tree_object="$T/broken-tree/.git/objects/${tree_oid:0:2}/${tree_oid:2}"
+[[ -f "$tree_object" ]] || fail "tree failure fixture is not a loose object"
+rm "$tree_object"
+expect 4 "$CLI" scan --repo "$T/broken-tree" --out "$T/broken-tree-report" --full-history
+[[ ! -e "$T/broken-tree-report/report.json" ]] || fail "scan published a report without a readable tree snapshot"
+echo "[m01] nonempty history fails closed when retained tree paths are unavailable"
+
 echo "[m01] snapshot file classification is evidence-backed"
 mkdir -p "$T/docs" && git init -q -b main "$T/docs" && (
   cd "$T/docs" && git config user.name "Docs" && git config user.email "docs@example.com"
@@ -696,5 +742,25 @@ if grep -ril "health_score\|trust_score\|trustworthy\|health-rating" "$T/rep-fix
   fail "universal-score language in reports"
 fi
 echo "[m01] R030 language scan OK"
+
+if [[ "${RH_M01_LIVE:-0}" == "1" ]]; then
+  live_url="${RH_M01_LIVE_URL:-https://github.com/octocat/Hello-World.git}"
+  "$CLI" scan --repo "$live_url" --out "$T/live-remote" --full-history >/dev/null || fail "approved live HTTPS scan"
+  "$CLI" scan --repo "$T/live-remote/evidence/remote.git" --out "$T/live-local" --full-history >/dev/null || fail "live clone local replay scan"
+  "$CLI" replay --bundle "$T/live-remote/bundle.manifest" --out "$T/live-replay" >/dev/null || fail "live HTTPS bundle replay"
+  cmp -s "$T/live-remote/report.json" "$T/live-replay/report.json" || fail "live HTTPS replay JSON differs"
+  cmp -s "$T/live-remote/report.md" "$T/live-replay/report.md" || fail "live HTTPS replay Markdown differs"
+  python3 - "$T/live-remote/report.json" "$T/live-local/report.json" <<'PY'
+import json, sys
+remote, local = (json.load(open(path)) for path in sys.argv[1:])
+def stable_metrics(report):
+    return [
+        (m["key"], m["version"], m["status"], m.get("value"), m["quality_dimensions"], m["evidence"])
+        for m in report["metrics"] if m["key"] != "freshness.evidence_max_age_hours"
+    ]
+assert stable_metrics(remote) == stable_metrics(local), "HTTPS and local scan metric observations differ"
+print("[m01] approved HTTPS and cloned-local metric parity OK")
+PY
+fi
 
 echo "test_m01 OK"

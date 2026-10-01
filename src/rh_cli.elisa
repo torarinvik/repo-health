@@ -365,7 +365,6 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
             rh_cli_err("clone failed; see evidence/git-clone.err (no partial report)")
             return 4
         scan_repo <- dest
-    is_local: bool = kind == Git::RH_URL_LOCAL
     logf: mutable darray[u8] = []
     defaultf: mutable darray[u8] = []
     shaf: mutable darray[u8] = []
@@ -431,7 +430,7 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if not Process::rh_succeeded(Git::rh_run_git_shallow(scan_repo, shap, shaep)):
         rh_cli_err("rev-parse failed (not a repository?)")
         return 4
-    _ = Git::rh_run_git_files(scan_repo, filesp, fileserrp)
+    files_result: Process::RhProcessResult = Git::rh_run_git_files(scan_repo, filesp, fileserrp)
     logep: cstr = (&loge[0]).cast[cstr] can Unsafe.PointerCast
     log_result: Process::RhProcessResult = Git::rh_run_git_log(scan_repo, logp, logep, full)
     if not Process::rh_succeeded(log_result):
@@ -554,13 +553,18 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     identities: i64 = Base::rh_count_lines(uniqb)
     bots: i64 = Report::rh_count_bot_lines(uniqb)
     filesb: mutable darray[u8] = []
+    files_read: bool = Base::rh_io_read(filesp, filesb) >= 0
+    if snap.commits_all > 0 and (not Process::rh_succeeded(files_result) or not files_read):
+        rh_cli_err("git tree snapshot failed; no report published")
+        return 4
+    file_snapshot_available: bool = snap.commits_all > 0
     files: Files::RhFileMetrics =
-        if Base::rh_io_read(filesp, filesb) >= 0 and snap.commits_all > 0:
+        if file_snapshot_available:
             Files::rh_file_metrics(filesb)
         else:
             Files::RhFileMetrics{readme: -1, contributing: -1, license: -1, installation: -1, api_reference: -1, governance: -1, code_ownership: -1, notice: -1, release_process: -1, succession_process: -1, license_files: -1, examples: -1, security_policy: -1, release_notes: -1, source_files: -1, ci_configuration: -1, test_files: -1, source_bytes: -1, missing_objects: -1}
-    snap.manifest <- Files::rh_manifest_presence(filesb) if is_local
-    snap.manifest <- 2 if not is_local
+    snap.manifest <- Files::rh_manifest_presence(filesb) if file_snapshot_available
+    snap.manifest <- 2 if not file_snapshot_available
     cov_n: mutable i64 = 0
     cov_d: mutable i64 = 0
     cov_v2_n: mutable i64 = 0
@@ -887,8 +891,8 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     if not Report::rh_report_manifest_bool(manb, "partial-clone: ", &partial_manifest) or partial_manifest != partial_clone:
         rh_cli_err("partial-clone field does not match retained evidence")
         return 4
-    snap.manifest <- Files::rh_manifest_presence(retained_files) if repo_kind == 0
-    snap.manifest <- 2 if repo_kind == 1
+    snap.manifest <- Files::rh_manifest_presence(retained_files) if snap.commits_all > 0
+    snap.manifest <- 2 if snap.commits_all == 0
     cov_n: mutable i64 = 0
     cov_d: mutable i64 = 0
     cov_v2_n: mutable i64 = 0
