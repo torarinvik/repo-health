@@ -32,6 +32,10 @@ def type_ok(val, t):
         return (isinstance(val, int) and not isinstance(val, bool)) or isinstance(val, dict)
     if t == "int_dict_or_null":
         return val is None or (isinstance(val, int) and not isinstance(val, bool)) or isinstance(val, dict)
+    if t == "int_dict_bool_or_null":
+        return val is None or (isinstance(val, int) and not isinstance(val, bool)) or isinstance(val, dict) or isinstance(val, bool)
+    if t == "int_dict_bool":
+        return (isinstance(val, int) and not isinstance(val, bool)) or isinstance(val, dict) or isinstance(val, bool)
     if t == "dict_or_null":
         return val is None or isinstance(val, dict)
     if t == "bool":

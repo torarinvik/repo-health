@@ -81,10 +81,19 @@ assert len(ng["unresolved"]) == 1, ng["unresolved"]
 assert ng["unresolved"][0]["reason"] == "context", ng["unresolved"]
 assert len(ng["advisories"]) == 1, ng["advisories"]
 assert m["schema"] == "rh-deps-metrics/1"
+assert len(m["metrics"]) == 38, m["metrics"]
 met = m["metrics"][0]
 assert met["key"] == "dependencies.unsupported_range_count" and met["version"] == "1.0.0"
 assert met["status"] == "observed" and met["value"] == 4, met
 metrics = {item["key"]: item for item in m["metrics"]}
+for key, metric in metrics.items():
+    assert metric["version"] == "1.0.0", metric
+    assert metric["evidence"] == (["dependency-input", "osv-input"] if key.startswith("security.") else ["dependency-input"]), metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "complete", "freshness": "unknown",
+        "validity": "valid", "provenance": "evidence_backed",
+    }, metric
+assert metrics["dependencies.unsupported_range_count"]["note"] == "unsupported range syntax is not a missing dependency; : and / forms are not evaluated", metrics
 assert {key: metrics[key]["value"] for key in metrics} == {
     "dependencies.unsupported_range_count": 4,
     "dependencies.ecosystem_count": 2,
@@ -187,8 +196,36 @@ cg = json.load(open(sys.argv[1] + "/deps-cargo-graph.json"))
 assert cg["advisories"] == [], cg["advisories"]
 m = json.load(open(sys.argv[1] + "/deps-metrics.json"))
 for metric in m["metrics"][-9:]:
-    assert metric["status"] == "unavailable" and "value" not in metric, metric
+    assert metric["status"] == "unavailable" and metric["value"] is None, metric
+    assert metric["reason"] == "osv-input-not-provided" and metric["evidence"] == [], metric
+    assert metric["quality_dimensions"] == {
+        "completeness": "unknown", "freshness": "unknown",
+        "validity": "unknown", "provenance": "unknown",
+    }, metric
 print("[deps] no --osv -> no advisories fabricated")
+PY
+
+echo "[deps] zero resolved artifacts produce a reasoned not-applicable share"
+mkdir -p "$T/rootonly"
+cat > "$T/rootonly/Cargo.lock" <<'LOCK'
+version = 3
+
+[[package]]
+name = "workspace"
+version = "0.1.0"
+LOCK
+"$ROOT/build/rh_cli" deps --repo "$T/rootonly" --out "$T/rootonly-out" >/dev/null || fail "root-only deps failed"
+python3 - "$T/rootonly-out/deps-metrics.json" <<'PY'
+import json, sys
+m = {metric["key"]: metric for metric in json.load(open(sys.argv[1]))["metrics"]}
+metric = m["dependency.artifact_digest_coverage"]
+assert metric["status"] == "not_applicable" and metric["value"] is None, metric
+assert metric["reason"] == "no-resolved-artifact-nodes" and metric["evidence"] == ["dependency-input"], metric
+assert metric["quality_dimensions"] == {
+    "completeness": "unknown", "freshness": "unknown",
+    "validity": "unknown", "provenance": "evidence_backed",
+}, metric
+print("[deps] empty artifact denominator stays not applicable")
 PY
 
 echo "[deps] bounded OSV URL capture retains source evidence before matching"

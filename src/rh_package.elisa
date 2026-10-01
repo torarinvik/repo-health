@@ -1,4 +1,5 @@
 include "./rh_sha256.elisa"
+include "./rh_observation.elisa"
 
 module Package:
     public:
@@ -4500,11 +4501,46 @@ module Package:
                         total <- total + 1
                 r <- r + 1
 
+    private:
+        def rh_deps_emit_metric(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, reason: cstr, dependency_evidence: bool, osv_evidence: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+            Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.DependencyInput) if dependency_evidence
+            Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.OsvInput) if osv_evidence
+            has_evidence: bool = dependency_evidence or osv_evidence
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Partial if status == Observation::RH_ST_PARTIAL else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if status == Observation::RH_ST_OBSERVED else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked if has_evidence else Observation::RhProvenanceQuality.Unknown
+            }
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(status, value, status == Observation::RH_ST_PARTIAL, quality, evidence)
+            Observation::rh_observation_emit_metric(out, key, "1.0.0", reason, observation)
+
+        def rh_deps_emit_count_metric(out: mutable darray[u8]&, key: cstr, count: i64, dependency_evidence: bool, osv_evidence: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_deps_emit_metric(out, key, Observation::RhMetricValue.Count(count), Observation::RH_ST_OBSERVED, "", dependency_evidence, osv_evidence)
+
+        def rh_deps_emit_ratio_metric(out: mutable darray[u8]&, key: cstr, numerator: i64, denominator: i64, dependency_evidence: bool, osv_evidence: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            Observation::rh_ratio_valid(numerator, denominator) and rh_deps_emit_metric(out, key, Observation::RhMetricValue.Ratio(numerator, denominator), Observation::RH_ST_OBSERVED, "", dependency_evidence, osv_evidence)
+
+        def rh_deps_emit_boolean_metric(out: mutable darray[u8]&, key: cstr, value: bool, dependency_evidence: bool, osv_evidence: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_deps_emit_metric(out, key, Observation::RhMetricValue.Boolean(value), Observation::RH_ST_OBSERVED, "", dependency_evidence, osv_evidence)
+
+        def rh_deps_emit_absent_metric(out: mutable darray[u8]&, key: cstr, status: u8, reason: cstr, dependency_evidence: bool, osv_evidence: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            rh_deps_emit_metric(out, key, Observation::RhMetricValue.Absent, status, reason, dependency_evidence, osv_evidence)
+
+        def rh_deps_emit_unsupported_range_metric(out: mutable darray[u8]&, count: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            emitted: bool = rh_deps_emit_count_metric(out, "dependencies.unsupported_range_count", count, true, false)
+            if emitted:
+                out.pop()
+                Base::rh_push_text(out, ",\"note\":\"unsupported range syntax is not a missing dependency; : and / forms are not evaluated\"}")
+            emitted
+
+    public:
         # Dependency metrics document (rh-deps-metrics/1). One registered metric,
         # `dependencies.unsupported_range_count`, with per-ecosystem components so
         # the denominator-free count can be audited. It never claims a dependency
         # is safe or that the graph is complete (R009/F022/R030).
-        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, transitive_resolved: mutable darray[i64]&, runtime_requirements: mutable darray[i64]&, development_requirements: mutable darray[i64]&, optional_requirements: mutable darray[i64]&, peer_requirements: mutable darray[i64]&, unknown_scope_requirements: mutable darray[i64]&, runtime_direct: mutable darray[i64]&, build_direct: mutable darray[i64]&, optional_direct: mutable darray[i64]&, unknown_scope_direct: mutable darray[i64]&, unpinned: mutable darray[i64]&, digest_known: mutable darray[i64]&, digest_total: mutable darray[i64]&, maximum_depth: mutable darray[i64]&, resolution_complete: mutable darray[i64]&, node_count: mutable darray[i64]&, edge_count: mutable darray[i64]&, advisory_unknown_nodes: mutable darray[i64]&, fixed_version_available: mutable darray[i64]&, runtime_edges: mutable darray[i64]&, development_edges: mutable darray[i64]&, optional_edges: mutable darray[i64]&, peer_edges: mutable darray[i64]&, unknown_scope_edges: mutable darray[i64]&, advisories: mutable darray[i64]&, advisory_records: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, affected_direct_nodes: mutable darray[i64]&, affected_transitive_nodes: mutable darray[i64]&, affected_unreachable_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_deps_metrics_emit(out: mutable darray[u8]&, eco_codes: darray[i64]&, declared: darray[i64]&, resolved: darray[i64]&, unresolved: darray[i64]&, unsupported: darray[i64]&, direct_declared: mutable darray[i64]&, direct_resolved: mutable darray[i64]&, direct_unresolved: mutable darray[i64]&, transitive_resolved: mutable darray[i64]&, runtime_requirements: mutable darray[i64]&, development_requirements: mutable darray[i64]&, optional_requirements: mutable darray[i64]&, peer_requirements: mutable darray[i64]&, unknown_scope_requirements: mutable darray[i64]&, runtime_direct: mutable darray[i64]&, build_direct: mutable darray[i64]&, optional_direct: mutable darray[i64]&, unknown_scope_direct: mutable darray[i64]&, unpinned: mutable darray[i64]&, digest_known: mutable darray[i64]&, digest_total: mutable darray[i64]&, maximum_depth: mutable darray[i64]&, resolution_complete: mutable darray[i64]&, node_count: mutable darray[i64]&, edge_count: mutable darray[i64]&, advisory_unknown_nodes: mutable darray[i64]&, fixed_version_available: mutable darray[i64]&, runtime_edges: mutable darray[i64]&, development_edges: mutable darray[i64]&, optional_edges: mutable darray[i64]&, peer_edges: mutable darray[i64]&, unknown_scope_edges: mutable darray[i64]&, advisories: mutable darray[i64]&, advisory_records: mutable darray[i64]&, affected_nodes: mutable darray[i64]&, affected_direct_nodes: mutable darray[i64]&, affected_transitive_nodes: mutable darray[i64]&, affected_unreachable_nodes: mutable darray[i64]&, withdrawn: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
             total_declared: i64 =
                 while i < eco_codes.count.i64() |total_declared: i64 = 0, i: i64 = 0| -> total_declared:
                     total_declared <- total_declared + declared[i.usize()]
@@ -4659,171 +4695,86 @@ module Package:
                 while i < eco_codes.count.i64() |i: i64 = 0, fixed_version_available, any_fixed_version|:
                     any_fixed_version <- true if fixed_version_available[i.usize()] == 1
                     i <- i + 1
-            Base::rh_push_text(out, "{\"schema\":\"rh-deps-metrics/1\",\"metrics\":[{\"key\":\"dependencies.unsupported_range_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_unsupported)
-            Base::rh_push_text(out, ",\"evidence\":[")
-            while j < eco_codes.count.i64() |j: i64 = 0, eco_codes, out|:
-                if j > 0:
-                    out.push(44)
-                Base::rh_push_text(out, "\"")
-                Base::rh_push_text(out, rh_deps_spec(eco_codes[j.usize()]))
-                Base::rh_push_text(out, "\"")
-                j <- j + 1
-            Base::rh_push_text(out, "],\"note\":\"unsupported range syntax is not a missing dependency; : and / forms are not evaluated\"},")
-            Base::rh_push_text(out, "{\"key\":\"dependencies.ecosystem_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, eco_codes.count.i64())
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependencies.declared_requirement_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_declared)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependencies.resolved_edge_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_resolved)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependencies.unresolved_requirement_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_unresolved)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.requirements_direct\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_direct_declared)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.resolved_direct_versions\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_direct_resolved)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.unresolved_requirements\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_direct_unresolved)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.resolved_transitive_versions\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_transitive_resolved)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.runtime_requirements\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_runtime_requirements)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.development_requirements\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_development_requirements)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.optional_requirements\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_optional_requirements)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.peer_requirements\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_peer_requirements)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.unknown_scope_requirements\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_unknown_scope_requirements)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.runtime_direct_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_runtime_direct)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.build_direct_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_build_direct)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.optional_direct_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_optional_direct)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.unknown_scope_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_unknown_scope_direct)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.unpinned_requirement_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_unpinned)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.artifact_digest_coverage\",\"version\":\"1.0.0\",\"status\":\"")
-            if total_digest_nodes > 0:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_i64(out, total_digest_known)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_i64(out, total_digest_nodes)
-                Base::rh_push_text(out, "}")
-            else:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-resolved-artifact-nodes\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.maximum_observed_depth\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_maximum_depth)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.resolution_complete\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_text(out, "true" if all_resolutions_complete else "false")
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"graph.node_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_node_count)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"graph.edge_count\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_edge_count)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.runtime_resolved_edges\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_runtime_edges)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.development_resolved_edges\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_development_edges)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.optional_resolved_edges\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_optional_edges)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.peer_resolved_edges\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_peer_edges)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"dependency.unknown_scope_resolved_edges\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":")
-            Base::rh_push_decimal_i64(out, total_unknown_scope_edges)
-            Base::rh_push_text(out, ",\"evidence\":[\"dependency-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"security.known_advisory_records\",\"version\":\"1.0.0\",\"status\":\"")
-            if security_observed:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, total_advisory_records)
-            else:
-                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"security.known_unique_advisories\",\"version\":\"1.0.0\",\"status\":\"")
-            if security_observed:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, total_advisories)
-            else:
-                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"security.affected_resolved_nodes\",\"version\":\"1.0.0\",\"status\":\"")
-            if security_observed:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, total_affected_nodes)
-            else:
-                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"security.affected_direct_nodes\",\"version\":\"1.0.0\",\"status\":\"")
-            if security_observed:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, total_affected_direct_nodes)
-            else:
-                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"security.affected_transitive_nodes\",\"version\":\"1.0.0\",\"status\":\"")
-            if security_observed:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, total_affected_transitive_nodes)
-            else:
-                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"security.affected_unreachable_nodes\",\"version\":\"1.0.0\",\"status\":\"")
-            if security_observed:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, total_affected_unreachable_nodes)
-            else:
-                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"security.advisory_match_unknown_nodes\",\"version\":\"1.0.0\",\"status\":\"")
-            if security_observed:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, total_advisory_unknown_nodes)
-            else:
-                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"security.fixed_version_available\",\"version\":\"1.0.0\",\"status\":\"")
-            if security_observed:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_text(out, "true" if any_fixed_version else "false")
-            else:
-                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]},")
-            Base::rh_push_text(out, "{\"key\":\"security.withdrawn_advisory_count\",\"version\":\"1.0.0\",\"status\":\"")
-            if security_observed:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, total_withdrawn)
-            else:
-                Base::rh_push_text(out, "unavailable\",\"reason\":\"osv-input-not-provided\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"osv-input\"]}],\"by_ecosystem\":[")
+            Base::rh_push_text(out, "{\"schema\":\"rh-deps-metrics/1\",\"metrics\":[")
+            metrics_ok: bool = |out|
+                first: bool = rh_deps_emit_unsupported_range_metric(out, total_unsupported)
+                out.push(44) if first
+                second: bool = first and rh_deps_emit_count_metric(out, "dependencies.ecosystem_count", eco_codes.count.i64(), true, false)
+                out.push(44) if second
+                third: bool = second and rh_deps_emit_count_metric(out, "dependencies.declared_requirement_count", total_declared, true, false)
+                out.push(44) if third
+                fourth: bool = third and rh_deps_emit_count_metric(out, "dependencies.resolved_edge_count", total_resolved, true, false)
+                out.push(44) if fourth
+                fifth: bool = fourth and rh_deps_emit_count_metric(out, "dependencies.unresolved_requirement_count", total_unresolved, true, false)
+                out.push(44) if fifth
+                sixth: bool = fifth and rh_deps_emit_count_metric(out, "dependency.requirements_direct", total_direct_declared, true, false)
+                out.push(44) if sixth
+                seventh: bool = sixth and rh_deps_emit_count_metric(out, "dependency.resolved_direct_versions", total_direct_resolved, true, false)
+                out.push(44) if seventh
+                eighth: bool = seventh and rh_deps_emit_count_metric(out, "dependency.unresolved_requirements", total_direct_unresolved, true, false)
+                out.push(44) if eighth
+                ninth: bool = eighth and rh_deps_emit_count_metric(out, "dependency.resolved_transitive_versions", total_transitive_resolved, true, false)
+                out.push(44) if ninth
+                tenth: bool = ninth and rh_deps_emit_count_metric(out, "dependency.runtime_requirements", total_runtime_requirements, true, false)
+                out.push(44) if tenth
+                eleventh: bool = tenth and rh_deps_emit_count_metric(out, "dependency.development_requirements", total_development_requirements, true, false)
+                out.push(44) if eleventh
+                twelfth: bool = eleventh and rh_deps_emit_count_metric(out, "dependency.optional_requirements", total_optional_requirements, true, false)
+                out.push(44) if twelfth
+                thirteenth: bool = twelfth and rh_deps_emit_count_metric(out, "dependency.peer_requirements", total_peer_requirements, true, false)
+                out.push(44) if thirteenth
+                fourteenth: bool = thirteenth and rh_deps_emit_count_metric(out, "dependency.unknown_scope_requirements", total_unknown_scope_requirements, true, false)
+                out.push(44) if fourteenth
+                fifteenth: bool = fourteenth and rh_deps_emit_count_metric(out, "dependency.runtime_direct_count", total_runtime_direct, true, false)
+                out.push(44) if fifteenth
+                sixteenth: bool = fifteenth and rh_deps_emit_count_metric(out, "dependency.build_direct_count", total_build_direct, true, false)
+                out.push(44) if sixteenth
+                seventeenth: bool = sixteenth and rh_deps_emit_count_metric(out, "dependency.optional_direct_count", total_optional_direct, true, false)
+                out.push(44) if seventeenth
+                eighteenth: bool = seventeenth and rh_deps_emit_count_metric(out, "dependency.unknown_scope_count", total_unknown_scope_direct, true, false)
+                out.push(44) if eighteenth
+                nineteenth: bool = eighteenth and rh_deps_emit_count_metric(out, "dependency.unpinned_requirement_count", total_unpinned, true, false)
+                out.push(44) if nineteenth
+                twentieth: bool = nineteenth and (rh_deps_emit_ratio_metric(out, "dependency.artifact_digest_coverage", total_digest_known, total_digest_nodes, true, false) if total_digest_nodes > 0 else rh_deps_emit_absent_metric(out, "dependency.artifact_digest_coverage", Observation::RH_ST_NOT_APPLICABLE, "no-resolved-artifact-nodes", true, false))
+                out.push(44) if twentieth
+                twenty_first: bool = twentieth and rh_deps_emit_count_metric(out, "dependency.maximum_observed_depth", total_maximum_depth, true, false)
+                out.push(44) if twenty_first
+                twenty_second: bool = twenty_first and rh_deps_emit_boolean_metric(out, "dependency.resolution_complete", all_resolutions_complete, true, false)
+                out.push(44) if twenty_second
+                twenty_third: bool = twenty_second and rh_deps_emit_count_metric(out, "graph.node_count", total_node_count, true, false)
+                out.push(44) if twenty_third
+                twenty_fourth: bool = twenty_third and rh_deps_emit_count_metric(out, "graph.edge_count", total_edge_count, true, false)
+                out.push(44) if twenty_fourth
+                twenty_fifth: bool = twenty_fourth and rh_deps_emit_count_metric(out, "dependency.runtime_resolved_edges", total_runtime_edges, true, false)
+                out.push(44) if twenty_fifth
+                twenty_sixth: bool = twenty_fifth and rh_deps_emit_count_metric(out, "dependency.development_resolved_edges", total_development_edges, true, false)
+                out.push(44) if twenty_sixth
+                twenty_seventh: bool = twenty_sixth and rh_deps_emit_count_metric(out, "dependency.optional_resolved_edges", total_optional_edges, true, false)
+                out.push(44) if twenty_seventh
+                twenty_eighth: bool = twenty_seventh and rh_deps_emit_count_metric(out, "dependency.peer_resolved_edges", total_peer_edges, true, false)
+                out.push(44) if twenty_eighth
+                twenty_ninth: bool = twenty_eighth and rh_deps_emit_count_metric(out, "dependency.unknown_scope_resolved_edges", total_unknown_scope_edges, true, false)
+                out.push(44) if twenty_ninth
+                thirtieth: bool = twenty_ninth and (rh_deps_emit_count_metric(out, "security.known_advisory_records", total_advisory_records, true, true) if security_observed else rh_deps_emit_absent_metric(out, "security.known_advisory_records", Observation::RH_ST_UNAVAILABLE, "osv-input-not-provided", false, false))
+                out.push(44) if thirtieth
+                thirty_first: bool = thirtieth and (rh_deps_emit_count_metric(out, "security.known_unique_advisories", total_advisories, true, true) if security_observed else rh_deps_emit_absent_metric(out, "security.known_unique_advisories", Observation::RH_ST_UNAVAILABLE, "osv-input-not-provided", false, false))
+                out.push(44) if thirty_first
+                thirty_second: bool = thirty_first and (rh_deps_emit_count_metric(out, "security.affected_resolved_nodes", total_affected_nodes, true, true) if security_observed else rh_deps_emit_absent_metric(out, "security.affected_resolved_nodes", Observation::RH_ST_UNAVAILABLE, "osv-input-not-provided", false, false))
+                out.push(44) if thirty_second
+                thirty_third: bool = thirty_second and (rh_deps_emit_count_metric(out, "security.affected_direct_nodes", total_affected_direct_nodes, true, true) if security_observed else rh_deps_emit_absent_metric(out, "security.affected_direct_nodes", Observation::RH_ST_UNAVAILABLE, "osv-input-not-provided", false, false))
+                out.push(44) if thirty_third
+                thirty_fourth: bool = thirty_third and (rh_deps_emit_count_metric(out, "security.affected_transitive_nodes", total_affected_transitive_nodes, true, true) if security_observed else rh_deps_emit_absent_metric(out, "security.affected_transitive_nodes", Observation::RH_ST_UNAVAILABLE, "osv-input-not-provided", false, false))
+                out.push(44) if thirty_fourth
+                thirty_fifth: bool = thirty_fourth and (rh_deps_emit_count_metric(out, "security.affected_unreachable_nodes", total_affected_unreachable_nodes, true, true) if security_observed else rh_deps_emit_absent_metric(out, "security.affected_unreachable_nodes", Observation::RH_ST_UNAVAILABLE, "osv-input-not-provided", false, false))
+                out.push(44) if thirty_fifth
+                thirty_sixth: bool = thirty_fifth and (rh_deps_emit_count_metric(out, "security.advisory_match_unknown_nodes", total_advisory_unknown_nodes, true, true) if security_observed else rh_deps_emit_absent_metric(out, "security.advisory_match_unknown_nodes", Observation::RH_ST_UNAVAILABLE, "osv-input-not-provided", false, false))
+                out.push(44) if thirty_sixth
+                thirty_seventh: bool = thirty_sixth and (rh_deps_emit_boolean_metric(out, "security.fixed_version_available", any_fixed_version, true, true) if security_observed else rh_deps_emit_absent_metric(out, "security.fixed_version_available", Observation::RH_ST_UNAVAILABLE, "osv-input-not-provided", false, false))
+                out.push(44) if thirty_seventh
+                thirty_eighth: bool = thirty_seventh and (rh_deps_emit_count_metric(out, "security.withdrawn_advisory_count", total_withdrawn, true, true) if security_observed else rh_deps_emit_absent_metric(out, "security.withdrawn_advisory_count", Observation::RH_ST_UNAVAILABLE, "osv-input-not-provided", false, false))
+                thirty_eighth
+            return false if not metrics_ok
+            Base::rh_push_text(out, "],\"by_ecosystem\":[")
             while k < eco_codes.count.i64() |k: i64 = 0, eco_codes, declared, resolved, unresolved, unsupported, direct_declared, direct_resolved, direct_unresolved, transitive_resolved, runtime_requirements, development_requirements, optional_requirements, peer_requirements, unknown_scope_requirements, runtime_direct, build_direct, optional_direct, unknown_scope_direct, unpinned, digest_known, digest_total, maximum_depth, resolution_complete, node_count, edge_count, advisory_unknown_nodes, fixed_version_available, runtime_edges, development_edges, optional_edges, peer_edges, unknown_scope_edges, advisories, advisory_records, affected_nodes, affected_direct_nodes, affected_transitive_nodes, affected_unreachable_nodes, withdrawn, out|:
                 if k > 0:
                     out.push(44)
@@ -4943,6 +4894,7 @@ module Package:
                 Base::rh_push_text(out, "}")
                 k <- k + 1
             Base::rh_push_text(out, "]}")
+            true
 
         def rh_deps_eco(code: i64) -> u8&:
             return "nuget" if code == 8
