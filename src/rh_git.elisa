@@ -133,6 +133,10 @@ module Git:
             Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_BATCH_PAGE2_RESPONSE", "OSV_QUERY_FAKE_BATCH_PAGE2_RESPONSE")
             Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_BATCH_PAGE3_RESPONSE", "OSV_QUERY_FAKE_BATCH_PAGE3_RESPONSE")
             Git::rh_append_parent_env(env, "OSV_QUERY_FAKE_BATCH_PAGE4_RESPONSE", "OSV_QUERY_FAKE_BATCH_PAGE4_RESPONSE")
+            Git::rh_append_parent_env(env, "RH_NOTIFY_CURL_CONFIG", "RH_NOTIFY_CURL_CONFIG")
+            Git::rh_append_parent_env(env, "RH_NOTIFY_CURL_ARGS", "RH_NOTIFY_CURL_ARGS")
+            Git::rh_append_parent_env(env, "RH_NOTIFY_CURL_HTTP", "RH_NOTIFY_CURL_HTTP")
+            Git::rh_append_parent_env(env, "RH_NOTIFY_CURL_EXIT", "RH_NOTIFY_CURL_EXIT")
             Git::rh_append_parent_env(env, "ECOSYSTEM_LOOKUP_CURL_CAPTURE", "ECOSYSTEM_LOOKUP_CURL_CAPTURE")
             Git::rh_append_parent_env(env, "ECOSYSTEM_LOOKUP_FAKE_BODY", "ECOSYSTEM_LOOKUP_FAKE_BODY")
             Git::rh_append_parent_env(env, "ECOSYSTEM_LOOKUP_FAKE_HTTP", "ECOSYSTEM_LOOKUP_FAKE_HTTP")
@@ -983,6 +987,75 @@ module Git:
         # querybatch is kept separate because its response contains IDs only.
         def rh_run_osv_query_batch_result(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             rh_run_osv_post_result("https://api.osv.dev/v1/querybatch", request_file, body_file, code_file, err_file)
+
+        # Send one bounded JSON webhook request to an operator-configured HTTPS
+        # destination. The complete DNS set is checked and pinned, curl config
+        # and proxies are disabled, redirects are refused, and URL/body travel
+        # through stdin rather than process arguments or retained files.
+        def rh_run_https_json_webhook(url: cstr, payload: darray[u8]&, idempotency_key: cstr, status_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return Process::rh_setup_error(22) if not Base::rh_cstr_starts_with(url, "https://") or not rh_fetch_guard(url)
+            return Process::rh_setup_error(22) if Base::rh_cstr_len_c(url) > 2048 or Base::rh_cstr_len_c(idempotency_key) != 64
+            return Process::rh_setup_error(22) if payload.count == 0 or payload.count > 32768
+            return Process::rh_setup_error(22) if not rh_arg_safe(status_file) or not rh_arg_safe(err_file)
+            while i < Base::rh_cstr_len_c(url) |i: usize = 8, url|:
+                byte: u8 = url[i]
+                return Process::rh_setup_error(22) if byte < 33 or byte > 126 or byte == 34 or byte == 92 or byte == 35
+                i <- i + 1
+            while i < 64 |i: usize = 0, idempotency_key|:
+                byte: u8 = idempotency_key[i]
+                return Process::rh_setup_error(22) if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
+                i <- i + 1
+            while i < payload.count |i: usize = 0, payload|:
+                return Process::rh_setup_error(22) if payload[i] < 32 or payload[i] > 126
+                i <- i + 1
+            pin: mutable darray[u8] = []
+            return Process::rh_setup_error(22) if not rh_prepare_https_pin(url, err_file, pin)
+            args: mutable darray[u8] = []
+            Process::rh_append_arg(args, "curl")
+            Process::rh_append_arg(args, "--disable")
+            Process::rh_append_arg(args, "-sS")
+            Process::rh_append_arg(args, "--noproxy")
+            Process::rh_append_arg(args, "*")
+            Process::rh_append_arg(args, "--proto")
+            Process::rh_append_arg(args, "=https")
+            Process::rh_append_arg(args, "--globoff")
+            Process::rh_append_arg(args, "--max-redirs")
+            Process::rh_append_arg(args, "0")
+            Process::rh_append_arg(args, "--resolve")
+            Process::rh_append_arg(args, (&pin[0]).cast[u8&] can Unsafe.PointerCast)
+            Process::rh_append_arg(args, "--max-time")
+            Process::rh_append_arg(args, "15")
+            Process::rh_append_arg(args, "--max-filesize")
+            Process::rh_append_arg(args, "16384")
+            Process::rh_append_arg(args, "-H")
+            Process::rh_append_arg(args, "Content-Type: application/json")
+            Process::rh_append_arg(args, "-H")
+            idempotency_header: mutable darray[u8] = []
+            Base::rh_push_text(idempotency_header, "Idempotency-Key: ")
+            Base::rh_push_cstr(idempotency_header, idempotency_key)
+            Process::rh_append_arg_bytes(args, idempotency_header)
+            Process::rh_append_arg(args, "-o")
+            Process::rh_append_arg(args, "/dev/null")
+            Process::rh_append_arg(args, "-w")
+            Process::rh_append_arg(args, "%{http_code}")
+            Process::rh_append_arg(args, "--config")
+            Process::rh_append_arg(args, "-")
+            args.push(0)
+            input: mutable darray[u8] = []
+            Base::rh_push_text(input, "url = \"")
+            while i < Base::rh_cstr_len_c(url) |i: usize = 0, url, input|:
+                input.push(url[i])
+                i <- i + 1
+            Base::rh_push_text(input, "\"\nrequest = \"POST\"\ndata = \"")
+            while i < payload.count |i: usize = 0, payload, input|:
+                byte: u8 = payload[i]
+                if byte == 34 or byte == 92:
+                    input.push(92)
+                input.push(byte)
+                i <- i + 1
+            Base::rh_push_text(input, "\"\n")
+            env: mutable darray[u8] = Git::rh_transport_env()
+            Process::rh_run_with_input_output_limit("curl", args, env, input, status_file, err_file, 4096, 17000)
 
         # Fetch one full OSV vulnerability by a validated ID from a prior
         # query/querybatch response. The endpoint host and route are fixed here;

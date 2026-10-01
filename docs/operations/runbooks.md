@@ -294,3 +294,28 @@ graph-query claims return `empty` with
 an active lease, and generic claims rank collection work ahead of graph
 queries. Fairness across hosts or database workers still needs deployment
 validation.
+
+## 12. Notification webhook delivery
+
+Use `rh_cli notify-deliver` only with the durable `--state` file or
+`--state-store` directory for the notification policy input. Keep the
+`rh-notify-transport-config/1` endpoint map in operator-controlled storage and
+restrict access to it; endpoint URLs are excluded from the public result, but
+the configuration itself can contain sensitive routing details. The policy
+input remains authoritative for destination authorization and upstream
+subscription, and no webhook is sent for suppressed, unauthorized,
+unconfigured, or delivery-capped events.
+
+The sender accepts public HTTPS endpoints, validates and pins the complete DNS
+answer set, disables redirects and proxy use, and bounds response size and
+time. A 2xx response advances cooldown state. Other outcomes leave the event
+retryable. Receivers should deduplicate the stable `Idempotency-Key`, because a
+crash after remote acceptance and before local state publication can cause a
+retry. This transport does not add endpoint authentication or provider-specific
+message adapters; use only endpoints whose exposure model is acceptable for
+the minimal notification fields it sends.
+
+Record: input and transport-config digests, destination ID, delivery counts,
+HTTP outcomes, state-store revision, and any retry or receiver-side
+deduplication result. Do not copy endpoint URLs or webhook credentials into
+incident notes.

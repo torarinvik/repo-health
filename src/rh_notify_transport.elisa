@@ -1,0 +1,387 @@
+# rh_notify_transport.elisa — policy-gated HTTPS delivery for notify events.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_git.elisa"
+include "./rh_notify_report.elisa"
+include "./rh_sha256.elisa"
+
+module NotifyTransport:
+    private:
+        const RH_NT_MAX_DESTINATIONS: i64 = 1024
+        const RH_NT_MAX_DELIVERIES: i64 = 100
+        const RH_NT_MAX_EVENTS: i64 = 10000
+
+        struct RhTransportDestination:
+            id: mutable i64
+            endpoint_start: mutable i64
+            endpoint_end: mutable i64
+
+        struct RhNotifyDeliveryCounts:
+            sent: mutable i64
+            failed: mutable i64
+            unconfigured: mutable i64
+            not_attempted: mutable i64
+
+        struct RhNotifyTransportRuntime:
+            transport_texts: mutable darray[u8]
+            destinations: mutable darray[RhTransportDestination]
+            state: mutable darray[u8]
+            status_ptr: cstr
+            error_ptr: cstr
+            counts: mutable RhNotifyDeliveryCounts
+
+        struct RhNotifyDeliveryRequest:
+            event: i64
+            decision_kind: i64
+            dispatchable: bool
+            destination_id: i64
+            next_state: mutable darray[u8]
+
+        struct RhNotifyDelivery:
+            label: mutable cstr
+            http_status: mutable i64
+            idempotency: mutable darray[u8]
+
+        def rh_nt_equal(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_nt_unique_keys(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if object < 0 or nodes[object.usize()].kind != Json::RH_JSON_OBJ
+            while key >= 0 |key: i64 = nodes[object.usize()].first_child, nodes, texts|:
+                return false if nodes[key.usize()].kind != Json::RH_JSON_STR
+                value: i64 = nodes[key.usize()].next_sibling
+                return false if value < 0
+                while other >= 0 |other: i64 = nodes[value.usize()].next_sibling, nodes, texts, key|:
+                    other_value: i64 = nodes[other.usize()].next_sibling
+                    return false if other_value < 0
+                    return false if Base::rh_bytes_equal_span(texts, nodes[key.usize()].text_start, nodes[key.usize()].text_end, texts, nodes[other.usize()].text_start, nodes[other.usize()].text_end)
+                    other <- nodes[other_value.usize()].next_sibling
+                key <- nodes[value.usize()].next_sibling
+            true
+
+        def rh_nt_only_keys(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, first: u8&, second: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while key >= 0 |key: i64 = nodes[object.usize()].first_child, nodes, texts, first, second|:
+                return false if nodes[key.usize()].kind != Json::RH_JSON_STR
+                return false if not Base::rh_bytes_equal_literal(texts, nodes[key.usize()].text_start, nodes[key.usize()].text_end, first) and not Base::rh_bytes_equal_literal(texts, nodes[key.usize()].text_start, nodes[key.usize()].text_end, second)
+                value: i64 = nodes[key.usize()].next_sibling
+                return false if value < 0
+                key <- nodes[value.usize()].next_sibling
+            true
+
+        def rh_nt_string(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            value: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            return false if value < 0
+            Json::rh_json_str_span(nodes, value, start_out, end_out)
+
+        def rh_nt_integer(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, object: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            value: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            Json::rh_json_int(nodes, raw, value, ok_out)
+
+        def rh_nt_find_destination(destinations: darray[RhTransportDestination]&, destination_id: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < destinations.count |i: usize = 0, destinations, destination_id|:
+                return i.i64() if destinations[i].id == destination_id
+                i <- i + 1
+            -1
+
+        def rh_nt_copy_raw(out: mutable darray[u8]&, raw: darray[u8]&, node: Json::RhJsonNode) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if node.text_start < 0 or node.text_end <= node.text_start or node.text_end > raw.count.i64()
+            while i < node.text_end |i: i64 = node.text_start, raw, out, node|:
+                out.push(raw[i.usize()])
+                i <- i + 1
+            true
+
+        def rh_nt_mini_input(raw: darray[u8]&, root_nodes: darray[Json::RhJsonNode]&, root: i64, destinations: i64, cooldown: i64, event: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "{\"schema\":\"rh-notify-input/3\",\"destinations\":")
+            return false if not rh_nt_copy_raw(out, raw, root_nodes[destinations.usize()])
+            if cooldown >= 0:
+                Base::rh_push_text(out, ",\"cooldown_secs\":")
+                return false if not rh_nt_copy_raw(out, raw, root_nodes[cooldown.usize()])
+            Base::rh_push_text(out, ",\"events\":[")
+            return false if not rh_nt_copy_raw(out, raw, root_nodes[event.usize()])
+            Base::rh_push_text(out, "]}")
+            true
+
+        def rh_nt_decision(result_raw: darray[u8]&, out_texts: mutable darray[u8]&, decision_start: mutable i64&, decision_end: mutable i64&, dispatchable_out: mutable bool&, applied_out: mutable bool&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            root: i64 = Json::rh_json_parse(result_raw, nodes, out_texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            decisions: i64 = Json::rh_json_obj_get(nodes, out_texts, root, "decisions")
+            return -1 if decisions < 0 or nodes[decisions.usize()].kind != Json::RH_JSON_ARR or nodes[decisions.usize()].child_count != 1
+            row: i64 = nodes[decisions.usize()].first_child
+            return -1 if row < 0 or not rh_nt_unique_keys(nodes, out_texts, row)
+            op_start: mutable i64 = 0
+            op_end: mutable i64 = 0
+            return -1 if not rh_nt_string(nodes, out_texts, row, "op", &op_start, &op_end)
+            if rh_nt_equal(out_texts, op_start, op_end, "notify"):
+                return -1 if not rh_nt_string(nodes, out_texts, row, "decision", decision_start, decision_end)
+                dispatch_idx: i64 = Json::rh_json_obj_get(nodes, out_texts, row, "dispatchable")
+                return -1 if dispatch_idx < 0 or nodes[dispatch_idx.usize()].kind != Json::RH_JSON_BOOL
+                dispatchable_out <- Json::rh_json_is_true(nodes, result_raw, dispatch_idx)
+                0
+            elif rh_nt_equal(out_texts, op_start, op_end, "ack"):
+                applied_idx: i64 = Json::rh_json_obj_get(nodes, out_texts, row, "applied")
+                return -1 if applied_idx < 0 or nodes[applied_idx.usize()].kind != Json::RH_JSON_BOOL
+                applied_out <- Json::rh_json_is_true(nodes, result_raw, applied_idx)
+                1
+            elif rh_nt_equal(out_texts, op_start, op_end, "resolve"):
+                applied_idx: i64 = Json::rh_json_obj_get(nodes, out_texts, row, "applied")
+                return -1 if applied_idx < 0 or nodes[applied_idx.usize()].kind != Json::RH_JSON_BOOL
+                applied_out <- Json::rh_json_is_true(nodes, result_raw, applied_idx)
+                2
+            else:
+                -1
+
+        def rh_nt_push_text_bytes(out: mutable darray[u8]&, value: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            while i < value.count |i: usize = 0, value, out|:
+                byte: u8 = value[i]
+                break if byte == 0
+                out.push(byte)
+                i <- i + 1
+
+        def rh_nt_payload(raw: darray[u8]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, event: i64, destination_id: i64, idempotency: mutable darray[u8]&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            rule_ok: mutable i64 = 0
+            subject_ok: mutable i64 = 0
+            at_ok: mutable i64 = 0
+            rule_id: i64 = rh_nt_integer(nodes, raw, texts, event, "rule_id", &rule_ok)
+            subject_id: i64 = rh_nt_integer(nodes, raw, texts, event, "subject_id", &subject_ok)
+            occurred_at: i64 = rh_nt_integer(nodes, raw, texts, event, "now", &at_ok)
+            digest_start: mutable i64 = 0
+            digest_end: mutable i64 = 0
+            return false if rule_ok == 0 or subject_ok == 0 or at_ok == 0 or occurred_at < 0
+            return false if not rh_nt_string(nodes, texts, event, "artifact_digest", &digest_start, &digest_end)
+            return false if digest_end - digest_start != 16 and digest_end - digest_start != 32
+            material: mutable darray[u8] = []
+            Base::rh_push_text(material, "repo-health/notify-webhook/1\n")
+            Base::rh_push_decimal_i64(material, destination_id)
+            material.push(10)
+            Base::rh_push_decimal_i64(material, rule_id)
+            material.push(10)
+            Base::rh_push_decimal_i64(material, subject_id)
+            material.push(10)
+            while i < digest_end |i: i64 = digest_start, texts, material|:
+                material.push(texts[i.usize()])
+                i <- i + 1
+            material.push(10)
+            Base::rh_push_decimal_i64(material, occurred_at)
+            Sha256::rh_sha256(material, idempotency)
+            return false if idempotency.count != 64
+            Base::rh_push_text(out, "{\"schema\":\"rh-notification-webhook/1\",\"delivery_id\":\"")
+            rh_nt_push_text_bytes(out, idempotency)
+            Base::rh_push_text(out, "\",\"destination_id\":")
+            Base::rh_push_decimal_i64(out, destination_id)
+            Base::rh_push_text(out, ",\"rule_id\":")
+            Base::rh_push_decimal_i64(out, rule_id)
+            Base::rh_push_text(out, ",\"subject_id\":")
+            Base::rh_push_decimal_i64(out, subject_id)
+            Base::rh_push_text(out, ",\"artifact_digest\":\"")
+            Base::rh_json_escape(out, texts, digest_start.usize(), digest_end.usize())
+            Base::rh_push_text(out, "\",\"occurred_at\":")
+            Base::rh_push_decimal_i64(out, occurred_at)
+            Base::rh_push_text(out, "}")
+            true
+
+        def rh_nt_read_status(status_path: cstr, status_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            bytes: mutable darray[u8] = []
+            return false if Base::rh_io_read(status_path, bytes) < 0 or bytes.count != 3
+            return false if bytes[0] < 48 or bytes[0] > 57 or bytes[1] < 48 or bytes[1] > 57 or bytes[2] < 48 or bytes[2] > 57
+            status: i64 = (bytes[0] - 48).i64() * 100 + (bytes[1] - 48).i64() * 10 + (bytes[2] - 48).i64()
+            return false if status < 100 or status > 599
+            status_out[0] <- status
+            true
+
+        def rh_nt_endpoint_ptr(texts: darray[u8]&, destination: RhTransportDestination) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
+            endpoint: mutable darray[u8] = []
+            while i < destination.endpoint_end |i: i64 = destination.endpoint_start, texts, destination, endpoint|:
+                endpoint.push(texts[i.usize()])
+                i <- i + 1
+            endpoint.push(0)
+            endpoint
+
+        def rh_nt_parse_transport(raw: darray[u8]&, texts_out: mutable darray[u8]&, out: mutable darray[RhTransportDestination]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts_out)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ or not rh_nt_unique_keys(nodes, texts_out, root) or not rh_nt_only_keys(nodes, texts_out, root, "schema", "destinations")
+            schema_start: mutable i64 = 0
+            schema_end: mutable i64 = 0
+            return -1 if not rh_nt_string(nodes, texts_out, root, "schema", &schema_start, &schema_end) or not rh_nt_equal(texts_out, schema_start, schema_end, "rh-notify-transport-config/1")
+            destinations_idx: i64 = Json::rh_json_obj_get(nodes, texts_out, root, "destinations")
+            return -1 if destinations_idx < 0 or nodes[destinations_idx.usize()].kind != Json::RH_JSON_ARR or nodes[destinations_idx.usize()].child_count > RH_NT_MAX_DESTINATIONS
+            while destination >= 0 |destination: i64 = nodes[destinations_idx.usize()].first_child, nodes, texts_out, out|:
+                return -1 if nodes[destination.usize()].kind != Json::RH_JSON_OBJ or not rh_nt_unique_keys(nodes, texts_out, destination) or not rh_nt_only_keys(nodes, texts_out, destination, "id", "endpoint")
+                id_ok: mutable i64 = 0
+                destination_id: i64 = rh_nt_integer(nodes, raw, texts_out, destination, "id", &id_ok)
+                endpoint_start: mutable i64 = 0
+                endpoint_end: mutable i64 = 0
+                return -1 if id_ok == 0 or destination_id < 0 or not rh_nt_string(nodes, texts_out, destination, "endpoint", &endpoint_start, &endpoint_end) or endpoint_start == endpoint_end or endpoint_end - endpoint_start > 2048
+                return -1 if rh_nt_find_destination(out, destination_id) >= 0
+                endpoint: mutable darray[u8] = []
+                while i < endpoint_end |i: i64 = endpoint_start, texts_out, endpoint|:
+                    byte: u8 = texts_out[i.usize()]
+                    return -1 if byte < 33 or byte > 126 or byte == 34 or byte == 92 or byte == 35
+                    endpoint.push(byte)
+                    i <- i + 1
+                endpoint.push(0)
+                endpoint_ptr: cstr = (&endpoint[0]).cast[cstr] can Unsafe.PointerCast
+                return -1 if not Base::rh_cstr_starts_with(endpoint_ptr, "https://") or not Git::rh_fetch_guard(endpoint_ptr)
+                out.push(RhTransportDestination{id: destination_id, endpoint_start: endpoint_start, endpoint_end: endpoint_end})
+                destination <- nodes[destination.usize()].next_sibling
+            0
+
+        def rh_nt_evaluate_event(raw: darray[u8]&, input_nodes: darray[Json::RhJsonNode]&, input_texts: darray[u8]&, root: i64, destinations_idx: i64, cooldown_idx: i64, event: i64, state: darray[u8]&, mini_result_out: mutable darray[u8]&, next_state_out: mutable darray[u8]&, decision_texts_out: mutable darray[u8]&, decision_start_out: mutable i64&, decision_end_out: mutable i64&, decision_kind_out: mutable i64&, dispatchable_out: mutable bool&, applied_out: mutable bool&, destination_id_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            mini: mutable darray[u8] = []
+            return -1 if not rh_nt_mini_input(raw, input_nodes, root, destinations_idx, cooldown_idx, event, mini)
+            return -1 if NotifyReport::rh_notify_report_state(mini, state, mini_result_out, next_state_out) != 0
+            decision_kind_out[0] <- rh_nt_decision(mini_result_out, decision_texts_out, decision_start_out, decision_end_out, dispatchable_out, applied_out)
+            return -1 if decision_kind_out[0] < 0
+            destination_ok: mutable i64 = 0
+            destination_id_out[0] <- rh_nt_integer(input_nodes, raw, input_texts, event, "destination_id", &destination_ok)
+            return -1 if destination_ok == 0 or destination_id_out[0] < 0
+            0
+
+        def rh_nt_deliver_event(raw: darray[u8]&, input_nodes: darray[Json::RhJsonNode]&, input_texts: darray[u8]&, request: RhNotifyDeliveryRequest, runtime: mutable RhNotifyTransportRuntime&, delivery: mutable RhNotifyDelivery&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            delivery.http_status <- -1
+            if request.decision_kind == 1 or request.decision_kind == 2 or not request.dispatchable:
+                runtime.state.clear()
+                runtime.state.extend(bytes_view(request.next_state))
+                delivery.label <- "not_attempted"
+                runtime.counts.not_attempted <- runtime.counts.not_attempted + 1
+                return 0
+            transport_index: i64 = rh_nt_find_destination(runtime.destinations, request.destination_id)
+            if transport_index < 0:
+                delivery.label <- "unconfigured"
+                runtime.counts.unconfigured <- runtime.counts.unconfigured + 1
+                return 0
+            if runtime.counts.sent + runtime.counts.failed >= RH_NT_MAX_DELIVERIES:
+                delivery.label <- "delivery_limit"
+                runtime.counts.not_attempted <- runtime.counts.not_attempted + 1
+                return 0
+            payload: mutable darray[u8] = []
+            return -1 if not rh_nt_payload(raw, input_nodes, input_texts, request.event, request.destination_id, delivery.idempotency, payload)
+            endpoint: mutable darray[u8] = rh_nt_endpoint_ptr(runtime.transport_texts, runtime.destinations[transport_index.usize()])
+            _ = remove_file(runtime.status_ptr)
+            _ = remove_file(runtime.error_ptr)
+            delivery.idempotency.push(0)
+            idempotency_ptr: cstr = (&delivery.idempotency[0]).cast[cstr] can Unsafe.PointerCast
+            endpoint_ptr: cstr = (&endpoint[0]).cast[cstr] can Unsafe.PointerCast
+            status_ptr: cstr = runtime.status_ptr
+            error_ptr: cstr = runtime.error_ptr
+            transport_result: Process::RhProcessResult = Git::rh_run_https_json_webhook(endpoint_ptr, payload, idempotency_ptr, status_ptr, error_ptr)
+            if Process::rh_succeeded(transport_result) and rh_nt_read_status(runtime.status_ptr, &delivery.http_status) and delivery.http_status >= 200 and delivery.http_status < 300:
+                delivery.label <- "sent"
+                runtime.counts.sent <- runtime.counts.sent + 1
+                runtime.state.clear()
+                runtime.state.extend(bytes_view(request.next_state))
+            else:
+                delivery.label <- "failed"
+                runtime.counts.failed <- runtime.counts.failed + 1
+            _ = remove_file(runtime.status_ptr)
+            _ = remove_file(runtime.error_ptr)
+            0
+
+        def rh_nt_emit_event(out: mutable darray[u8]&, event_index: i64, destination_id: i64, decision_kind: i64, decision_texts: darray[u8]&, decision_start: i64, decision_end: i64, applied: bool, delivery: cstr, http_status: i64, idempotency: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            Base::rh_push_text(out, "{\"event_index\":")
+            Base::rh_push_decimal_i64(out, event_index)
+            Base::rh_push_text(out, ",\"destination_id\":")
+            Base::rh_push_decimal_i64(out, destination_id)
+            Base::rh_push_text(out, ",\"decision\":\"")
+            if decision_kind == 0:
+                Base::rh_json_escape(out, decision_texts, decision_start.usize(), decision_end.usize())
+                out.push(34)
+            elif decision_kind == 1:
+                Base::rh_push_text(out, "ack")
+            else:
+                Base::rh_push_text(out, "resolve")
+            if decision_kind == 1 or decision_kind == 2:
+                Base::rh_push_text(out, "\",\"applied\":")
+                Base::rh_push_text(out, "true") if applied else Base::rh_push_text(out, "false")
+            Base::rh_push_text(out, ",\"delivery\":\"")
+            Base::rh_push_cstr(out, delivery)
+            Base::rh_push_text(out, "\",\"http_status\":")
+            Base::rh_push_decimal_i64(out, http_status) if http_status >= 0
+            Base::rh_push_text(out, "null") if http_status < 0
+            Base::rh_push_text(out, ",\"delivery_id\":null") if idempotency.count == 0
+            if idempotency.count > 0:
+                Base::rh_push_text(out, ",\"delivery_id\":\"")
+                rh_nt_push_text_bytes(out, idempotency)
+                out.push(34)
+            out.push(125)
+
+        def rh_nt_process_event(raw: darray[u8]&, input_nodes: darray[Json::RhJsonNode]&, input_texts: darray[u8]&, root: i64, destinations_idx: i64, cooldown_idx: i64, event: i64, event_index: i64, runtime: mutable RhNotifyTransportRuntime&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            mini_result: mutable darray[u8] = []
+            next_state: mutable darray[u8] = []
+            decision_texts: mutable darray[u8] = []
+            decision_start: mutable i64 = 0
+            decision_end: mutable i64 = 0
+            decision_kind: mutable i64 = -1
+            dispatchable: mutable bool = false
+            applied: mutable bool = false
+            destination_id: mutable i64 = -1
+            return -1 if rh_nt_evaluate_event(raw, input_nodes, input_texts, root, destinations_idx, cooldown_idx, event, runtime.state, mini_result, next_state, decision_texts, &decision_start, &decision_end, &decision_kind, &dispatchable, &applied, &destination_id) != 0
+            request: RhNotifyDeliveryRequest = RhNotifyDeliveryRequest{event: event, decision_kind: decision_kind, dispatchable: dispatchable, destination_id: destination_id, next_state: next_state}
+            delivery: mutable RhNotifyDelivery = RhNotifyDelivery{label: "not_attempted", http_status: -1, idempotency: []}
+            return -1 if rh_nt_deliver_event(raw, input_nodes, input_texts, request, runtime, delivery) != 0
+            rh_nt_emit_event(out, event_index, destination_id, decision_kind, decision_texts, decision_start, decision_end, applied, delivery.label, delivery.http_status, delivery.idempotency)
+            0
+
+    public:
+        # Evaluate each event against the standard notify policy and send only
+        # newly dispatchable events whose separately configured HTTPS endpoint
+        # exists. A failed send leaves that event's cooldown row uncommitted.
+        # Successful sends are at-least-once across a crash between remote
+        # acceptance and local state publication; the stable idempotency header
+        # lets receivers collapse retries when they support it.
+        def rh_notify_transport_report(raw: darray[u8]&, transport_raw: darray[u8]&, initial_state: darray[u8]&, scratch_prefix: cstr, out: mutable darray[u8]&, state_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if raw.count > 8388608 or transport_raw.count > 1048576
+            input_nodes: mutable darray[Json::RhJsonNode] = []
+            input_texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse_large_bounded(raw, input_nodes, input_texts, 1000000)
+            return -1 if root < 0 or input_nodes[root.usize()].kind != Json::RH_JSON_OBJ or not rh_nt_unique_keys(input_nodes, input_texts, root)
+            destinations_idx: i64 = Json::rh_json_obj_get(input_nodes, input_texts, root, "destinations")
+            events_idx: i64 = Json::rh_json_obj_get(input_nodes, input_texts, root, "events")
+            return -1 if destinations_idx < 0 or events_idx < 0 or input_nodes[destinations_idx.usize()].kind != Json::RH_JSON_ARR or input_nodes[events_idx.usize()].kind != Json::RH_JSON_ARR
+            return -1 if input_nodes[events_idx.usize()].child_count > RH_NT_MAX_EVENTS
+            cooldown_idx: i64 = Json::rh_json_obj_get(input_nodes, input_texts, root, "cooldown_secs")
+            transport_texts: mutable darray[u8] = []
+            transport_destinations: mutable darray[RhTransportDestination] = []
+            return -1 if rh_nt_parse_transport(transport_raw, transport_texts, transport_destinations) != 0
+
+            # Validate all policy input and persisted state before the first
+            # external side effect. The result is discarded; events are then
+            # evaluated one at a time so a failed delivery cannot start a cooldown.
+            preflight_result: mutable darray[u8] = []
+            preflight_state: mutable darray[u8] = []
+            return -1 if NotifyReport::rh_notify_report_state(raw, initial_state, preflight_result, preflight_state) != 0
+
+            status_path: mutable darray[u8] = []
+            Base::rh_push_cstr(status_path, scratch_prefix)
+            Base::rh_push_text(status_path, ".notify-status")
+            status_path.push(0)
+            error_path: mutable darray[u8] = []
+            Base::rh_push_cstr(error_path, scratch_prefix)
+            Base::rh_push_text(error_path, ".notify-error")
+            error_path.push(0)
+            status_ptr: cstr = (&status_path[0]).cast[cstr] can Unsafe.PointerCast
+            error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
+            state: mutable darray[u8] = []
+            state.extend(bytes_view(initial_state))
+            runtime: mutable RhNotifyTransportRuntime = RhNotifyTransportRuntime{transport_texts: transport_texts, destinations: transport_destinations, state: state, status_ptr: status_ptr, error_ptr: error_ptr, counts: RhNotifyDeliveryCounts{sent: 0, failed: 0, unconfigured: 0, not_attempted: 0}}
+            event_index: mutable i64 = 0
+            Base::rh_push_text(out, "{\"schema\":\"rh-notify-delivery-result/1\",\"deliveries\":[")
+            while event >= 0 |event: i64 = input_nodes[events_idx.usize()].first_child, input_nodes, input_texts, raw, destinations_idx, cooldown_idx, runtime, event_index, out|:
+                if event_index > 0:
+                    out.push(44)
+                return -1 if rh_nt_process_event(raw, input_nodes, input_texts, root, destinations_idx, cooldown_idx, event, event_index, runtime, out) != 0
+                event_index <- event_index + 1
+                event <- input_nodes[event.usize()].next_sibling
+            Base::rh_push_text(out, "],\"counts\":{\"sent\":")
+            Base::rh_push_decimal_i64(out, runtime.counts.sent)
+            Base::rh_push_text(out, ",\"failed\":")
+            Base::rh_push_decimal_i64(out, runtime.counts.failed)
+            Base::rh_push_text(out, ",\"unconfigured\":")
+            Base::rh_push_decimal_i64(out, runtime.counts.unconfigured)
+            Base::rh_push_text(out, ",\"not_attempted\":")
+            Base::rh_push_decimal_i64(out, runtime.counts.not_attempted)
+            Base::rh_push_text(out, "},\"note\":\"only policy-dispatchable events are sent; failed sends do not start cooldown; HTTPS destinations require public DNS answers and use a stable per-event idempotency key; a crash after remote acceptance but before local state publication can cause a retry\"}")
+            state_out.extend(bytes_view(runtime.state)) if runtime.state.count > 0
+            Base::rh_push_text(state_out, "{\"schema\":\"rh-notify-state/2\",\"rows\":[]}") if runtime.state.count == 0
+            0

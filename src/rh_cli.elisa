@@ -80,6 +80,7 @@ include "./rh_vcs_report.elisa"
 include "./rh_vcs_transformation.elisa"
 include "./rh_gerrit.elisa"
 include "./rh_notify_report.elisa"
+include "./rh_notify_transport.elisa"
 include "./rh_identity_report.elisa"
 include "./rh_identity_evidence.elisa"
 include "./rh_identity_publication.elisa"
@@ -214,6 +215,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli vcs --format hg|svn|fossil|patch|gerrit|sourcehut|sourcehut-pages --input <file> --out <file>")
     rh_cli_err("       rh_cli vcs --format hg|svn|fossil --repo <path> --out <file>")
     rh_cli_err("       rh_cli notify --input <file> --out <file> [--state <file> | --state-store <dir>]")
+    rh_cli_err("       rh_cli notify-deliver --input <notify-input> --transport <config> --out <file> (--state <file> | --state-store <dir>)")
     rh_cli_err("       rh_cli query --input <file> --out <file>")
     rh_cli_err("       rh_cli identity --input <file> --out <file> [--evidence-store <root/evidence-dir>]")
     rh_cli_err("       rh_cli identity-publish --input <file> --out <file>")
@@ -2515,6 +2517,36 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_do_notify_state(slots[nf_idx], slots[no_idx], slots[ns_idx], true, "", false) if ns_idx >= 0
         return rh_do_notify_state(slots[nf_idx], slots[no_idx], slots[nf_idx], false, slots[nt_idx], true) if nt_idx >= 0
         return rh_do_notify_state(slots[nf_idx], slots[no_idx], slots[nf_idx], false, "", false)
+    if Base::rh_streq(cmd, "notify-deliver"):
+        nd_input_idx, nd_transport_idx, nd_out_idx, nd_state_idx, nd_state_root_idx =
+            while nd_arg < argc |nd_input_idx: i64 = -1, nd_transport_idx: i64 = -1, nd_out_idx: i64 = -1, nd_state_idx: i64 = -1, nd_state_root_idx: i64 = -1, nd_arg: i64 = 2, slots| -> nd_input_idx, nd_transport_idx, nd_out_idx, nd_state_idx, nd_state_root_idx:
+                option: u8& = slots[nd_arg].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(option, "--input"):
+                    return rh_cli_usage(2) if nd_arg + 1 >= argc
+                    nd_arg <- nd_arg + 1
+                    nd_input_idx <- nd_arg
+                elif Base::rh_streq(option, "--transport"):
+                    return rh_cli_usage(2) if nd_arg + 1 >= argc
+                    nd_arg <- nd_arg + 1
+                    nd_transport_idx <- nd_arg
+                elif Base::rh_streq(option, "--out"):
+                    return rh_cli_usage(2) if nd_arg + 1 >= argc
+                    nd_arg <- nd_arg + 1
+                    nd_out_idx <- nd_arg
+                elif Base::rh_streq(option, "--state"):
+                    return rh_cli_usage(2) if nd_arg + 1 >= argc
+                    nd_arg <- nd_arg + 1
+                    nd_state_idx <- nd_arg
+                elif Base::rh_streq(option, "--state-store"):
+                    return rh_cli_usage(2) if nd_arg + 1 >= argc
+                    nd_arg <- nd_arg + 1
+                    nd_state_root_idx <- nd_arg
+                else:
+                    return rh_cli_usage(2)
+                nd_arg <- nd_arg + 1
+        return rh_cli_usage(2) if nd_input_idx < 0 or nd_transport_idx < 0 or nd_out_idx < 0 or (nd_state_idx < 0 and nd_state_root_idx < 0) or (nd_state_idx >= 0 and nd_state_root_idx >= 0)
+        return rh_do_notify_transport(slots[nd_input_idx], slots[nd_transport_idx], slots[nd_out_idx], slots[nd_state_idx], true, "", false) if nd_state_idx >= 0
+        return rh_do_notify_transport(slots[nd_input_idx], slots[nd_transport_idx], slots[nd_out_idx], "", false, slots[nd_state_root_idx], true)
     if Base::rh_streq(cmd, "query"):
         qi_idx, qo_idx =
             while qq < argc |qi_idx: i64 = -1, qo_idx: i64 = -1, qq: i64 = 2, slots| -> qi_idx, qo_idx:
@@ -9473,6 +9505,94 @@ def rh_do_vcs(format: cstr, input_path: cstr, out_path: cstr, repo_path: cstr, h
     0
 
 # --- M06-08 notification execution path. ---
+# Applies notification policy before bounded HTTPS delivery. Durable state is
+# required so failed sends can be retried without starting a cooldown.
+def rh_do_notify_transport(input_path: cstr, transport_path: cstr, out_path: cstr, state_path: cstr, has_state: bool, state_root: cstr, has_state_root: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(transport_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected notify-deliver argument (allowlist)")
+        return 3
+    if has_state and (not Git::rh_arg_safe(state_path) or Base::rh_streq(state_path, out_path) or Base::rh_streq(state_path, input_path) or Base::rh_streq(state_path, transport_path)):
+        rh_cli_err("notify-deliver: invalid or conflicting --state path")
+        return 3
+    if has_state_root and not Git::rh_arg_safe(state_root):
+        rh_cli_err("rejected notify-deliver state-store argument (allowlist)")
+        return 3
+    return 2 if has_state and has_state_root
+    return 3 if Base::rh_streq(out_path, input_path) or Base::rh_streq(out_path, transport_path)
+    input_name: mutable darray[u8] = []
+    Base::rh_push_cstr(input_name, input_path)
+    input_name.push(0)
+    input_ptr: cstr = (&input_name[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(input_ptr, raw) < 0:
+        rh_cli_err("notify-deliver: cannot read --input")
+        return 4
+    transport_name: mutable darray[u8] = []
+    Base::rh_push_cstr(transport_name, transport_path)
+    transport_name.push(0)
+    transport_ptr: cstr = (&transport_name[0]).cast[cstr] can Unsafe.PointerCast
+    transport_raw: mutable darray[u8] = []
+    if Base::rh_io_read(transport_ptr, transport_raw) < 0:
+        rh_cli_err("notify-deliver: cannot read --transport")
+        return 4
+    state_bytes: mutable darray[u8] = []
+    state_ptr: mutable cstr = input_ptr
+    state_name: mutable darray[u8] = []
+    if has_state:
+        Base::rh_push_cstr(state_name, state_path)
+        state_name.push(0)
+        state_ptr <- (&state_name[0]).cast[cstr] can Unsafe.PointerCast
+        if file_exists(state_ptr) and Base::rh_io_read(state_ptr, state_bytes) < 0:
+            rh_cli_err("notify-deliver: cannot read --state")
+            return 4
+    elif has_state_root:
+        if Git::rh_ensure_dir(state_root) != 0:
+            rh_cli_err("notify-deliver: cannot create --state-store")
+            return 4
+        loaded_state: i64 = StateStore::rh_state_store_load(state_root, state_bytes)
+        if loaded_state < 0:
+            rh_cli_err("notify-deliver: corrupt --state-store (fail closed)")
+            return 4
+    delivery: mutable darray[u8] = []
+    state_body: mutable darray[u8] = []
+    if NotifyTransport::rh_notify_transport_report(raw, transport_raw, state_bytes, out_path, delivery, state_body) != 0:
+        rh_cli_err("notify-deliver: invalid policy input, transport config, state, or delivery request (fail closed)")
+        return 4
+    delivery.push(10)
+    if not Base::rh_io_write(out_path, delivery):
+        rh_cli_err("notify-deliver: cannot write --out")
+        return 4
+    framed_input: mutable darray[u8] = []
+    Base::rh_push_text(framed_input, "rh-notify-delivery-input/1\nnotify:")
+    Base::rh_push_decimal_u64(framed_input, raw.count.u64())
+    framed_input.push(58)
+    framed_input.extend(bytes_view(raw))
+    Base::rh_push_text(framed_input, "\ntransport:")
+    Base::rh_push_decimal_u64(framed_input, transport_raw.count.u64())
+    framed_input.push(58)
+    framed_input.extend(bytes_view(transport_raw))
+    notify_configuration: mutable darray[u8] = []
+    Base::rh_push_text(notify_configuration, "repo-health/notify-https-webhook/1;destinations=1024;events=10000;deliveries=100;https=public-dns-pinned;redirects=disabled;response-bytes=16384;timeout-seconds=15")
+    notify_configuration.push(0)
+    configuration_ptr: cstr = (&notify_configuration[0]).cast[cstr] can Unsafe.PointerCast
+    fields: u8& = "[{\"source\":\"authorized notify input and persisted per-destination state\",\"target\":\"policy decision before delivery\",\"state\":\"transformed\"},{\"source\":\"operator-configured HTTPS endpoints\",\"target\":\"external webhook route\",\"state\":\"preserved\"},{\"source\":\"failed, unconfigured, or delivery-capped dispatch\",\"target\":\"retryable result without cooldown advancement\",\"state\":\"preserved\"},{\"source\":\"endpoint URLs and transport diagnostics\",\"target\":\"public result\",\"state\":\"discarded\"}]"
+    if not AdapterTransformationCli::rh_write_sidecar(framed_input, delivery, "notify-https-webhook", "rh-notify-delivery-result/1", configuration_ptr, fields, out_path):
+        rh_cli_err("notify-deliver: cannot write transformation report")
+        return 4
+    if has_state:
+        state_body.push(10)
+        if not Base::rh_io_write(state_ptr, state_body):
+            rh_cli_err("notify-deliver: cannot persist --state")
+            return 4
+    elif has_state_root:
+        state_body.push(10)
+        state_id: mutable darray[u8] = []
+        if StateStore::rh_state_store_publish(state_root, state_body, state_id) != 0:
+            rh_cli_err("notify-deliver: cannot publish --state-store")
+            return 4
+    rh_cli_out("notify-deliver: policy-gated result emitted")
+    0
+
 # Reads configured rh-notify-input/3 destinations and writes
 # rh-notify-result/4. Events bind to configured destination IDs; unconfigured
 # destinations are refused without state changes. Dedup/cooldown is scoped to
