@@ -76,6 +76,22 @@ result = json.load(open(sys.argv[2]))
 assert result["metrics"][0]["observation"]["value"] == source["metrics"][0]["observation"]["value"], result
 print("[lineage] fixed-width histogram observations validate and round-trip")
 PY
+python3 - "$T/in.json" "$T/summary-input.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["metrics"][0]["observation"]["value"] = {
+    "kind": "count_summary", "count": 2, "sum": 8, "min": 3, "max": 5
+}
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" lineage --input "$T/summary-input.json" --out "$T/summary-output.json" >/dev/null || fail "typed summary lineage"
+python3 - "$T/summary-input.json" "$T/summary-output.json" <<'PY'
+import json, sys
+source = json.load(open(sys.argv[1]))
+result = json.load(open(sys.argv[2]))
+assert result["metrics"][0]["observation"]["value"] == source["metrics"][0]["observation"]["value"], result
+print("[lineage] count summary observations validate and round-trip")
+PY
 python3 - "$T/histogram-input.json" "$T/bad-histogram-input.json" <<'PY'
 import json, sys
 document = json.load(open(sys.argv[1]))

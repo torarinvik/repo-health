@@ -329,7 +329,7 @@ lineage_backup="$tmp/lineage-input.json"
 cp "$lineage_input" "$lineage_backup"
 restore_lineage_input() { cp "$lineage_backup" "$lineage_input"; }
 trap restore_lineage_input EXIT
-for variant in absent count count_pair timestamp ratio boolean enumeration; do
+for variant in absent count count_pair count_summary timestamp ratio boolean enumeration; do
   python3 - "$lineage_input" "$variant" <<'PY'
 import json, sys
 path, kind = sys.argv[1:]
@@ -339,6 +339,7 @@ payloads = {
     "absent": {"kind": "absent"},
     "count": {"kind": "count", "value": 17},
     "count_pair": {"kind": "count_pair", "first": 3, "second": 4},
+    "count_summary": {"kind": "count_summary", "count": 2, "sum": 8, "min": 3, "max": 5},
     "timestamp": {"kind": "timestamp", "value": 1700000000},
     "ratio": {"kind": "ratio", "num": 1, "den": 2},
     "boolean": {"kind": "boolean", "value": True},
@@ -355,6 +356,22 @@ PY
   restore_lineage_input
 done
 echo "[schemas] all tagged observation variants accepted"
+python3 - "$lineage_input" <<'PY'
+import json, sys
+path = sys.argv[1]
+document = json.load(open(path))
+document["metrics"][0]["observation"]["value"] = {
+    "kind": "count_summary", "count": 2, "sum": 8, "min": 9, "max": 7
+}
+json.dump(document, open(path, "w"), separators=(",", ":"))
+PY
+if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+  restore_lineage_input
+  trap - EXIT
+  fail "schema accepted an unordered count summary range"
+fi
+restore_lineage_input
+echo "[schemas] count summary range ordering is constrained"
 python3 - "$lineage_input" <<'PY'
 import json, sys
 path = sys.argv[1]

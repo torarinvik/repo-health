@@ -72,6 +72,26 @@ assert all(field["state"] in {"preserved", "transformed", "inferred", "discarded
 print("[population] bounded selection + per-metric coverage + witnesses OK")
 PY
 
+echo "[population] empty observed population keeps a canonical absent range"
+python3 - "$T/in.json" "$T/empty-distribution-input.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+for dependent in document["dependents"]:
+    metric = next(row for row in dependent["metrics"] if row["key"] == "review.coverage")
+    metric.update(status="unknown", value=None, policy="unknown")
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" population --input "$T/empty-distribution-input.json" --out "$T/empty-distribution-output.json" >/dev/null || fail "empty population distribution"
+python3 - "$T/empty-distribution-output.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+metric = next(row for row in document["metrics"] if row["key"] == "review.coverage")
+assert metric["observed"] == 0 and metric["distribution"] == {
+    "count": 0, "sum": 0, "min": None, "max": None
+}, metric
+print("[population] empty distribution count, sum, and absent range stay explicit")
+PY
+
 echo "[population] aggregate linked merge review as an exact pooled ratio"
 python3 - "$T/in.json" "$T/ratio.json" <<'PY'
 import json, sys
