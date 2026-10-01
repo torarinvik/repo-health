@@ -168,36 +168,41 @@ module ContinuityScan:
             return -1 if cutoff < 0 or coverage_start < 0 or coverage_end < coverage_start
             return -1 if start_days < 0 or end_days <= start_days
             return -1 if end_days > 9223372036854775807 / 86400
+            first_instants: mutable darray[i64] = []
+            window_starts: mutable darray[i64] = []
+            window_ends: mutable darray[i64] = []
+            has_returns: mutable darray[bool] = []
+            while a < n_actors.usize() |a: usize = 0, n_actors, first_instants, window_starts, window_ends, has_returns|:
+                first_instants.push(9223372036854775807)
+                window_starts.push(0)
+                window_ends.push(0)
+                has_returns.push(false)
+                a <- a + 1
+            if first_seen_supported:
+                while event_index < actor.count |event_index: usize = 0, actor, inst, n_actors, first_instants|:
+                    actor_id: i64 = actor[event_index]
+                    if actor_id >= 0 and actor_id < n_actors:
+                        first_instants[actor_id.usize()] <- inst[event_index] if inst[event_index] < first_instants[actor_id.usize()]
+                    event_index <- event_index + 1
+                while a < n_actors.usize() |a: usize = 0, first_instants, window_starts, window_ends, start_days, end_days|:
+                    if first_instants[a] != 9223372036854775807:
+                        return -1 if not Continuity::rh_retention_window_bounds(first_instants[a], start_days, end_days, &window_starts[a], &window_ends[a])
+                    a <- a + 1
+                while event_index < actor.count |event_index: usize = 0, actor, inst, n_actors, first_instants, window_starts, window_ends, has_returns|:
+                    actor_id: i64 = actor[event_index]
+                    if actor_id >= 0 and actor_id < n_actors:
+                        actor_index: usize = actor_id.usize()
+                        instant: i64 = inst[event_index]
+                        if instant >= window_starts[actor_index] and instant < window_ends[actor_index] and instant != first_instants[actor_index]:
+                            has_returns[actor_index] <- true
+                    event_index <- event_index + 1
             computed: mutable darray[i64] = []
-            while a < n_actors.usize() |a: usize = 0, actor, inst, n_actors, cutoff, coverage_start, coverage_end, start_days, end_days, first_seen_supported, computed|:
-                if not first_seen_supported:
+            while a < n_actors.usize() |a: usize = 0, n_actors, cutoff, coverage_start, coverage_end, start_days, end_days, first_seen_supported, first_instants, has_returns, computed|:
+                if not first_seen_supported or first_instants[a] == 9223372036854775807:
                     computed.push(Continuity::RH_RET_UNOBSERVABLE)
                     a <- a + 1
                     continue
-                t0: mutable i64 = 9223372036854775807
-                has_return: mutable bool = false
-                while e < actor.count |e: usize = 0, actor, inst, a, t0, has_return, start_days, end_days|:
-                    aid: i64 = actor[e]
-                    t: i64 = inst[e]
-                    e <- e + 1
-                    continue if aid.i64() != a.i64()
-                    if t < t0:
-                        t0 <- t
-                if t0 == 9223372036854775807:
-                    computed.push(Continuity::RH_RET_UNOBSERVABLE)
-                    a <- a + 1
-                    continue
-                w_start: mutable i64 = 0
-                w_end: mutable i64 = 0
-                return -1 if not Continuity::rh_retention_window_bounds(t0, start_days, end_days, &w_start, &w_end)
-                while e2 < actor.count |e2: usize = 0, actor, inst, a, w_start, w_end, has_return|:
-                    aid2: i64 = actor[e2]
-                    t2: i64 = inst[e2]
-                    e2 <- e2 + 1
-                    continue if aid2.i64() != a.i64()
-                    if t2 >= w_start and t2 < w_end and t2 != t0:
-                        has_return <- true
-                s: i64 = Continuity::rh_retention_status(t0, start_days, end_days, cutoff, coverage_start, coverage_end, has_return)
+                s: i64 = Continuity::rh_retention_status(first_instants[a], start_days, end_days, cutoff, coverage_start, coverage_end, has_returns[a])
                 return -1 if s == Continuity::RH_RET_INVALID
                 computed.push(s)
                 a <- a + 1
