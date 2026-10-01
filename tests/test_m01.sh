@@ -163,7 +163,9 @@ for metric in d["metrics"]:
         if value_type == "ratio":
             assert 0 <= value["num"] <= value["den"], (identity, value)
     elif value_type == "enum":
-        assert set(value) == {"code", "label"} and type(value["code"]) is int and value["code"] >= 0 and isinstance(value["label"], str), (identity, value)
+        allowed_values = {entry["code"]: entry["label"] for entry in output["values"]}
+        assert output["shape"] == "labeled_enum" and set(value) == {"code", "label"}, (identity, output, value)
+        assert type(value["code"]) is int and allowed_values.get(value["code"]) == value["label"], (identity, value, allowed_values)
     elif value_type == "count_pair":
         members = output["members"]
         assert output["shape"] == "named_count_pair" and set(value) == set(members), (identity, output, value)

@@ -40,7 +40,7 @@ assert len(fixture_ids) == len(set(fixture_ids)), "duplicate fixture catalog ID"
 known_fixtures = {f["id"]: f.get("status") for f in fixture_rows}
 assert known_fixtures, "empty fixture catalog"
 unit_type = {"ratio": "ratio", "boolean": "boolean", "enum": "enum", "timestamp": "timestamp", "events_per_week_squared": "rational", "events_squared": "rational"}
-shape_type = {"fixed_bucket_histogram": "histogram", "named_count_pair": "count_pair"}
+shape_type = {"fixed_bucket_histogram": "histogram", "named_count_pair": "count_pair", "labeled_enum": "enum"}
 for p in files:
     d = json.load(open(p))
     for f in base:
@@ -74,6 +74,15 @@ for p in files:
         assert "bucket_upper_seconds" not in out, (p, "named count pair has histogram bounds")
     else:
         assert "members" not in out, (p, "members require a named count pair")
+    if out.get("type") == "enum":
+        values = out.get("values")
+        assert out.get("shape") == "labeled_enum" and isinstance(values, list) and values, (p, "enum requires a labeled value map")
+        codes = [value.get("code") for value in values if isinstance(value, dict)]
+        labels = [value.get("label") for value in values if isinstance(value, dict)]
+        assert len(codes) == len(values) and len(codes) == len(set(codes)) and all(isinstance(code, int) and code >= 0 for code in codes), (p, "invalid or duplicate enum code")
+        assert len(labels) == len(values) and len(labels) == len(set(labels)) and all(isinstance(label, str) and re.fullmatch(r"[a-z][a-z0-9_]*", label) for label in labels), (p, "invalid or duplicate enum label")
+    else:
+        assert "values" not in out, (p, "enum values require enum output")
     assert isinstance(d["source_requirements"], list) and d["source_requirements"], (p, "source_requirements must be nonempty")
     assert len(d["source_requirements"]) == len(set(d["source_requirements"])), (p, "duplicate source requirement")
     assert set(d["source_requirements"]) <= known_sources, (p, "unknown source requirement", sorted(set(d["source_requirements"]) - known_sources))

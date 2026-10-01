@@ -118,18 +118,19 @@ fi
 grep -q "CAF threshold boundary changed" "$TMP/boundary.log" || fail "boundary failed for an unexpected reason"
 
 echo "[metric-admission] entity, output type, source, and fixture references are checked"
-for case_name in subject_kind output_type output_shape cost_class privacy_class ratio_denominator source_requirement fixture_reference; do
+for case_name in subject_kind output_type output_shape enum_values cost_class privacy_class ratio_denominator source_requirement fixture_reference; do
   rm -rf "$TMP/metrics/definitions"
   cp -R "$ROOT/metrics/definitions" "$TMP/metrics/definitions"
   python3 - "$TMP/metrics/definitions" "$case_name" <<'PY'
 import json, sys
 p, case_name = sys.argv[1:]
-name = "activity_bot_event_share.json" if case_name == "ratio_denominator" else "history_collection_complete_windows.json" if case_name == "output_shape" else "activity_accepted_changes.json"
+name = "activity_bot_event_share.json" if case_name == "ratio_denominator" else "history_collection_complete_windows.json" if case_name == "output_shape" else "history_coverage_state.json" if case_name == "enum_values" else "activity_accepted_changes.json"
 p = p + "/" + name
 d = json.load(open(p))
 if case_name == "subject_kind": d["subject_kind"] = "unknown"
 elif case_name == "output_type": d["output"]["type"] = "ratio"
 elif case_name == "output_shape": d["output"]["type"] = "integer"
+elif case_name == "enum_values": d["output"]["values"][1]["code"] = d["output"]["values"][0]["code"]
 elif case_name == "cost_class": d["cost_class"] = "unbounded"
 elif case_name == "privacy_class": d["privacy_class"] = "individual"
 elif case_name == "ratio_denominator": del d["output"]["denominator"]
