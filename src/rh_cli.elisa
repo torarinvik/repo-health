@@ -369,11 +369,13 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     defaultf: mutable darray[u8] = []
     shaf: mutable darray[u8] = []
     filesf: mutable darray[u8] = []
+    reff: mutable darray[u8] = []
     verf: mutable darray[u8] = []
     loge: mutable darray[u8] = []
     defaulte: mutable darray[u8] = []
     shae: mutable darray[u8] = []
     fileserr: mutable darray[u8] = []
+    refs_err: mutable darray[u8] = []
     vere: mutable darray[u8] = []
     if not rh_out_path(evc, "git-log.bin", logf):
         rh_cli_err("cannot stage log path")
@@ -386,6 +388,9 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
         return 4
     if not rh_out_path(evc, "git-files.txt", filesf):
         rh_cli_err("cannot stage file-list path")
+        return 4
+    if not rh_out_path(evc, "git-refs.txt", reff):
+        rh_cli_err("cannot stage ref-list path")
         return 4
     if not rh_out_path(evc, "git-version.txt", verf):
         rh_cli_err("cannot stage version path")
@@ -410,6 +415,9 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if not rh_out_path(evc, "git-files.err", fileserr):
         rh_cli_err("cannot stage file-list error path")
         return 4
+    if not rh_out_path(evc, "git-refs.err", refs_err):
+        rh_cli_err("cannot stage ref-list error path")
+        return 4
     if not rh_out_path(evc, "git-version.err", vere):
         rh_cli_err("cannot stage version error path")
         return 4
@@ -417,9 +425,11 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     defaultp: cstr = (&defaultf[0]).cast[cstr] can Unsafe.PointerCast
     shap: cstr = (&shaf[0]).cast[cstr] can Unsafe.PointerCast
     filesp: cstr = (&filesf[0]).cast[cstr] can Unsafe.PointerCast
+    refsp: cstr = (&reff[0]).cast[cstr] can Unsafe.PointerCast
     verp: cstr = (&verf[0]).cast[cstr] can Unsafe.PointerCast
     verep: cstr = (&vere[0]).cast[cstr] can Unsafe.PointerCast
     fileserrp: cstr = (&fileserr[0]).cast[cstr] can Unsafe.PointerCast
+    refs_errp: cstr = (&refs_err[0]).cast[cstr] can Unsafe.PointerCast
     if not Process::rh_succeeded(Git::rh_run_git_version(verp, verep)):
         rh_cli_err("git --version failed")
         return 4
@@ -430,6 +440,7 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if not Process::rh_succeeded(Git::rh_run_git_shallow(scan_repo, shap, shaep)):
         rh_cli_err("rev-parse failed (not a repository?)")
         return 4
+    refs_result: Process::RhProcessResult = Git::rh_run_git_refs(scan_repo, refsp, refs_errp)
     files_result: Process::RhProcessResult = Git::rh_run_git_files(scan_repo, filesp, fileserrp)
     logep: cstr = (&loge[0]).cast[cstr] can Unsafe.PointerCast
     log_result: Process::RhProcessResult = Git::rh_run_git_log(scan_repo, logp, logep, full)
@@ -552,6 +563,14 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
         return 4
     identities: i64 = Base::rh_count_lines(uniqb)
     bots: i64 = Report::rh_count_bot_lines(uniqb)
+    refs_bytes: mutable darray[u8] = []
+    refs_read: bool = Base::rh_io_read(refsp, refs_bytes) >= 0
+    if snap.commits_all > 0 and (not Process::rh_succeeded(refs_result) or not refs_read):
+        rh_cli_err("git ref snapshot failed; no report published")
+        return 4
+    if not refs_read and not Base::rh_io_write(refsp, refs_bytes):
+        rh_cli_err("cannot write empty ref evidence")
+        return 4
     filesb: mutable darray[u8] = []
     files_read: bool = Base::rh_io_read(filesp, filesb) >= 0
     if snap.commits_all > 0 and (not Process::rh_succeeded(files_result) or not files_read):
@@ -611,7 +630,7 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
         rh_cli_err("cannot read expected markdown output")
         return 4
     manp: cstr = (&manf[0]).cast[cstr] can Unsafe.PointerCast
-    if not Report::rh_write_manifest(manp, repo, &snap, &ctx, logb, defaultb, shab, filesb, git_version_bytes, partb, report_bytes, markdown_bytes):
+    if not Report::rh_write_manifest(manp, repo, &snap, &ctx, logb, defaultb, shab, filesb, refs_bytes, git_version_bytes, partb, report_bytes, markdown_bytes):
         rh_cli_err("cannot write bundle.manifest")
         return 4
     done: mutable darray[u8] =
@@ -745,6 +764,25 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     if files_integrity < 0:
         rh_cli_err("retained file evidence digest mismatch")
         return 5
+    if bundle_version >= 3:
+        refs_path: mutable darray[u8] = []
+        has_refs_dir: bool = rh_dirname(bundle, refs_path)
+        if has_refs_dir:
+            refs_path.push(47)
+        Base::rh_push_text(refs_path, "evidence/git-refs.txt")
+        refs_path.push(0)
+        refs_ptr: cstr = (&refs_path[0]).cast[cstr] can Unsafe.PointerCast
+        retained_refs: mutable darray[u8] = []
+        if Base::rh_io_read(refs_ptr, retained_refs) < 0:
+            rh_cli_err("cannot read retained Git ref evidence")
+            return 4
+        refs_integrity: i64 = Report::rh_manifest_sha256_matches(manb, "object-sha256-evidence/git-refs.txt", retained_refs)
+        if refs_integrity == 0:
+            rh_cli_err("bundle has no unique Git ref digest")
+            return 4
+        if refs_integrity < 0:
+            rh_cli_err("retained Git ref digest mismatch")
+            return 5
     shallowpath: mutable darray[u8] = []
     has_shallow_dir: bool = rh_dirname(bundle, shallowpath)
     if has_shallow_dir:
@@ -891,8 +929,12 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     if not Report::rh_report_manifest_bool(manb, "partial-clone: ", &partial_manifest) or partial_manifest != partial_clone:
         rh_cli_err("partial-clone field does not match retained evidence")
         return 4
-    snap.manifest <- Files::rh_manifest_presence(retained_files) if snap.commits_all > 0
-    snap.manifest <- 2 if snap.commits_all == 0
+    if bundle_version >= 3:
+        snap.manifest <- Files::rh_manifest_presence(retained_files) if snap.commits_all > 0
+        snap.manifest <- 2 if snap.commits_all == 0
+    else:
+        snap.manifest <- Files::rh_manifest_presence(retained_files) if repo_kind == 0
+        snap.manifest <- 2 if repo_kind == 1
     cov_n: mutable i64 = 0
     cov_d: mutable i64 = 0
     cov_v2_n: mutable i64 = 0

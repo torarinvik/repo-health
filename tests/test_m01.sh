@@ -86,10 +86,10 @@ python3 - "$T/rep-fix2" <<'PY'
 import hashlib, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 manifest = (root / "bundle.manifest").read_text()
-assert manifest.startswith("repo-health-bundle-manifest 2\n")
+assert manifest.startswith("repo-health-bundle-manifest 3\n")
 assert (root / "evidence/emails.uniq").read_bytes() == b"alice@example.com\nbob@example.com\n"
 for metadata in (
-    "bundle-schema: rh-evidence-bundle/2",
+    "bundle-schema: rh-evidence-bundle/3",
     "report-schema: repo-health-m01/1.0.0",
     "rights-status: not-assessed",
     "retention-class: user-controlled-local",
@@ -98,18 +98,21 @@ for metadata in (
 ):
     assert metadata in manifest, metadata
 for rel in ("evidence/git-default-count.txt", "evidence/git-files.txt",
-            "evidence/git-log.bin", "evidence/git-shallow.txt", "evidence/git-version.txt",
+            "evidence/git-log.bin", "evidence/git-refs.txt", "evidence/git-shallow.txt", "evidence/git-version.txt",
             "evidence/git-partial.txt"):
     key = f"object-sha256-{rel}: "
     expected = hashlib.sha256((root / rel).read_bytes()).hexdigest()
     assert manifest.count(key + expected) == 1, key
+refs = (root / "evidence/git-refs.txt").read_text().splitlines()
+assert any(row.endswith(" HEAD") for row in refs), refs
+assert any(row.endswith(" refs/heads/main") for row in refs), refs
 expected = hashlib.sha256((root / "report.json").read_bytes()).hexdigest()
 assert manifest.count("expected-output-sha256-report.json: " + expected) == 1
 expected = hashlib.sha256((root / "report.md").read_bytes()).hexdigest()
 assert manifest.count("expected-output-sha256-report.md: " + expected) == 1
 print("[m01] evidence manifest hashes and metadata OK")
 PY
-python3 "$ROOT/tools/evidence-manifest-check.py" "$T/rep-fix2/bundle.manifest" >/dev/null || fail "manifest version-2 contract check"
+python3 "$ROOT/tools/evidence-manifest-check.py" "$T/rep-fix2/bundle.manifest" >/dev/null || fail "manifest version-3 contract check"
 cp "$T/rep-fix2/bundle.manifest" "$T/bad-manifest-order.txt"
 python3 - "$T/bad-manifest-order.txt" <<'PY'
 import pathlib, sys
@@ -400,8 +403,13 @@ cp -R "$T/rep-fix2" "$T/rep-legacy-v1"
 python3 - "$T/rep-legacy-v1/bundle.manifest" <<'PY'
 import pathlib, sys
 path = pathlib.Path(sys.argv[1])
-manifest = path.read_text().replace("repo-health-bundle-manifest 2\n", "repo-health-bundle-manifest 1\n", 1).replace("bundle-schema: rh-evidence-bundle/2\n", "bundle-schema: rh-evidence-bundle/1\n", 1)
-manifest = "\n".join(line for line in manifest.splitlines() if not line.startswith("expected-output-sha256-report.md: ")) + "\n"
+manifest = path.read_text().replace("repo-health-bundle-manifest 3\n", "repo-health-bundle-manifest 1\n", 1).replace("bundle-schema: rh-evidence-bundle/3\n", "bundle-schema: rh-evidence-bundle/1\n", 1)
+manifest = "\n".join(
+    line for line in manifest.splitlines()
+    if not line.startswith("expected-output-sha256-report.md: ")
+    and not line.startswith("object-sha256-evidence/git-refs.txt: ")
+)
+manifest = manifest.replace(" evidence/git-refs.txt", "") + "\n"
 path.write_text(manifest)
 PY
 python3 "$ROOT/tools/evidence-manifest-check.py" "$T/rep-legacy-v1/bundle.manifest" >/dev/null || fail "manifest version-1 contract check"
@@ -409,11 +417,28 @@ python3 "$ROOT/tools/evidence-manifest-check.py" "$T/rep-legacy-v1/bundle.manife
 cmp "$T/rep-legacy-v1/report.md" "$T/replay-legacy-v1/report.md" || fail "legacy v1 markdown regeneration"
 cmp "$T/rep-legacy-v1/report.json" "$T/replay-legacy-v1/report.json" || fail "legacy v1 JSON regeneration"
 echo "[m01] version-1 bundles replay with regenerated JSON and Markdown"
+cp -R "$T/rep-fix2" "$T/rep-legacy-v2"
+python3 - "$T/rep-legacy-v2/bundle.manifest" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+manifest = path.read_text().replace("repo-health-bundle-manifest 3\n", "repo-health-bundle-manifest 2\n", 1).replace("bundle-schema: rh-evidence-bundle/3\n", "bundle-schema: rh-evidence-bundle/2\n", 1)
+manifest = "\n".join(
+    line for line in manifest.splitlines()
+    if not line.startswith("object-sha256-evidence/git-refs.txt: ")
+)
+manifest = manifest.replace(" evidence/git-refs.txt", "") + "\n"
+path.write_text(manifest)
+PY
+python3 "$ROOT/tools/evidence-manifest-check.py" "$T/rep-legacy-v2/bundle.manifest" >/dev/null || fail "manifest version-2 contract check"
+"$CLI" replay --bundle "$T/rep-legacy-v2/bundle.manifest" --out "$T/replay-legacy-v2" >/dev/null || fail "legacy v2 replay"
+cmp "$T/rep-legacy-v2/report.md" "$T/replay-legacy-v2/report.md" || fail "legacy v2 markdown regeneration"
+cmp "$T/rep-legacy-v2/report.json" "$T/replay-legacy-v2/report.json" || fail "legacy v2 JSON regeneration"
+echo "[m01] version-2 bundles replay with regenerated JSON and Markdown"
 cp "$T/rep-fix2/bundle.manifest" "$T/inconsistent-schema.manifest"
 python3 - "$T/inconsistent-schema.manifest" <<'PY'
 import pathlib, sys
 path = pathlib.Path(sys.argv[1])
-path.write_text(path.read_text().replace("bundle-schema: rh-evidence-bundle/2", "bundle-schema: rh-evidence-bundle/1", 1))
+path.write_text(path.read_text().replace("bundle-schema: rh-evidence-bundle/3", "bundle-schema: rh-evidence-bundle/1", 1))
 PY
 expect 4 "$CLI" replay --bundle "$T/inconsistent-schema.manifest" --out "$T/replay-inconsistent-schema"
 echo "[m01] inconsistent bundle header/schema rejected"
@@ -421,6 +446,10 @@ mv "$T/rep-fix2/evidence/git-files.txt" "$T/rep-fix2/evidence/git-files.missing"
 expect 4 "$CLI" replay --bundle "$T/rep-fix2/bundle.manifest" --out "$T/replay-missing-files"
 mv "$T/rep-fix2/evidence/git-files.missing" "$T/rep-fix2/evidence/git-files.txt"
 echo "[m01] replay requires retained file evidence OK"
+mv "$T/rep-fix2/evidence/git-refs.txt" "$T/rep-fix2/evidence/git-refs.missing"
+expect 4 "$CLI" replay --bundle "$T/rep-fix2/bundle.manifest" --out "$T/replay-missing-refs"
+mv "$T/rep-fix2/evidence/git-refs.missing" "$T/rep-fix2/evidence/git-refs.txt"
+echo "[m01] replay requires retained ref evidence for bundle v3"
 # Rebinding a modified report digest must not make it replayable: replay
 # regenerates report.json from retained evidence and compares the exact bytes.
 cp -R "$T/rep-fix2" "$T/rep-forged-report"
@@ -661,6 +690,9 @@ expect 5 "$CLI" replay --bundle "$T/rep-tampered/bundle.manifest" --out "$T/repl
 cp -r "$T/rep-fix2" "$T/rep-files-tampered"
 printf 'X' >> "$T/rep-files-tampered/evidence/git-files.txt"
 expect 5 "$CLI" replay --bundle "$T/rep-files-tampered/bundle.manifest" --out "$T/replay-files-t"
+cp -R "$T/rep-fix2" "$T/rep-refs-tampered"
+printf 'X' >> "$T/rep-refs-tampered/evidence/git-refs.txt"
+expect 5 "$CLI" replay --bundle "$T/rep-refs-tampered/bundle.manifest" --out "$T/replay-refs-t"
 cp -r "$T/rep-fix2" "$T/rep-shallow-tampered"
 printf 'X' >> "$T/rep-shallow-tampered/evidence/git-shallow.txt"
 expect 5 "$CLI" replay --bundle "$T/rep-shallow-tampered/bundle.manifest" --out "$T/replay-shallow-t"

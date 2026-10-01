@@ -20,7 +20,7 @@ def validate(path, schema_path):
     lines = raw.decode("utf-8").splitlines()
     if not lines:
         fail("empty manifest")
-    version_spec = next((v for v in spec["versions"].values() if v["header"] == lines[0]), None)
+    version_key, version_spec = next(((key, value) for key, value in spec["versions"].items() if value["header"] == lines[0]), (None, None))
     if version_spec is None:
         fail("unsupported manifest header")
     rows = []
@@ -59,7 +59,8 @@ def validate(path, schema_path):
         fail("header and bundle schema disagree")
     if values["report-schema"] != [spec["report_schema"]]:
         fail("unexpected report schema")
-    if values["files"] != [" ".join(spec["files"])]:
+    expected_files = spec.get("files_by_version", {}).get(version_key, spec["files"])
+    if values["files"] != [" ".join(expected_files)]:
         fail("unexpected evidence file set or order")
     enums = spec["enums"]
     for key, allowed_values in enums.items():
