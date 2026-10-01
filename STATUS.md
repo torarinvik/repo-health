@@ -508,6 +508,15 @@ record, eliminating three parallel arrays without changing the threshold or
 first-seen tie behavior. Exact release/review counts remain covered by the
 role CLI regression.
 
+**M04-07 scalar concentration increment:** `Metrics::rh_concentration` now
+uses Elisa's in-place, allocation-free heapsort for descending event counts,
+replacing a quadratic insertion-sort worst case with O(n log n) ordering.
+The `test_oracles` suite checks the exact 50% result for 10,000 ascending
+sparse counts. In a three-sample local profile, the 10,000-node uniform
+metrics stage moved from 92.466 ms to 8.720 ms median with the same workload
+digest; those process timings include startup and dataset construction.
+`tests/test_m00.sh` and the profile pass.
+
 **M04-01 declaration-summary increment:** Role, source, and positive-revocation
 tallies now share one scoped pass and return an immutable `RhRoleSummary`, replacing
 repeated declaration scans and eight mutable output parameters while preserving unknown buckets.

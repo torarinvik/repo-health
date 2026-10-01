@@ -272,3 +272,13 @@ repetitions: full recomputation median 2,565 ms, partial-cache median 2,288 ms,
 individual-child peak RSS remained 234.88 MiB full and 243.19 MiB partial.
 Sample latency varied across runs; the paired timings are local synthetic
 evidence only.
+
+The 10,000-node uniform metrics stage exposed quadratic insertion sorting in
+the scalar concentration calculation. Replacing it with Elisa's in-place,
+allocation-free O(n log n) heapsort reduced the median from 92.466 ms to
+8.720 ms across three samples. Both runs used dataset digest
+`d198982b7779b1ea`; these process timings include startup and deterministic
+dataset construction, so this is a local before/after observation rather than
+a general capacity claim. `src/test_oracles.elisa` now checks the exact 50%
+prefix for 10,000 ascending sparse counts, the adverse input order for the old
+insertion sort.
