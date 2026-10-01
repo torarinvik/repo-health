@@ -20,8 +20,8 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":true,"identity_snapshot":{"identity_revision":8,"cluster_id_by_actor":[0,0,2,3,4]},"review_actor_id":4,"declarations":[{"actor_id":1,"role":"owner","permission":1,"source":"provider","declared_at":100},{"actor_id":2,"role":"triager","permission":2,"source":"file","declared_at":100,"revoked_at":200},{"actor_id":3,"role":"member","permission":4,"source":"operator","declared_at":300},{"actor_id":4,"role":"wizard","permission":8,"source":"file","declared_at":100}],"observed_actions":[{"actor_id":1,"identity_actor_index":0,"actor_type":"bot","kind":"release","at":120},{"actor_id":2,"identity_actor_index":1,"actor_type":"human","kind":"release","at":130},{"kind":"release","at":135},{"actor_id":null,"kind":"release","at":136},{"actor_id":3,"kind":"merge","at":140},{"actor_id":4,"kind":"review","at":150},{"actor_id":4,"kind":"review","at":160}],"queries":[{"actor_id":1,"as_of":150},{"actor_id":2,"as_of":150},{"actor_id":2,"as_of":250},{"actor_id":3,"as_of":250},{"actor_id":3,"as_of":350},{"actor_id":4,"as_of":150}],"permission_queries":[{"actor_id":1,"perm_bit":1,"as_of":150},{"actor_id":1,"perm_bit":2,"as_of":150}]}
 JSON
 "$ROOT/build/rh_cli" roles --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "run"
-python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
-import hashlib, json, sys
+python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" "$ROOT" <<'PY'
+import glob, hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-roles-result/1", d
 assert d["identity_revision"] == 8, d
@@ -37,6 +37,79 @@ assert {f["state"] for f in tr["fields"]} == {"preserved", "transformed", "unkno
 assert d["source_tally"] == {"provider": 1, "file": 2, "operator": 1}, d["source_tally"]
 assert d["role_tally"] == {"owner": 1, "maintainer": 0, "triager": 1, "member": 1, "unknown": 1}, d["role_tally"]
 metrics = {m["key"]: m for m in d["metrics"]}
+assert len(metrics) == 23, metrics
+definitions = {}
+for path in glob.glob(sys.argv[4] + "/metrics/definitions/*.json"):
+    definition = json.load(open(path))
+    definitions[(definition["key"], definition["version"])] = definition
+expected_inputs = {
+    "roles.owner_declaration_count": ["role_declarations", "declared_role"],
+    "roles.maintainer_declaration_count": ["role_declarations", "declared_role"],
+    "roles.triager_declaration_count": ["role_declarations", "declared_role"],
+    "roles.member_declaration_count": ["role_declarations", "declared_role"],
+    "roles.unknown_declaration_count": ["role_declarations", "declared_role"],
+    "roles.provider_declaration_count": ["role_declarations", "declaration_source"],
+    "roles.file_declaration_count": ["role_declarations", "declaration_source"],
+    "roles.operator_declaration_count": ["role_declarations", "declaration_source"],
+    "maintainer.role_assignments_with_end_dates": ["role_declarations", "explicit_positive_revoked_at_timestamp"],
+    "maintainer.declared_current": ["time_scoped_role_declarations", "declaration_as_of_time"],
+    "maintainer.active_declared_12m": ["time_scoped_role_declarations", "declaration_as_of_time", "persistent_activity_profile"],
+    "maintainer.observed_release_actors": ["release_action_events", "actor_ids"],
+    "maintainer.observed_merge_actors": ["merge_action_events", "actor_ids"],
+    "maintainer.observed_review_actors": ["review_action_events", "actor_ids"],
+    "maintainer.unattributed_release_count": ["release_action_events", "actor_id_attribution"],
+    "maintainer.reviewed_merge_change_count": ["merge_action_events", "review_action_events", "change_ids"],
+    "maintainer.linked_merge_change_count": ["merge_action_events", "change_ids"],
+    "maintainer.review_share": ["review_action_events", "actor_ids", "review_actor_id"],
+    "maintainer.release_role_automation_share": ["release_action_events", "actor_ids", "explicit_actor_type"],
+    "concentration.release_actor_count_80": ["release_action_events", "actor_ids"],
+    "concentration.review_actor_count_80": ["review_action_events", "actor_ids"],
+    "maintainer.permission_observed_current": ["provider_role_declarations", "authorization_state", "declaration_as_of_time"],
+    "maintainer.permission_inventory_coverage": ["provider_role_declarations", "authorization_state", "declaration_as_of_time", "permission_inventory_completeness"],
+}
+expected_sources = {
+    **{key: ["captured-role-document"] for key in (
+        "roles.owner_declaration_count", "roles.maintainer_declaration_count", "roles.triager_declaration_count",
+        "roles.member_declaration_count", "roles.unknown_declaration_count", "roles.provider_declaration_count",
+        "roles.file_declaration_count", "roles.operator_declaration_count")},
+    "maintainer.role_assignments_with_end_dates": ["role-declaration-input"],
+    "maintainer.declared_current": ["role-declarations"],
+    "maintainer.active_declared_12m": ["role-declarations", "persistent-activity-profile"],
+    "maintainer.observed_release_actors": ["role-events"],
+    "maintainer.observed_merge_actors": ["role-events"],
+    "maintainer.observed_review_actors": ["role-events"],
+    "maintainer.unattributed_release_count": ["observed-release-events"],
+    "maintainer.reviewed_merge_change_count": ["role-events"],
+    "maintainer.linked_merge_change_count": ["role-events"],
+    "maintainer.review_share": ["observed-review-events", "explicit-review-actor-selection"],
+    "maintainer.release_role_automation_share": ["observed-release-events", "explicit-actor-classification"],
+    "concentration.release_actor_count_80": ["role-events"],
+    "concentration.review_actor_count_80": ["role-events"],
+    "maintainer.permission_observed_current": ["authorized-role-declarations"],
+    "maintainer.permission_inventory_coverage": ["authorized-role-declarations", "permission-inventory-completeness"],
+}
+assert set(metrics) == set(expected_inputs) == set(expected_sources), (set(metrics), set(expected_inputs), set(expected_sources))
+for metric in d["metrics"]:
+    identity = (metric["key"], metric["version"])
+    definition = definitions[identity]
+    assert definition["subject_kind"] == "project", (identity, definition)
+    assert definition["inputs"] == expected_inputs[metric["key"]], (identity, definition.get("inputs"))
+    assert definition["source_requirements"] == expected_sources[metric["key"]], (identity, definition["source_requirements"])
+    assert metric["evidence"] == ["roles-input"], (identity, metric["evidence"])
+    output_type = definition["output"]["type"]
+    if metric["status"] == "observed":
+        if output_type == "integer":
+            assert type(metric["value"]) is int, (identity, metric)
+            if metric["key"].startswith("concentration."):
+                assert "ceiling(80%" in definition["denominator_rule"], (identity, definition)
+            else:
+                assert definition["denominator_rule"] == "none" or definition["denominator_rule"].startswith("none;"), (identity, definition)
+        else:
+            assert output_type == "ratio" and set(metric["value"]) == {"num", "den"} and metric["value"]["den"] > 0, (identity, metric)
+            assert definition["output"]["numerator"] and definition["output"]["denominator"] and not definition["denominator_rule"].startswith("none"), (identity, definition)
+assert "numerator" not in definitions[("maintainer.role_assignments_with_end_dates", "1.0.0")]["output"]
+assert definitions[("maintainer.role_assignments_with_end_dates", "1.0.0")]["denominator_rule"].startswith("none;")
+print("[roles] all 23 emitted metric rows match catalog sources, inputs, types, and denominators")
 assert metrics["roles.owner_declaration_count"]["value"] == 1, metrics
 assert metrics["roles.maintainer_declaration_count"]["value"] == 0, metrics
 assert metrics["roles.triager_declaration_count"]["value"] == 1, metrics
