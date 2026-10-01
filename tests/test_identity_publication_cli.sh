@@ -107,6 +107,72 @@ assert d["actor_kinds"] == {"human": 1, "bot_known": 0, "service_known": 2, "unr
 print("[identity-publication] historical as-of recomputes actor-kind aggregates")
 PY
 
+echo "[identity-publication] exhaustive overlapping kind/source assertion pairs"
+python3 - "$T/history-pairs.json" "$T/history-pairs.expected.json" <<'PY'
+import itertools, json, sys
+
+kinds = ("human", "bot_known")
+sources = ("provider", "operator")
+assertions = tuple(itertools.product(kinds, sources))
+pairs = tuple(itertools.product(assertions, repeat=2))
+history = []
+expected_kinds = {"human": 0, "bot_known": 0, "service_known": 0, "unresolved": 0}
+expected_sources = {"provider": 0, "project": 0, "operator": 0, "unknown": 0}
+kind_conflicts = 0
+source_conflicts = 0
+
+for actor_id, pair in enumerate(pairs):
+    actor_assertions = []
+    for valid_from, (kind, source) in enumerate(pair):
+        actor_assertions.append({
+            "actor_id": actor_id,
+            "kind": kind,
+            "valid_from": valid_from,
+            "valid_until": 3,
+            "source": source,
+        })
+    history.extend(actor_assertions)
+
+    active_kinds = {item["kind"] for item in actor_assertions if item["valid_from"] <= 2 < item["valid_until"]}
+    active_sources = {item["source"] for item in actor_assertions if item["valid_from"] <= 2 < item["valid_until"]}
+    kind_conflict = len(active_kinds) > 1
+    source_conflict = len(active_sources) > 1
+    kind_conflicts += kind_conflict
+    source_conflicts += source_conflict
+    expected_kinds[next(iter(active_kinds)) if not kind_conflict else "unresolved"] += 1
+    expected_sources[next(iter(active_sources)) if not source_conflict else "unknown"] += 1
+
+document = {
+    "schema": "rh-identity-publication-input/1",
+    "project_id": "history-pair-cross-product",
+    "publication_scope": "public",
+    "actor_count": len(pairs),
+    "links": [],
+    "as_of": 2,
+    "actor_kind_history": history,
+}
+expected = {
+    "actor_kinds": expected_kinds,
+    "actor_kind_source_counts": expected_sources,
+    "actor_kind_history": {
+        "as_of": 2,
+        "assertions": len(history),
+        "conflicted_actors": kind_conflicts,
+        "source_conflicts": source_conflicts,
+    },
+}
+json.dump(document, open(sys.argv[1], "w"), separators=(",", ":"))
+json.dump(expected, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" identity-publish --input "$T/history-pairs.json" --out "$T/history-pairs.out" >/dev/null || fail "overlapping history pair publication"
+python3 - "$T/history-pairs.expected.json" "$T/history-pairs.out" <<'PY'
+import json, sys
+expected, actual = (json.load(open(path)) for path in sys.argv[1:])
+for field, value in expected.items():
+    assert actual[field] == value, (field, actual[field], value)
+print("[identity-publication] all 16 active assertion pairs match independent kind/source oracle")
+PY
+
 echo "[identity-publication] malformed inputs fail closed"
 set +e
 printf '%s' '{"schema":"rh-identity-publication-input/2","project_id":"x","publication_scope":"public","actor_count":0,"links":[]}' > "$T/bad-schema.json"
