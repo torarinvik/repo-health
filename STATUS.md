@@ -534,6 +534,12 @@ replaces four declaration de-duplication scans and repeated persistent-actor
 searches while preserving time, authorization, source, and revocation rules;
 `tests/test_roles_cli.sh` covers duplicate actor/profile rows and permission states.
 
+**M04-05 cohort-row increment:** Persistent membership now computes active
+months, first-to-last span, and latest-month activity in one scoped row pass;
+the event-share cohort pass derives recency from its existing final-month
+result. This removes repeated matrix reads while preserving cohort and
+zero-month behavior.
+
 **M04 scope (in progress):** implemented — persistence cohorts over an
 actor-by-complete-month presence matrix (one active day is one month;
 component measures returned alongside membership), a coverage basis
