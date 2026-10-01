@@ -24,22 +24,49 @@ include "./rh_continuity.elisa"
 
 module ContinuityScan:
     private:
-        # Locate a project-local actor id by the supplied author-email span; -1
-        # when new. Linear scan keeps first-appearance IDs deterministic.
-        # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_cs_find_actor(pool: darray[u8]&, astart: darray[i64]&, aend: darray[i64]&, log: darray[u8]&, s: usize, e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while a < astart.count |a: usize = 0, astart, aend, pool, log, s, e|:
-                ps: i64 = astart[a]
-                pe: i64 = aend[a]
-                if pe - ps == e.i64() - s.i64():
-                    match_ok: bool =
-                        while k < pe - ps |match_ok: bool = true, k: i64 = 0| -> match_ok:
-                            if pool[(ps + k).usize()] != log[s + k.usize()]:
-                                match_ok <- false
-                            k <- k + 1
-                    return a.i64() if match_ok
-                a <- a + 1
+        # Actor IDs are assigned on first appearance; the private index only
+        # accelerates exact mailmap-normalized email lookup.
+        def rh_cs_find_actor(pool: darray[u8]&, astart: darray[i64]&, aend: darray[i64]&, slots: darray[i64]&, log: darray[u8]&, s: usize, e: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if slots.count == 0
+            slot: mutable usize = hash_sview(string_view_slice(bytes_view(log), s, e)).usize() % slots.count
+            while probe < slots.count |probe: usize = 0, slot, astart, aend, slots, pool, log, s, e|:
+                index: i64 = slots[slot]
+                return -1 if index == 0
+                actor_index: usize = (index - 1).usize()
+                return index - 1 if Base::rh_bytes_equal_span(pool, astart[actor_index], aend[actor_index], log, s.i64(), e.i64())
+                slot <- (slot + 1) % slots.count
+                probe <- probe + 1
             -1
+
+        def rh_cs_actor_index_grow(pool: darray[u8]&, astart: darray[i64]&, aend: darray[i64]&, slots: mutable darray[i64]&, required_actors: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if slots.count > 0 and required_actors * 2 <= slots.count
+            capacity: mutable usize = 16 if slots.count == 0 else slots.count * 2
+            capacity <- required_actors * 2 + 1 if capacity < required_actors * 2 + 1
+            grown_slots: mutable darray[i64] = []
+            while i < capacity |i: usize = 0, capacity, grown_slots|:
+                grown_slots.push(0)
+                i <- i + 1
+            while actor_index < astart.count |actor_index: usize = 0, astart, aend, pool, grown_slots|:
+                hash: usize = hash_sview(string_view_slice(bytes_view(pool), astart[actor_index].usize(), aend[actor_index].usize())).usize()
+                slot: mutable usize = hash % grown_slots.count
+                while grown_slots[slot] != 0 |slot, grown_slots|:
+                    slot <- (slot + 1) % grown_slots.count
+                grown_slots[slot] <- actor_index.i64() + 1
+                actor_index <- actor_index + 1
+            slots <- grown_slots
+            true
+
+        def rh_cs_actor_index_insert(pool: darray[u8]&, astart: darray[i64]&, aend: darray[i64]&, slots: mutable darray[i64]&, actor_index: usize) -> bool:
+            return false if slots.count == 0 or actor_index >= astart.count
+            hash: usize = hash_sview(string_view_slice(bytes_view(pool), astart[actor_index].usize(), aend[actor_index].usize())).usize()
+            slot: mutable usize = hash % slots.count
+            while probe < slots.count |probe: usize = 0, slot, slots, actor_index|:
+                if slots[slot] == 0:
+                    slots[slot] <- actor_index.i64() + 1
+                    return true
+                slot <- (slot + 1) % slots.count
+                probe <- probe + 1
+            false
 
         # Parse in-window commits. Appends one entry per accepted commit to the
         # parallel arrays (actor, month, inst, kind) and returns the accepted
@@ -50,12 +77,13 @@ module ContinuityScan:
             pool: mutable darray[u8] = []
             astart: mutable darray[i64] = []
             aend: mutable darray[i64] = []
+            actor_slots: mutable darray[i64] = []
             n: mutable i64 = 0
             accepted: mutable i64 = 0
             if now < window_start:
                 n_actors_out[0] <- 0
                 return -1
-            while pos < log.count |pos: usize = 0, log, window_start, now, actor, month, inst, kind, pool, astart, aend, n, accepted|:
+            while pos < log.count |pos: usize = 0, log, window_start, now, actor, month, inst, kind, pool, astart, aend, actor_slots, n, accepted|:
                 span_end: usize =
                     rec_end: i64 = Base::rh_find_byte(log, pos, 0)
                     rec_end.usize() if rec_end >= 0 else log.count
@@ -105,14 +133,16 @@ module ContinuityScan:
                 if at < window_start or at > now:
                     pos <- span_end + 1
                     continue
-                aid: mutable i64 = rh_cs_find_actor(pool, astart, aend, log, actor_email_s, actor_email_e)
+                aid: mutable i64 = rh_cs_find_actor(pool, astart, aend, actor_slots, log, actor_email_s, actor_email_e)
                 if aid < 0:
+                    return -1 if not rh_cs_actor_index_grow(pool, astart, aend, actor_slots, (n + 1).usize())
                     aid <- n
                     astart.push(pool.count.i64())
                     while kk < actor_email_e |kk: usize = actor_email_s, log, actor_email_e, pool|:
                         pool.push(log[kk])
                         kk <- kk + 1
                     aend.push(pool.count.i64())
+                    return -1 if not rh_cs_actor_index_insert(pool, astart, aend, actor_slots, aid.usize())
                     n <- n + 1
                 mo: mutable i64 = 0
                 if not Temporal::rh_month_of_instant(at, &mo):
