@@ -49,6 +49,16 @@ module Population:
             has_value: mutable bool
             policy: mutable u8
 
+        struct RhPopulationRatioCoverage:
+            numerator_observed: mutable i64
+            numerator_partial: mutable i64
+            numerator_unavailable: mutable i64
+            numerator_unknown: mutable i64
+            denominator_observed: mutable i64
+            denominator_partial: mutable i64
+            denominator_unavailable: mutable i64
+            denominator_unknown: mutable i64
+
         struct RhPopulationProjectIdentity:
             graph_node_id: mutable i64
             accepted: mutable bool
@@ -212,8 +222,11 @@ module Population:
             Base::rh_push_text(out, "\"}")
             true
 
-        def rh_population_emit_ratio_metric(out: mutable darray[u8]&, texts: darray[u8]&, ratio: RhPopulationRatio, numerator: i64, denominator: i64, observed_dependents: i64, not_applicable_dependents: i64, unknown_dependents: i64, selected_dependents: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_population_emit_ratio_metric(out: mutable darray[u8]&, texts: darray[u8]&, ratio: RhPopulationRatio, numerator: i64, denominator: i64, observed_dependents: i64, not_applicable_dependents: i64, unknown_dependents: i64, selected_dependents: i64, coverage: RhPopulationRatioCoverage) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if numerator < 0 or denominator < 0 or numerator > denominator
+            return false if observed_dependents < 0 or not_applicable_dependents < 0 or unknown_dependents < 0 or selected_dependents < 0 or observed_dependents + not_applicable_dependents + unknown_dependents != selected_dependents
+            return false if coverage.numerator_observed + coverage.numerator_partial + coverage.numerator_unavailable + coverage.numerator_unknown != selected_dependents
+            return false if coverage.denominator_observed + coverage.denominator_partial + coverage.denominator_unavailable + coverage.denominator_unknown != selected_dependents
             has_value: bool = denominator > 0
             emitted: bool =
                 incomplete: bool = has_value and unknown_dependents > 0
@@ -251,7 +264,23 @@ module Population:
             Base::rh_push_decimal_i64(out, unknown_dependents)
             Base::rh_push_text(out, ",\"selected_dependents\":")
             Base::rh_push_decimal_i64(out, selected_dependents)
-            Base::rh_push_text(out, "},\"basis\":\"pooled-configured-count-pairs-over-selected-dependents\"}")
+            Base::rh_push_text(out, ",\"numerator_metric\":{\"observed\":")
+            Base::rh_push_decimal_i64(out, coverage.numerator_observed)
+            Base::rh_push_text(out, ",\"partial\":")
+            Base::rh_push_decimal_i64(out, coverage.numerator_partial)
+            Base::rh_push_text(out, ",\"unavailable\":")
+            Base::rh_push_decimal_i64(out, coverage.numerator_unavailable)
+            Base::rh_push_text(out, ",\"unknown\":")
+            Base::rh_push_decimal_i64(out, coverage.numerator_unknown)
+            Base::rh_push_text(out, "},\"denominator_metric\":{\"observed\":")
+            Base::rh_push_decimal_i64(out, coverage.denominator_observed)
+            Base::rh_push_text(out, ",\"partial\":")
+            Base::rh_push_decimal_i64(out, coverage.denominator_partial)
+            Base::rh_push_text(out, ",\"unavailable\":")
+            Base::rh_push_decimal_i64(out, coverage.denominator_unavailable)
+            Base::rh_push_text(out, ",\"unknown\":")
+            Base::rh_push_decimal_i64(out, coverage.denominator_unknown)
+            Base::rh_push_text(out, "}},\"basis\":\"pooled-configured-count-pairs-over-selected-dependents\"}")
             true
 
         def rh_population_metric_index(metrics: darray[RhPopulationMetric]&, texts: darray[u8]&, key_s: i64, key_e: i64, version_s: i64, version_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -589,6 +618,7 @@ module Population:
             ratio_observed_dependents: mutable darray[i64] = []
             ratio_unknown_dependents: mutable darray[i64] = []
             ratio_not_applicable_dependents: mutable darray[i64] = []
+            ratio_coverage: mutable darray[RhPopulationRatioCoverage] = []
             metric_cell_indices: mutable darray[i64] = []
             identity_selected: mutable darray[bool] = []
             identity_accepted: mutable i64 = 0
@@ -614,6 +644,7 @@ module Population:
                 ratio_observed_dependents.push(0)
                 ratio_unknown_dependents.push(0)
                 ratio_not_applicable_dependents.push(0)
+                ratio_coverage.push(RhPopulationRatioCoverage{numerator_observed: 0, numerator_partial: 0, numerator_unavailable: 0, numerator_unknown: 0, denominator_observed: 0, denominator_partial: 0, denominator_unavailable: 0, denominator_unknown: 0})
                 i <- i + 1
             while i < metrics.count |i: usize = 0, metrics, metric_cell_indices|:
                 metric_cell_indices.push(-1)
@@ -727,7 +758,7 @@ module Population:
                 while metric_index < metrics.count |metric_index: usize = 0, metrics, metric_cell_indices, cell_start|:
                     return -1 if metric_cell_indices[metric_index] < cell_start
                     metric_index <- metric_index + 1
-                while ratio_index < ratios.count |ratio_index: usize = 0, ratios, cells, metric_cell_indices, cell_start, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents|:
+                while ratio_index < ratios.count |ratio_index: usize = 0, ratios, cells, metric_cell_indices, cell_start, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, ratio_coverage|:
                     ratio: RhPopulationRatio = ratios[ratio_index]
                     numerator_cell_index: i64 = metric_cell_indices[ratio.numerator_index.usize()]
                     denominator_cell_index: i64 = metric_cell_indices[ratio.denominator_index.usize()]
@@ -738,6 +769,24 @@ module Population:
                     denominator_status: u8 = denominator_cell.status
                     numerator_value: i64 = numerator_cell.value
                     denominator_value: i64 = denominator_cell.value
+                    coverage: RhPopulationRatioCoverage = ratio_coverage[ratio_index]
+                    if numerator_status == RH_POP_STATUS_OBSERVED:
+                        coverage.numerator_observed <- coverage.numerator_observed + 1
+                    elif numerator_status == RH_POP_STATUS_PARTIAL:
+                        coverage.numerator_partial <- coverage.numerator_partial + 1
+                    elif numerator_status == RH_POP_STATUS_UNAVAILABLE:
+                        coverage.numerator_unavailable <- coverage.numerator_unavailable + 1
+                    else:
+                        coverage.numerator_unknown <- coverage.numerator_unknown + 1
+                    if denominator_status == RH_POP_STATUS_OBSERVED:
+                        coverage.denominator_observed <- coverage.denominator_observed + 1
+                    elif denominator_status == RH_POP_STATUS_PARTIAL:
+                        coverage.denominator_partial <- coverage.denominator_partial + 1
+                    elif denominator_status == RH_POP_STATUS_UNAVAILABLE:
+                        coverage.denominator_unavailable <- coverage.denominator_unavailable + 1
+                    else:
+                        coverage.denominator_unknown <- coverage.denominator_unknown + 1
+                    ratio_coverage[ratio_index] <- coverage
                     if numerator_status == RH_POP_STATUS_OBSERVED and denominator_status == RH_POP_STATUS_OBSERVED:
                         if denominator_value == 0:
                             return -1 if numerator_value != 0
@@ -765,7 +814,7 @@ module Population:
                 reason_e: mutable i64 = 0
                 return -1 if not Population::rh_population_str(nodes, texts, unresolved, "package", &us, &ue) or not Population::rh_population_str(nodes, texts, unresolved, "reason", &reason_s, &reason_e) or us == ue or reason_s == reason_e
                 unresolved <- nodes[unresolved.usize()].next_sibling
-            Base::rh_push_text(out, "{\"schema\":\"rh-population-result/4\",\"focal\":{\"package\":")
+            Base::rh_push_text(out, "{\"schema\":\"rh-population-result/5\",\"focal\":{\"package\":")
             Population::rh_population_emit_span(out, texts, focal_s, focal_e)
             Base::rh_push_text(out, ",\"version_policy\":")
             Population::rh_population_emit_span(out, texts, policy_s, policy_e)
@@ -902,11 +951,11 @@ module Population:
                 Base::rh_push_text(out, "}}")
                 i <- i + 1
             Base::rh_push_text(out, "],\"ratio_metrics\":[")
-            while i < ratios.count |i: usize = 0, ratios, texts, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, dependents, out|:
+            while i < ratios.count |i: usize = 0, ratios, texts, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, ratio_coverage, dependents, out|:
                 if i > 0:
                     out.push(44)
                 ratio: RhPopulationRatio = ratios[i]
-                return -1 if not Population::rh_population_emit_ratio_metric(out, texts, ratio, ratio_numerator_sums[i], ratio_denominator_sums[i], ratio_observed_dependents[i], ratio_not_applicable_dependents[i], ratio_unknown_dependents[i], dependents.count.i64())
+                return -1 if not Population::rh_population_emit_ratio_metric(out, texts, ratio, ratio_numerator_sums[i], ratio_denominator_sums[i], ratio_observed_dependents[i], ratio_not_applicable_dependents[i], ratio_unknown_dependents[i], dependents.count.i64(), ratio_coverage[i])
                 i <- i + 1
-            Base::rh_push_text(out, "],\"note\":\"selected dependent population counts projects once even when a repository publishes several packages; provider caps and unresolved mappings remain visible; intrinsic metrics are independent evidence; unknown values are not imputed as zero; path witnesses identify the qualifying package context; configured ratios pool exact count pairs only over observed selected dependents\"}")
+            Base::rh_push_text(out, "],\"note\":\"selected dependent population counts projects once even when a repository publishes several packages; provider caps and unresolved mappings remain visible; intrinsic metrics are independent evidence; unknown values are not imputed as zero; path witnesses identify the qualifying package context; configured ratios pool exact count pairs only over observed selected dependents and retain separate numerator and denominator metric coverage by state\"}")
             0
