@@ -21,9 +21,9 @@ cp "$ROOT"/fixtures/inventory/*.json "$T"/
 echo "[inventory] CycloneDX 1.5 (supported) -> observed"
 "$ROOT/build/rh_cli" inventory --format cyclonedx --input "$T/cyclonedx-1.5.json" --out "$T/cdx.json" >/dev/null || fail "cyclonedx parse"
 cmp -s "$T/cdx.json" "$ROOT/fixtures/inventory-results/cyclonedx-1.5.json" || fail "CycloneDX result differs from golden"
-python3 - "$T/cdx.json" "$T/cyclonedx-1.5.json" <<'PY'
+python3 - "$T/cdx.json" "$T/cyclonedx-1.5.json" "$ROOT" <<'PY'
 import json, sys
-import hashlib
+import glob, hashlib
 d = json.load(open(sys.argv[1]))
 raw = open(sys.argv[2], "rb").read()
 tr = json.load(open(sys.argv[1] + ".transformations.json"))
@@ -65,6 +65,38 @@ assert {k: metrics[k]["value"] for k in metrics} == {
     "provenance.artifact_digest_present_share": {"num": 2, "den": 2},
     "inventory.unknown_field_count": 0,
 }, metrics
+definitions = {}
+for path in glob.glob(sys.argv[3] + "/metrics/definitions/*.json"):
+    definition = json.load(open(path))
+    definitions[(definition["key"], definition["version"])] = definition
+expected_inputs = {
+    "inventory.component_count": ["accepted_component_or_package_entries", "declared_spec_version", "format_required_identity_fields"],
+    "inventory.invalid_component_count": ["cyclonedx_or_spdx_document", "declared_spec_version", "component_or_package_entries", "format_required_identity_fields"],
+    "inventory.components_with_purl_count": ["accepted_component_or_package_entries", "nonempty_purl_field_or_spdx_purl_external_ref"],
+    "inventory.components_with_hash_count": ["accepted_component_or_package_entries", "hash_or_checksum_entries"],
+    "inventory.known_digest_count": ["accepted_component_or_package_entries", "sha256_hash_or_checksum_entries", "sha256_algorithm_and_hex_content"],
+    "provenance.artifact_digest_present_share": ["accepted_component_or_package_entries", "hash_or_checksum_entries"],
+    "inventory.unknown_field_count": ["cyclonedx_or_spdx_document", "declared_spec_version", "format_top_level_field_allowlist"],
+}
+assert len(d["metrics"]) == 7
+for metric in d["metrics"]:
+    identity = (metric["key"], metric["version"])
+    definition = definitions[identity]
+    assert definition["subject_kind"] == "project", (identity, definition)
+    assert definition["source_requirements"] == ["captured-inventory-document"], (identity, definition)
+    assert definition["inputs"] == expected_inputs[metric["key"]], (identity, definition.get("inputs"))
+    assert metric["status"] == "observed" and metric["evidence"] == ["inventory-input"], metric
+    output_type = definition["output"]["type"]
+    if output_type == "integer":
+        assert type(metric["value"]) is int and (definition["denominator_rule"] == "none" or definition["denominator_rule"].startswith("none;")), (identity, definition)
+    else:
+        assert output_type == "ratio" and set(metric["value"]) == {"num", "den"} and metric["value"]["den"] > 0, (identity, metric)
+        assert definition["output"]["denominator"] and not definition["denominator_rule"].startswith("none"), (identity, definition)
+known_digest = definitions[("inventory.known_digest_count", "1.0.0")]
+assert known_digest["output"]["unit"] == "records", known_digest
+assert "individual hash or checksum entries" in known_digest["params"]["scope"], known_digest
+assert "not validated" in definitions[("inventory.components_with_purl_count", "1.0.0")]["params"]["scope"]
+print("[inventory] all seven metric rows match catalog sources, inputs, types, and denominators")
 by = {x["name"]: x for x in d["components"]}
 assert by["serde"]["digest_known"] is True, by
 assert by["left-pad"]["digest_known"] is False, by  # only valid SHA-256 counts
@@ -92,6 +124,40 @@ for metric in d["metrics"]:
 print("[inventory] CycloneDX", sys.argv[2], "OK")
 PY
 done
+
+echo "[inventory] digest count is per valid SHA-256 entry, not per component"
+python3 - "$T/multiple-digests.json" <<'PY'
+import json, sys
+document = {
+    "bomFormat": "CycloneDX",
+    "specVersion": "1.5",
+    "components": [{
+        "type": "library",
+        "name": "one-component",
+        "version": "1.0.0",
+        "purl": "not-a-validated-package-url",
+        "hashes": [
+            {"alg": "SHA-256", "content": "a" * 64},
+            {"alg": "SHA-256", "content": "b" * 64},
+            {"alg": "MD5", "content": "not-a-sha256"},
+        ],
+    }],
+}
+with open(sys.argv[1], "w") as output:
+    json.dump(document, output, separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" inventory --format cyclonedx --input "$T/multiple-digests.json" --out "$T/multiple-digests.out" >/dev/null || fail "multiple digest input"
+python3 - "$T/multiple-digests.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {metric["key"]: metric for metric in d["metrics"]}
+assert m["inventory.component_count"]["value"] == 1, m
+assert m["inventory.components_with_hash_count"]["value"] == 1, m
+assert m["inventory.known_digest_count"]["value"] == 2, m
+assert m["inventory.components_with_purl_count"]["value"] == 1, m
+assert m["provenance.artifact_digest_present_share"]["value"] == {"num": 1, "den": 1}, m
+print("[inventory] per-entry SHA-256 and presence-only PURL counts OK")
+PY
 
 echo "[inventory] unmodeled top-level CycloneDX fields are counted, not dropped"
 printf '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[],"signature":{},"futureField":1}' > "$T/cdx-unknown.json"
