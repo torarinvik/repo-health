@@ -80,6 +80,9 @@ def check_obj(obj, spec, ctx):
     for k, maximum in spec.get("maximum_items", {}).items():
         if k in obj:
             assert isinstance(obj[k], list) and len(obj[k]) <= maximum, (ctx, "too many items", k, len(obj[k]), maximum)
+    for k, minimum in spec.get("minimum_items", {}).items():
+        if k in obj:
+            assert isinstance(obj[k], list) and len(obj[k]) >= minimum, (ctx, "too few items", k, len(obj[k]), minimum)
     for k in spec.get("unique_items", []):
         if k in obj:
             values = obj[k]

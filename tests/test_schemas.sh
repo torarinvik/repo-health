@@ -11,6 +11,32 @@ echo "[schemas] all checked-in fixtures validate"
 out="$(bash "$ROOT/tools/schema-check.sh")" || fail "schema-check"
 echo "$out"
 
+echo "[schemas] metric definitions require nonempty inputs"
+schema_input_negative="$ROOT/metrics/definitions/_schema-negative-inputs.json"
+trap 'rm -f "$schema_input_negative"' EXIT
+for invalid in missing empty duplicate; do
+  python3 - "$ROOT/metrics/definitions/history_commit_count.json" "$schema_input_negative" "$invalid" <<'PY'
+import json, sys
+source, target, invalid = sys.argv[1:]
+definition = json.load(open(source))
+if invalid == "missing":
+    del definition["inputs"]
+elif invalid == "empty":
+    definition["inputs"] = []
+else:
+    definition["inputs"].append(definition["inputs"][0])
+json.dump(definition, open(target, "w"), separators=(",", ":"))
+PY
+  if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+    rm -f "$schema_input_negative"
+    trap - EXIT
+    fail "metric-definition schema accepted $invalid inputs"
+  fi
+done
+rm -f "$schema_input_negative"
+trap - EXIT
+echo "[schemas] missing, empty, and duplicate inputs are rejected"
+
 echo "[schemas] schemas are versioned and cover the named families"
 python3 - "$ROOT/schemas/evidence-bundle-manifest.spec.json" <<'PY'
 import json, sys

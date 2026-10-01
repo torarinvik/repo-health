@@ -16,6 +16,10 @@ import glob, json, sys
 root = sys.argv[1]
 defs = [json.load(open(p)) for p in glob.glob(root + "/metrics/definitions/*.json")]
 assert len(defs) == 229, len(defs)
+for d in defs:
+    assert isinstance(d.get("inputs"), list) and d["inputs"], (d["key"], d.get("inputs"))
+    assert all(isinstance(value, str) and value.strip() for value in d["inputs"]), (d["key"], d["inputs"])
+    assert len(d["inputs"]) == len(set(d["inputs"])), (d["key"], d["inputs"])
 assert {d["measurement_class"] for d in defs} == {"raw", "derived", "modeled"}
 assert all(d["measurement_class"] == "modeled" for d in defs if d.get("group") == "experimental")
 mapped = [
@@ -118,7 +122,7 @@ fi
 grep -q "CAF threshold boundary changed" "$TMP/boundary.log" || fail "boundary failed for an unexpected reason"
 
 echo "[metric-admission] entity, output type, source, and fixture references are checked"
-for case_name in subject_kind output_type output_shape enum_values cost_class privacy_class ratio_denominator source_requirement fixture_reference; do
+for case_name in subject_kind output_type output_shape enum_values cost_class privacy_class ratio_denominator source_requirement fixture_reference inputs_missing inputs_duplicate; do
   rm -rf "$TMP/metrics/definitions"
   cp -R "$ROOT/metrics/definitions" "$TMP/metrics/definitions"
   python3 - "$TMP/metrics/definitions" "$case_name" <<'PY'
@@ -135,6 +139,8 @@ elif case_name == "cost_class": d["cost_class"] = "unbounded"
 elif case_name == "privacy_class": d["privacy_class"] = "individual"
 elif case_name == "ratio_denominator": del d["output"]["denominator"]
 elif case_name == "source_requirement": d["source_requirements"] = ["undeclared-source"]
+elif case_name == "inputs_missing": del d["inputs"]
+elif case_name == "inputs_duplicate": d["inputs"].append(d["inputs"][0])
 else: d["fixture_references"] = ["F999"]
 json.dump(d, open(p, "w"))
 PY

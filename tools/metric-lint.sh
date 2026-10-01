@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # tools/metric-lint.sh — M00-05 / M09 metric admission lint.
 #
-# Every definition must carry the base contract fields. Anything not yet
-# `implemented` must ALSO carry the M09 admission-template fields (inputs,
-# output numerator/denominator for ratios, params, missing_behavior,
-# confounders) so a planned metric cannot be a bare name. Every metric also
-# declares a raw/derived/modeled class, and standards mappings are checked
+# Every definition must carry the base contract fields, including a nonempty
+# list of measurement inputs. Anything not yet `implemented` must ALSO carry
+# the M09 admission-template fields (output numerator/denominator for ratios,
+# params, missing_behavior, confounders) so a planned metric cannot be a bare
+# name. Every metric declares a raw/derived/modeled class, and mappings are checked
 # against their local key/version. Ratio outputs need an explicit numerator
 # and denominator; no metric is publishable without a denominator rule.
 set -euo pipefail
@@ -20,9 +20,9 @@ MEASUREMENT_CLASS = {"raw", "derived", "modeled"}
 SUBJECT_KIND = {"project", "repository", "package", "artifact"}
 PRIVACY_CLASS = {"project_aggregate"}
 base = ["key", "version", "implementation_status", "owner", "subject_kind",
-        "output", "denominator_rule", "source_requirements", "cost_class",
+        "inputs", "output", "denominator_rule", "source_requirements", "cost_class",
         "privacy_class", "fixture_references", "measurement_class"]
-admission = ["inputs", "params", "missing_behavior", "confounders"]
+admission = ["params", "missing_behavior", "confounders"]
 seen = {}
 files = sorted(glob.glob(os.path.join(root, "metrics", "definitions", "*.json")))
 assert files, "no metric definitions"
@@ -56,6 +56,9 @@ for p in files:
     else:
         assert d["measurement_class"] != "modeled", (p, "modeled metric must be isolated as experimental")
     assert d.get("status_note"), (p, "missing status_note")
+    assert isinstance(d["inputs"], list) and d["inputs"], (p, "inputs must be nonempty")
+    assert all(isinstance(value, str) and value.strip() for value in d["inputs"]), (p, "inputs must contain nonempty strings")
+    assert len(d["inputs"]) == len(set(d["inputs"])), (p, "duplicate input")
     out = d["output"]
     assert isinstance(out, dict) and out.get("unit"), (p, "output.unit")
     unit = out["unit"]

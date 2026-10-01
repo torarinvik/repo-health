@@ -148,6 +148,9 @@ for metric in d["metrics"]:
     identity = (metric["key"], metric["version"])
     definition = definitions[identity]
     assert definition["implementation_status"] == "implemented", (identity, definition)
+    assert isinstance(definition.get("inputs"), list) and definition["inputs"], (identity, definition.get("inputs"))
+    assert all(isinstance(value, str) and value.strip() for value in definition["inputs"]), (identity, definition["inputs"])
+    assert len(definition["inputs"]) == len(set(definition["inputs"])), (identity, definition["inputs"])
     output = definition["output"]
     if "value" not in metric:
         assert metric["status"] != "observed", (identity, metric)
@@ -209,6 +212,26 @@ assert len(d["metrics"]) == 61, d
 coverage = {(x["key"], x["version"]): x for x in d["metrics"] if x["key"] == "coverage.window_completeness"}
 assert coverage[("coverage.window_completeness", "1.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "1.0.0")]["value"]["den"], coverage
 assert coverage[("coverage.window_completeness", "2.0.0")]["value"]["num"] == coverage[("coverage.window_completeness", "2.0.0")]["value"]["den"], coverage
+v1_definition = definitions[("coverage.window_completeness", "1.0.0")]
+v2_definition = definitions[("coverage.window_completeness", "2.0.0")]
+assert v1_definition["output"]["numerator"] == v1_definition["output"]["denominator"] == "complete_months_in_coverage_basis", v1_definition
+assert "oldest retained history timestamp" in v1_definition["denominator_rule"], v1_definition
+assert v2_definition["output"]["numerator"] == "complete_months_of_retained_history_in_window", v2_definition
+assert v2_definition["output"]["denominator"] == "eligible_complete_months_in_window", v2_definition
+coverage_inputs = ["requested_window", "retained_history_span", "shallow_history_state", "truncation_state"]
+assert v1_definition["inputs"] == v2_definition["inputs"] == coverage_inputs, (v1_definition, v2_definition)
+for metric_key in (
+    "code.source_file_count", "documentation.api_reference_present",
+    "documentation.contributing_guide_present", "documentation.example_program_count",
+    "documentation.installation_guide_present", "documentation.readme_present",
+    "governance.code_ownership_rules_present", "governance.governance_document_present",
+    "governance.release_process_document_present", "governance.succession_process_document_present",
+    "licensing.license_declaration_present", "licensing.license_file_count",
+    "licensing.source_notice_presence", "release.release_note_presence",
+    "security.security_policy_present", "source.manifest_presence",
+):
+    definition = next(value for (key, _), value in definitions.items() if key == metric_key)
+    assert "retained-snapshot-paths" in definition["source_requirements"], (metric_key, definition)
 for metric in coverage.values():
     assert metric["evidence"] == ["evidence/git-log.bin", "evidence/git-shallow.txt"], metric
 valid = {"observed","not_observed","unavailable","unauthorized","partial","stale","not_applicable","error","conflicted","suppressed","unsupported"}
@@ -477,7 +500,7 @@ echo "[m01] S003 credential-canary absent OK"
 
 # --- shallow clone: no complete-lifetime claim ---
 git clone -q --depth 1 "file://$T/fix2" "$T/shallow" 2>/dev/null
-"$CLI" scan --repo "$T/shallow" --out "$T/rep-shallow" --window-days 36500 >/dev/null || fail "shallow scan"
+"$CLI" scan --repo "$T/shallow" --out "$T/rep-shallow" --window-days 365 >/dev/null || fail "shallow scan"
 python3 - "$T/rep-shallow/report.json" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -495,7 +518,8 @@ v2 = coverage[("coverage.window_completeness", "2.0.0")]
 assert v1["reason"] == v2["reason"] == "history-coverage-incomplete", (v1, v2)
 assert v1["evidence"] == v2["evidence"] == ["evidence/git-log.bin", "evidence/git-shallow.txt"], (v1, v2)
 assert v1["value"]["num"] == v1["value"]["den"], (v1, v2)
-assert v2["value"]["num"] == v1["value"]["num"] and v2["value"]["den"] > v1["value"]["den"], (v1, v2)
+assert v1["value"]["num"] > v2["value"]["den"], (v1, v2)
+assert 0 <= v2["value"]["num"] <= v2["value"]["den"], (v1, v2)
 print("[m01] shallow OK")
 EOF
 

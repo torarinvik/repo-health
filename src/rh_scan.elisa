@@ -220,9 +220,9 @@ module Scan:
 
         # Coverage of the requested window (collection completeness, NOT activity).
         # v1 is scoped to the observed history: its denominator is the complete
-        # month span that was actually reachable. v2 keeps that numerator but uses
-        # the full eligible requested window as denominator, so shallow/truncated
-        # history cannot look complete merely because its reachable prefix is dense.
+        # month span from the oldest retained timestamp to the cutoff. v2 clips
+        # that retained span to the requested window and uses the full eligible
+        # window as denominator, so old history cannot inflate the numerator.
         # state_out: 0 complete, 1 shallow, 2 truncated. Empty windows are 0/0.
         def rh_coverage(snap: RhSnapshot&, window_start: i64, now: i64, v1_num_out: mutable i64&, v1_den_out: mutable i64&, v2_num_out: mutable i64&, v2_den_out: mutable i64&, state_out: mutable i64&) -> void:
             eligible: i64 = Temporal::rh_complete_months_between(window_start, now)
@@ -233,25 +233,17 @@ module Scan:
                 v2_den_out[0] <- 0
                 state_out[0] <- 0
                 return
-            if snap.shallow == 1:
-                covered: mutable i64 = Temporal::rh_complete_months_between(snap.oldest_at, now)
-                if covered < 0:
-                    covered <- 0
-                v1_num_out[0] <- covered
-                v1_den_out[0] <- covered
-                v2_num_out[0] <- covered
+            if snap.shallow == 1 or snap.truncated == 1:
+                retained_span_raw: i64 = Temporal::rh_complete_months_between(snap.oldest_at, now)
+                retained_span: i64 = retained_span_raw if retained_span_raw > 0 else 0
+                retained_start: i64 = snap.oldest_at if snap.oldest_at > window_start else window_start
+                retained_window_raw: i64 = Temporal::rh_complete_months_between(retained_start, now)
+                retained_window: i64 = retained_window_raw if retained_window_raw > 0 else 0
+                v1_num_out[0] <- retained_span
+                v1_den_out[0] <- retained_span
+                v2_num_out[0] <- retained_window
                 v2_den_out[0] <- eligible
-                state_out[0] <- 1
-                return
-            if snap.truncated == 1:
-                covered2: mutable i64 = Temporal::rh_complete_months_between(snap.oldest_at, now)
-                if covered2 < 0:
-                    covered2 <- 0
-                v1_num_out[0] <- covered2
-                v1_den_out[0] <- covered2
-                v2_num_out[0] <- covered2
-                v2_den_out[0] <- eligible
-                state_out[0] <- 2
+                state_out[0] <- 1 if snap.shallow == 1 else 2
                 return
             v1_num_out[0] <- eligible
             v1_den_out[0] <- eligible
