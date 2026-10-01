@@ -40,9 +40,34 @@ assert {field["state"] for field in transformation["fields"]} == {"preserved", "
 print("[findings] origin + typed outcomes OK")
 PY
 
+echo "[findings] version 2 preserves unavailable, unsupported, and not-applicable"
+V2_INPUT="$T/in-v2.json"
+V2_RESULT="$ROOT/fixtures/packages/scorecard-findings-v2-result.json"
+cp "$ROOT/fixtures/packages/scorecard-findings-v2.json" "$V2_INPUT"
+"$ROOT/build/rh_cli" findings --input "$V2_INPUT" --out "$T/v2-out.json" >/dev/null || fail "findings v2 run"
+cmp -s "$T/v2-out.json" "$V2_RESULT" || fail "findings v2 result differs from the public contract fixture"
+python3 - "$T/v2-out.json" "$V2_INPUT" "$T/v2-out.json.transformations.json" <<'PY'
+import hashlib, json, sys
+result = json.load(open(sys.argv[1]))
+source = open(sys.argv[2], "rb").read()
+transformation = json.load(open(sys.argv[3]))
+assert result["schema"] == "rh-findings-result/2", result
+assert json.loads(source)["schema"] == "rh-scorecard-findings-input/2", source
+assert result["summary"] == {"total": 5, "pass": 1, "fail": 0, "unknown": 1, "omitted": 0, "inconclusive": 0, "error": 0, "unavailable": 1, "unsupported": 1, "not_applicable": 1}, result
+assert [item["outcome"] for item in result["findings"][-3:]] == ["unavailable", "unsupported", "not_applicable"], result
+assert transformation["output_schema"] == "rh-findings-result/2", transformation
+assert transformation["normalizer_version"] == "2.0.0", transformation
+assert transformation["source_input_sha256"] == hashlib.sha256(source).hexdigest(), transformation
+assert transformation["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), transformation
+assert transformation["configuration_sha256"] == hashlib.sha256(b"repo-health/scorecard-findings/2").hexdigest(), transformation
+print("[findings] typed missingness states remain distinct")
+PY
+
 echo "[findings] determinism"
 "$ROOT/build/rh_cli" findings --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "findings output not deterministic"
+"$ROOT/build/rh_cli" findings --input "$V2_INPUT" --out "$T/v2-out2.json" >/dev/null || fail "findings v2 rerun"
+cmp -s "$T/v2-out.json" "$T/v2-out2.json" || fail "findings v2 output not deterministic"
 
 echo "[findings] malformed and untyped outcomes fail closed"
 set +e

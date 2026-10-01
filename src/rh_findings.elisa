@@ -2,14 +2,15 @@
 #
 # This adapter keeps tool observations separate from local policy decisions.
 # Assessment time is retained as known time; delivery paths never refresh it.
-# Outcome and polarity vocabularies are closed so omitted, inconclusive,
-# unknown, and error cannot silently become false or failed.
+# Outcome and polarity vocabularies are closed so unavailable, unsupported,
+# not-applicable, omitted, inconclusive, unknown, and error stay distinct.
 
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 
 module Findings:
     private:
+        # Dynamic emission retains both public result tokens: rh-findings-result/1 and rh-findings-result/2.
         const RH_FINDINGS_MAX: i64 = 10000
         const RH_FINDING_LOCATIONS_MAX: i64 = 256
 
@@ -31,14 +32,28 @@ module Findings:
             out.push(34)
             true
 
-        def rh_findings_outcome(s: i64, e: i64, texts: darray[u8]&) -> i64:
+        def rh_findings_outcome(s: i64, e: i64, texts: darray[u8]&, version: i64) -> i64:
             return 0 if Findings::rh_findings_span_eq(texts, s, e, "pass")
             return 1 if Findings::rh_findings_span_eq(texts, s, e, "fail")
             return 2 if Findings::rh_findings_span_eq(texts, s, e, "unknown")
             return 3 if Findings::rh_findings_span_eq(texts, s, e, "omitted")
             return 4 if Findings::rh_findings_span_eq(texts, s, e, "inconclusive")
             return 5 if Findings::rh_findings_span_eq(texts, s, e, "error")
+            return 6 if version == 2 and Findings::rh_findings_span_eq(texts, s, e, "unavailable")
+            return 7 if version == 2 and Findings::rh_findings_span_eq(texts, s, e, "unsupported")
+            return 8 if version == 2 and Findings::rh_findings_span_eq(texts, s, e, "not_applicable")
             -1
+
+        def rh_findings_summary_key(index: i64) -> u8&:
+            return "pass" if index == 0
+            return "fail" if index == 1
+            return "unknown" if index == 2
+            return "omitted" if index == 3
+            return "inconclusive" if index == 4
+            return "error" if index == 5
+            return "unavailable" if index == 6
+            return "unsupported" if index == 7
+            "not_applicable"
 
         def rh_findings_polarity(s: i64, e: i64, texts: darray[u8]&) -> bool:
             Findings::rh_findings_span_eq(texts, s, e, "positive") or Findings::rh_findings_span_eq(texts, s, e, "negative") or Findings::rh_findings_span_eq(texts, s, e, "neutral")
@@ -55,7 +70,15 @@ module Findings:
             schema_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
             scs: mutable i64 = -1
             sce: mutable i64 = -1
-            return -1 if not Json::rh_json_str_span(nodes, schema_idx, &scs, &sce) or not Findings::rh_findings_span_eq(texts, scs, sce, "rh-scorecard-findings-input/1")
+            return -1 if not Json::rh_json_str_span(nodes, schema_idx, &scs, &sce)
+            version: i64 =
+                if Findings::rh_findings_span_eq(texts, scs, sce, "rh-scorecard-findings-input/1"):
+                    1
+                elif Findings::rh_findings_span_eq(texts, scs, sce, "rh-scorecard-findings-input/2"):
+                    2
+                else:
+                    -1
+            return -1 if version < 0
             aid: i64 = Json::rh_json_obj_get(nodes, texts, root, "assessment_id")
             tool: i64 = Json::rh_json_obj_get(nodes, texts, root, "tool")
             tv: i64 = Json::rh_json_obj_get(nodes, texts, root, "tool_version")
@@ -87,8 +110,10 @@ module Findings:
             return -1 if findings_idx < 0 or nodes[findings_idx.usize()].kind != Json::RH_JSON_ARR
             findings_count: i64 = nodes[findings_idx.usize()].child_count
             return -1 if findings_count < 0 or findings_count > RH_FINDINGS_MAX
-            counts: mutable darray[i64] = [0, 0, 0, 0, 0, 0]
-            Base::rh_push_text(out, "{\"schema\":\"rh-findings-result/1\",\"assessment\":{\"id\":\"")
+            counts: mutable darray[i64] = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+            Base::rh_push_text(out, "{\"schema\":\"rh-findings-result/")
+            Base::rh_push_decimal_i64(out, version)
+            Base::rh_push_text(out, "\",\"assessment\":{\"id\":\"")
             Findings::rh_findings_emit_span(out, texts, ass, ase)
             Base::rh_push_text(out, "\",\"tool\":\"")
             Findings::rh_findings_emit_span(out, texts, ts, te)
@@ -129,7 +154,7 @@ module Findings:
                 return -1 if not Json::rh_json_str_span(nodes, probe, &prs, &pre) or pre <= prs
                 return -1 if not Json::rh_json_str_span(nodes, polarity, &pos, &poe) or not Findings::rh_findings_polarity(pos, poe, texts)
                 return -1 if not Json::rh_json_str_span(nodes, outcome, &os, &oe)
-                outcome_code: i64 = Findings::rh_findings_outcome(os, oe, texts)
+                outcome_code: i64 = Findings::rh_findings_outcome(os, oe, texts, version)
                 return -1 if outcome_code < 0
                 locations: i64 = Json::rh_json_obj_get(nodes, texts, child, "locations")
                 return -1 if locations < 0 or nodes[locations.usize()].kind != Json::RH_JSON_ARR or nodes[locations.usize()].child_count > RH_FINDING_LOCATIONS_MAX
@@ -168,20 +193,12 @@ module Findings:
                 child <- nodes[child.usize()].next_sibling
             Base::rh_push_text(out, "],\"summary\":{\"total\":")
             Base::rh_push_decimal_i64(out, findings_count)
-            while summary_i < 6 |summary_i: i64 = 0, counts, out|:
-                if summary_i == 0:
-                    Base::rh_push_text(out, ",\"pass\":")
-                elif summary_i == 1:
-                    Base::rh_push_text(out, ",\"fail\":")
-                elif summary_i == 2:
-                    Base::rh_push_text(out, ",\"unknown\":")
-                elif summary_i == 3:
-                    Base::rh_push_text(out, ",\"omitted\":")
-                elif summary_i == 4:
-                    Base::rh_push_text(out, ",\"inconclusive\":")
-                else:
-                    Base::rh_push_text(out, ",\"error\":")
+            summary_count: i64 = 6 if version == 1 else 9
+            while summary_i < summary_count |summary_i: i64 = 0, counts, out|:
+                Base::rh_push_text(out, ",\"")
+                Base::rh_push_text(out, Findings::rh_findings_summary_key(summary_i))
+                Base::rh_push_text(out, "\":")
                 Base::rh_push_decimal_i64(out, counts[summary_i.usize()])
                 summary_i <- summary_i + 1
             Base::rh_push_text(out, "},\"note\":\"assessment time is retained as known time; delivery paths do not refresh age; outcomes remain typed and are not policy verdicts\"}")
-            0
+            version
