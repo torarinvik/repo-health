@@ -150,6 +150,27 @@ assert issue["status"] == "closed" and issue["updated_at"] == 1699999999, issue
 print("[forge-events] duplicate replacement + count idempotence OK")
 PY
 
+echo "[forge-events] composite event index survives native-ID hash collisions"
+python3 - "$T/input.json" "$T/collision-page.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["issues"] = [
+    {"number": 1, "state": "open", "created_at": 1698000000},
+    {"number": 17, "state": "open", "created_at": 1698000001},
+    {"number": 17, "state": "closed", "created_at": 1698000002},
+]
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" forge events --input "$T/collision-page.json" --out "$T/collision-page.out" >/dev/null || fail "colliding event identities"
+python3 - "$T/collision-page.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["capabilities"]["issues"]["duplicate_replacements"] == 1 and d["capabilities"]["issues"]["count"] == 2, d
+issues = {event["native_id"]: event["status"] for event in d["events"] if event["kind"] == "issues"}
+assert issues == {"github:1": "open", "github:17": "closed"}, issues
+print("[forge-events] exact composite keys survive hash collisions")
+PY
+
 echo "[forge-events] opaque pagination state is retained"
 python3 - "$T/input.json" "$T/paginated.json" <<'PY'
 import json, sys

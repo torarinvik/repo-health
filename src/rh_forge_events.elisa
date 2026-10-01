@@ -193,14 +193,61 @@ module ForgeEvents:
             return "state" if kind < 3
             "status"
 
-        def rh_fe_existing(events: darray[RhForgeEvent]&, kind: u8, native_id: i64, pull_request: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while i < events.count.i64() |i: i64 = 0, events, kind, native_id|:
-                event: RhForgeEvent = events[i.usize()]
-                return i if event.kind == kind and event.native_id == native_id and event.pull_request == pull_request
-                i <- i + 1
+        def rh_fe_hash_word(start_hash: u64, value: u64) -> u64:
+            key: mutable u64 = value
+            while byte_index < 8 |hash: mutable u64 = start_hash, byte_index: usize = 0, key| -> hash:
+                hash <- (hash ^ key.u8().u64()) * 0x100000001b3
+                key <- key >> 8
+                byte_index <- byte_index + 1
+
+        def rh_fe_event_hash(kind: u8, native_id: i64, pull_request: i64) -> usize:
+            kind_hash: u64 = (0xcbf29ce484222325 ^ kind.u64()) * 0x100000001b3
+            id_hash: u64 = ForgeEvents::rh_fe_hash_word(kind_hash, native_id.u64())
+            ForgeEvents::rh_fe_hash_word(id_hash, pull_request.u64()).usize()
+
+        def rh_fe_event_index(events: darray[RhForgeEvent]&, slots: darray[i64]&, kind: u8, native_id: i64, pull_request: i64) -> i64:
+            return -1 if slots.count == 0
+            slot: mutable usize = ForgeEvents::rh_fe_event_hash(kind, native_id, pull_request) % slots.count
+            while probe < slots.count |probe: usize = 0, slot, events, slots, kind, native_id, pull_request|:
+                index: i64 = slots[slot]
+                return -1 if index == 0
+                event: RhForgeEvent = events[(index - 1).usize()]
+                return index - 1 if event.kind == kind and event.native_id == native_id and event.pull_request == pull_request
+                slot <- (slot + 1) % slots.count
+                probe <- probe + 1
             -1
 
-        def rh_fe_add_array(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, key: u8&, kind: u8, githubish: bool, bitbucket: bool, pull_request: i64, events: mutable darray[RhForgeEvent]&, counts: mutable RhForgeCapabilityCounts&, total_attempts: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_fe_event_index_grow(events: darray[RhForgeEvent]&, slots: mutable darray[i64]&, required: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if slots.count > 0 and required * 2 <= slots.count
+            capacity: mutable usize = 16 if slots.count == 0 else slots.count * 2
+            capacity <- required * 2 + 1 if capacity < required * 2 + 1
+            grown_slots: mutable darray[i64] = []
+            while i < capacity |i: usize = 0, capacity, grown_slots|:
+                grown_slots.push(0)
+                i <- i + 1
+            while event_index < events.count |event_index: usize = 0, events, grown_slots|:
+                event: RhForgeEvent = events[event_index]
+                slot: mutable usize = ForgeEvents::rh_fe_event_hash(event.kind, event.native_id, event.pull_request) % grown_slots.count
+                while grown_slots[slot] != 0 |slot, grown_slots|:
+                    slot <- (slot + 1) % grown_slots.count
+                grown_slots[slot] <- event_index.i64() + 1
+                event_index <- event_index + 1
+            slots <- grown_slots
+            true
+
+        def rh_fe_event_index_insert(events: darray[RhForgeEvent]&, slots: mutable darray[i64]&, event_index: usize) -> bool:
+            return false if slots.count == 0 or event_index >= events.count
+            event: RhForgeEvent = events[event_index]
+            slot: mutable usize = ForgeEvents::rh_fe_event_hash(event.kind, event.native_id, event.pull_request) % slots.count
+            while probe < slots.count |probe: usize = 0, slot, slots, event_index|:
+                if slots[slot] == 0:
+                    slots[slot] <- event_index.i64() + 1
+                    return true
+                slot <- (slot + 1) % slots.count
+                probe <- probe + 1
+            false
+
+        def rh_fe_add_array(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, key: u8&, kind: u8, githubish: bool, bitbucket: bool, pull_request: i64, events: mutable darray[RhForgeEvent]&, event_slots: mutable darray[i64]&, counts: mutable RhForgeCapabilityCounts&, total_attempts: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             arr: i64 = Json::rh_json_obj_get(nodes, texts, root, key)
             return 0 if arr < 0
             return -1 if nodes[arr.usize()].kind != Json::RH_JSON_ARR
@@ -337,12 +384,14 @@ module ForgeEvents:
                             continue
                 normalized: RhForgeEvent = RhForgeEvent{kind: kind, native_id: native_id, status_s: status_s, status_e: status_e, has_status: status_ok == 1, created_at: created_at, has_created_at: true, updated_at: updated_at, has_updated_at: updated_ok == 1, closed_at: closed_at, has_closed_at: closed_ok == 1, url_s: url_s, url_e: url_e, has_url: url_ok == 1, tag_s: tag_s, tag_e: tag_e, has_tag: tag_ok == 1, pull_request: pull_request, has_pull_request: pull_request > 0, staged_page_number: staged_page_number, staged_record_ordinal: staged_record_ordinal, staged_evidence_start: staged_evidence_start, staged_evidence_end: staged_evidence_end, has_staged_origin: has_staged_origin, has_staged_evidence: has_staged_evidence}
                 counts.normalized <- counts.normalized + 1
-                existing: i64 = ForgeEvents::rh_fe_existing(events, kind, native_id, pull_request)
+                existing: i64 = ForgeEvents::rh_fe_event_index(events, event_slots, kind, native_id, pull_request)
                 if existing >= 0:
                     events[existing.usize()] <- normalized
                     counts.duplicate_replacements <- counts.duplicate_replacements + 1
                 else:
+                    return -1 if not ForgeEvents::rh_fe_event_index_grow(events, event_slots, events.count + 1)
                     events.push(normalized)
+                    return -1 if not ForgeEvents::rh_fe_event_index_insert(events, event_slots, events.count - 1)
                 child <- nodes[child.usize()].next_sibling
             0
 
@@ -523,6 +572,7 @@ module ForgeEvents:
                 else:
                     return -1
             events: mutable darray[RhForgeEvent] = []
+            event_slots: mutable darray[i64] = []
             issues_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false, not_attempted: false}
             proposals_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false, not_attempted: false}
             reviews_counts: mutable RhForgeCapabilityCounts = RhForgeCapabilityCounts{attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, present: false, not_attempted: false}
@@ -631,13 +681,13 @@ module ForgeEvents:
                     return -1 if nodes[next_pull_idx.usize()].kind != Json::RH_JSON_NULL
                 else:
                     return -1 if nodes[next_pull_idx.usize()].kind == Json::RH_JSON_NULL
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "issues", 0, githubish, bitbucket, 0, events, &issues_counts, &total_attempts) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, githubish, bitbucket, 0, events, &proposals_counts, &total_attempts) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "issues", 0, githubish, bitbucket, 0, events, event_slots, &issues_counts, &total_attempts) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "proposals", 1, githubish, bitbucket, 0, events, event_slots, &proposals_counts, &total_attempts) != 0
             reviews_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "reviews")
             if reviews_by_pull_idx >= 0:
                 return -1 if not github or not scope_repository_present or reviews_idx >= 0 or nodes[reviews_by_pull_idx.usize()].kind != Json::RH_JSON_ARR
                 reviews_counts.present <- true
-                while review_group >= 0 |review_group: i64 = nodes[reviews_by_pull_idx.usize()].first_child, review_group_count: mutable i64 = 0, seen_pull_numbers: mutable darray[i64] = [], nodes, raw, texts, events, reviews_counts, total_attempts|:
+                while review_group >= 0 |review_group: i64 = nodes[reviews_by_pull_idx.usize()].first_child, review_group_count: mutable i64 = 0, seen_pull_numbers: mutable darray[i64] = [], nodes, raw, texts, events, event_slots, reviews_counts, total_attempts|:
                     return -1 if review_group_count >= 10
                     return -1 if nodes[review_group.usize()].kind != Json::RH_JSON_OBJ
                     pull_ok: mutable i64 = 0
@@ -647,12 +697,12 @@ module ForgeEvents:
                         return -1 if seen_pull_numbers[prior_group_idx.usize()] == grouped_pull
                         prior_group_idx <- prior_group_idx + 1
                     seen_pull_numbers.push(grouped_pull)
-                    return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, review_group, "reviews", 2, githubish, bitbucket, grouped_pull, events, &reviews_counts, &total_attempts) != 0
+                    return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, review_group, "reviews", 2, githubish, bitbucket, grouped_pull, events, event_slots, &reviews_counts, &total_attempts) != 0
                     review_group <- nodes[review_group.usize()].next_sibling
                     review_group_count <- review_group_count + 1
             else:
-                return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, githubish, bitbucket, 0, events, &reviews_counts, &total_attempts) != 0
-            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "releases", 3, githubish, bitbucket, 0, events, &releases_counts, &total_attempts) != 0
+                return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "reviews", 2, githubish, bitbucket, 0, events, event_slots, &reviews_counts, &total_attempts) != 0
+            return -1 if ForgeEvents::rh_fe_add_array(nodes, raw, texts, root, "releases", 3, githubish, bitbucket, 0, events, event_slots, &releases_counts, &total_attempts) != 0
             return -1 if ForgeEvents::rh_fe_not_attempted(nodes, texts, root, "issues", &issues_counts) != 0
             return -1 if ForgeEvents::rh_fe_not_attempted(nodes, texts, root, "proposals", &proposals_counts) != 0
             return -1 if ForgeEvents::rh_fe_not_attempted(nodes, texts, root, "reviews", &reviews_counts) != 0

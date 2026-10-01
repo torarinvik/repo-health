@@ -189,7 +189,7 @@ Gitea, and Forgejo issues, proposals, reviews, and releases through
 `rh-forge-events-input/1`. It preserves provider-native status strings and
 IDs (`github:<id>`/`gitlab:<id>`), emits explicit `observed` or `unsupported`
 capability states, and reports attempted, normalized, duplicate-replacement,
-unique, and rejected counts per capability. It retains no titles or bodies.
+unique, and rejected counts per capability. Duplicate replacement uses a dynamically grown collision-checked index keyed by capability, native ID, and pull request; the CLI fixture exercises colliding native-ID hashes. It retains no titles or bodies.
 The input envelope is versioned in `schemas/forge-events-input.schema.json`
 and registered with the public contract checks. Each successful captured
 normalization also writes a deterministic `.transformations.json` sidecar
