@@ -26,6 +26,7 @@ int main(int argc, char **argv) {
                                         MAP_PRIVATE | MAP_ANON, -1, 0);
         if (memory == MAP_FAILED) return 3;
         for (size_t offset = 0; offset < length; offset += 4096) memory[offset] = 1;
+        pause_millis(100);
         return 42;
     }
     if (argv[1][0] == 'p') {
