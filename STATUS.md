@@ -46,6 +46,8 @@ catalog below contains 226 implemented definitions across 225 distinct keys.**
 
 **M00-04 policy producer increment:** All seven `rh-policy-result/1` metric rows now use the shared typed observation validator and writer through `PolicyReport`. Decision counts retain their values and fixed `PolicyResult` evidence identity; exception-expiry days emit reasoned `not_applicable` with a null value when no active exception applies. Typed validation runs before output-directory creation and report publication. The policy result schema and deny/exception fixtures constrain status, value, evidence, and quality; `tests/test_policy_cli.sh`, `tests/test_m00.sh`, and `tests/test_schemas.sh` cover the decision counts and expiry states.
 
+**M00-04 replay producer increment:** `replay.json` emits `coverage.replay_match_share` through the common typed writer and validates its exact ratio before output-directory creation. Fixed evidence identities retain the original `bundle.manifest` and `evidence/git-log.bin` strings. The M01 regression checks both links and all four quality dimensions; `schemas/replay-result.schema.json` plus the verified fixture and a zero-denominator negative case cover the row shape.
+
 **M00-04 observation schema variants:** `rh-jsonschema/1` now validates discriminator-specific payload fields/types, closed observation/quality keys, nonnegative counts/timestamps/codes, positive ratio denominators, and count-pair ordering in the lineage input/result schemas. `tests/test_schemas.sh` covers all seven value variants and rejects invalid count types, zero denominators, and reversed count pairs in both directions.
 
 **M02 scope (in progress):** `db/migrations/001_initial.sql` target schema

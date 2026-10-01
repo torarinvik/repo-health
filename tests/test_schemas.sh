@@ -30,7 +30,7 @@ for p in sorted(glob.glob(os.path.join(root, "schemas", "*.schema.json"))):
     assert s["schema"] == "rh-jsonschema/1", p
     assert s["targets"], p
     names.add(s["name"])
-for want in ("connector-manifest", "canonical-repo", "dep-graph", "adapter-transformation", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result", "pylock-artifact-observation-result", "pylock-marker-evaluation", "projection-snapshot", "cyclonedx", "spdx", "inventory-result", "continuity-metrics", "succession-result", "parser-diff-result", "policy-result", "registry-meta", "registry-meta-result", "distribution", "archive", "role-publication", "homebrew", "osv-query-input", "osv-commit-query-input", "osv-query-batch-result", "osv-query-batch-pages-result", "osv-query-batch-hydrated-result", "snapshot-reconcile-input", "snapshot-reconcile-result", "forge-events-input", "ingest-input", "postgres-legacy-ingest-input", "postgres-command", "postgres-result", "github-review-capability-probe-result", "github-collaborator-probe-result", "gitlab-capability-matrix", "forge-capability-matrix", "bitbucket-capability-matrix", "correction-evidence-policy", "correction-evidence-verification", "privacy-history"):
+for want in ("connector-manifest", "canonical-repo", "dep-graph", "adapter-transformation", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result", "pylock-artifact-observation-result", "pylock-marker-evaluation", "projection-snapshot", "cyclonedx", "spdx", "inventory-result", "continuity-metrics", "succession-result", "parser-diff-result", "policy-result", "replay-result", "registry-meta", "registry-meta-result", "distribution", "archive", "role-publication", "homebrew", "osv-query-input", "osv-commit-query-input", "osv-query-batch-result", "osv-query-batch-pages-result", "osv-query-batch-hydrated-result", "snapshot-reconcile-input", "snapshot-reconcile-result", "forge-events-input", "ingest-input", "postgres-legacy-ingest-input", "postgres-command", "postgres-result", "github-review-capability-probe-result", "github-collaborator-probe-result", "gitlab-capability-matrix", "forge-capability-matrix", "bitbucket-capability-matrix", "correction-evidence-policy", "correction-evidence-verification", "privacy-history"):
     assert want in names, ("missing schema", want)
 print("[schemas] families OK:", ", ".join(sorted(names)))
 PY
@@ -153,6 +153,21 @@ PY
 done
 rm -f "$policy_negative"
 echo "[schemas] policy observed and not-applicable values are constrained"
+
+echo "[schemas] replay ratio requires a positive denominator and retained evidence"
+replay_negative="$ROOT/fixtures/replay/replay-result-negative.json"
+python3 - "$ROOT/fixtures/replay/replay-result-verified.json" "$replay_negative" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["metrics"][0]["value"]["den"] = 0
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+  rm -f "$replay_negative"
+  fail "replay schema accepted a zero-denominator ratio"
+fi
+rm -f "$replay_negative"
+echo "[schemas] replay ratio bounds are enforced"
 
 echo "[schemas] negative control: a malformed document is rejected"
 tmp="$ROOT/build/tmp_schema_neg"

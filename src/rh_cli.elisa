@@ -911,9 +911,6 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     if not markdown_regenerated:
         rh_cli_err("retained markdown differs from markdown regenerated from evidence")
         return 5
-    if Git::rh_ensure_dir(out) != 0:
-        rh_cli_err("cannot create output directory")
-        return 4
     rep: mutable darray[u8] = []
     if not rh_out_path(out, "replay.json", rep):
         rh_cli_err("cannot stage replay path")
@@ -937,9 +934,21 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
     Base::rh_push_decimal_i64(rb, snap.rejected)
     Base::rh_push_text(rb, ",\"digest\":\"fnv1a64:")
     Base::rh_push_hex_u64(rb, snap.digest)
-    Base::rh_push_text(rb, "\",\"metrics\":[{\"key\":\"coverage.replay_match_share\",\"version\":\"1.0.0\",\"status\":\"observed\",\"value\":{\"num\":")
-    Base::rh_push_decimal_i64(rb, 1 if verified else 0)
-    Base::rh_push_text(rb, ",\"den\":1},\"evidence\":[\"bundle.manifest\",\"evidence/git-log.bin\"]}]}\n")
+    Base::rh_push_text(rb, "\",\"metrics\":[")
+    replay_match_num: i64 = 1 if verified else 0
+    replay_match_ratio_valid: bool = Observation::rh_ratio_valid(replay_match_num, 1)
+    replay_evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+    Observation::rh_evidence_links_push(&replay_evidence, Observation::RhEvidenceObject.BundleManifestFile)
+    Observation::rh_evidence_links_push(&replay_evidence, Observation::RhEvidenceObject.GitLogBundleFile)
+    replay_quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: Observation::RhCompleteness.Complete, freshness: Observation::RhFreshness.Unknown, validity: Observation::RhValidity.Valid, provenance: Observation::RhProvenanceQuality.EvidenceBacked}
+    replay_observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(Observation::RH_ST_OBSERVED, Observation::RhMetricValue.Ratio(replay_match_num, 1), false, replay_quality, replay_evidence)
+    if not replay_match_ratio_valid or not Observation::rh_observation_emit_metric(rb, "coverage.replay_match_share", "1.0.0", "", replay_observation):
+        rh_cli_err("replay: typed metric observation failed validation")
+        return 4
+    Base::rh_push_text(rb, "]}\n")
+    if Git::rh_ensure_dir(out) != 0:
+        rh_cli_err("cannot create output directory")
+        return 4
     repp: cstr = (&rep[0]).cast[cstr] can Unsafe.PointerCast
     if not Base::rh_io_write(repp, rb):
         rh_cli_err("cannot write replay.json")

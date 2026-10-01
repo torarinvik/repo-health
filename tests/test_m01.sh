@@ -283,6 +283,8 @@ import json; d = json.load(open('$T/replay-fix2/replay.json'))
 assert d['verified'] is True, d
 m = {x['key']: x for x in d['metrics']}
 assert m['coverage.replay_match_share']['value'] == {'num': 1, 'den': 1}, m
+assert m['coverage.replay_match_share']['evidence'] == ['bundle.manifest', 'evidence/git-log.bin'], m
+assert m['coverage.replay_match_share']['quality_dimensions'] == {'completeness':'complete','freshness':'unknown','validity':'valid','provenance':'evidence_backed'}, m
 assert open('$T/replay-fix2/report.md', 'rb').read() == open('$T/rep-fix2/report.md', 'rb').read()
 assert open('$T/replay-fix2/report.json', 'rb').read() == open('$T/rep-fix2/report.json', 'rb').read()
 print('[m01] replay verified OK')"
