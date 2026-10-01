@@ -501,6 +501,12 @@ private to `Roles`; the typed counts shared with `RolesReport` are explicit.
 `tests/test_roles_cli.sh`, `tests/test_roles_provider_cli.sh`, and
 `tests/test_m04.sh` pass.
 
+**M04-01 concentration increment:** The 80-percent concentration path now
+keeps actor identity, action count, and selection state together in a private
+record, eliminating three parallel arrays without changing the threshold or
+first-seen tie behavior. Exact release/review counts remain covered by the
+role CLI regression.
+
 **M04 scope (in progress):** implemented — persistence cohorts over an
 actor-by-complete-month presence matrix (one active day is one month;
 component measures returned alongside membership), a coverage basis

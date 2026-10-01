@@ -203,6 +203,11 @@ module Roles:
             merge: mutable RhActionActorTypeCountAccumulator
             review: mutable RhActionActorTypeCountAccumulator
 
+        struct RhActorContribution:
+            actor_id: i64
+            count: mutable i64
+            selected: mutable bool
+
         def rh_action_actor_type_count_accumulator_empty() -> RhActionActorTypeCountAccumulator:
             RhActionActorTypeCountAccumulator{human: 0, bot: 0, service: 0, unknown: 0}
 
@@ -308,40 +313,35 @@ module Roles:
             true
 
         def rh_observed_concentration_80(actions: darray[RhObservedAction]&, kind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
-            actors: mutable darray[i64] = []
-            counts: mutable darray[i64] = []
+            contributions: mutable darray[RhActorContribution] = []
             total: mutable i64 = 0
-            while i < actions.count |i: usize = 0, actions, actors, counts, total, kind|:
+            while i < actions.count |i: usize = 0, actions, contributions, total, kind|:
                 action: RhObservedAction = actions[i]
                 if action.kind == kind and action.identity_actor_id >= 0:
                     total <- total + 1
-                    found: mutable i64 = -1
-                    while j < actors.count |j: usize = 0, actors, action, found|:
-                        found <- j.i64() if actors[j] == action.identity_actor_id
-                        j <- j + 1
+                    identity_actor_id: mutable i64 = action.identity_actor_id
+                    found: i64 =
+                        while j < contributions.count |found: i64 = -1, j: usize = 0, contributions, identity_actor_id| -> found:
+                            found <- j.i64() if contributions[j].actor_id == identity_actor_id
+                            j <- j + 1
                     if found < 0:
-                        actors.push(action.identity_actor_id)
-                        counts.push(1)
+                        contributions.push(RhActorContribution{actor_id: identity_actor_id, count: 1, selected: false})
                     else:
-                        counts[found.usize()] <- counts[found.usize()] + 1
+                        contributions[found.usize()].count <- contributions[found.usize()].count + 1
                 i <- i + 1
             return 0 if total == 0
-            used: mutable darray[u8] = []
-            while i < counts.count |i: usize = 0, used|:
-                used.push(0)
-                i <- i + 1
             target: i64 = (total * 4 + 4) / 5
             selected: i64 =
-                while covered < target |selected: i64 = 0, covered: i64 = 0, best: i64 = -1, best_count: i64 = -1, counts, used| -> selected:
+                while covered < target |selected: i64 = 0, covered: i64 = 0, best: i64 = -1, best_count: i64 = -1, contributions| -> selected:
                     best <- -1
                     best_count <- -1
-                    while i < counts.count |i: usize = 0, counts, used, best, best_count|:
-                        if used[i] == 0 and counts[i] > best_count:
+                    while i < contributions.count |i: usize = 0, contributions, best, best_count|:
+                        if not contributions[i].selected and contributions[i].count > best_count:
                             best <- i.i64()
-                            best_count <- counts[i]
+                            best_count <- contributions[i].count
                         i <- i + 1
                     return selected if best < 0
-                    used[best.usize()] <- 1
+                    contributions[best.usize()].selected <- true
                     covered <- covered + best_count
                     selected <- selected + 1
             selected
