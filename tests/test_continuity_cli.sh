@@ -78,6 +78,31 @@ grep -q '"censored":1' "$CM" || fail "expected one censored actor"
 grep -q '"first_seen_supported":true' "$CM" || fail "full history should support first-seen"
 grep -q '"first_observation_basis":"first-ever"' "$CJ" || fail "full history must label first-ever basis"
 grep -q '"actors_total":4' "$CM" || fail "expected 4 raw actors"
+python3 - "$CM" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert len(d["metrics"]) == 23, d["metrics"]
+for metric in d["metrics"]:
+    assert metric["version"] == "1.0.0" and metric["evidence"] == ["evidence/git-log.bin"], metric
+    dimensions = metric["quality_dimensions"]
+    assert dimensions["freshness"] == "unknown" and dimensions["provenance"] == "evidence_backed", metric
+    if metric["status"] == "observed":
+        assert metric["value"] is not None, metric
+        assert dimensions["completeness"] == "complete" and dimensions["validity"] == "valid", metric
+        if isinstance(metric["value"], dict):
+            assert metric["value"]["den"] > 0, metric
+    else:
+        assert metric["status"] in ("unsupported", "not_applicable"), metric
+        assert metric["value"] is None and metric.get("reason"), metric
+        assert dimensions["completeness"] == "unknown" and dimensions["validity"] == "unknown", metric
+by = {metric["key"]: metric for metric in d["metrics"]}
+assert by["persistence.returning_after_gap"]["gap_days"] == 90, by
+assert by["persistence.persistent_24m"]["profile"] == {
+    "window_complete_months": 24, "min_active_months": 12,
+    "min_span_months": 12, "recent_required": True,
+}, by
+print("[continuity] every metric uses a validated evidence/quality envelope")
+PY
 if grep -q '"first_month_index":0' "$CJ"; then
   fail "first_month_index must be a real calendar month index, not 0"
 fi
@@ -199,6 +224,11 @@ d = json.load(open(sys.argv[1]))
 by = {m["key"]: m for m in d["metrics"]}
 for key in ("persistence.persistent_event_share", "persistence.median_observed_tenure_days"):
     assert by[key]["status"] == "partial", (key, by[key])
+    assert by[key]["value"] is not None and by[key]["evidence"] == ["evidence/git-log.bin"], by[key]
+    assert by[key]["quality_dimensions"] == {
+        "completeness": "partial", "freshness": "unknown",
+        "validity": "unknown", "provenance": "evidence_backed",
+    }, by[key]
 for key in ("persistence.active_3_of_12_months", "persistence.active_6_of_12_months", "persistence.active_9_of_12_months"):
     assert by[key]["status"] == "unsupported" and by[key]["reason"] == "fewer-than-twelve-complete-months", (key, by[key])
 print("[continuity] persistence window states OK")

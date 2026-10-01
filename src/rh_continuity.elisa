@@ -1,3 +1,5 @@
+include "./rh_observation.elisa"
+
 module Continuity:
     public:
         # rh_continuity.elisa — persistence cohorts, retention censoring,
@@ -458,234 +460,108 @@ module Continuity:
         # is `not_applicable`, never 0 (unknown != zero). Censored/unobservable and
         # the raw concentration components are reported alongside so every
         # denominator can be audited. Raw emails never appear here.
-        def rh_continuity_metrics_write(out: mutable darray[u8]&, identity_rev: i64, observation_start: i64, observation_end: i64, actors_total: i64, persistent: i64, persistent_24: i64, active3: i64, active6: i64, active9: i64, event_share_num: i64, event_share_den: i64, tenure_days: i64, retained: i64, eligible: i64, censored: i64, unobservable: i64, retained_365: i64, eligible_365: i64, censored_365: i64, unobservable_365: i64, returning_after_gap: i64, first_seen_supported: bool, hhi_n: u64, hhi_d: u64, eff_n: u64, eff_d: u64, fifty: i64, eighty: i64, top_n: u64, top_d: u64, top3_n: u64, top3_d: u64, top5_n: u64, top5_d: u64, gini_n: u64, gini_d: u64) -> void can[Memory.Allocate, Abort.Panic]:
+    private:
+        def rh_continuity_emit_observation(out: mutable darray[u8]&, key: cstr, value: Observation::RhMetricValue, status: u8, reason: cstr, extra_fields: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+            Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.GitLogBundleFile)
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Partial if status == Observation::RH_ST_PARTIAL else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if status == Observation::RH_ST_OBSERVED else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked
+            }
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(status, value, status == Observation::RH_ST_PARTIAL, quality, evidence)
+            emitted: bool = Observation::rh_observation_emit_metric(out, key, "1.0.0", reason, observation)
+            if emitted and Base::rh_cstr_len_c(extra_fields) > 0:
+                out.pop()
+                Base::rh_push_text(out, extra_fields)
+                out.push(125)
+            emitted
+
+        def rh_continuity_emit_count(out: mutable darray[u8]&, key: cstr, count: i64, status: u8, reason: cstr, extra_fields: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            has_value: bool = status == Observation::RH_ST_OBSERVED or status == Observation::RH_ST_PARTIAL
+            return false if has_value and count < 0
+            value: Observation::RhMetricValue = Observation::RhMetricValue.Count(count) if has_value else Observation::RhMetricValue.Absent
+            rh_continuity_emit_observation(out, key, value, status, reason, extra_fields)
+
+        def rh_continuity_emit_ratio(out: mutable darray[u8]&, key: cstr, numerator: i64, denominator: i64, status: u8, reason: cstr, bounded: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            has_value: bool = status == Observation::RH_ST_OBSERVED or status == Observation::RH_ST_PARTIAL
+            return false if has_value and (denominator <= 0 or numerator < 0 or bounded and numerator > denominator)
+            value: Observation::RhMetricValue = Observation::RhMetricValue.Ratio(numerator, denominator) if has_value else Observation::RhMetricValue.Absent
+            rh_continuity_emit_observation(out, key, value, status, reason, "")
+
+        def rh_continuity_emit_u64_ratio(out: mutable darray[u8]&, key: cstr, numerator: u64, denominator: u64, bounded: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if denominator == 0
+            return false if numerator > 9223372036854775807 or denominator > 9223372036854775807
+            rh_continuity_emit_ratio(out, key, numerator.i64(), denominator.i64(), Observation::RH_ST_OBSERVED, "", bounded)
+
+        def rh_continuity_emit_u64_ratio_or_absent(out: mutable darray[u8]&, key: cstr, numerator: u64, denominator: u64, reason: cstr, bounded: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            return rh_continuity_emit_observation(out, key, Observation::RhMetricValue.Absent, Observation::RH_ST_NOT_APPLICABLE, reason, "") if denominator == 0
+            rh_continuity_emit_u64_ratio(out, key, numerator, denominator, bounded)
+
+    public:
+        # Publish the 23 continuity observations through the shared typed writer.
+        # The exact window, denominator components, profiles, and evidence paths
+        # remain part of rh-continuity-metrics/1 for existing consumers.
+        def rh_continuity_metrics_write(out: mutable darray[u8]&, identity_rev: i64, observation_start: i64, observation_end: i64, actors_total: i64, persistent: i64, persistent_24: i64, active3: i64, active6: i64, active9: i64, event_share_num: i64, event_share_den: i64, tenure_days: i64, retained: i64, eligible: i64, censored: i64, unobservable: i64, retained_365: i64, eligible_365: i64, censored_365: i64, unobservable_365: i64, returning_after_gap: i64, first_seen_supported: bool, hhi_n: u64, hhi_d: u64, eff_n: u64, eff_d: u64, fifty: i64, eighty: i64, top_n: u64, top_d: u64, top3_n: u64, top3_d: u64, top5_n: u64, top5_d: u64, gini_n: u64, gini_d: u64) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(out, "{\"schema\":\"rh-continuity-metrics/1\",\"identity_revision\":")
             Base::rh_push_decimal_i64(out, identity_rev)
             Base::rh_push_text(out, ",\"observation_window\":{\"start\":")
             Base::rh_push_decimal_i64(out, observation_start)
             Base::rh_push_text(out, ",\"end\":")
             Base::rh_push_decimal_i64(out, observation_end)
-            Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"actors_total\":")
+            Base::rh_push_text(out, "},\"actors_total\":")
             Base::rh_push_decimal_i64(out, actors_total)
-            Base::rh_push_text(out, ",\"metrics\":[{\"key\":\"persistence.retained_90d\",\"version\":\"1.0.0\",\"status\":\"")
-            if not first_seen_supported:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"windowed-or-shallow-history-cannot-establish-first-observation\"")
-            elif eligible <= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-eligible-complete-window\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_i64(out, retained)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_i64(out, eligible)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"persistence.retained_365d\",\"version\":\"1.0.0\",\"status\":\"")
-            if not first_seen_supported:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"windowed-or-shallow-history-cannot-establish-first-observation\"")
-            elif eligible_365 <= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-eligible-complete-window\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_i64(out, retained_365)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_i64(out, eligible_365)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"persistence.returning_after_gap\",\"version\":\"1.0.0\",\"status\":\"")
-            if not first_seen_supported:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"windowed-or-shallow-history-cannot-establish-complete-intervening-coverage\"")
-            elif actors_total <= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-actors\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, returning_after_gap)
-            Base::rh_push_text(out, ",\"gap_days\":90,\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"persistence.persistent_24m\",\"version\":\"1.0.0\",\"status\":\"")
-            if actors_total <= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-actors\"")
-            elif persistent_24 < 0:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"fewer-than-twenty-four-complete-months\"")
-            elif not first_seen_supported:
-                Base::rh_push_text(out, "partial\",\"value\":")
-                Base::rh_push_decimal_i64(out, persistent_24)
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, persistent_24)
-            Base::rh_push_text(out, ",\"profile\":{\"window_complete_months\":24,\"min_active_months\":12,\"min_span_months\":12,\"recent_required\":true},\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"persistence.persistent_12m\",\"version\":\"1.0.0\",\"status\":\"")
-            if actors_total <= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-actors\"")
-            elif persistent < 0:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"fewer-than-six-complete-months\"")
-            elif not first_seen_supported:
-                Base::rh_push_text(out, "partial\",\"value\":")
-                Base::rh_push_decimal_i64(out, persistent)
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, persistent)
-            Base::rh_push_text(out, ",\"profile\":{\"min_active_months\":6,\"min_span_months\":6,\"recent_required\":false},\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"persistence.retention_censored\",\"version\":\"1.0.0\",\"status\":\"")
-            if actors_total <= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-actors\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, censored)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"persistence.active_3_of_12_months\",\"version\":\"1.0.0\",\"status\":\"")
-            if active3 < 0:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"fewer-than-twelve-complete-months\"")
-            else:
-                Base::rh_push_text(out, "partial\",\"value\":") if not first_seen_supported else Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, active3)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"persistence.active_6_of_12_months\",\"version\":\"1.0.0\",\"status\":\"")
-            if active6 < 0:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"fewer-than-twelve-complete-months\"")
-            else:
-                Base::rh_push_text(out, "partial\",\"value\":") if not first_seen_supported else Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, active6)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"persistence.active_9_of_12_months\",\"version\":\"1.0.0\",\"status\":\"")
-            if active9 < 0:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"fewer-than-twelve-complete-months\"")
-            else:
-                Base::rh_push_text(out, "partial\",\"value\":") if not first_seen_supported else Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, active9)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"persistence.persistent_event_share\",\"version\":\"1.0.0\",\"status\":\"")
-            if event_share_den <= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-events\"")
-            else:
-                Base::rh_push_text(out, "partial\",\"value\":{\"num\":") if not first_seen_supported else Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_i64(out, event_share_num)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_i64(out, event_share_den)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"persistence.median_observed_tenure_days\",\"version\":\"1.0.0\",\"status\":\"")
-            if tenure_days < 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-observed-actor-tenure\"")
-            else:
-                Base::rh_push_text(out, "partial\",\"value\":") if not first_seen_supported else Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, tenure_days)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            # concentration.change_hhi
-            Base::rh_push_text(out, "{\"key\":\"concentration.change_hhi\",\"version\":\"1.0.0\",\"status\":\"")
-            if hhi_d == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_u64(out, hhi_n)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_u64(out, hhi_d)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            # concentration.change_effective_actor_count
-            Base::rh_push_text(out, "{\"key\":\"concentration.change_effective_actor_count\",\"version\":\"1.0.0\",\"status\":\"")
-            if eff_d == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_u64(out, eff_n)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_u64(out, eff_d)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            # concentration.change_absence_factor_50
-            Base::rh_push_text(out, "{\"key\":\"concentration.change_absence_factor_50\",\"version\":\"1.0.0\",\"status\":\"")
-            if fifty < 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, fifty)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            # concentration.change_top1_share
-            Base::rh_push_text(out, "{\"key\":\"concentration.change_top1_share\",\"version\":\"1.0.0\",\"status\":\"")
-            if top_d == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_u64(out, top_n)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_u64(out, top_d)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            # concentration.change_gini
-            Base::rh_push_text(out, "{\"key\":\"concentration.change_gini\",\"version\":\"1.0.0\",\"status\":\"")
-            if gini_d == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"fewer-than-two-nonzero-actors\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_u64(out, gini_n)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_u64(out, gini_d)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"concentration.top1_event_share\",\"version\":\"1.0.0\",\"status\":\"")
-            if top_d == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_u64(out, top_n)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_u64(out, top_d)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"concentration.top3_event_share\",\"version\":\"1.0.0\",\"status\":\"")
-            if top3_d == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_u64(out, top3_n)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_u64(out, top3_d)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"concentration.top5_event_share\",\"version\":\"1.0.0\",\"status\":\"")
-            if top5_d == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_u64(out, top5_n)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_u64(out, top5_d)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"concentration.hhi\",\"version\":\"1.0.0\",\"status\":\"")
-            if hhi_d == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_u64(out, hhi_n)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_u64(out, hhi_d)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"concentration.effective_actor_count\",\"version\":\"1.0.0\",\"status\":\"")
-            if eff_d == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"num\":")
-                Base::rh_push_decimal_u64(out, eff_n)
-                Base::rh_push_text(out, ",\"den\":")
-                Base::rh_push_decimal_u64(out, eff_d)
-                Base::rh_push_text(out, "}")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"concentration.absence_factor_50\",\"version\":\"1.0.0\",\"status\":\"")
-            if fifty < 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, fifty)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"concentration.actor_count_80\",\"version\":\"1.0.0\",\"status\":\"")
-            if eighty < 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-qualifying-commit-events\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, eighty)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]}],\"retention_components\":{\"retained\":")
+            Base::rh_push_text(out, ",\"metrics\":[")
+            metrics_ok: bool = |out|
+                retained_90d_ok: bool = rh_continuity_emit_ratio(out, "persistence.retained_90d", retained, eligible, Observation::RH_ST_UNSUPPORTED if not first_seen_supported else Observation::RH_ST_NOT_APPLICABLE if eligible <= 0 else Observation::RH_ST_OBSERVED, "windowed-or-shallow-history-cannot-establish-first-observation" if not first_seen_supported else "no-eligible-complete-window" if eligible <= 0 else "", true)
+                out.push(44) if retained_90d_ok
+                retained_365d_ok: bool = retained_90d_ok and rh_continuity_emit_ratio(out, "persistence.retained_365d", retained_365, eligible_365, Observation::RH_ST_UNSUPPORTED if not first_seen_supported else Observation::RH_ST_NOT_APPLICABLE if eligible_365 <= 0 else Observation::RH_ST_OBSERVED, "windowed-or-shallow-history-cannot-establish-first-observation" if not first_seen_supported else "no-eligible-complete-window" if eligible_365 <= 0 else "", true)
+                out.push(44) if retained_365d_ok
+                returning_after_gap_ok: bool = retained_365d_ok and rh_continuity_emit_count(out, "persistence.returning_after_gap", returning_after_gap, Observation::RH_ST_UNSUPPORTED if not first_seen_supported else Observation::RH_ST_NOT_APPLICABLE if actors_total <= 0 else Observation::RH_ST_OBSERVED, "windowed-or-shallow-history-cannot-establish-complete-intervening-coverage" if not first_seen_supported else "no-actors" if actors_total <= 0 else "", ",\"gap_days\":90")
+                out.push(44) if returning_after_gap_ok
+                persistent_24m_ok: bool = returning_after_gap_ok and rh_continuity_emit_count(out, "persistence.persistent_24m", persistent_24, Observation::RH_ST_NOT_APPLICABLE if actors_total <= 0 else Observation::RH_ST_UNSUPPORTED if persistent_24 < 0 else Observation::RH_ST_PARTIAL if not first_seen_supported else Observation::RH_ST_OBSERVED, "no-actors" if actors_total <= 0 else "fewer-than-twenty-four-complete-months" if persistent_24 < 0 else "", ",\"profile\":{\"window_complete_months\":24,\"min_active_months\":12,\"min_span_months\":12,\"recent_required\":true}")
+                out.push(44) if persistent_24m_ok
+                persistent_12m_ok: bool = persistent_24m_ok and rh_continuity_emit_count(out, "persistence.persistent_12m", persistent, Observation::RH_ST_NOT_APPLICABLE if actors_total <= 0 else Observation::RH_ST_UNSUPPORTED if persistent < 0 else Observation::RH_ST_PARTIAL if not first_seen_supported else Observation::RH_ST_OBSERVED, "no-actors" if actors_total <= 0 else "fewer-than-six-complete-months" if persistent < 0 else "", ",\"profile\":{\"min_active_months\":6,\"min_span_months\":6,\"recent_required\":false}")
+                out.push(44) if persistent_12m_ok
+                retention_censored_ok: bool = persistent_12m_ok and rh_continuity_emit_count(out, "persistence.retention_censored", censored, Observation::RH_ST_NOT_APPLICABLE if actors_total <= 0 else Observation::RH_ST_OBSERVED, "no-actors" if actors_total <= 0 else "", "")
+                out.push(44) if retention_censored_ok
+                active_3_ok: bool = retention_censored_ok and rh_continuity_emit_count(out, "persistence.active_3_of_12_months", active3, Observation::RH_ST_UNSUPPORTED if active3 < 0 else Observation::RH_ST_PARTIAL if not first_seen_supported else Observation::RH_ST_OBSERVED, "fewer-than-twelve-complete-months" if active3 < 0 else "", "")
+                out.push(44) if active_3_ok
+                active_6_ok: bool = active_3_ok and rh_continuity_emit_count(out, "persistence.active_6_of_12_months", active6, Observation::RH_ST_UNSUPPORTED if active6 < 0 else Observation::RH_ST_PARTIAL if not first_seen_supported else Observation::RH_ST_OBSERVED, "fewer-than-twelve-complete-months" if active6 < 0 else "", "")
+                out.push(44) if active_6_ok
+                active_9_ok: bool = active_6_ok and rh_continuity_emit_count(out, "persistence.active_9_of_12_months", active9, Observation::RH_ST_UNSUPPORTED if active9 < 0 else Observation::RH_ST_PARTIAL if not first_seen_supported else Observation::RH_ST_OBSERVED, "fewer-than-twelve-complete-months" if active9 < 0 else "", "")
+                out.push(44) if active_9_ok
+                persistent_event_share_ok: bool = active_9_ok and rh_continuity_emit_ratio(out, "persistence.persistent_event_share", event_share_num, event_share_den, Observation::RH_ST_NOT_APPLICABLE if event_share_den <= 0 else Observation::RH_ST_PARTIAL if not first_seen_supported else Observation::RH_ST_OBSERVED, "no-qualifying-events" if event_share_den <= 0 else "", true)
+                out.push(44) if persistent_event_share_ok
+                tenure_ok: bool = persistent_event_share_ok and rh_continuity_emit_count(out, "persistence.median_observed_tenure_days", tenure_days, Observation::RH_ST_NOT_APPLICABLE if tenure_days < 0 else Observation::RH_ST_PARTIAL if not first_seen_supported else Observation::RH_ST_OBSERVED, "no-observed-actor-tenure" if tenure_days < 0 else "", "")
+                out.push(44) if tenure_ok
+                change_hhi_ok: bool = tenure_ok and rh_continuity_emit_u64_ratio_or_absent(out, "concentration.change_hhi", hhi_n, hhi_d, "no-qualifying-commit-events", true)
+                out.push(44) if change_hhi_ok
+                change_effective_ok: bool = change_hhi_ok and rh_continuity_emit_u64_ratio_or_absent(out, "concentration.change_effective_actor_count", eff_n, eff_d, "no-qualifying-commit-events", false)
+                out.push(44) if change_effective_ok
+                change_absence_ok: bool = change_effective_ok and rh_continuity_emit_count(out, "concentration.change_absence_factor_50", fifty, Observation::RH_ST_NOT_APPLICABLE if fifty < 0 else Observation::RH_ST_OBSERVED, "no-qualifying-commit-events" if fifty < 0 else "", "")
+                out.push(44) if change_absence_ok
+                change_top1_ok: bool = change_absence_ok and rh_continuity_emit_u64_ratio_or_absent(out, "concentration.change_top1_share", top_n, top_d, "no-qualifying-commit-events", true)
+                out.push(44) if change_top1_ok
+                change_gini_ok: bool = change_top1_ok and rh_continuity_emit_u64_ratio_or_absent(out, "concentration.change_gini", gini_n, gini_d, "fewer-than-two-nonzero-actors", true)
+                out.push(44) if change_gini_ok
+                top1_share_ok: bool = change_gini_ok and rh_continuity_emit_u64_ratio_or_absent(out, "concentration.top1_event_share", top_n, top_d, "no-qualifying-commit-events", true)
+                out.push(44) if top1_share_ok
+                top3_share_ok: bool = top1_share_ok and rh_continuity_emit_u64_ratio_or_absent(out, "concentration.top3_event_share", top3_n, top3_d, "no-qualifying-commit-events", true)
+                out.push(44) if top3_share_ok
+                top5_share_ok: bool = top3_share_ok and rh_continuity_emit_u64_ratio_or_absent(out, "concentration.top5_event_share", top5_n, top5_d, "no-qualifying-commit-events", true)
+                out.push(44) if top5_share_ok
+                hhi_ok: bool = top5_share_ok and rh_continuity_emit_u64_ratio_or_absent(out, "concentration.hhi", hhi_n, hhi_d, "no-qualifying-commit-events", true)
+                out.push(44) if hhi_ok
+                effective_ok: bool = hhi_ok and rh_continuity_emit_u64_ratio_or_absent(out, "concentration.effective_actor_count", eff_n, eff_d, "no-qualifying-commit-events", false)
+                out.push(44) if effective_ok
+                absence_50_ok: bool = effective_ok and rh_continuity_emit_count(out, "concentration.absence_factor_50", fifty, Observation::RH_ST_NOT_APPLICABLE if fifty < 0 else Observation::RH_ST_OBSERVED, "no-qualifying-commit-events" if fifty < 0 else "", "")
+                out.push(44) if absence_50_ok
+                absence_80_ok: bool = absence_50_ok and rh_continuity_emit_count(out, "concentration.actor_count_80", eighty, Observation::RH_ST_NOT_APPLICABLE if eighty < 0 else Observation::RH_ST_OBSERVED, "no-qualifying-commit-events" if eighty < 0 else "", "")
+                absence_80_ok
+            return false if not metrics_ok
+            Base::rh_push_text(out, "],\"retention_components\":{\"retained\":")
             Base::rh_push_decimal_i64(out, retained)
             Base::rh_push_text(out, ",\"eligible\":")
             Base::rh_push_decimal_i64(out, eligible)
@@ -718,6 +594,7 @@ module Continuity:
             Base::rh_push_text(out, ",\"absence_factor_80\":")
             Base::rh_push_decimal_i64(out, eighty)
             Base::rh_push_text(out, "}}")
+            true
 
         # Continuity report (rh-continuity/1). Every published number is paired
         # with the rule or denominator that produced it: cohort thresholds,
