@@ -110,6 +110,7 @@ include "./rh_project_map.elisa"
 include "./rh_coverage.elisa"
 include "./rh_coverage_continuity.elisa"
 include "./rh_forge_review_chain.elisa"
+include "./rh_roles_review_chain.elisa"
 include "./rh_columnar.elisa"
 include "./rh_aggregates.elisa"
 include "./rh_index.elisa"
@@ -199,6 +200,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
     rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [review options] | --gitlab-project <group/path> [--resume-from <result>]) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli forge review-chain --input <rh-forge-review-chain-input/1> --out <file>")
+    rh_cli_err("       rh_cli roles-review-chain --input <rh-forge-review-chain-result/1> --out <rh-roles-input/1>")
     rh_cli_err("       rh_cli staged-normalize --input <provider-specific staged token|rh-postgres-staged-forge-events-input/1> --out <file> [--postgres]")
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
     rh_cli_err("       rh_cli connector probe (--github-repo <owner/repo> [--all | --review-pull N | --collaborators] | --gitlab-project <group/project> --all | --instance <approved-instance.json> --repository <owner/repo> --all | --bitbucket-repo <workspace/repo> --all) --out <file>")
@@ -2896,6 +2898,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         if pvh_idx >= 0:
             history_path <- slots[pvh_idx]
         return rh_do_privacy(slots[pvi_idx], slots[pvo_idx], history_path, pvh_idx >= 0)
+    if Base::rh_streq(cmd, "roles-review-chain"):
+        rci_idx, rco_idx =
+            while rcc < argc |rci_idx: i64 = -1, rco_idx: i64 = -1, rcc: i64 = 2, slots| -> rci_idx, rco_idx:
+                option: u8& = slots[rcc].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(option, "--input"):
+                    if rcc + 1 < argc:
+                        rcc <- rcc + 1
+                        rci_idx <- rcc
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(option, "--out"):
+                    if rcc + 1 < argc:
+                        rcc <- rcc + 1
+                        rco_idx <- rcc
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                rcc <- rcc + 1
+        return rh_cli_usage(2) if rci_idx < 0 or rco_idx < 0
+        return rh_do_roles_review_chain(slots[rci_idx], slots[rco_idx])
     if Base::rh_streq(cmd, "roles"):
         rl_idx, rlu_idx, rlo_idx =
             while rlq < argc |rl_idx: i64 = -1, rlu_idx: i64 = -1, rlo_idx: i64 = -1, rlq: i64 = 2, slots| -> rl_idx, rlu_idx, rlo_idx:
@@ -7975,6 +7998,29 @@ def rh_do_forge_review_chain(input_path: cstr, out_path: cstr) -> i32 can[Memory
         rh_cli_err("forge review-chain: cannot write transformation report")
         return 4
     rh_cli_out("forge review-chain: assembled bounded segment chain")
+    0
+
+# Turn a cursor-validated GitHub review-chain result into roles action input.
+def rh_do_roles_review_chain(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected roles-review-chain argument (allowlist)")
+        return 3
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(input_path, raw) < 0:
+        rh_cli_err("roles-review-chain: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if RolesReviewChain::rh_roles_review_chain_normalize(raw, body) != 0:
+        rh_cli_err("roles-review-chain: invalid, oversized, or temporally inconsistent review-chain result")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("roles-review-chain: cannot write --out")
+        return 4
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "github-review-chain-roles", "rh-roles-input/1", "repo-health/github-review-chain-roles/1", "[{\"source\":\"cursor-validated merged pull requests\",\"target\":\"linked merge actions\",\"state\":\"transformed\"},{\"source\":\"pre-merge review events for known merged pull requests\",\"target\":\"linked review actions\",\"state\":\"transformed\"},{\"source\":\"GitHub pull-list pagination\",\"target\":\"atomic full change population\",\"state\":\"partial\"},{\"source\":\"review-chain input bytes\",\"target\":\"source_sha256\",\"state\":\"digest-bound\"}]", out_path):
+        rh_cli_err("roles-review-chain: cannot write transformation report")
+        return 4
+    rh_cli_out("roles-review-chain: prepared linked change actions with partial population coverage")
     0
 
 # Replay committed PostgreSQL forge stage rows through the provider-native

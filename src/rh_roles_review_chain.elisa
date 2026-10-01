@@ -1,0 +1,197 @@
+# Project a validated GitHub review-chain result into scoped roles actions.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+
+module RolesReviewChain:
+    private:
+        const RH_RRC_MAX_INPUT_BYTES: i64 = 33554432
+        const RH_RRC_MAX_SOURCE_ROWS: i64 = 100000
+        const RH_RRC_MAX_MERGED_PULLS: i64 = 4000
+        const RH_RRC_MAX_LINKED_REVIEWS: i64 = 16000
+
+        struct RhRrcPull:
+            number: i64
+            merged_at: i64
+            has_merged_at: bool
+
+        struct RhRrcReview:
+            pull_number: i64
+            submitted_at: i64
+
+        def rh_rrc_eq(texts: darray[u8]&, start: i64, end: i64, value: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, value)
+
+        def rh_rrc_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, object: i64, key: u8&, value_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            ok: mutable i64 = 0
+            value_out[0] <- Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, object, key), &ok)
+            ok == 1
+
+        def rh_rrc_github_id(texts: darray[u8]&, start: i64, end: i64) -> bool:
+            return false if start < 0 or end - start < 8
+            return false if not rh_rrc_eq(texts, start, start + 7, "github:")
+            return false if end - start == 7
+            while offset < end - start - 7 |offset: i64 = 0, texts, start, end|:
+                digit: u8 = texts[(start + 7 + offset).usize()]
+                return false if digit < 48 or digit > 57
+                offset <- offset + 1
+            true
+
+        def rh_rrc_number_hash(number: i64) -> usize:
+            key: mutable u64 = number.u64()
+            key <- (key ^ (key >> 30)) * 0xbf58476d1ce4e5b9
+            key <- (key ^ (key >> 27)) * 0x94d049bb133111eb
+            (key ^ (key >> 31)).usize()
+
+        def rh_rrc_pull_index(pulls: darray[RhRrcPull]&, slots: darray[i64]&, number: i64) -> i64:
+            slot: mutable usize = RolesReviewChain::rh_rrc_number_hash(number) % slots.count
+            while slots[slot] >= 0 |slot, slots, pulls, number|:
+                index: usize = slots[slot].usize()
+                return index.i64() if pulls[index].number == number
+                slot <- (slot + 1) % slots.count
+            -1
+
+        def rh_rrc_parse_pulls(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, as_of: i64, pulls_out: mutable darray[RhRrcPull]&, slots_out: mutable darray[i64]&, merged_count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            array: i64 = Json::rh_json_obj_get(nodes, texts, root, "pull_requests")
+            return false if array < 0 or nodes[array.usize()].kind != Json::RH_JSON_ARR or nodes[array.usize()].child_count > RH_RRC_MAX_SOURCE_ROWS
+            slot_count: usize = nodes[array.usize()].child_count.usize() * 2 + 1
+            while slot_index < slot_count |slot_index: usize = 0, slots_out, slot_count|:
+                slots_out.push(-1)
+                slot_index <- slot_index + 1
+            while child >= 0 |child: i64 = nodes[array.usize()].first_child, nodes, raw, texts, pulls_out, slots_out, as_of, merged_count_out|:
+                return false if nodes[child.usize()].kind != Json::RH_JSON_OBJ or nodes[child.usize()].child_count != 4
+                number: mutable i64 = 0
+                return false if not RolesReviewChain::rh_rrc_int(nodes, raw, texts, child, "number", &number) or number < 1
+                merged_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "merged_at")
+                return false if merged_idx < 0
+                merged_at: mutable i64 = 0
+                has_merged_at: bool = nodes[merged_idx.usize()].kind != Json::RH_JSON_NULL
+                if has_merged_at:
+                    return false if not RolesReviewChain::rh_rrc_int(nodes, raw, texts, child, "merged_at", &merged_at) or merged_at < 0 or merged_at > as_of
+                    merged_count_out[0] <- merged_count_out[0] + 1
+                    return false if merged_count_out[0] > RH_RRC_MAX_MERGED_PULLS
+                slot: mutable usize = RolesReviewChain::rh_rrc_number_hash(number) % slots_out.count
+                while slots_out[slot] >= 0 |slot, slots_out, pulls_out, number|:
+                    prior_index: usize = slots_out[slot].usize()
+                    return false if pulls_out[prior_index].number == number
+                    slot <- (slot + 1) % slots_out.count
+                pulls_out.push(RhRrcPull{number: number, merged_at: merged_at, has_merged_at: has_merged_at})
+                slots_out[slot] <- pulls_out.count.i64() - 1
+                child <- nodes[child.usize()].next_sibling
+            true
+
+        def rh_rrc_parse_reviews(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, as_of: i64, pulls: darray[RhRrcPull]&, pull_slots: darray[i64]&, reviews_out: mutable darray[RhRrcReview]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            array: i64 = Json::rh_json_obj_get(nodes, texts, root, "review_events")
+            return false if array < 0 or nodes[array.usize()].kind != Json::RH_JSON_ARR or nodes[array.usize()].child_count > RH_RRC_MAX_SOURCE_ROWS
+            while child >= 0 |child: i64 = nodes[array.usize()].first_child, nodes, raw, texts, pulls, pull_slots, reviews_out, as_of|:
+                return false if nodes[child.usize()].kind != Json::RH_JSON_OBJ or nodes[child.usize()].child_count != 8
+                native_id_start: mutable i64 = 0
+                native_id_end: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "native_id"), &native_id_start, &native_id_end) or not RolesReviewChain::rh_rrc_github_id(texts, native_id_start, native_id_end)
+                status_start: mutable i64 = 0
+                status_end: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, child, "status"), &status_start, &status_end) or status_end <= status_start
+                pull_number: mutable i64 = 0
+                submitted_at: mutable i64 = 0
+                return false if not RolesReviewChain::rh_rrc_int(nodes, raw, texts, child, "pull_request", &pull_number) or pull_number < 1
+                return false if not RolesReviewChain::rh_rrc_int(nodes, raw, texts, child, "submitted_at", &submitted_at) or submitted_at < 0 or submitted_at > as_of
+                pull_index: i64 = RolesReviewChain::rh_rrc_pull_index(pulls, pull_slots, pull_number)
+                return false if pull_index < 0
+                pull: RhRrcPull = pulls[pull_index.usize()]
+                if pull.has_merged_at and submitted_at <= pull.merged_at:
+                    return false if reviews_out.count >= RH_RRC_MAX_LINKED_REVIEWS
+                    reviews_out.push(RhRrcReview{pull_number: pull_number, submitted_at: submitted_at})
+                child <- nodes[child.usize()].next_sibling
+            true
+
+        def rh_rrc_emit_action(out: mutable darray[u8]&, kind: u8&, at: i64, pull_number: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "{\"actor_id\":null,\"kind\":\"")
+            Base::rh_push_text(out, kind)
+            Base::rh_push_text(out, "\",\"at\":")
+            Base::rh_push_decimal_i64(out, at)
+            Base::rh_push_text(out, ",\"change_id\":\"")
+            Base::rh_push_decimal_i64(out, pull_number)
+            Base::rh_push_text(out, "\"}")
+
+        def rh_rrc_emit_roles_input(texts: darray[u8]&, repository_start: i64, repository_end: i64, as_of: i64, collection_complete: bool, source_digest: darray[u8]&, pulls: darray[RhRrcPull]&, reviews: darray[RhRrcReview]&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "{\"schema\":\"rh-roles-input/1\",\"provider\":\"github\",\"scope\":{\"repository\":\"")
+            Base::rh_json_escape(out, texts, repository_start.usize(), repository_end.usize())
+            Base::rh_push_text(out, "\"},\"as_of\":")
+            Base::rh_push_decimal_i64(out, as_of)
+            Base::rh_push_text(out, ",\"linked_change_population\":{\"source\":\"github-review-chain\",\"repository\":\"")
+            Base::rh_json_escape(out, texts, repository_start.usize(), repository_end.usize())
+            Base::rh_push_text(out, "\",\"as_of\":")
+            Base::rh_push_decimal_i64(out, as_of)
+            Base::rh_push_text(out, ",\"collection_status\":\"")
+            Base::rh_push_text(out, "complete" if collection_complete else "partial")
+            Base::rh_push_text(out, "\",\"status\":\"partial\",\"atomic_snapshot\":false,\"source_sha256\":\"")
+            out.extend(bytes_view(source_digest))
+            Base::rh_push_text(out, "\",\"reason\":\"")
+            Base::rh_push_text(out, "github-pull-list-pagination-non-atomic" if collection_complete else "review-chain-cursor-incomplete")
+            Base::rh_push_text(out, "\"},\"declarations\":[],\"observed_actions\":[")
+            first: mutable bool = true
+            while index < pulls.count |index: usize = 0, pulls, out, first|:
+                pull: RhRrcPull = pulls[index]
+                if pull.has_merged_at:
+                    out.push(44) if not first
+                    first <- false
+                    RolesReviewChain::rh_rrc_emit_action(out, "merge", pull.merged_at, pull.number)
+                index <- index + 1
+            while index < reviews.count |index: usize = 0, reviews, out, first|:
+                review: RhRrcReview = reviews[index]
+                out.push(44) if not first
+                first <- false
+                RolesReviewChain::rh_rrc_emit_action(out, "review", review.submitted_at, review.pull_number)
+                index <- index + 1
+            Base::rh_push_text(out, "]}")
+
+    public:
+        def rh_roles_review_chain_normalize(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count.i64() > RH_RRC_MAX_INPUT_BYTES or out.count != 0
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse_large_bounded(raw, nodes, texts, 2000000)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ or nodes[root.usize()].child_count != 24
+            schema_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
+            schema_start: mutable i64 = 0
+            schema_end: mutable i64 = 0
+            return -1 if not Json::rh_json_str_span(nodes, schema_idx, &schema_start, &schema_end) or not RolesReviewChain::rh_rrc_eq(texts, schema_start, schema_end, "rh-forge-review-chain-result/1")
+            repository_start: mutable i64 = 0
+            repository_end: mutable i64 = 0
+            return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "repository"), &repository_start, &repository_end) or repository_end <= repository_start
+            as_of: mutable i64 = 0
+            return -1 if not RolesReviewChain::rh_rrc_int(nodes, raw, texts, root, "as_of", &as_of) or as_of < 0
+            status_complete: mutable bool = false
+            status_start: mutable i64 = 0
+            status_end: mutable i64 = 0
+            return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "status"), &status_start, &status_end)
+            if RolesReviewChain::rh_rrc_eq(texts, status_start, status_end, "complete"):
+                status_complete <- true
+            elif not RolesReviewChain::rh_rrc_eq(texts, status_start, status_end, "partial"):
+                return -1
+            complete_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "complete")
+            return -1 if complete_idx < 0 or nodes[complete_idx.usize()].kind != Json::RH_JSON_BOOL or Json::rh_json_is_true(nodes, raw, complete_idx) != status_complete
+            segment_count: mutable i64 = 0
+            pull_count: mutable i64 = 0
+            merged_count_declared: mutable i64 = 0
+            review_count_declared: mutable i64 = 0
+            return -1 if not RolesReviewChain::rh_rrc_int(nodes, raw, texts, root, "segment_count", &segment_count) or segment_count < 1 or segment_count > 128
+            return -1 if not RolesReviewChain::rh_rrc_int(nodes, raw, texts, root, "pull_request_count", &pull_count) or pull_count < 0 or pull_count > RH_RRC_MAX_SOURCE_ROWS
+            return -1 if not RolesReviewChain::rh_rrc_int(nodes, raw, texts, root, "merged_pull_request_count", &merged_count_declared) or merged_count_declared < 0 or merged_count_declared > RH_RRC_MAX_MERGED_PULLS
+            return -1 if not RolesReviewChain::rh_rrc_int(nodes, raw, texts, root, "review_event_count", &review_count_declared) or review_count_declared < 0 or review_count_declared > RH_RRC_MAX_SOURCE_ROWS
+            basis_start: mutable i64 = 0
+            basis_end: mutable i64 = 0
+            return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "basis"), &basis_start, &basis_end) or basis_start == basis_end
+            pulls: mutable darray[RhRrcPull] = []
+            pull_slots: mutable darray[i64] = []
+            merged_count: mutable i64 = 0
+            return -1 if not RolesReviewChain::rh_rrc_parse_pulls(nodes, raw, texts, root, as_of, pulls, pull_slots, &merged_count)
+            return -1 if pulls.count.i64() != pull_count or merged_count != merged_count_declared
+            reviews: mutable darray[RhRrcReview] = []
+            review_array: i64 = Json::rh_json_obj_get(nodes, texts, root, "review_events")
+            return -1 if review_array < 0 or nodes[review_array.usize()].child_count != review_count_declared
+            return -1 if not RolesReviewChain::rh_rrc_parse_reviews(nodes, raw, texts, root, as_of, pulls, pull_slots, reviews)
+            source_digest: mutable darray[u8] = []
+            Sha256::rh_sha256(raw, source_digest)
+            RolesReviewChain::rh_rrc_emit_roles_input(texts, repository_start, repository_end, as_of, status_complete, source_digest, pulls, reviews, out)
+            0
