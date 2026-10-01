@@ -375,7 +375,6 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     defaulte: mutable darray[u8] = []
     shae: mutable darray[u8] = []
     fileserr: mutable darray[u8] = []
-    refs_err: mutable darray[u8] = []
     vere: mutable darray[u8] = []
     if not rh_out_path(evc, "git-log.bin", logf):
         rh_cli_err("cannot stage log path")
@@ -415,9 +414,6 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if not rh_out_path(evc, "git-files.err", fileserr):
         rh_cli_err("cannot stage file-list error path")
         return 4
-    if not rh_out_path(evc, "git-refs.err", refs_err):
-        rh_cli_err("cannot stage ref-list error path")
-        return 4
     if not rh_out_path(evc, "git-version.err", vere):
         rh_cli_err("cannot stage version error path")
         return 4
@@ -429,7 +425,6 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     verp: cstr = (&verf[0]).cast[cstr] can Unsafe.PointerCast
     verep: cstr = (&vere[0]).cast[cstr] can Unsafe.PointerCast
     fileserrp: cstr = (&fileserr[0]).cast[cstr] can Unsafe.PointerCast
-    refs_errp: cstr = (&refs_err[0]).cast[cstr] can Unsafe.PointerCast
     if not Process::rh_succeeded(Git::rh_run_git_version(verp, verep)):
         rh_cli_err("git --version failed")
         return 4
@@ -440,7 +435,6 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
     if not Process::rh_succeeded(Git::rh_run_git_shallow(scan_repo, shap, shaep)):
         rh_cli_err("rev-parse failed (not a repository?)")
         return 4
-    refs_result: Process::RhProcessResult = Git::rh_run_git_refs(scan_repo, refsp, refs_errp)
     files_result: Process::RhProcessResult = Git::rh_run_git_files(scan_repo, filesp, fileserrp)
     logep: cstr = (&loge[0]).cast[cstr] can Unsafe.PointerCast
     log_result: Process::RhProcessResult = Git::rh_run_git_log(scan_repo, logp, logep, full)
@@ -563,14 +557,22 @@ def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[M
         return 4
     identities: i64 = Base::rh_count_lines(uniqb)
     bots: i64 = Report::rh_count_bot_lines(uniqb)
-    refs_bytes: mutable darray[u8] = []
-    refs_read: bool = Base::rh_io_read(refsp, refs_bytes) >= 0
-    if snap.commits_all > 0 and (not Process::rh_succeeded(refs_result) or not refs_read):
-        rh_cli_err("git ref snapshot failed; no report published")
-        return 4
-    if not refs_read and not Base::rh_io_write(refsp, refs_bytes):
-        rh_cli_err("cannot write empty ref evidence")
-        return 4
+    refs_bytes: mutable darray[u8] =
+        refs_err: mutable darray[u8] = []
+        if not rh_out_path(evc, "git-refs.err", refs_err):
+            rh_cli_err("cannot stage ref-list error path")
+            return 4
+        refs_errp: cstr = (&refs_err[0]).cast[cstr] can Unsafe.PointerCast
+        refs_result: Process::RhProcessResult = Git::rh_run_git_refs(scan_repo, refsp, refs_errp)
+        bytes: mutable darray[u8] = []
+        read: bool = Base::rh_io_read(refsp, bytes) >= 0
+        if snap.commits_all > 0 and (not Process::rh_succeeded(refs_result) or not read):
+            rh_cli_err("git ref snapshot failed; no report published")
+            return 4
+        if not read and not Base::rh_io_write(refsp, bytes):
+            rh_cli_err("cannot write empty ref evidence")
+            return 4
+        bytes
     filesb: mutable darray[u8] = []
     files_read: bool = Base::rh_io_read(filesp, filesb) >= 0
     if snap.commits_all > 0 and (not Process::rh_succeeded(files_result) or not files_read):
