@@ -163,6 +163,35 @@ for state, expected_status, expected_value, expected_reason in (
 print("[population] observed, not-applicable, and not-observed pooled ratios OK")
 PY
 
+echo "[population] multiple pooled ratios use order-independent indexed metric cells"
+python3 - "$T/ratio.json" "$T/ratio-many.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["ratio_definitions"].append({
+    "key":"test.active_months_to_review_coverage",
+    "version":"1.0.0",
+    "numerator_key":"history.months_active",
+    "numerator_version":"1",
+    "denominator_key":"review.coverage",
+    "denominator_version":"2",
+})
+for dependent in document["dependents"]:
+    dependent["metrics"].reverse()
+json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" population --input "$T/ratio-many.json" --out "$T/ratio-many-out.json" >/dev/null || fail "multiple indexed pooled ratios"
+python3 - "$T/ratio-many-out.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+ratios = {row["key"]: row for row in document["ratio_metrics"]}
+first = ratios["maintainer.linked_merge_review_coverage"]
+assert first["status"] == "partial" and first["value"] == {"num":3,"den":4}, first
+second = ratios["test.active_months_to_review_coverage"]
+assert second["status"] == "not_observed" and second["value"] is None, second
+assert second["coverage"] == {"observed_dependents":0,"not_applicable_dependents":0,"unknown_dependents":3,"selected_dependents":3}, second
+print("[population] multiple ratio definitions resolve shuffled metric cells without changing pooled results")
+PY
+
 echo "[population] join reviewed project identities from the selected graph population"
 cat > "$T/graph.json" <<'JSON'
 {"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"acme-core","version":"1.2.0"},{"id":1,"name":"consumer-a","version":"1"},{"id":2,"name":"consumer-b","version":"1"},{"id":3,"name":"consumer-c","version":"1"}],"edges":[{"from":1,"to":0,"scope":"normal"},{"from":2,"to":0,"scope":"normal"},{"from":3,"to":0,"scope":"normal"}],"unresolved":[],"advisories":[]}

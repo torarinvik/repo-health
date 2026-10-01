@@ -529,6 +529,7 @@ module Population:
             ratio_observed_dependents: mutable darray[i64] = []
             ratio_unknown_dependents: mutable darray[i64] = []
             ratio_not_applicable_dependents: mutable darray[i64] = []
+            metric_cell_indices: mutable darray[i64] = []
             identity_accepted: mutable i64 = 0
             canonical_family_count: mutable i64 = 0
             while i < metrics.count |i: usize = 0, metrics, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown|:
@@ -550,7 +551,10 @@ module Population:
                 ratio_unknown_dependents.push(0)
                 ratio_not_applicable_dependents.push(0)
                 i <- i + 1
-            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, families_s, families_e, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, ratios, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, has_downstream, identity_accepted, identities, identity_texts, canonical_family_count|:
+            while i < metrics.count |i: usize = 0, metrics, metric_cell_indices|:
+                metric_cell_indices.push(-1)
+                i <- i + 1
+            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, metric_cell_indices, families_s, families_e, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, ratios, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, has_downstream, identity_accepted, identities, identity_texts, canonical_family_count|:
                 return -1 if not Population::rh_population_unique_object_keys(nodes, texts, dep)
                 ids: mutable i64 = 0
                 ide: mutable i64 = 0
@@ -604,11 +608,13 @@ module Population:
                 if not Population::rh_population_seen_span(families_s, families_e, texts, fs, fe):
                     families_s.push(fs)
                     families_e.push(fe)
+                while metric_index < metrics.count |metric_index: usize = 0, metrics, metric_cell_indices|:
+                    metric_cell_indices[metric_index] <- -1
+                    metric_index <- metric_index + 1
                 cell_start: i64 = cells.count.i64()
                 metric_idx: i64 = Population::rh_population_get(nodes, texts, dep, "metrics")
                 return -1 if metric_idx < 0 or nodes[metric_idx.usize()].kind != Json::RH_JSON_ARR
-                seen_metrics: mutable darray[i64] = []
-                while cell >= 0 |cell: i64 = nodes[metric_idx.usize()].first_child, nodes, texts, raw, metrics, cells, seen_metrics, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown|:
+                while cell >= 0 |cell: i64 = nodes[metric_idx.usize()].first_child, nodes, texts, raw, metrics, cells, metric_cell_indices, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown|:
                     return -1 if not Population::rh_population_unique_object_keys(nodes, texts, cell)
                     cks: mutable i64 = 0
                     cke: mutable i64 = 0
@@ -624,10 +630,7 @@ module Population:
                     policy: i64 = Population::rh_population_policy(texts, ps2, pe2)
                     return -1 if mi < 0 or status < 0 or policy < 0
                     return -1 if status != RH_POP_STATUS_OBSERVED and policy != RH_POP_POLICY_UNKNOWN
-                    while z < seen_metrics.count |z: usize = 0, seen_metrics, mi|:
-                        return -1 if seen_metrics[z] == mi
-                        z <- z + 1
-                    seen_metrics.push(mi)
+                    return -1 if metric_cell_indices[mi.usize()] >= 0
                     value_idx: i64 = Population::rh_population_get(nodes, texts, cell, "value")
                     has_value: bool = value_idx >= 0 and nodes[value_idx.usize()].kind != Json::RH_JSON_NULL
                     value_ok: mutable i64 = 0
@@ -637,6 +640,7 @@ module Population:
                         return -1 if value_ok == 0 or value < 0
                     return -1 if status == RH_POP_STATUS_OBSERVED and not has_value
                     return -1 if status != RH_POP_STATUS_OBSERVED and has_value
+                    metric_cell_indices[mi.usize()] <- cells.count.i64()
                     cells.push(RhPopulationCell{metric_index: mi, status: status.u8(), value: value, has_value: has_value, policy: policy.u8()})
                     if status == RH_POP_STATUS_OBSERVED:
                         return -1 if sums[mi.usize()] > 9223372036854775807 - value
@@ -659,23 +663,20 @@ module Population:
                     else:
                         policy_unknown[mi.usize()] <- policy_unknown[mi.usize()] + 1
                     cell <- nodes[cell.usize()].next_sibling
-                return -1 if seen_metrics.count != metrics.count
-                while ratio_index < ratios.count |ratio_index: usize = 0, ratios, cells, cell_start, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents|:
+                while metric_index < metrics.count |metric_index: usize = 0, metrics, metric_cell_indices, cell_start|:
+                    return -1 if metric_cell_indices[metric_index] < cell_start
+                    metric_index <- metric_index + 1
+                while ratio_index < ratios.count |ratio_index: usize = 0, ratios, cells, metric_cell_indices, cell_start, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents|:
                     ratio: RhPopulationRatio = ratios[ratio_index]
-                    numerator_status: mutable u8 = 255
-                    denominator_status: mutable u8 = 255
-                    numerator_value: mutable i64 = 0
-                    denominator_value: mutable i64 = 0
-                    while ratio_cell < (cells.count.i64() - cell_start).usize() |ratio_cell: usize = 0, cells, cell_start, ratio, numerator_status, denominator_status, numerator_value, denominator_value|:
-                        cell_value: RhPopulationCell = cells[(cell_start + ratio_cell.i64()).usize()]
-                        if cell_value.metric_index == ratio.numerator_index:
-                            numerator_status <- cell_value.status
-                            numerator_value <- cell_value.value
-                        if cell_value.metric_index == ratio.denominator_index:
-                            denominator_status <- cell_value.status
-                            denominator_value <- cell_value.value
-                        ratio_cell <- ratio_cell + 1
-                    return -1 if numerator_status == 255 or denominator_status == 255
+                    numerator_cell_index: i64 = metric_cell_indices[ratio.numerator_index.usize()]
+                    denominator_cell_index: i64 = metric_cell_indices[ratio.denominator_index.usize()]
+                    return -1 if numerator_cell_index < cell_start or denominator_cell_index < cell_start
+                    numerator_cell: RhPopulationCell = cells[numerator_cell_index.usize()]
+                    denominator_cell: RhPopulationCell = cells[denominator_cell_index.usize()]
+                    numerator_status: u8 = numerator_cell.status
+                    denominator_status: u8 = denominator_cell.status
+                    numerator_value: i64 = numerator_cell.value
+                    denominator_value: i64 = denominator_cell.value
                     if numerator_status == RH_POP_STATUS_OBSERVED and denominator_status == RH_POP_STATUS_OBSERVED:
                         if denominator_value == 0:
                             return -1 if numerator_value != 0
