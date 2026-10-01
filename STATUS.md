@@ -493,13 +493,14 @@ the exact role input, canonical result, and pinned configuration. Live
 permission-inventory import still needs owner authorization
 the M02 slice lacks, so this operates on captured documents.
 
-**M04-01 action-type count increment:** Observed release, merge, and review
-counts now use one scoped action pass and an inline actor-type record instead
-of three four-slot arrays and three scans. Unknown action types remain in the
-unknown bucket, and the report shape is unchanged. The accumulator helper is
-private to `Roles`; the typed counts shared with `RolesReport` are explicit.
-`tests/test_roles_cli.sh`, `tests/test_roles_provider_cli.sh`, and
-`tests/test_m04.sh` pass.
+**M04-01 action-summary increment:** Observed release, merge, and review
+actor-type counts, unattributed releases, release automation-share counts,
+and focused-review share counts now come from one scoped action pass returning
+`RhObservedActionTallies`. This replaces three count arrays and three repeated
+event scans; unknown actors remain in their existing bucket and report fields
+keep their established order. The mutable accumulator is private to `Roles`,
+with immutable records shared with `RolesReport`. `tests/test_roles_cli.sh`,
+`tests/test_roles_provider_cli.sh`, and `tests/test_m04.sh` pass.
 
 **M04-01 concentration increment:** The 80-percent concentration path now
 keeps actor identity, action count, and selection state together in a private

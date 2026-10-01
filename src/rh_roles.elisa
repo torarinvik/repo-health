@@ -70,6 +70,14 @@ module Roles:
             merge: RhActionActorTypeCounts
             review: RhActionActorTypeCounts
 
+        struct RhObservedActionTallies:
+            actor_types: RhObservedActionTypeCounts
+            unattributed_release_count: i64
+            automated_release_actions: i64
+            attributed_release_actions: i64
+            review_focus_actions: i64
+            attributed_review_actions: i64
+
         struct RhLinkedChange:
             mutable id_start: i64
             mutable id_end: i64
@@ -151,14 +159,6 @@ module Roles:
                     i <- i + 1
             total
 
-        def rh_observed_unattributed_count(actions: darray[RhObservedAction]&, kind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
-            actions_loop: mutable darray[RhObservedAction]& = actions
-            kind_loop: mutable u8 = kind
-            while i < actions_loop.count |total: i64 = 0, i: usize = 0, actions_loop, kind_loop| -> total:
-                action: RhObservedAction = actions_loop[i]
-                total <- total + 1 if action.kind == kind_loop and action.actor_id < 0
-                i <- i + 1
-
     private:
         struct RhRoleSummaryAccumulator:
             provider_sources: mutable i64
@@ -203,6 +203,14 @@ module Roles:
             merge: mutable RhActionActorTypeCountAccumulator
             review: mutable RhActionActorTypeCountAccumulator
 
+        struct RhObservedActionTallyAccumulator:
+            actor_types: mutable RhObservedActionTypeCountAccumulator
+            unattributed_release_count: mutable i64
+            automated_release_actions: mutable i64
+            attributed_release_actions: mutable i64
+            review_focus_actions: mutable i64
+            attributed_review_actions: mutable i64
+
         struct RhActorContribution:
             actor_id: i64
             count: mutable i64
@@ -218,11 +226,24 @@ module Roles:
                 review: rh_action_actor_type_count_accumulator_empty()
             }
 
+        def rh_observed_action_tally_accumulator_empty() -> RhObservedActionTallyAccumulator:
+            RhObservedActionTallyAccumulator{
+                actor_types: rh_observed_action_type_count_accumulator_empty(),
+                unattributed_release_count: 0,
+                automated_release_actions: 0,
+                attributed_release_actions: 0,
+                review_focus_actions: 0,
+                attributed_review_actions: 0
+            }
+
         def rh_action_actor_type_count_add(counts: mutable RhActionActorTypeCountAccumulator&, actor_kind: u8) -> void:
             counts.human <- counts.human + 1 if actor_kind == RH_ACTOR_KIND_HUMAN
             counts.bot <- counts.bot + 1 if actor_kind == RH_ACTOR_KIND_BOT
             counts.service <- counts.service + 1 if actor_kind == RH_ACTOR_KIND_SERVICE
             counts.unknown <- counts.unknown + 1 if actor_kind == RH_ACTOR_KIND_UNKNOWN
+
+        def rh_action_actor_type_counts_make(counts: RhActionActorTypeCountAccumulator&) -> RhActionActorTypeCounts:
+            RhActionActorTypeCounts{human: counts.human, bot: counts.bot, service: counts.service, unknown: counts.unknown}
 
     public:
         def rh_role_summary(decls: darray[RhRoleDecl]&) -> RhRoleSummary:
@@ -242,43 +263,39 @@ module Roles:
                 unknown_role: accumulated.unknown_role
             }
 
-        def rh_observed_action_type_counts(actions: darray[RhObservedAction]&) -> RhObservedActionTypeCounts:
+        def rh_observed_action_tallies(actions: darray[RhObservedAction]&, review_focus_actor: i64) -> RhObservedActionTallies:
             actions_loop: mutable darray[RhObservedAction]& = actions
-            accumulated: RhObservedActionTypeCountAccumulator =
-                while i < actions_loop.count |counts: mutable RhObservedActionTypeCountAccumulator = rh_observed_action_type_count_accumulator_empty(), i: usize = 0, actions_loop| -> counts:
+            review_focus_actor_loop: mutable i64 = review_focus_actor
+            accumulated: RhObservedActionTallyAccumulator =
+                while i < actions_loop.count |counts: mutable RhObservedActionTallyAccumulator = rh_observed_action_tally_accumulator_empty(), i: usize = 0, actions_loop, review_focus_actor_loop| -> counts:
                     action: RhObservedAction = actions_loop[i]
                     if action.kind == RH_ACTION_RELEASE:
-                        rh_action_actor_type_count_add(&counts.release, action.actor_kind)
+                        rh_action_actor_type_count_add(&counts.actor_types.release, action.actor_kind)
+                        if action.actor_id < 0:
+                            counts.unattributed_release_count <- counts.unattributed_release_count + 1
+                        else:
+                            counts.attributed_release_actions <- counts.attributed_release_actions + 1
+                            counts.automated_release_actions <- counts.automated_release_actions + 1 if action.actor_kind == RH_ACTOR_KIND_BOT or action.actor_kind == RH_ACTOR_KIND_SERVICE
                     elif action.kind == RH_ACTION_MERGE:
-                        rh_action_actor_type_count_add(&counts.merge, action.actor_kind)
+                        rh_action_actor_type_count_add(&counts.actor_types.merge, action.actor_kind)
                     elif action.kind == RH_ACTION_REVIEW:
-                        rh_action_actor_type_count_add(&counts.review, action.actor_kind)
+                        rh_action_actor_type_count_add(&counts.actor_types.review, action.actor_kind)
+                        if action.actor_id >= 0:
+                            counts.attributed_review_actions <- counts.attributed_review_actions + 1
+                            counts.review_focus_actions <- counts.review_focus_actions + 1 if action.actor_id == review_focus_actor_loop
                     i <- i + 1
-            RhObservedActionTypeCounts{
-                release: RhActionActorTypeCounts{human: accumulated.release.human, bot: accumulated.release.bot, service: accumulated.release.service, unknown: accumulated.release.unknown},
-                merge: RhActionActorTypeCounts{human: accumulated.merge.human, bot: accumulated.merge.bot, service: accumulated.merge.service, unknown: accumulated.merge.unknown},
-                review: RhActionActorTypeCounts{human: accumulated.review.human, bot: accumulated.review.bot, service: accumulated.review.service, unknown: accumulated.review.unknown}
+            RhObservedActionTallies{
+                actor_types: RhObservedActionTypeCounts{
+                    release: rh_action_actor_type_counts_make(&accumulated.actor_types.release),
+                    merge: rh_action_actor_type_counts_make(&accumulated.actor_types.merge),
+                    review: rh_action_actor_type_counts_make(&accumulated.actor_types.review)
+                },
+                unattributed_release_count: accumulated.unattributed_release_count,
+                automated_release_actions: accumulated.automated_release_actions,
+                attributed_release_actions: accumulated.attributed_release_actions,
+                review_focus_actions: accumulated.review_focus_actions,
+                attributed_review_actions: accumulated.attributed_review_actions
             }
-
-        def rh_observed_release_automation(actions: darray[RhObservedAction]&, automated_out: mutable i64&, attributed_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-            automated_out[0] <- 0
-            attributed_out[0] <- 0
-            while i < actions.count |i: usize = 0, actions, automated_out, attributed_out|:
-                action: RhObservedAction = actions[i]
-                if action.kind == RH_ACTION_RELEASE and action.actor_id >= 0:
-                    attributed_out[0] <- attributed_out[0] + 1
-                    automated_out[0] <- automated_out[0] + 1 if action.actor_kind == RH_ACTOR_KIND_BOT or action.actor_kind == RH_ACTOR_KIND_SERVICE
-                i <- i + 1
-
-        def rh_observed_review_share(actions: darray[RhObservedAction]&, actor: i64, numerator_out: mutable i64&, denominator_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-            numerator_out[0] <- 0
-            denominator_out[0] <- 0
-            while i < actions.count |i: usize = 0, actions, actor, numerator_out, denominator_out|:
-                action: RhObservedAction = actions[i]
-                if action.kind == RH_ACTION_REVIEW and action.actor_id >= 0:
-                    denominator_out[0] <- denominator_out[0] + 1
-                    numerator_out[0] <- numerator_out[0] + 1 if action.actor_id == actor
-                i <- i + 1
 
         def rh_observed_linked_merge_review_counts(actions: darray[RhObservedAction]&, texts: darray[u8]&, reviewed_out: mutable i64&, linked_merges_out: mutable i64&, unlinked_merges_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             reviewed_out[0] <- 0
