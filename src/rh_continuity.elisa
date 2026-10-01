@@ -176,29 +176,26 @@ module Continuity:
         # by the caller because the first observed event may not be first-ever.
         def rh_median_tenure_days(actor: darray[i64]&, inst: darray[i64]&, n_actors: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if n_actors < 0 or actor.count != inst.count
+            actor_times: mutable darray[RhActorTenure] = []
+            while a < n_actors |a: i64 = 0, n_actors, actor_times|:
+                actor_times.push(RhActorTenure{first: 9223372036854775807, last: 0})
+                a <- a + 1
+            while e < actor.count |e: usize = 0, actor, inst, actor_times, n_actors|:
+                actor_id: i64 = actor[e]
+                if actor_id >= 0 and actor_id < n_actors:
+                    observed: RhActorTenure = actor_times[actor_id.usize()]
+                    observed.first <- inst[e] if inst[e] < observed.first
+                    observed.last <- inst[e] if inst[e] > observed.last
+                    actor_times[actor_id.usize()] <- observed
+                e <- e + 1
             spans: mutable darray[i64] = []
-            while a < n_actors |a: i64 = 0, actor, inst, spans, n_actors|:
-                first: mutable i64 = 9223372036854775807
-                last: mutable i64 = 0
-                while e < actor.count |e: usize = 0, actor, inst, a, first, last|:
-                    if actor[e] == a:
-                        if inst[e] < first:
-                            first <- inst[e]
-                        if inst[e] > last:
-                            last <- inst[e]
-                    e <- e + 1
-                if first != 9223372036854775807:
-                    spans.push((last - first) / 86400)
+            while a < actor_times.count |a: usize = 0, actor_times, spans|:
+                observed: RhActorTenure = actor_times[a]
+                if observed.first != 9223372036854775807:
+                    spans.push((observed.last - observed.first) / 86400)
                 a <- a + 1
             return -1 if spans.count == 0
-            while i < spans.count |i: usize = 1, spans|:
-                value: i64 = spans[i]
-                j: usize = i
-                while j > 0 and spans[j - 1] > value |j: usize = i, value, spans|:
-                    spans[j] <- spans[j - 1]
-                    j <- j - 1
-                spans[j] <- value
-                i <- i + 1
+            sort[i64](spans, rh_tenure_days_less)
             middle: usize = spans.count / 2
             if spans.count % 2 == 0:
                 (spans[middle - 1] + spans[middle]) / 2
@@ -289,9 +286,16 @@ module Continuity:
             actor: i64
             instant: i64
 
+        struct RhActorTenure:
+            first: mutable i64
+            last: mutable i64
+
         def rh_actor_instant_less(left: RhActorInstant, right: RhActorInstant) -> bool:
             return left.actor < right.actor if left.actor != right.actor
             left.instant < right.instant
+
+        def rh_tenure_days_less(left: i64, right: i64) -> bool:
+            left < right
 
     public:
         # Count actors with consecutive qualifying events separated by at least

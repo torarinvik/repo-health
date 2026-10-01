@@ -740,6 +740,8 @@ Implement the user's central insight: persistent committed stewardship is differ
 
 The persistence event-share numerator now evaluates the cohort predicate once per actor and counts qualifying events in one pass. Its work is O(actors × months + events), rather than rescanning the actor-by-month matrix for every event; Fixture A checks all 72 events from its six persistent actors (`src/test_continuity.elisa`).
 
+Median observed tenure now gathers each actor's first and last event in one event pass, then uses Elisa's standard in-place sort for the actor spans. This replaces the per-actor event rescan and insertion sort with O(events + actors log actors); the module oracle checks an unsorted event stream, an empty actor, and an even-sized median (`src/test_continuity.elisa`).
+
 **M04-06: Retention.** Implement eligible newcomer cohorts, return windows, right censoring, history-completeness rules, and observed versus actual first contribution semantics.
 
 **M04-06 linear retention increment:** `rh_cs_retention` now derives each actor's earliest event in one pass and marks qualifying return-window events in a second pass, then applies the existing censoring and coverage rules. This reduces the production path from rescanning every event twice per actor to O(events + actors); the existing parser oracles retain coverage for retained, not-retained, censored, unobservable, and overflow states (`src/test_continuity_scan.elisa`, `tests/test_continuity_cli.sh`).
