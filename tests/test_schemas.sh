@@ -35,6 +35,37 @@ for want in ("connector-manifest", "canonical-repo", "dep-graph", "adapter-trans
 print("[schemas] families OK:", ", ".join(sorted(names)))
 PY
 
+echo "[schemas] dependency ecosystem breakdowns constrain counts, ratios, and nested fields"
+deps_negative="$ROOT/fixtures/deps-metrics/_schema-negative.json"
+trap 'rm -f "$deps_negative"' EXIT
+for invalid in negative-count zero-digest-denominator negative-security-count security-type unknown-field; do
+  python3 - "$ROOT/fixtures/deps-metrics/cargo-npm-osv.json" "$deps_negative" "$invalid" <<'PY'
+import json, sys
+source, target, invalid = sys.argv[1:]
+document = json.load(open(source))
+row = document["by_ecosystem"][0]
+if invalid == "negative-count":
+    row["declared_requirements"] = -1
+elif invalid == "zero-digest-denominator":
+    row["artifact_digest_coverage"]["den"] = 0
+elif invalid == "negative-security-count":
+    row["affected_resolved_nodes"] = -1
+elif invalid == "security-type":
+    row["fixed_version_available"] = "true"
+else:
+    row["future_field"] = 1
+json.dump(document, open(target, "w"), separators=(",", ":"))
+PY
+  if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+    rm -f "$deps_negative"
+    trap - EXIT
+    fail "dependency schema accepted $invalid ecosystem breakdown"
+  fi
+done
+rm -f "$deps_negative"
+trap - EXIT
+echo "[schemas] malformed dependency ecosystem breakdowns are rejected"
+
 echo "[schemas] inventory metric status constrains nullable values"
 inventory_negative="$ROOT/fixtures/inventory-results/_schema-negative.json"
 trap 'rm -f "$inventory_negative"' EXIT

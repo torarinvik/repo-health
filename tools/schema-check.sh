@@ -48,6 +48,8 @@ def type_ok(val, t):
         return val is None or isinstance(val, str)
     if t == "int_or_null":
         return val is None or (isinstance(val, int) and not isinstance(val, bool))
+    if t == "nonnegative_int_or_null":
+        return val is None or (isinstance(val, int) and not isinstance(val, bool) and val >= 0)
     if t == "int_str_or_null":
         return val is None or isinstance(val, str) or (isinstance(val, int) and not isinstance(val, bool))
     return False
