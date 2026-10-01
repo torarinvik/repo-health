@@ -17,13 +17,50 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-coverage-input/1","source":"github","source_instance":"github.com/acme/project","collected_at":1700003700,"capabilities":[{"capability":"review_events","state":"partial","reason":"page cap","valid_start":null,"valid_end":1700000000,"known_as_of":1700000100},{"capability":"maintainer_permissions","state":"unauthorized","reason":"owner authorization required","valid_start":1690000000,"valid_end":null,"known_as_of":1700000100},{"capability":"git_log","state":"observed","reason":"complete public log","valid_start":1690000000,"valid_end":1700000000,"known_as_of":1700000100}]}
 JSON
 "$ROOT/build/rh_cli" coverage --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "coverage run"
-python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" <<'PY'
-import hashlib, json, sys
+python3 - "$T/out.json" "$T/in.json" "$T/out.json.transformations.json" "$ROOT" <<'PY'
+import glob, hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-coverage-result/1", d
 assert d["source"] == "github" and d["source_instance"] == "github.com/acme/project", d
 assert d["state_counts"] == {"observed": 1, "partial": 1, "stale": 0, "unavailable": 0, "unauthorized": 1, "not_applicable": 0, "unsupported": 0}, d
 metrics = {m["key"]: m for m in d["metrics"]}
+definitions = {}
+for path in glob.glob(sys.argv[4] + "/metrics/definitions/*.json"):
+    definition = json.load(open(path))
+    definitions[(definition["key"], definition["version"])] = definition
+state_count_inputs = ["capability_coverage_records", "source_instance", "capability_state"]
+expected_inputs = {
+    "coverage.observed_capability_count": state_count_inputs,
+    "coverage.partial_capability_count": state_count_inputs,
+    "coverage.stale_capability_count": state_count_inputs,
+    "coverage.unavailable_capability_count": state_count_inputs,
+    "coverage.unauthorized_capability_count": state_count_inputs,
+    "coverage.unsupported_capability_count": state_count_inputs,
+    "coverage.not_applicable_capability_count": state_count_inputs,
+    "coverage.requested_capabilities": ["source_capability_coverage"],
+    "coverage.available_capability_share": ["capability_coverage_records", "applicability_state", "capability_state"],
+    "coverage.unauthorized_capabilities": ["capability_coverage_records", "capability_state"],
+    "coverage.partial_collection_count": ["capability_coverage_records", "capability_state"],
+    "coverage.source_freshness_hours": ["capability_coverage_records", "capability_state", "capability_known_as_of", "collected_at"],
+}
+assert set(metrics) == set(expected_inputs) and len(metrics) == 12, metrics
+for metric in d["metrics"]:
+    identity = (metric["key"], metric["version"])
+    definition = definitions[identity]
+    assert definition["subject_kind"] == "project", (identity, definition)
+    assert definition["source_requirements"] == ["captured-capability-coverage"], (identity, definition)
+    assert definition["inputs"] == expected_inputs[metric["key"]], (identity, definition.get("inputs"))
+    assert metric["evidence"] == ["coverage-input"], (identity, metric)
+    output_type = definition["output"]["type"]
+    if metric["status"] == "observed":
+        if output_type == "integer":
+            assert type(metric["value"]) is int, (identity, metric)
+            assert definition["denominator_rule"] == "none" or definition["denominator_rule"].startswith("none;"), (identity, definition)
+        else:
+            assert output_type == "ratio" and set(metric["value"]) == {"num", "den"} and metric["value"]["den"] > 0, (identity, metric)
+            assert definition["output"]["numerator"] and definition["output"]["denominator"] and definition["denominator_rule"] == "applicable requested capabilities", (identity, definition)
+assert definitions[("coverage.available_capability_share", "1.0.0")]["output"]["numerator"] == "requested capability records in observed, partial, or stale state"
+print("[coverage] all 12 metrics match catalog sources, inputs, types, and denominators")
 assert metrics["coverage.observed_capability_count"]["value"] == 1, metrics
 assert metrics["coverage.partial_capability_count"]["value"] == 1, metrics
 assert metrics["coverage.stale_capability_count"]["value"] == 0, metrics
