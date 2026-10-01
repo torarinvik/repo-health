@@ -507,6 +507,11 @@ record, eliminating three parallel arrays without changing the threshold or
 first-seen tie behavior. Exact release/review counts remain covered by the
 role CLI regression.
 
+**M04-01 declaration-summary increment:** Role and source tallies now share
+one scoped pass and return an immutable `RhRoleSummary`, replacing two scans
+and eight mutable output parameters while preserving unknown buckets.
+`tests/test_roles_cli.sh` and the M04 role oracle pass.
+
 **M04 scope (in progress):** implemented — persistence cohorts over an
 actor-by-complete-month presence matrix (one active day is one month;
 component measures returned alongside membership), a coverage basis

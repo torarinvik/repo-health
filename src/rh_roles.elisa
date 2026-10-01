@@ -38,6 +38,16 @@ module Roles:
             declared_at: i64
             revoked_at: i64
 
+        struct RhRoleSummary:
+            provider_sources: i64
+            file_sources: i64
+            operator_sources: i64
+            owner: i64
+            maintainer: i64
+            triager: i64
+            member: i64
+            unknown_role: i64
+
         # Provider-native actions normalized at the same boundary as role
         # declarations. An action is evidence of participation, never a role.
         struct RhObservedAction:
@@ -125,48 +135,6 @@ module Roles:
                 i <- i + 1
             0
 
-        # Stratify a declaration set: how many declarations are provider/file/
-        # operator-sourced. Callers use this to weight or caveat a claim; a claim
-        # from a captured document is not the same as one from a project file.
-        def rh_role_source_tally(decls: darray[RhRoleDecl]&, prov_out: mutable i64&, file_out: mutable i64&, op_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-            prov_out[0] <- 0
-            file_out[0] <- 0
-            op_out[0] <- 0
-            while i < decls.count |i: usize = 0, decls, prov_out, file_out, op_out|:
-                d: RhRoleDecl = decls[i]
-                if d.source == RH_DECL_SOURCE_PROVIDER:
-                    prov_out[0] <- prov_out[0] + 1
-                elif d.source == RH_DECL_SOURCE_FILE:
-                    file_out[0] <- file_out[0] + 1
-                else:
-                    op_out[0] <- op_out[0] + 1
-                i <- i + 1
-            return
-
-        # Count declarations by normalized role. Unknown provider strings stay
-        # visible as their own bucket; a count is evidence of a declaration, not
-        # an observed action or an inferred maintainer identity.
-        def rh_role_tally(decls: darray[RhRoleDecl]&, owner_out: mutable i64&, maintainer_out: mutable i64&, triager_out: mutable i64&, member_out: mutable i64&, unknown_out: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-            owner_out[0] <- 0
-            maintainer_out[0] <- 0
-            triager_out[0] <- 0
-            member_out[0] <- 0
-            unknown_out[0] <- 0
-            while i < decls.count |i: usize = 0, decls, owner_out, maintainer_out, triager_out, member_out, unknown_out|:
-                role: u8 = decls[i].role
-                if role == RH_ROLE_OWNER:
-                    owner_out[0] <- owner_out[0] + 1
-                elif role == RH_ROLE_MAINTAINER:
-                    maintainer_out[0] <- maintainer_out[0] + 1
-                elif role == RH_ROLE_TRIAGER:
-                    triager_out[0] <- triager_out[0] + 1
-                elif role == RH_ROLE_MEMBER:
-                    member_out[0] <- member_out[0] + 1
-                else:
-                    unknown_out[0] <- unknown_out[0] + 1
-                i <- i + 1
-            return
-
         def rh_observed_actor_count(actions: darray[RhObservedAction]&, kind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
             actions_loop: mutable darray[RhObservedAction]& = actions
             kind_loop: mutable u8 = kind
@@ -192,6 +160,38 @@ module Roles:
                 i <- i + 1
 
     private:
+        struct RhRoleSummaryAccumulator:
+            provider_sources: mutable i64
+            file_sources: mutable i64
+            operator_sources: mutable i64
+            owner: mutable i64
+            maintainer: mutable i64
+            triager: mutable i64
+            member: mutable i64
+            unknown_role: mutable i64
+
+        def rh_role_summary_accumulator_empty() -> RhRoleSummaryAccumulator:
+            RhRoleSummaryAccumulator{
+                provider_sources: 0,
+                file_sources: 0,
+                operator_sources: 0,
+                owner: 0,
+                maintainer: 0,
+                triager: 0,
+                member: 0,
+                unknown_role: 0
+            }
+
+        def rh_role_summary_add(accumulator: mutable RhRoleSummaryAccumulator&, role: u8, source: u8) -> void:
+            accumulator.provider_sources <- accumulator.provider_sources + 1 if source == RH_DECL_SOURCE_PROVIDER
+            accumulator.file_sources <- accumulator.file_sources + 1 if source == RH_DECL_SOURCE_FILE
+            accumulator.operator_sources <- accumulator.operator_sources + 1 if source != RH_DECL_SOURCE_PROVIDER and source != RH_DECL_SOURCE_FILE
+            accumulator.owner <- accumulator.owner + 1 if role == RH_ROLE_OWNER
+            accumulator.maintainer <- accumulator.maintainer + 1 if role == RH_ROLE_MAINTAINER
+            accumulator.triager <- accumulator.triager + 1 if role == RH_ROLE_TRIAGER
+            accumulator.member <- accumulator.member + 1 if role == RH_ROLE_MEMBER
+            accumulator.unknown_role <- accumulator.unknown_role + 1 if role != RH_ROLE_OWNER and role != RH_ROLE_MAINTAINER and role != RH_ROLE_TRIAGER and role != RH_ROLE_MEMBER
+
         struct RhActionActorTypeCountAccumulator:
             human: mutable i64
             bot: mutable i64
@@ -225,6 +225,23 @@ module Roles:
             counts.unknown <- counts.unknown + 1 if actor_kind == RH_ACTOR_KIND_UNKNOWN
 
     public:
+        def rh_role_summary(decls: darray[RhRoleDecl]&) -> RhRoleSummary:
+            decls_loop: mutable darray[RhRoleDecl]& = decls
+            accumulated: RhRoleSummaryAccumulator =
+                while i < decls_loop.count |counts: mutable RhRoleSummaryAccumulator = rh_role_summary_accumulator_empty(), i: usize = 0, decls_loop| -> counts:
+                    rh_role_summary_add(&counts, decls_loop[i].role, decls_loop[i].source)
+                    i <- i + 1
+            RhRoleSummary{
+                provider_sources: accumulated.provider_sources,
+                file_sources: accumulated.file_sources,
+                operator_sources: accumulated.operator_sources,
+                owner: accumulated.owner,
+                maintainer: accumulated.maintainer,
+                triager: accumulated.triager,
+                member: accumulated.member,
+                unknown_role: accumulated.unknown_role
+            }
+
         def rh_observed_action_type_counts(actions: darray[RhObservedAction]&) -> RhObservedActionTypeCounts:
             actions_loop: mutable darray[RhObservedAction]& = actions
             accumulated: RhObservedActionTypeCountAccumulator =
