@@ -103,6 +103,71 @@ assert by["persistence.persistent_24m"]["profile"] == {
 }, by
 print("[continuity] every metric uses a validated evidence/quality envelope")
 PY
+python3 - "$CM" "$ROOT" <<'PY'
+import glob, json, pathlib, sys
+metrics = json.load(open(sys.argv[1]))["metrics"]
+definitions = {}
+for path in glob.glob(sys.argv[2] + "/metrics/definitions/*.json"):
+    definition = json.load(open(path))
+    if definition.get("key", "").startswith(("persistence.", "concentration.")):
+        definitions[(definition["key"], definition["version"])] = definition
+
+expected_denominators = {
+    "persistence.retained_90d": "eligible actors with a complete 90–120 day return interval only; incomplete follow-up is censored, not failed",
+    "persistence.retained_365d": "eligible actors with a complete 365–395 day return interval only; incomplete follow-up is censored, not failed",
+    "persistence.returning_after_gap": "none; count each project-local actor once when consecutive qualifying events are separated by at least the configured complete-coverage gap",
+    "persistence.persistent_24m": "none; count of actors meeting the trailing twenty-four complete-month profile",
+    "persistence.persistent_12m": "none; count of actors meeting the configured six-active-month, six-span profile over complete longitudinal month coverage",
+    "persistence.retention_censored": "newcomer actors whose requested 90–120 day return window extends beyond cutoff",
+    "persistence.active_3_of_12_months": "actors with activity in at least three of the trailing twelve complete months; fewer than twelve complete months is unsupported",
+    "persistence.active_6_of_12_months": "actors with activity in at least six of the trailing twelve complete months; fewer than twelve complete months is unsupported",
+    "persistence.active_9_of_12_months": "actors with activity in at least nine of the trailing twelve complete months; fewer than twelve complete months is unsupported",
+    "persistence.persistent_event_share": "qualifying commit events attributable to the six-active-month, six-span persistence cohort divided by qualifying commit events; empty is not_applicable",
+    "persistence.median_observed_tenure_days": "median first-to-last observed event span across actor groups; empty is not_applicable",
+    "concentration.change_hhi": "all qualifying commit events in the covered window; an empty population is not_applicable, never 0",
+    "concentration.change_effective_actor_count": "reciprocal of HHI over the same qualifying commit events; empty population is not_applicable, never 0",
+    "concentration.change_absence_factor_50": "accepted change events; smallest actor count reaching at least 50 percent of accepted change events",
+    "concentration.change_top1_share": "all qualifying commit events in the covered window; an empty population is not_applicable, never 0",
+    "concentration.change_gini": "nonzero actors over all qualifying commit events in the covered window; fewer than two nonzero actors is not_applicable, never 0",
+    "concentration.top1_event_share": "accepted change events; largest actor event count divided by total accepted change events",
+    "concentration.top3_event_share": "all qualifying generic-Git commit events in the selected window with a project-local raw author identity",
+    "concentration.top5_event_share": "all qualifying generic-Git commit events in the selected window with a project-local raw author identity",
+    "concentration.hhi": "accepted change events; exact Herfindahl-Hirschman concentration over accepted change events",
+    "concentration.effective_actor_count": "accepted change events; reciprocal of exact change-event HHI",
+    "concentration.absence_factor_50": "accepted change events; smallest actor count reaching at least 50 percent of accepted change events",
+    "concentration.actor_count_80": "accepted change events; smallest actor count reaching at least 80 percent of accepted change events",
+}
+ratio_keys = {
+    "persistence.retained_90d", "persistence.retained_365d", "persistence.persistent_event_share",
+    "concentration.change_hhi", "concentration.change_effective_actor_count", "concentration.change_top1_share",
+    "concentration.change_gini", "concentration.top1_event_share", "concentration.top3_event_share",
+    "concentration.top5_event_share", "concentration.hhi", "concentration.effective_actor_count",
+}
+legacy_sources = {
+    "concentration.top1_event_share", "concentration.hhi", "concentration.effective_actor_count",
+    "concentration.absence_factor_50", "concentration.actor_count_80",
+}
+assert {metric["key"] for metric in metrics} == set(expected_denominators), metrics
+assert len(definitions.keys() & {(key, "1.0.0") for key in expected_denominators}) == len(expected_denominators)
+for metric in metrics:
+    key = metric["key"]
+    definition = definitions[(key, metric["version"])]
+    expected_inputs = ["qualifying_events", "coverage_window", "actor_grouping"] if key.startswith("persistence.") else ["qualifying_events", "actor_grouping"]
+    expected_source = ["git-log-evidence"] if key in legacy_sources else ["generic-git"]
+    expected_type = "ratio" if key in ratio_keys else "integer"
+    expected_unit = "days" if key == "persistence.median_observed_tenure_days" else "ratio" if key in ratio_keys else "actors"
+    assert definition["subject_kind"] == "project", (key, definition)
+    assert definition["source_requirements"] == expected_source, (key, definition["source_requirements"])
+    assert definition["inputs"] == expected_inputs, (key, definition["inputs"])
+    assert definition["output"]["type"] == expected_type and definition["output"]["unit"] == expected_unit, (key, definition["output"])
+    assert definition["denominator_rule"] == expected_denominators[key], (key, definition["denominator_rule"])
+    value = metric["value"]
+    if value is not None and expected_type == "ratio":
+        assert set(value) == {"num", "den"} and type(value["num"]) is int and type(value["den"]) is int and value["den"] > 0, (key, value)
+    elif value is not None:
+        assert type(value) is int and value >= 0, (key, value)
+print("[continuity] all emitted metrics match catalog inputs, sources, value shapes, and denominators")
+PY
 if grep -q '"first_month_index":0' "$CJ"; then
   fail "first_month_index must be a real calendar month index, not 0"
 fi

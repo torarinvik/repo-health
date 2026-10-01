@@ -1,4 +1,5 @@
 include "./rh_observation.elisa"
+include "../../Elisa-compiler/elisacore_std/collections.elisa"
 
 module Continuity:
     public:
@@ -272,37 +273,45 @@ module Continuity:
             return RH_RET_RETAINED if has_return_event
             RH_RET_NOT_RETAINED
 
-        # Count actors whose observed activity returns after the configured gap.
-        # Full-history callers provide the complete intervening coverage required
-        # by the metric; windowed callers publish unsupported instead of treating
-        # an unobserved interval as inactivity. An actor is counted once, even if
-        # several qualifying gaps occur.
+    private:
+        struct RhActorInstant:
+            actor: i64
+            instant: i64
+
+        def rh_actor_instant_less(left: RhActorInstant, right: RhActorInstant) -> bool:
+            return left.actor < right.actor if left.actor != right.actor
+            left.instant < right.instant
+
+    public:
+        # Count actors with consecutive qualifying events separated by at least
+        # the configured gap. Full-history callers provide the complete
+        # intervening coverage required by the metric; windowed callers publish
+        # unsupported instead of treating an unobserved interval as inactivity.
+        # An actor is counted once, even if several qualifying gaps occur.
         def rh_returning_after_gap(actor: darray[i64]&, inst: darray[i64]&, n_actors: i64, gap_days: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if n_actors < 0 or gap_days <= 0
             return -1 if actor.count != inst.count or gap_days > 9223372036854775807 / 86400
-            while i < inst.count |i: usize = 0, inst|:
-                return -1 if inst[i] < 0
+            while i < inst.count |i: usize = 0, actor, inst, n_actors|:
+                return -1 if inst[i] < 0 or actor[i] < 0 or actor[i] >= n_actors
                 i <- i + 1
             count: i64 =
                 gap_seconds: i64 = gap_days * 86400
                 actor_loop: mutable darray[i64]& = actor
                 inst_loop: mutable darray[i64]& = inst
-                actors_loop: mutable i64 = n_actors
                 gap_loop: mutable i64 = gap_seconds
-                while a < actors_loop |returning: i64 = 0, a: i64 = 0, actor_loop, inst_loop, actors_loop, gap_loop| -> returning:
-                    first: mutable i64 = 9223372036854775807
-                    last: mutable i64 = -9223372036854775807
-                    while e < actor_loop.count.i64() |e: i64 = 0, actor_loop, inst_loop, a, first, last|:
-                        if actor_loop[e.usize()] == a:
-                            t: i64 = inst_loop[e.usize()]
-                            if t < first:
-                                first <- t
-                            if t > last:
-                                last <- t
-                        e <- e + 1
-                    if first != 9223372036854775807 and last - first >= gap_loop:
-                        returning <- returning + 1
-                    a <- a + 1
+                actor_instants: mutable darray[RhActorInstant] = []
+                while e < actor_loop.count |e: usize = 0, actor_loop, inst_loop, actor_instants|:
+                    actor_instants.push(RhActorInstant{actor: actor_loop[e], instant: inst_loop[e]})
+                    e <- e + 1
+                sort[RhActorInstant](actor_instants, rh_actor_instant_less)
+                last_counted_actor: mutable i64 = -1
+                while index < actor_instants.count |returning: i64 = 0, index: usize = 1, actor_instants, gap_loop, last_counted_actor| -> returning:
+                    previous: RhActorInstant = actor_instants[index - 1]
+                    current: RhActorInstant = actor_instants[index]
+                    if current.actor == previous.actor and current.instant - previous.instant >= gap_loop:
+                        returning <- returning + 1 if current.actor != last_counted_actor
+                        last_counted_actor <- current.actor
+                    index <- index + 1
             count
 
         # Coverage basis for a continuity result (R029/R002). Distinguishes a
