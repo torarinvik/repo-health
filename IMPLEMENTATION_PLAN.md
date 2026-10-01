@@ -486,6 +486,8 @@ Evidence lists use Elisa `InlineVec` with two compact stored-link entries before
 
 **M00-02 actor-kind history oracle increment:** `tests/test_identity_publication_cli.sh` checks all 16 ordered pairs of active kind/source assertions for one actor at a fixed effective time. An independent oracle verifies kind agreement, source agreement, each independent conflict dimension, aggregate classifications, and the assertion/conflict counts. Half-open as-of boundaries and historical recomputation are also covered by the focused fixtures; longer histories and cross-products with graph-link lifecycles remain open.
 
+**M00-02 identity-diamond oracle increment:** `tests/test_identity_cli.sh` exhausts all 1,024 accepted/proposed/rejected/revoked states across the five edges of a four-actor diamond (K4 minus one edge). An independent union-find oracle derives accepted components and the visible revision watermark for every state tuple. This adds an overlapping-path topology beside chains, cycles, stars, and a branched cycle; other graph shapes and longer histories remain open.
+
 **M00-02 identity-order oracle increment:** four representative cyclic lifecycle patterns now run through every edge permutation and all 16 endpoint-direction masks. The test independently derives undirected accepted components and accepted/revoked revision watermarks, then checks all 1,536 production CLI outputs. This verifies order and endpoint-orientation invariance for the cycle patterns; other graph shapes, longer histories, and graph-linked actor-metadata cross-products remain open.
 
 ### 5.3 Essential invariants
