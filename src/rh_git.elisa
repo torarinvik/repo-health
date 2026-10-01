@@ -988,16 +988,31 @@ module Git:
         # depth-bounded by default. Protocol guards forbid ext/file helpers.
         # Full-history mode drops the depth bound (filter stays: blobs are never
         # needed by the M01 metric set).
-        def rh_run_git_clone(url: cstr, dest: cstr, err_file: cstr, full_history: bool) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def rh_run_git_clone(url: cstr, dest: cstr, err_file: cstr, full_history: bool) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return Process::rh_setup_error(22) if not rh_arg_safe(url)
             return Process::rh_setup_error(22) if not rh_arg_safe(dest)
             return Process::rh_setup_error(22) if not rh_arg_safe(err_file)
+            return Process::rh_setup_error(22) if not rh_fetch_arg_safe(url) or not rh_fetch_guard(url)
+            pin: mutable darray[u8] = []
+            return Process::rh_setup_error(22) if not rh_prepare_https_pin(url, err_file, pin)
+            pin_ptr: cstr = (&pin[0]).cast[cstr] can Unsafe.PointerCast
+            resolve_option: mutable darray[u8] =
+                option: mutable darray[u8] = []
+                Base::rh_push_text(option, "http.curloptResolve=")
+                Base::rh_push_cstr(option, pin_ptr)
+                option.push(0)
+                option
+            resolve_option_ptr: cstr = (&resolve_option[0]).cast[cstr] can Unsafe.PointerCast
             args: mutable darray[u8] = []
             Process::rh_append_arg(args, "git")
             Process::rh_append_arg(args, "-c")
             Process::rh_append_arg(args, "protocol.ext.allow=never")
             Process::rh_append_arg(args, "-c")
             Process::rh_append_arg(args, "protocol.file.allow=never")
+            Process::rh_append_arg(args, "-c")
+            Process::rh_append_arg(args, "http.followRedirects=false")
+            Process::rh_append_arg(args, "-c")
+            Process::rh_append_arg(args, resolve_option_ptr.cast[u8&] can Unsafe.PointerCast)
             Process::rh_append_arg(args, "clone")
             Process::rh_append_arg(args, "--bare")
             Process::rh_append_arg(args, "--no-checkout")

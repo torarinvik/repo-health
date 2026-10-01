@@ -71,6 +71,22 @@ while [ "$#" -gt 0 ]; do
 done
 SH
 chmod +x "$RESOLVE_BIN/python3" "$RESOLVE_BIN/curl"
+echo "[m07] Git clone rejects mixed public/private DNS before starting Git"
+export RH_TEST_SYSTEM_PYTHON="$REAL_PYTHON"
+mixed_scan_out="$RESOLVE_T/mixed-scan"
+set +e
+PATH="$RESOLVE_BIN:$PATH" RH_TEST_DNS_ADDRESSES="93.184.216.34,127.0.0.1" \
+  "$ROOT/build/rh_cli" scan --repo "https://example.com/repo.git" --out "$mixed_scan_out" --window-days 365 >/dev/null 2>&1
+mixed_scan_rc=$?
+set -e
+[[ "$mixed_scan_rc" -eq 4 ]] || fail "mixed Git-clone DNS answer must fail closed (got $mixed_scan_rc)"
+[[ ! -e "$mixed_scan_out/evidence/remote.git" ]] || fail "Git clone ran for mixed public/private DNS set"
+[[ ! -e "$mixed_scan_out/report.json" ]] || fail "mixed Git-clone DNS set published a report"
+[[ ! -e "$mixed_scan_out/evidence/git-clone.err.resolved" ]] || fail "Git resolver scratch file leaked after rejected DNS set"
+grep -q 'http.curloptResolve=' "$ROOT/src/rh_git.elisa" || fail "Git clone DNS pin config missing"
+grep -q 'http.followRedirects=false' "$ROOT/src/rh_git.elisa" || fail "Git clone redirect rejection missing"
+echo "[m07] Git HTTPS clone is DNS-pinned and redirects fail closed"
+
 SOURCE_URL="https://api.github.com/repos/octocat/Hello-World"
 export RH_TEST_SYSTEM_PYTHON="$REAL_PYTHON"
 export RH_TEST_CURL_LOG="$RESOLVE_T/curl.args"
