@@ -54,9 +54,10 @@ JSON
 
 echo "[policy] observed violation -> deny (fired rule 1)"
 policy_cli --policy "$T/policy.json" --input "$T/deny.json" --out "$T/o1" | grep -q "decision=deny" || fail "expected deny"
-python3 - "$T/o1/policy-result.json" <<'PY'
-import json, sys
+python3 - "$T/o1/policy-result.json" "$ROOT" <<'PY'
+import glob, json, sys
 d = json.load(open(sys.argv[1]))
+root = sys.argv[2]
 assert d["schema"] == "rh-policy-result/1"
 assert d["decision"] == "deny", d
 assert d["fired_rule_ids"] == [1], d
@@ -64,6 +65,52 @@ assert d["binding"]["policy_digest"] and len(d["binding"]["policy_digest"]) == 1
 assert d["explanation"]["decision"] == "deny", d["explanation"]
 assert "unknown is never permission" in d["note"], d["note"]
 metrics = {m["key"]: m for m in d["metrics"]}
+definitions = {}
+for path in glob.glob(root + "/metrics/definitions/*.json"):
+    definition = json.load(open(path))
+    definitions[(definition["key"], definition["version"])] = definition
+expected_inputs = {
+    "policy.evaluations": ["policy_evaluation_result"],
+    "policy.allow_count": ["policy_evaluation_result"],
+    "policy.warn_count": ["policy_evaluation_result"],
+    "policy.deny_count": ["policy_evaluation_result"],
+    "policy.unknown_count": ["policy_evaluation_result"],
+    "policy.active_exceptions": ["policy_evaluation_result", "applied_exceptions"],
+    "policy.exception_expiry_days": ["policy_evaluation_result", "applied_exceptions"],
+}
+expected_units = {
+    "policy.evaluations": "evaluations",
+    "policy.allow_count": "decisions",
+    "policy.warn_count": "decisions",
+    "policy.deny_count": "decisions",
+    "policy.unknown_count": "decisions",
+    "policy.active_exceptions": "exceptions",
+    "policy.exception_expiry_days": "days",
+}
+expected_denominators = {
+    "policy.evaluations": "none; count of completed policy evaluations in the selected result",
+    "policy.allow_count": "none; count of evaluations returning allow under the declared precedence",
+    "policy.warn_count": "none; count of evaluations returning warn under the declared precedence",
+    "policy.deny_count": "none; count of evaluations returning deny with an evidenced blocking rule",
+    "policy.unknown_count": "none; count of evaluations unable to decide from required evidence",
+    "policy.active_exceptions": "none; count of approved, unexpired exceptions applying to this exact evaluation",
+    "policy.exception_expiry_days": "none; minimum remaining whole days among approved, unexpired exceptions applied to this evaluation",
+}
+assert set(metrics) == set(expected_inputs) == set(expected_units) == set(expected_denominators), set(metrics)
+for key, metric in metrics.items():
+    identity = (key, metric["version"])
+    definition = definitions[identity]
+    assert definition["implementation_status"] == "implemented", (identity, definition)
+    assert definition["subject_kind"] == "project", (identity, definition["subject_kind"])
+    assert definition["source_requirements"] == ["policy-result"], (identity, definition["source_requirements"])
+    assert definition["inputs"] == expected_inputs[key], (identity, definition["inputs"])
+    assert definition["output"] == {"unit": expected_units[key], "type": "integer"}, (identity, definition["output"])
+    assert definition["denominator_rule"] == expected_denominators[key], (identity, definition["denominator_rule"])
+    if metric["status"] == "observed":
+        assert type(metric["value"]) is int and metric["value"] >= 0, (identity, metric)
+    else:
+        assert key == "policy.exception_expiry_days" and metric["status"] == "not_applicable" and metric["value"] is None, (identity, metric)
+print("[policy] all seven emitted rows match catalog sources, inputs, types, units, and denominators")
 assert len(metrics) == 7, metrics
 assert all(m["version"] == "1.0.0" and m["evidence"] == ["policy-result"] for m in metrics.values()), metrics
 assert all(m["quality_dimensions"] == {"completeness":"complete", "freshness":"unknown", "validity":"valid", "provenance":"evidence_backed"} for m in metrics.values() if m["status"] == "observed"), metrics
