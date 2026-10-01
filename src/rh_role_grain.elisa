@@ -40,6 +40,11 @@ module RoleGrain:
             valid_to: mutable i64
             has_valid_to: mutable bool
 
+        struct RhRoleActorKey:
+            role: u8
+            actor_s: i64
+            actor_e: i64
+
         def rh_rg_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_obj_get(nodes, texts, obj, key)
 
@@ -82,6 +87,16 @@ module RoleGrain:
             return "reviewer" if role == RH_ROLE_REVIEWER
             "releaser"
 
+        def rh_rg_actor_key_hash(role: u8, actor_s: i64, actor_e: i64, texts: darray[u8]&) -> usize:
+            (hash_sview(string_view_slice(bytes_view(texts), actor_s.usize(), actor_e.usize())).usize() ^ role.usize())
+
+        def rh_rg_index_table(capacity: usize) -> mutable darray[i64] can[Memory.Allocate, Abort.Panic]:
+            slots: mutable darray[i64] = []
+            while i < capacity |i: usize = 0, capacity, slots|:
+                slots.push(0)
+                i <- i + 1
+            slots
+
         def rh_rg_action(texts: darray[u8]&, s: i64, e: i64) -> i64:
             return 0 if RoleGrain::rh_rg_eq(texts, s, e, "replace")
             return 1 if RoleGrain::rh_rg_eq(texts, s, e, "retract")
@@ -99,8 +114,8 @@ module RoleGrain:
                 i <- i + 1
             -1
 
-        def rh_rg_add_role(events: darray[RhRoleEvent]&, corrections: darray[RhRoleCorrection]&, texts: darray[u8]&, current: bool, counts: mutable darray[i64]&, distinct: mutable darray[i64]&, actor_roles: mutable darray[u8]&, actor_s: mutable darray[i64]&, actor_e: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while i < events.count |i: usize = 0, events, corrections, texts, current, counts, distinct, actor_roles, actor_s, actor_e|:
+        def rh_rg_add_role(events: darray[RhRoleEvent]&, corrections: darray[RhRoleCorrection]&, texts: darray[u8]&, current: bool, counts: mutable darray[i64]&, distinct: mutable darray[i64]&, actor_slots: mutable darray[i64]&, actor_roles: mutable darray[RhRoleActorKey]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while i < events.count |i: usize = 0, events, corrections, texts, current, counts, distinct, actor_slots, actor_roles|:
                 event: RhRoleEvent = events[i]
                 actor_start: mutable i64 = event.actor_s
                 actor_end: mutable i64 = event.actor_e
@@ -116,15 +131,18 @@ module RoleGrain:
                             actor_end <- c.actor_e
                 if active:
                     counts[event.role.usize()] <- counts[event.role.usize()] + 1
+                    slot: mutable usize = RoleGrain::rh_rg_actor_key_hash(event.role, actor_start, actor_end, texts) % actor_slots.count
                     found: mutable bool = false
-                    while j < actor_roles.count |j: usize = 0, actor_roles, actor_s, actor_e, texts, event, actor_start, actor_end, found|:
-                        if actor_roles[j] == event.role and Base::rh_bytes_equal_span(texts, actor_s[j], actor_e[j], texts, actor_start, actor_end):
+                    while actor_slots[slot] != 0 |slot, actor_slots, actor_roles, event, actor_start, actor_end, texts, found|:
+                        actor_index: usize = (actor_slots[slot] - 1).usize()
+                        actor: RhRoleActorKey = actor_roles[actor_index]
+                        if actor.role == event.role and Base::rh_bytes_equal_span(texts, actor.actor_s, actor.actor_e, texts, actor_start, actor_end):
                             found <- true
-                        j <- j + 1
+                            break
+                        slot <- (slot + 1) % actor_slots.count
                     if not found:
-                        actor_roles.push(event.role)
-                        actor_s.push(actor_start)
-                        actor_e.push(actor_end)
+                        actor_roles.push(RhRoleActorKey{role: event.role, actor_s: actor_start, actor_e: actor_end})
+                        actor_slots[slot] <- actor_roles.count.i64()
                         distinct[event.role.usize()] <- distinct[event.role.usize()] + 1
                 i <- i + 1
             events.count.i64()
@@ -212,14 +230,13 @@ module RoleGrain:
             known_distinct: mutable darray[i64] = [0, 0, 0, 0]
             current_counts: mutable darray[i64] = [0, 0, 0, 0]
             current_distinct: mutable darray[i64] = [0, 0, 0, 0]
-            known_roles: mutable darray[u8] = []
-            known_actor_s: mutable darray[i64] = []
-            known_actor_e: mutable darray[i64] = []
-            current_roles: mutable darray[u8] = []
-            current_actor_s: mutable darray[i64] = []
-            current_actor_e: mutable darray[i64] = []
-            _ = RoleGrain::rh_rg_add_role(events, corrections, texts, false, known_counts, known_distinct, known_roles, known_actor_s, known_actor_e)
-            _ = RoleGrain::rh_rg_add_role(events, corrections, texts, true, current_counts, current_distinct, current_roles, current_actor_s, current_actor_e)
+            actor_table_capacity: usize = events.count * 2 + 1
+            known_actor_slots: mutable darray[i64] = RoleGrain::rh_rg_index_table(actor_table_capacity)
+            known_actor_roles: mutable darray[RhRoleActorKey] = []
+            current_actor_slots: mutable darray[i64] = RoleGrain::rh_rg_index_table(actor_table_capacity)
+            current_actor_roles: mutable darray[RhRoleActorKey] = []
+            _ = RoleGrain::rh_rg_add_role(events, corrections, texts, false, known_counts, known_distinct, known_actor_slots, known_actor_roles)
+            _ = RoleGrain::rh_rg_add_role(events, corrections, texts, true, current_counts, current_distinct, current_actor_slots, current_actor_roles)
             Base::rh_push_text(out, "{\"schema\":\"rh-role-grain-result/1\",\"identity_revision\":")
             Base::rh_push_decimal_i64(out, identity_revision)
             Base::rh_push_text(out, ",\"as_known_revision\":")

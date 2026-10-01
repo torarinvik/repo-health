@@ -43,6 +43,25 @@ assert "never rewrites an older event actor" in d["note"], d
 print("[role-grain] one-event grain + as-known/current correction fan-out OK")
 PY
 
+echo "[role-grain] indexed role-actor counts preserve repeats, roles, collisions, and corrections"
+cat > "$T/actor-index.json" <<'JSON'
+{"schema":"rh-role-grain-input/1","identity_revision":4,"as_known_revision":3,"events":[{"id":"e1","actor":"actor-8","role":"author","at":1},{"id":"e2","actor":"actor-8","role":"author","at":2},{"id":"e3","actor":"actor-10","role":"author","at":3},{"id":"e4","actor":"actor-8","role":"reviewer","at":4},{"id":"e5","actor":"actor-5","role":"reviewer","at":5},{"id":"e6","actor":"actor-10","role":"reviewer","at":6},{"id":"e7","actor":"actor-5","role":"author","at":7},{"id":"e8","actor":"actor-8","role":"author","at":8}],"corrections":[{"event_id":"e2","action":"replace","actor":"actor-11","revision":4},{"event_id":"e4","action":"retract","revision":4}]}
+JSON
+"$ROOT/build/rh_cli" role-grain --input "$T/actor-index.json" --out "$T/actor-index-out.json" >/dev/null || fail "indexed actor counts"
+python3 - "$T/actor-index-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+known = {row["role"]: row for row in d["as_known"]["roles"]}
+current = {row["role"]: row for row in d["current_corrected"]["roles"]}
+assert d["as_known"]["event_count"] == 8, d
+assert known["author"]["events"] == 5 and known["author"]["distinct_actors"] == 3, d
+assert known["reviewer"]["events"] == 3 and known["reviewer"]["distinct_actors"] == 3, d
+assert d["current_corrected"]["event_count"] == 7, d
+assert current["author"]["events"] == 5 and current["author"]["distinct_actors"] == 4, d
+assert current["reviewer"]["events"] == 2 and current["reviewer"]["distinct_actors"] == 2, d
+print("[role-grain] actor-role grouping and correction counts OK")
+PY
+
 echo "[role-grain] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" role-grain --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "role-grain output not deterministic"
