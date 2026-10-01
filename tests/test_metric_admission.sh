@@ -36,6 +36,53 @@ for d, c in mapped:
 print("[metric-admission] class coverage and CHAOSS population/boundary contract OK")
 PY
 
+echo "[metric-admission] dependency metric definitions match emitted evidence and denominator semantics"
+python3 - "$ROOT" <<'PY'
+import glob, json, sys
+root = sys.argv[1]
+definitions = {d["key"]: d for d in
+               (json.load(open(path)) for path in glob.glob(root + "/metrics/definitions/*.json"))}
+observed = json.load(open(root + "/fixtures/deps-metrics/cargo-npm-osv.json"))
+without_osv = json.load(open(root + "/fixtures/deps-metrics/cargo-npm-no-osv.json"))
+observed_rows = {row["key"]: row for row in observed["metrics"]}
+without_osv_rows = {row["key"]: row for row in without_osv["metrics"]}
+assert len(observed_rows) == 38 and observed_rows.keys() == without_osv_rows.keys()
+source_evidence = {
+    "captured-dependency-manifest": "dependency-input",
+    "captured-osv": "osv-input",
+}
+for key, row in observed_rows.items():
+    definition = definitions[key]
+    expected_sources = {"captured-dependency-manifest"}
+    if key.startswith("security."):
+        expected_sources.add("captured-osv")
+    assert set(definition["source_requirements"]) == expected_sources, (key, definition["source_requirements"])
+    assert set(row["evidence"]) == {source_evidence[source] for source in expected_sources}, (key, row["evidence"])
+    output_type = definition["output"]["type"]
+    denominator = definition["denominator_rule"]
+    if output_type == "integer":
+        assert type(row["value"]) is int and (denominator == "none" or denominator.startswith("none;")), (key, row, denominator)
+    elif output_type == "boolean":
+        assert type(row["value"]) is bool and (denominator == "none" or denominator.startswith("none;")), (key, row, denominator)
+    elif output_type == "ratio":
+        assert set(row["value"]) == {"num", "den"} and row["value"]["den"] > 0, (key, row)
+        assert "denominator" in definition["output"] and not denominator.startswith("none"), (key, definition)
+    else:
+        raise AssertionError((key, output_type))
+for key, row in without_osv_rows.items():
+    if key.startswith("security."):
+        assert row["status"] == "unavailable" and row["value"] is None and row["evidence"] == [], (key, row)
+    else:
+        assert row["status"] == "observed" and row["evidence"] == ["dependency-input"], (key, row)
+assert definitions["dependencies.unsupported_range_count"]["subject_kind"] == "project"
+assert definitions["dependency.resolved_transitive_versions"]["inputs"] == ["resolved_dependency_graph", "selected_graph_root"]
+assert "direct destinations" in definitions["dependency.resolved_transitive_versions"]["denominator_rule"]
+assert definitions["dependency.artifact_digest_coverage"]["output"]["denominator"] == "all unique resolved edge-destination package nodes"
+assert definitions["dependency.maximum_observed_depth"]["denominator_rule"].startswith("none;")
+assert definitions["dependency.resolution_complete"]["denominator_rule"].startswith("none;")
+print("[metric-admission] 38 dependency rows, emitted evidence, no-OSV states, and denominator rules agree")
+PY
+
 echo "[metric-admission] missing class is rejected"
 rm -rf "$TMP"
 mkdir -p "$TMP/metrics"
