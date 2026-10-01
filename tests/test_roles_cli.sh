@@ -191,6 +191,26 @@ assert "never guessed" in d["note"], d["note"]
 print("[roles] declared queries + tally OK")
 PY
 
+echo "[roles] distinct actors and 80% concentration share one collision-checked tally"
+cat > "$T/actor-concentration.json" <<'JSON'
+{"schema":"rh-roles-input/1","declarations":[],"observed_actions":[{"actor_id":1,"kind":"release","at":1},{"actor_id":1,"kind":"release","at":2},{"actor_id":1,"kind":"release","at":3},{"actor_id":2,"kind":"release","at":4},{"actor_id":3,"kind":"release","at":5},{"actor_id":null,"kind":"release","at":6},{"actor_id":1,"kind":"merge","at":7},{"actor_id":2,"kind":"merge","at":8},{"actor_id":4,"kind":"review","at":9},{"actor_id":4,"kind":"review","at":10},{"actor_id":5,"kind":"review","at":11},{"actor_id":5,"kind":"review","at":12},{"actor_id":6,"kind":"review","at":13},{"actor_id":null,"kind":"review","at":14}]}
+JSON
+"$ROOT/build/rh_cli" roles --input "$T/actor-concentration.json" --out "$T/actor-concentration-out.json" >/dev/null || fail "actor concentration tally"
+python3 - "$T/actor-concentration-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = {row["key"]: row for row in d["metrics"]}
+expected = {
+    "maintainer.observed_release_actors": 3,
+    "maintainer.observed_merge_actors": 2,
+    "maintainer.observed_review_actors": 3,
+    "concentration.release_actor_count_80": 2,
+    "concentration.review_actor_count_80": 2,
+}
+assert {key: m[key]["value"] for key in expected} == expected, m
+print("[roles] actor grouping and 80% thresholds OK")
+PY
+
 echo "[roles] action actor-type tallies use the typed single-pass result"
 cat > "$T/service-actions.json" <<'JSON'
 {"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":false,"declarations":[],"observed_actions":[{"actor_id":10,"actor_type":"service","kind":"release","at":10},{"actor_id":11,"actor_type":"service","kind":"merge","at":11},{"actor_id":12,"actor_type":"service","kind":"review","at":12}]}

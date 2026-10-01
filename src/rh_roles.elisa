@@ -72,6 +72,11 @@ module Roles:
 
         struct RhObservedActionTallies:
             actor_types: RhObservedActionTypeCounts
+            observed_release_actors: i64
+            observed_merge_actors: i64
+            observed_review_actors: i64
+            release_actor_count_80: i64
+            review_actor_count_80: i64
             unattributed_release_count: i64
             automated_release_actions: i64
             attributed_release_actions: i64
@@ -143,22 +148,6 @@ module Roles:
                 i <- i + 1
             0
 
-        def rh_observed_actor_count(actions: darray[RhObservedAction]&, kind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
-            actions_loop: mutable darray[RhObservedAction]& = actions
-            kind_loop: mutable u8 = kind
-            total: i64 =
-                while i < actions_loop.count |total: i64 = 0, i: usize = 0, actions_loop, kind_loop| -> total:
-                    action: RhObservedAction = actions_loop[i]
-                    seen: mutable bool = false
-                    if action.kind == kind_loop and action.identity_actor_id >= 0:
-                        while j < i |j: usize = 0, i, actions_loop, action, kind_loop, seen|:
-                            prior: RhObservedAction = actions_loop[j]
-                            seen <- true if prior.kind == kind_loop and prior.identity_actor_id >= 0 and prior.identity_actor_id == action.identity_actor_id
-                            j <- j + 1
-                        total <- total + 1 if not seen
-                    i <- i + 1
-            total
-
     private:
         struct RhRoleSummaryAccumulator:
             provider_sources: mutable i64
@@ -213,8 +202,9 @@ module Roles:
 
         struct RhActorContribution:
             actor_id: i64
+            kind: u8
+            first_seen: i64
             count: mutable i64
-            selected: mutable bool
 
         def rh_action_actor_type_count_accumulator_empty() -> RhActionActorTypeCountAccumulator:
             RhActionActorTypeCountAccumulator{human: 0, bot: 0, service: 0, unknown: 0}
@@ -245,6 +235,33 @@ module Roles:
         def rh_action_actor_type_counts_make(counts: RhActionActorTypeCountAccumulator&) -> RhActionActorTypeCounts:
             RhActionActorTypeCounts{human: counts.human, bot: counts.bot, service: counts.service, unknown: counts.unknown}
 
+        def rh_actor_contribution_hash(actor_id: i64, kind: u8) -> usize:
+            key: u64 = actor_id.u64()
+            hash: mutable u64 = 0xcbf29ce484222325
+            while byte_index < 8 |hash, key, byte_index: mutable usize = 0|:
+                shift: u64 = byte_index.u64() * 8
+                hash <- (hash ^ ((key >> shift).u8().u64())) * 0x100000001b3
+                byte_index <- byte_index + 1
+            hash <- (hash ^ kind.u64()) * 0x100000001b3
+            hash.usize()
+
+        def rh_actor_contribution_increment(actor_id: i64, kind: u8, slots: mutable darray[i64]&, contributions: mutable darray[RhActorContribution]&) -> void can[Memory.Allocate, Abort.Panic]:
+            slot: mutable usize = Roles::rh_actor_contribution_hash(actor_id, kind) % slots.count
+            while slots[slot] != 0 |slot, slots, contributions, actor_id, kind|:
+                contribution_index: usize = (slots[slot] - 1).usize()
+                contribution: RhActorContribution = contributions[contribution_index]
+                if contribution.actor_id == actor_id and contribution.kind == kind:
+                    contributions[contribution_index].count <- contributions[contribution_index].count + 1
+                    return
+                slot <- (slot + 1) % slots.count
+            contributions.push(RhActorContribution{actor_id: actor_id, kind: kind, first_seen: contributions.count.i64(), count: 1})
+            slots[slot] <- contributions.count.i64()
+
+        def rh_actor_contribution_less(left: RhActorContribution, right: RhActorContribution) -> bool:
+            return left.kind < right.kind if left.kind != right.kind
+            return left.count > right.count if left.count != right.count
+            left.first_seen < right.first_seen
+
     public:
         def rh_role_summary(decls: darray[RhRoleDecl]&) -> RhRoleSummary:
             decls_loop: mutable darray[RhRoleDecl]& = decls
@@ -263,12 +280,20 @@ module Roles:
                 unknown_role: accumulated.unknown_role
             }
 
-        def rh_observed_action_tallies(actions: darray[RhObservedAction]&, review_focus_actor: i64) -> RhObservedActionTallies:
+        def rh_observed_action_tallies(actions: darray[RhObservedAction]&, review_focus_actor: i64) -> RhObservedActionTallies can[Memory.Allocate, Abort.Panic]:
             actions_loop: mutable darray[RhObservedAction]& = actions
             review_focus_actor_loop: mutable i64 = review_focus_actor
+            capacity: usize = actions.count * 2 + 1
+            slots: mutable darray[i64] = []
+            while i < capacity |i: usize = 0, capacity, slots|:
+                slots.push(0)
+                i <- i + 1
+            contributions: mutable darray[RhActorContribution] = []
             accumulated: RhObservedActionTallyAccumulator =
-                while i < actions_loop.count |counts: mutable RhObservedActionTallyAccumulator = rh_observed_action_tally_accumulator_empty(), i: usize = 0, actions_loop, review_focus_actor_loop| -> counts:
+                while i < actions_loop.count |counts: mutable RhObservedActionTallyAccumulator = rh_observed_action_tally_accumulator_empty(), i: usize = 0, actions_loop, review_focus_actor_loop, slots, contributions| -> counts:
                     action: RhObservedAction = actions_loop[i]
+                    if action.identity_actor_id >= 0:
+                        rh_actor_contribution_increment(action.identity_actor_id, action.kind, slots, contributions)
                     if action.kind == RH_ACTION_RELEASE:
                         rh_action_actor_type_count_add(&counts.actor_types.release, action.actor_kind)
                         if action.actor_id < 0:
@@ -284,12 +309,49 @@ module Roles:
                             counts.attributed_review_actions <- counts.attributed_review_actions + 1
                             counts.review_focus_actions <- counts.review_focus_actions + 1 if action.actor_id == review_focus_actor_loop
                     i <- i + 1
+            sort[RhActorContribution](contributions, rh_actor_contribution_less)
+            observed_release_actors: mutable i64 = 0
+            observed_merge_actors: mutable i64 = 0
+            observed_review_actors: mutable i64 = 0
+            release_action_total: mutable i64 = 0
+            review_action_total: mutable i64 = 0
+            while i < contributions.count |i: usize = 0, contributions, observed_release_actors, observed_merge_actors, observed_review_actors, release_action_total, review_action_total|:
+                contribution: RhActorContribution = contributions[i]
+                if contribution.kind == RH_ACTION_RELEASE:
+                    observed_release_actors <- observed_release_actors + 1
+                    release_action_total <- release_action_total + contribution.count
+                elif contribution.kind == RH_ACTION_MERGE:
+                    observed_merge_actors <- observed_merge_actors + 1
+                elif contribution.kind == RH_ACTION_REVIEW:
+                    observed_review_actors <- observed_review_actors + 1
+                    review_action_total <- review_action_total + contribution.count
+                i <- i + 1
+            release_target: i64 = (release_action_total * 4 + 4) / 5
+            review_target: i64 = (review_action_total * 4 + 4) / 5
+            release_actor_count_80: mutable i64 = 0
+            review_actor_count_80: mutable i64 = 0
+            release_covered: mutable i64 = 0
+            review_covered: mutable i64 = 0
+            while i < contributions.count |i: usize = 0, contributions, release_target, review_target, release_actor_count_80, review_actor_count_80, release_covered, review_covered|:
+                contribution: RhActorContribution = contributions[i]
+                if contribution.kind == RH_ACTION_RELEASE and release_covered < release_target:
+                    release_covered <- release_covered + contribution.count
+                    release_actor_count_80 <- release_actor_count_80 + 1
+                elif contribution.kind == RH_ACTION_REVIEW and review_covered < review_target:
+                    review_covered <- review_covered + contribution.count
+                    review_actor_count_80 <- review_actor_count_80 + 1
+                i <- i + 1
             RhObservedActionTallies{
                 actor_types: RhObservedActionTypeCounts{
                     release: rh_action_actor_type_counts_make(&accumulated.actor_types.release),
                     merge: rh_action_actor_type_counts_make(&accumulated.actor_types.merge),
                     review: rh_action_actor_type_counts_make(&accumulated.actor_types.review)
                 },
+                observed_release_actors: observed_release_actors,
+                observed_merge_actors: observed_merge_actors,
+                observed_review_actors: observed_review_actors,
+                release_actor_count_80: release_actor_count_80,
+                review_actor_count_80: review_actor_count_80,
                 unattributed_release_count: accumulated.unattributed_release_count,
                 automated_release_actions: accumulated.automated_release_actions,
                 attributed_release_actions: accumulated.attributed_release_actions,
@@ -345,37 +407,3 @@ module Roles:
                     reviewed_out[0] <- reviewed_out[0] + 1 if change.has_review
                 i <- i + 1
             true
-
-        def rh_observed_concentration_80(actions: darray[RhObservedAction]&, kind: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
-            contributions: mutable darray[RhActorContribution] = []
-            total: mutable i64 = 0
-            while i < actions.count |i: usize = 0, actions, contributions, total, kind|:
-                action: RhObservedAction = actions[i]
-                if action.kind == kind and action.identity_actor_id >= 0:
-                    total <- total + 1
-                    identity_actor_id: mutable i64 = action.identity_actor_id
-                    found: i64 =
-                        while j < contributions.count |found: i64 = -1, j: usize = 0, contributions, identity_actor_id| -> found:
-                            found <- j.i64() if contributions[j].actor_id == identity_actor_id
-                            j <- j + 1
-                    if found < 0:
-                        contributions.push(RhActorContribution{actor_id: identity_actor_id, count: 1, selected: false})
-                    else:
-                        contributions[found.usize()].count <- contributions[found.usize()].count + 1
-                i <- i + 1
-            return 0 if total == 0
-            target: i64 = (total * 4 + 4) / 5
-            selected: i64 =
-                while covered < target |selected: i64 = 0, covered: i64 = 0, best: i64 = -1, best_count: i64 = -1, contributions| -> selected:
-                    best <- -1
-                    best_count <- -1
-                    while i < contributions.count |i: usize = 0, contributions, best, best_count|:
-                        if not contributions[i].selected and contributions[i].count > best_count:
-                            best <- i.i64()
-                            best_count <- contributions[i].count
-                        i <- i + 1
-                    return selected if best < 0
-                    contributions[best.usize()].selected <- true
-                    covered <- covered + best_count
-                    selected <- selected + 1
-            selected
