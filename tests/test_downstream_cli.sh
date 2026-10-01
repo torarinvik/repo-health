@@ -186,9 +186,10 @@ JSON
 
 echo "[downstream] diamond direct=2 transitive=3"
 "$ROOT/build/rh_cli" downstream --graph "$T/diamond.json" --subject 4 --out "$T/d" >/dev/null || fail "diamond run"
-python3 - "$T/d/downstream.json" <<'PY'
-import json, sys
+python3 - "$T/d/downstream.json" "$ROOT" <<'PY'
+import glob, json, sys
 d = json.load(open(sys.argv[1]))
+root = sys.argv[2]
 assert d["schema"] == "rh-downstream/1"
 assert d["direct_count"] == 2, d
 assert d["transitive_count"] == 3, d
@@ -204,6 +205,72 @@ assert "NOT a total" in d["note"], d["note"]
 assert d["grouping"]["family_dedup"] is False, d["grouping"]
 assert d["intrinsics"] is None, d["intrinsics"]
 metrics = {m["key"]: m for m in d["metrics"]}
+definitions = {}
+for path in glob.glob(root + "/metrics/definitions/*.json"):
+    definition = json.load(open(path))
+    definitions[(definition["key"], definition["version"])] = definition
+expected_inputs = {
+    "graph.direct_dependents_count": ["dependency_graph", "projection_definition", "mapping_revision"],
+    "graph.transitive_dependents_count": ["dependency_graph", "projection_definition", "mapping_revision"],
+    "graph.scc_component_count": ["dependency_graph", "projection_definition", "mapping_revision"],
+    "graph.strongly_connected_components": ["dependency_graph", "projection_definition", "mapping_revision"],
+    "graph.reverse_reachability_count": ["dependency_graph", "projection_definition", "mapping_revision"],
+    "graph.cyclic_node_share": ["dependency_graph", "projection_definition", "mapping_revision"],
+    "graph.traversal_truncated": ["dependency_graph", "projection_definition", "mapping_revision"],
+    "graph.scenario_affected_count": ["dependency_graph", "projection_definition", "mapping_revision", "unavailable_node_set"],
+    "downstream_condition.intrinsic_coverage_share": ["bounded downstream projection", "independent intrinsic metric masks"],
+}
+graph_sources = ["captured-dependency-graph"]
+expected_sources = {
+    **{key: graph_sources for key in expected_inputs if key.startswith("graph.")},
+    "downstream_condition.intrinsic_coverage_share": ["downstream-graph", "intrinsic-metric-evidence"],
+}
+expected_types = {
+    **{key: "integer" for key in (
+        "graph.direct_dependents_count", "graph.transitive_dependents_count", "graph.scc_component_count",
+        "graph.strongly_connected_components", "graph.reverse_reachability_count", "graph.scenario_affected_count")},
+    "graph.cyclic_node_share": "ratio",
+    "graph.traversal_truncated": "boolean",
+    "downstream_condition.intrinsic_coverage_share": "ratio",
+}
+expected_units = {
+    "graph.direct_dependents_count": "nodes",
+    "graph.transitive_dependents_count": "nodes",
+    "graph.scc_component_count": "components",
+    "graph.strongly_connected_components": "components",
+    "graph.reverse_reachability_count": "nodes",
+    "graph.cyclic_node_share": "ratio",
+    "graph.traversal_truncated": "boolean",
+    "graph.scenario_affected_count": "nodes",
+    "downstream_condition.intrinsic_coverage_share": "ratio",
+}
+expected_denominators = {
+    **{key: "none; count within the labeled graph projection" for key in expected_inputs if key.startswith("graph.") and expected_types[key] == "integer"},
+    "graph.cyclic_node_share": "visible nodes in the selected projection",
+    "graph.traversal_truncated": "none; boolean observation of the selected traversal budget",
+    "downstream_condition.intrinsic_coverage_share": "all requested intrinsic metric cells across the selected dependent projection",
+}
+assert set(metrics) == set(expected_inputs) == set(expected_sources) == set(expected_types), set(metrics)
+for key, metric in metrics.items():
+    identity = (key, metric["version"])
+    definition = definitions[identity]
+    assert definition["implementation_status"] == "implemented", (identity, definition)
+    assert definition["inputs"] == expected_inputs[key], (identity, definition["inputs"])
+    assert definition["source_requirements"] == expected_sources[key], (identity, definition["source_requirements"])
+    assert definition["output"]["type"] == expected_types[key], (identity, definition["output"])
+    assert definition["subject_kind"] == "package", (identity, definition["subject_kind"])
+    assert definition["output"]["unit"] == expected_units[key], (identity, definition["output"])
+    assert definition["denominator_rule"] == expected_denominators[key], (identity, definition["denominator_rule"])
+    if expected_types[key] == "ratio":
+        assert definition["output"]["numerator"] and definition["output"]["denominator"], (identity, definition)
+    if metric["status"] == "observed":
+        if expected_types[key] == "integer":
+            assert type(metric["value"]) is int and metric["value"] >= 0, (identity, metric)
+        elif expected_types[key] == "boolean":
+            assert type(metric["value"]) is bool, (identity, metric)
+        else:
+            assert set(metric["value"]) == {"num", "den"} and metric["value"]["den"] > 0, (identity, metric)
+print("[downstream] all nine emitted rows match catalog subjects, sources, inputs, types, and denominators")
 assert metrics["graph.direct_dependents_count"]["value"] == 2, metrics
 assert metrics["graph.transitive_dependents_count"]["value"] == 3, metrics
 assert metrics["graph.scc_component_count"]["value"] == 4, metrics
