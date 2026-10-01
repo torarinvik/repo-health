@@ -117,8 +117,8 @@ cp "$T/rep-fix2/bundle.manifest" "$T/bad-manifest-unknown.txt"
 printf 'unreviewed-field: value\n' >> "$T/bad-manifest-unknown.txt"
 if python3 "$ROOT/tools/evidence-manifest-check.py" "$T/bad-manifest-unknown.txt" >/dev/null 2>&1; then fail "manifest schema accepted unknown field"; fi
 echo "[m01] independent manifest contract rejects noncanonical and unknown fields"
-python3 - "$T/rep-fix2/report.json" <<'EOF'
-import json, sys
+python3 - "$T/rep-fix2/report.json" "$ROOT" <<'EOF'
+import glob, json, sys
 d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
 assert m["history.commit_count"]["value"] == 3, m
@@ -138,6 +138,40 @@ assert m["history.collection_complete_windows"]["quality_dimensions"] == {
 assert m["history.collection_complete_windows"]["evidence"] == [
     "evidence/git-log.bin", "evidence/git-shallow.txt"
 ], m["history.collection_complete_windows"]
+definitions = {}
+for path in glob.glob(sys.argv[2] + "/metrics/definitions/*.json"):
+    definition = json.load(open(path))
+    definitions[(definition["key"], definition["version"])] = definition
+identities = [(metric["key"], metric["version"]) for metric in d["metrics"]]
+assert len(identities) == len(set(identities)) == 61, identities
+for metric in d["metrics"]:
+    identity = (metric["key"], metric["version"])
+    definition = definitions[identity]
+    assert definition["implementation_status"] == "implemented", (identity, definition)
+    output = definition["output"]
+    if "value" not in metric:
+        assert metric["status"] != "observed", (identity, metric)
+        continue
+    value = metric["value"]
+    value_type = output["type"]
+    if value_type in ("integer", "timestamp"):
+        assert type(value) is int and value >= 0, (identity, value)
+    elif value_type == "boolean":
+        assert type(value) is bool, (identity, value)
+    elif value_type in ("ratio", "rational"):
+        assert set(value) == {"num", "den"} and type(value["num"]) is int and type(value["den"]) is int and value["den"] > 0, (identity, value)
+        if value_type == "ratio":
+            assert 0 <= value["num"] <= value["den"], (identity, value)
+    elif value_type == "enum":
+        assert set(value) == {"code", "label"} and type(value["code"]) is int and value["code"] >= 0 and isinstance(value["label"], str), (identity, value)
+    elif value_type == "count_pair":
+        members = output["members"]
+        assert output["shape"] == "named_count_pair" and set(value) == set(members), (identity, output, value)
+        assert all(type(value[name]) is int and value[name] >= 0 for name in members), (identity, value)
+        assert value[members[0]] <= value[members[1]], (identity, value)
+    else:
+        raise AssertionError((identity, "unknown output type", value_type))
+print("[m01] all 61 core report rows match implemented catalog output types and value shapes")
 assert m["history.coverage_state"]["evidence"] == [
     "evidence/git-log.bin", "evidence/git-shallow.txt"
 ], m["history.coverage_state"]

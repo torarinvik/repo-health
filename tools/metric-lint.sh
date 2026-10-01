@@ -40,6 +40,7 @@ assert len(fixture_ids) == len(set(fixture_ids)), "duplicate fixture catalog ID"
 known_fixtures = {f["id"]: f.get("status") for f in fixture_rows}
 assert known_fixtures, "empty fixture catalog"
 unit_type = {"ratio": "ratio", "boolean": "boolean", "enum": "enum", "timestamp": "timestamp", "events_per_week_squared": "rational", "events_squared": "rational"}
+shape_type = {"fixed_bucket_histogram": "histogram", "named_count_pair": "count_pair"}
 for p in files:
     d = json.load(open(p))
     for f in base:
@@ -58,13 +59,21 @@ for p in files:
     out = d["output"]
     assert isinstance(out, dict) and out.get("unit"), (p, "output.unit")
     unit = out["unit"]
-    expected_type = unit_type.get(unit, "histogram" if out.get("shape") == "fixed_bucket_histogram" else "integer")
+    shape = out.get("shape")
+    assert shape is None or shape in shape_type, (p, "unknown output shape", shape)
+    expected_type = unit_type.get(unit, shape_type.get(shape, "integer"))
     assert out.get("type") == expected_type, (p, "output unit/type mismatch", unit, out.get("type"), expected_type)
     if out["unit"] == "ratio":
         assert out.get("numerator") and out.get("denominator"), (p, "ratio needs numerator+denominator")
         assert d["denominator_rule"].strip().lower() != "none", (p, "ratio needs a denominator rule")
     if out.get("shape") == "fixed_bucket_histogram":
         assert out["type"] == "histogram" and isinstance(out.get("bucket_upper_seconds"), list) and out["bucket_upper_seconds"] and out["bucket_upper_seconds"][-1] is None, (p, "malformed fixed histogram")
+    if out.get("shape") == "named_count_pair":
+        members = out.get("members")
+        assert out["type"] == "count_pair" and isinstance(members, list) and len(members) == 2 and len(members) == len(set(members)) and all(re.fullmatch(r"[a-z][a-z0-9_]*", member) for member in members), (p, "malformed named count pair")
+        assert "bucket_upper_seconds" not in out, (p, "named count pair has histogram bounds")
+    else:
+        assert "members" not in out, (p, "members require a named count pair")
     assert isinstance(d["source_requirements"], list) and d["source_requirements"], (p, "source_requirements must be nonempty")
     assert len(d["source_requirements"]) == len(set(d["source_requirements"])), (p, "duplicate source requirement")
     assert set(d["source_requirements"]) <= known_sources, (p, "unknown source requirement", sorted(set(d["source_requirements"]) - known_sources))
