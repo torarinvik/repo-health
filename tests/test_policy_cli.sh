@@ -64,18 +64,30 @@ assert d["binding"]["policy_digest"] and len(d["binding"]["policy_digest"]) == 1
 assert d["explanation"]["decision"] == "deny", d["explanation"]
 assert "unknown is never permission" in d["note"], d["note"]
 metrics = {m["key"]: m for m in d["metrics"]}
+assert len(metrics) == 7, metrics
+assert all(m["version"] == "1.0.0" and m["evidence"] == ["policy-result"] for m in metrics.values()), metrics
+assert all(m["quality_dimensions"] == {"completeness":"complete", "freshness":"unknown", "validity":"valid", "provenance":"evidence_backed"} for m in metrics.values() if m["status"] == "observed"), metrics
 assert metrics["policy.evaluations"]["value"] == 1, metrics
 assert metrics["policy.allow_count"]["value"] == 0, metrics
 assert metrics["policy.warn_count"]["value"] == 0, metrics
 assert metrics["policy.deny_count"]["value"] == 1, metrics
 assert metrics["policy.unknown_count"]["value"] == 0, metrics
 assert metrics["policy.active_exceptions"]["value"] == 0, metrics
+expiry = metrics["policy.exception_expiry_days"]
+assert expiry["status"] == "not_applicable" and expiry["value"] is None and expiry["reason"] == "no-active-exception", expiry
 print("[policy] deny OK")
 PY
 
 echo "[policy] partial -> unknown (never permission)"
 sed 's/"observed","num":1/"partial","num":1/; s/"complete":true},{"rule_id":2/"complete":false},{"rule_id":2/' "$T/deny.json" > "$T/partial.json"
 policy_cli --policy "$T/policy.json" --input "$T/partial.json" --out "$T/o2" | grep -q "decision=unknown" || fail "partial must be unknown"
+python3 - "$T/o2/policy-result.json" <<'PY'
+import json, sys
+metrics = {row["key"]: row for row in json.load(open(sys.argv[1]))["metrics"]}
+assert metrics["policy.unknown_count"]["value"] == 1, metrics
+assert metrics["policy.deny_count"]["value"] == 0, metrics
+print("[policy] unknown decision metric OK")
+PY
 
 echo "[policy] missing input for a rule -> unknown"
 cat > "$T/missing.json" <<'JSON'
@@ -130,6 +142,8 @@ assert d["excepted_rule_ids"] == [1], d
 metrics = {m["key"]: m for m in d["metrics"]}
 assert metrics["policy.active_exceptions"]["value"] == 1, metrics
 assert metrics["policy.exception_expiry_days"]["value"] == 0, metrics
+assert metrics["policy.exception_expiry_days"]["status"] == "observed", metrics
+assert metrics["policy.exception_expiry_days"]["quality_dimensions"]["validity"] == "valid", metrics
 print("[policy] exception OK")
 PY
 # expired -> deny; wrong subject -> deny; wrong artifact digest (TOCTOU) -> deny

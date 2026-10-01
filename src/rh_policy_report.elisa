@@ -1,0 +1,41 @@
+# rh_policy_report.elisa — typed metric projection for policy results.
+
+include "./rh_base.elisa"
+include "./rh_observation.elisa"
+
+module PolicyReport:
+    private:
+        def rh_policy_emit_count(out: mutable darray[u8]&, key: cstr, count: i64, status: u8, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+            value: Observation::RhMetricValue = Observation::RhMetricValue.Count(count) if status == Observation::RH_ST_OBSERVED else Observation::RhMetricValue.Absent
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if status == Observation::RH_ST_OBSERVED else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked
+            }
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+            Observation::rh_evidence_links_push(&evidence, Observation::RhEvidenceObject.PolicyResult)
+            observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(status, value, false, quality, evidence)
+            Observation::rh_observation_emit_metric(out, key, "1.0.0", reason, observation)
+
+    public:
+        def rh_policy_metrics_write(out: mutable darray[u8]&, decision: u8, active_exceptions: i64, exception_expiry_days: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if decision > 3 or active_exceptions < 0
+            Base::rh_push_text(out, "[")
+            metrics_ok: bool = |out|
+                evaluations_ok: bool = rh_policy_emit_count(out, "policy.evaluations", 1, Observation::RH_ST_OBSERVED, "")
+                out.push(44) if evaluations_ok
+                allow_ok: bool = evaluations_ok and rh_policy_emit_count(out, "policy.allow_count", 1 if decision == 0 else 0, Observation::RH_ST_OBSERVED, "")
+                out.push(44) if allow_ok
+                warn_ok: bool = allow_ok and rh_policy_emit_count(out, "policy.warn_count", 1 if decision == 1 else 0, Observation::RH_ST_OBSERVED, "")
+                out.push(44) if warn_ok
+                deny_ok: bool = warn_ok and rh_policy_emit_count(out, "policy.deny_count", 1 if decision == 3 else 0, Observation::RH_ST_OBSERVED, "")
+                out.push(44) if deny_ok
+                unknown_ok: bool = deny_ok and rh_policy_emit_count(out, "policy.unknown_count", 1 if decision == 2 else 0, Observation::RH_ST_OBSERVED, "")
+                out.push(44) if unknown_ok
+                exceptions_ok: bool = unknown_ok and rh_policy_emit_count(out, "policy.active_exceptions", active_exceptions, Observation::RH_ST_OBSERVED, "")
+                out.push(44) if exceptions_ok
+                expiry_ok: bool = exceptions_ok and rh_policy_emit_count(out, "policy.exception_expiry_days", exception_expiry_days, Observation::RH_ST_NOT_APPLICABLE if exception_expiry_days < 0 else Observation::RH_ST_OBSERVED, "no-active-exception" if exception_expiry_days < 0 else "")
+                Base::rh_push_text(out, "]")
+                expiry_ok
+            metrics_ok
