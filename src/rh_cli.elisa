@@ -16,6 +16,7 @@ include "./rh_evidence.elisa"
 include "./rh_metrics.elisa"
 include "./rh_git.elisa"
 include "./rh_scan.elisa"
+include "./rh_scan_telemetry.elisa"
 include "./rh_report.elisa"
 include "./rh_files.elisa"
 include "./rh_http.elisa"
@@ -313,60 +314,6 @@ def rh_out_path(dir: cstr, name: u8&, out: mutable darray[u8]&) -> bool can[Memo
     Base::rh_push_text(out, name)
     out.push(0)
     true
-
-module ScanTelemetry:
-    public:
-        enum RhScanProcessPurpose:
-            GitClone
-            GitVersion
-            GitPartial
-            GitShallow
-            GitFiles
-            GitLog
-            GitEmptyCheck
-            GitDefaultCount
-            GitRefs
-
-    private:
-        def rh_purpose_name(purpose: RhScanProcessPurpose) -> u8&:
-            if purpose == RhScanProcessPurpose.GitClone: "git-clone"
-            elif purpose == RhScanProcessPurpose.GitVersion: "git-version"
-            elif purpose == RhScanProcessPurpose.GitPartial: "git-partial"
-            elif purpose == RhScanProcessPurpose.GitShallow: "git-shallow"
-            elif purpose == RhScanProcessPurpose.GitFiles: "git-files"
-            elif purpose == RhScanProcessPurpose.GitLog: "git-log"
-            elif purpose == RhScanProcessPurpose.GitEmptyCheck: "git-empty-check"
-            elif purpose == RhScanProcessPurpose.GitDefaultCount: "git-default-count"
-            else: "git-refs"
-
-        def rh_process_kind_name(kind: Process::RhProcessKind) -> u8&:
-            if kind == Process::RhProcessKind.Exit: "exit"
-            elif kind == Process::RhProcessKind.Timeout: "timeout"
-            elif kind == Process::RhProcessKind.OutputLimit: "output-limit"
-            elif kind == Process::RhProcessKind.SetupError: "setup-error"
-            elif kind == Process::RhProcessKind.Signal: "signal"
-            elif kind == Process::RhProcessKind.IoError: "io-error"
-            elif kind == Process::RhProcessKind.CapacityLimit: "capacity-limit"
-            else: "resource-limit"
-
-    public:
-        def append_process(rows: mutable darray[u8]&, purpose: RhScanProcessPurpose, result: Process::RhProcessResult) -> void can[Memory.Allocate, Abort.Panic]:
-            Base::rh_push_text(rows, ScanTelemetry::rh_purpose_name(purpose))
-            rows.push(9)
-            Base::rh_push_text(rows, ScanTelemetry::rh_process_kind_name(result.kind))
-            rows.push(9)
-            Base::rh_push_decimal_i64(rows, result.code.i64())
-            rows.push(9)
-            Base::rh_push_decimal_i64(rows, result.elapsed_ms)
-            rows.push(9)
-            Base::rh_push_decimal_i64(rows, result.stdout_bytes.i64())
-            rows.push(9)
-            Base::rh_push_decimal_i64(rows, result.stderr_bytes.i64())
-            rows.push(9)
-            Base::rh_push_decimal_i64(rows, result.peak_group_processes.i64())
-            rows.push(9)
-            Base::rh_push_decimal_u64(rows, result.peak_group_memory_bytes)
-            rows.push(10)
 
 def rh_do_scan(repo: cstr, out: cstr, full: bool, window_days: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     kind: u8 = Git::rh_url_kind(repo)
@@ -868,6 +815,10 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
         Base::rh_push_text(process_metrics_path, "evidence/process-metrics.txt")
         process_metrics_path.push(0)
         process_metrics_ptr: cstr = (&process_metrics_path[0]).cast[cstr] can Unsafe.PointerCast
+        process_metrics_size: i64 = Base::rh_file_size(process_metrics_ptr)
+        if process_metrics_size < 0 or process_metrics_size > ScanTelemetry::RH_MAX_EVIDENCE_BYTES.i64():
+            rh_cli_err("retained process telemetry exceeds its size contract or cannot be read")
+            return 4
         retained_process_metrics: mutable darray[u8] = []
         if Base::rh_io_read(process_metrics_ptr, retained_process_metrics) < 0:
             rh_cli_err("cannot read retained process telemetry evidence")
@@ -879,6 +830,9 @@ def rh_do_replay(bundle: cstr, out: cstr) -> i32 can[Memory.Allocate, Abort.Pani
         if process_metrics_integrity < 0:
             rh_cli_err("retained process telemetry digest mismatch")
             return 5
+        if not ScanTelemetry::valid_evidence(retained_process_metrics):
+            rh_cli_err("invalid retained process telemetry contract")
+            return 4
     shallowpath: mutable darray[u8] = []
     has_shallow_dir: bool = rh_dirname(bundle, shallowpath)
     if has_shallow_dir:

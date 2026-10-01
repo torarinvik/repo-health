@@ -739,6 +739,35 @@ expect 5 "$CLI" replay --bundle "$T/rep-refs-tampered/bundle.manifest" --out "$T
 cp -R "$T/rep-fix2" "$T/rep-process-metrics-tampered"
 printf 'X' >> "$T/rep-process-metrics-tampered/evidence/process-metrics.txt"
 expect 5 "$CLI" replay --bundle "$T/rep-process-metrics-tampered/bundle.manifest" --out "$T/replay-process-metrics-t"
+python3 - "$T/rep-fix2" "$T/rep-process-metrics-invalid" "$T/rep-process-metrics-incomplete" "$T/rep-process-metrics-oversized" <<'PY'
+import hashlib, pathlib, shutil, sys
+source = pathlib.Path(sys.argv[1])
+for target_name, mutation in ((sys.argv[2], "invalid-number"), (sys.argv[3], "missing-required-purpose"), (sys.argv[4], "oversized")):
+    target = pathlib.Path(target_name)
+    shutil.copytree(source, target)
+    evidence_path = target / "evidence/process-metrics.txt"
+    lines = evidence_path.read_text().splitlines(keepends=True)
+    if mutation == "invalid-number":
+        fields = lines[2].rstrip("\n").split("\t")
+        fields[2] = "not-an-integer"
+        lines[2] = "\t".join(fields) + "\n"
+    elif mutation == "missing-required-purpose":
+        lines = [line for line in lines if not line.startswith("git-refs\t")]
+    else:
+        evidence_path.write_bytes(b"x" * 4096)
+    if mutation != "oversized":
+        evidence_path.write_text("".join(lines))
+    manifest_path = target / "bundle.manifest"
+    manifest = manifest_path.read_text()
+    prefix = "object-sha256-evidence/process-metrics.txt: "
+    old = next(line for line in manifest.splitlines() if line.startswith(prefix))
+    digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    manifest_path.write_text(manifest.replace(old, prefix + digest, 1))
+PY
+expect 4 "$CLI" replay --bundle "$T/rep-process-metrics-invalid/bundle.manifest" --out "$T/replay-process-metrics-invalid"
+expect 4 "$CLI" replay --bundle "$T/rep-process-metrics-incomplete/bundle.manifest" --out "$T/replay-process-metrics-incomplete"
+expect 4 "$CLI" replay --bundle "$T/rep-process-metrics-oversized/bundle.manifest" --out "$T/replay-process-metrics-oversized"
+echo "[m01] replay rejects malformed, incomplete, or oversized process telemetry"
 cp -r "$T/rep-fix2" "$T/rep-shallow-tampered"
 printf 'X' >> "$T/rep-shallow-tampered/evidence/git-shallow.txt"
 expect 5 "$CLI" replay --bundle "$T/rep-shallow-tampered/bundle.manifest" --out "$T/replay-shallow-t"

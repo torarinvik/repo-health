@@ -1,0 +1,167 @@
+# Sanitized telemetry for Git scan subprocesses. The report boundary publishes
+# only this closed purpose vocabulary, and replay validates it before trusting
+# the retained rows.
+include "./rh_process.elisa"
+
+module ScanTelemetry:
+    public:
+        const RH_MAX_EVIDENCE_BYTES: usize = 2048
+
+        enum RhScanProcessPurpose:
+            GitClone
+            GitVersion
+            GitPartial
+            GitShallow
+            GitFiles
+            GitLog
+            GitEmptyCheck
+            GitDefaultCount
+            GitRefs
+
+    private:
+        const RH_REQUIRED_PURPOSE_MASK: u16 = 446
+
+        def rh_purpose_name(purpose: RhScanProcessPurpose) -> u8&:
+            if purpose == RhScanProcessPurpose.GitClone: "git-clone"
+            elif purpose == RhScanProcessPurpose.GitVersion: "git-version"
+            elif purpose == RhScanProcessPurpose.GitPartial: "git-partial"
+            elif purpose == RhScanProcessPurpose.GitShallow: "git-shallow"
+            elif purpose == RhScanProcessPurpose.GitFiles: "git-files"
+            elif purpose == RhScanProcessPurpose.GitLog: "git-log"
+            elif purpose == RhScanProcessPurpose.GitEmptyCheck: "git-empty-check"
+            elif purpose == RhScanProcessPurpose.GitDefaultCount: "git-default-count"
+            else: "git-refs"
+
+        def rh_process_kind_name(kind: Process::RhProcessKind) -> u8&:
+            if kind == Process::RhProcessKind.Exit: "exit"
+            elif kind == Process::RhProcessKind.Timeout: "timeout"
+            elif kind == Process::RhProcessKind.OutputLimit: "output-limit"
+            elif kind == Process::RhProcessKind.SetupError: "setup-error"
+            elif kind == Process::RhProcessKind.Signal: "signal"
+            elif kind == Process::RhProcessKind.IoError: "io-error"
+            elif kind == Process::RhProcessKind.CapacityLimit: "capacity-limit"
+            else: "resource-limit"
+
+        def rh_line_end(data: darray[u8]&, start: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while index < data.count |index: usize = start, line_end: i64 = -1| -> line_end:
+                break index.i64() if data[index] == 10
+                index <- index + 1
+
+        def rh_decimal_field_valid(data: darray[u8]&, start: usize, end: usize, allow_negative: bool, maximum: u64, negative_out: mutable bool&, magnitude_out: mutable u64&) -> bool:
+            return false if start >= end
+            negative: mutable bool = false
+            digits_start: mutable usize = start
+            if data[digits_start] == 45:
+                return false if not allow_negative
+                negative <- true
+                digits_start <- digits_start + 1
+            return false if digits_start >= end
+            return false if data[digits_start] == 48 and digits_start + 1 < end
+            return false if negative and end - digits_start == 1 and data[digits_start] == 48
+            magnitude: mutable u64 = 0
+            while index < end |index: usize = digits_start, data, maximum, magnitude|:
+                digit_byte: u8 = data[index]
+                return false if digit_byte < 48 or digit_byte > 57
+                digit: u64 = (digit_byte - 48).u64()
+                return false if digit > maximum
+                return false if magnitude > (maximum - digit) / 10
+                magnitude <- magnitude * 10 + digit
+                index <- index + 1
+            negative_out <- negative
+            magnitude_out <- magnitude
+            true
+
+        def rh_purpose_index(data: darray[u8]&, start: usize, end: usize) -> i64 can[Memory.Allocate, Abort.Panic]:
+            if Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "git-clone"): 0
+            elif Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "git-version"): 1
+            elif Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "git-partial"): 2
+            elif Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "git-shallow"): 3
+            elif Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "git-files"): 4
+            elif Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "git-log"): 5
+            elif Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "git-empty-check"): 6
+            elif Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "git-default-count"): 7
+            elif Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "git-refs"): 8
+            else: -1
+
+        def rh_kind_field_valid(data: darray[u8]&, start: usize, end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "exit")
+            return true if Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "timeout")
+            return true if Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "output-limit")
+            return true if Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "setup-error")
+            return true if Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "signal")
+            return true if Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "io-error")
+            return true if Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "capacity-limit")
+            Base::rh_bytes_equal_literal(data, start.i64(), end.i64(), "resource-limit")
+
+        def rh_field_valid(data: darray[u8]&, start: usize, end: usize, field: usize, purpose_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            if field == 0:
+                purpose_out <- rh_purpose_index(data, start, end)
+                return purpose_out >= 0
+            return rh_kind_field_valid(data, start, end) if field == 1
+            allow_negative: bool = field == 2 or field == 3
+            maximum: u64 =
+                if field == 2: 2147483648
+                elif field == 3: 9223372036854775807
+                else: 18446744073709551615
+            negative: mutable bool = false
+            magnitude: mutable u64 = 0
+            return false if not rh_decimal_field_valid(data, start, end, allow_negative, maximum, &negative, &magnitude)
+            if field == 2:
+                return magnitude <= 2147483648 if negative else magnitude <= 2147483647
+            if field == 3:
+                return magnitude == 1 if negative else true
+            not negative
+
+        def rh_row_valid(data: darray[u8]&, start: usize, end: usize, purpose_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            field: mutable usize = 0
+            field_start: mutable usize = start
+            while cursor <= end |cursor: usize = start, field, field_start, end, data, purpose_out|:
+                if cursor == end or data[cursor] == 9:
+                    return false if field >= 8
+                    return false if not rh_field_valid(data, field_start, cursor, field, purpose_out)
+                    field <- field + 1
+                    field_start <- cursor + 1
+                cursor <- cursor + 1
+            field == 8
+
+    public:
+        def append_process(rows: mutable darray[u8]&, purpose: RhScanProcessPurpose, result: Process::RhProcessResult) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(rows, ScanTelemetry::rh_purpose_name(purpose))
+            rows.push(9)
+            Base::rh_push_text(rows, ScanTelemetry::rh_process_kind_name(result.kind))
+            rows.push(9)
+            Base::rh_push_decimal_i64(rows, result.code.i64())
+            rows.push(9)
+            Base::rh_push_decimal_i64(rows, result.elapsed_ms)
+            rows.push(9)
+            Base::rh_push_decimal_i64(rows, result.stdout_bytes.i64())
+            rows.push(9)
+            Base::rh_push_decimal_i64(rows, result.stderr_bytes.i64())
+            rows.push(9)
+            Base::rh_push_decimal_i64(rows, result.peak_group_processes.i64())
+            rows.push(9)
+            Base::rh_push_decimal_u64(rows, result.peak_group_memory_bytes)
+            rows.push(10)
+
+        def valid_evidence(data: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if data.count > RH_MAX_EVIDENCE_BYTES
+            header_end: i64 = ScanTelemetry::rh_line_end(data, 0)
+            return false if header_end < 0 or not Base::rh_bytes_equal_literal(data, 0, header_end, "rh-process-telemetry/1")
+            columns_start: usize = (header_end + 1).usize()
+            columns_end: i64 = ScanTelemetry::rh_line_end(data, columns_start)
+            return false if columns_end < 0 or not Base::rh_bytes_equal_literal(data, columns_start.i64(), columns_end, "purpose\tkind\tcode\telapsed_ms\tstdout_bytes\tstderr_bytes\tpeak_processes\tpeak_memory_bytes")
+            seen_purposes: mutable u16 = 0
+            previous_purpose: mutable i64 = -1
+            row_start: mutable usize = (columns_end + 1).usize()
+            while row_start < data.count |row_start, data, seen_purposes, previous_purpose|:
+                row_end: i64 = ScanTelemetry::rh_line_end(data, row_start)
+                return false if row_end < 0 or row_end.usize() == row_start
+                purpose: mutable i64 = -1
+                return false if not ScanTelemetry::rh_row_valid(data, row_start, row_end.usize(), &purpose)
+                return false if purpose <= previous_purpose
+                purpose_bit: u16 = (1 << purpose.usize()).u16()
+                return false if (seen_purposes & purpose_bit) != 0
+                seen_purposes <- seen_purposes | purpose_bit
+                previous_purpose <- purpose
+                row_start <- (row_end + 1).usize()
+            (seen_purposes & RH_REQUIRED_PURPOSE_MASK) == RH_REQUIRED_PURPOSE_MASK
