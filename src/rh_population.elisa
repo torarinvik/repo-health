@@ -304,7 +304,7 @@ module Population:
                 child <- nodes[child.usize()].next_sibling
             out.push(93)
 
-        def rh_population_project_identities(raw: darray[u8]&, nodes_out: mutable darray[Json::RhJsonNode]&, texts_out: mutable darray[u8]&, identities_out: mutable darray[RhPopulationProjectIdentity]&, revision_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_population_project_identities(raw: darray[u8]&, nodes_out: mutable darray[Json::RhJsonNode]&, texts_out: mutable darray[u8]&, identities_out: mutable darray[RhPopulationProjectIdentity]&, node_ids_out: mutable darray[i64]&, node_slots_out: mutable darray[i64]&, identity_indices_out: mutable darray[i64]&, revision_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             root: i64 = Json::rh_json_parse(raw, nodes_out, texts_out)
             return false if root < 0 or not Population::rh_population_unique_object_keys(nodes_out, texts_out, root)
             schema_s: mutable i64 = 0
@@ -314,6 +314,7 @@ module Population:
             transitive: i64 = Population::rh_population_get(nodes_out, texts_out, root, "transitive")
             identity_obj: i64 = Population::rh_population_get(nodes_out, texts_out, root, "project_identities")
             return false if transitive < 0 or nodes_out[transitive.usize()].kind != Json::RH_JSON_ARR or identity_obj < 0
+            return false if nodes_out[transitive.usize()].child_count > RH_POP_MAX_DEPENDENTS
             return false if not Population::rh_population_unique_object_keys(nodes_out, texts_out, identity_obj)
             revision_ok: mutable i64 = 0
             revision_out[0] <- Population::rh_population_int(nodes_out, raw, texts_out, identity_obj, "revision", &revision_ok)
@@ -322,28 +323,28 @@ module Population:
             return false if items < 0 or nodes_out[items.usize()].kind != Json::RH_JSON_ARR
             coverage: i64 = Population::rh_population_get(nodes_out, texts_out, identity_obj, "coverage")
             return false if coverage < 0 or not Population::rh_population_unique_object_keys(nodes_out, texts_out, coverage)
-            transitive_ids: mutable darray[i64] = []
-            while candidate >= 0 |candidate: i64 = nodes_out[transitive.usize()].first_child, nodes_out, texts_out, raw, transitive_ids|:
+            node_ids_out <- []
+            node_slots_out <- Population::rh_population_node_index_table(nodes_out[transitive.usize()].child_count)
+            while candidate >= 0 |candidate: i64 = nodes_out[transitive.usize()].first_child, nodes_out, texts_out, raw, node_ids_out, node_slots_out|:
                 return false if not Population::rh_population_unique_object_keys(nodes_out, texts_out, candidate)
                 candidate_id: i64 = Population::rh_population_get(nodes_out, texts_out, candidate, "id")
                 candidate_ok: mutable i64 = 0
                 parsed_id: i64 = Json::rh_json_int(nodes_out, raw, candidate_id, &candidate_ok)
                 return false if candidate_ok != 1 or parsed_id < 0
-                while prior < transitive_ids.count |prior: usize = 0, transitive_ids, parsed_id|:
-                    return false if transitive_ids[prior] == parsed_id
-                    prior <- prior + 1
-                transitive_ids.push(parsed_id)
+                return false if not Population::rh_population_node_insert(node_ids_out, node_slots_out, parsed_id)
                 candidate <- nodes_out[candidate.usize()].next_sibling
+            identity_indices_out <- []
+            while i < node_ids_out.count |i: usize = 0, node_ids_out, identity_indices_out|:
+                identity_indices_out.push(-1)
+                i <- i + 1
             accepted_count: mutable i64 = 0
-            while row >= 0 |row: i64 = nodes_out[items.usize()].first_child, nodes_out, texts_out, raw, identities_out, transitive_ids, accepted_count|:
+            while row >= 0 |row: i64 = nodes_out[items.usize()].first_child, nodes_out, texts_out, raw, identities_out, node_ids_out, node_slots_out, identity_indices_out, accepted_count|:
                 return false if not Population::rh_population_unique_object_keys(nodes_out, texts_out, row)
                 id_ok: mutable i64 = 0
                 graph_node_id: i64 = Population::rh_population_int(nodes_out, raw, texts_out, row, "graph_node_id", &id_ok)
                 return false if id_ok != 1 or graph_node_id < 0
-                return false if not Population::rh_population_seen_i64(transitive_ids, graph_node_id)
-                while prior < identities_out.count |prior: usize = 0, identities_out, graph_node_id|:
-                    return false if identities_out[prior].graph_node_id == graph_node_id
-                    prior <- prior + 1
+                transitive_index: i64 = Population::rh_population_node_index(node_ids_out, node_slots_out, graph_node_id)
+                return false if transitive_index < 0 or identity_indices_out[transitive_index.usize()] >= 0
                 status_s: mutable i64 = 0
                 status_e: mutable i64 = 0
                 return false if not Population::rh_population_str(nodes_out, texts_out, row, "mapping_status", &status_s, &status_e)
@@ -363,9 +364,10 @@ module Population:
                     accepted_count <- accepted_count + 1
                 else:
                     return false if not Population::rh_population_all_null(nodes_out, texts_out, row, "project_id") or not Population::rh_population_all_null(nodes_out, texts_out, row, "family_id") or not Population::rh_population_all_null(nodes_out, texts_out, row, "reviewer_id") or not Population::rh_population_all_null(nodes_out, texts_out, row, "reviewed_at") or not Population::rh_population_all_null(nodes_out, texts_out, row, "evidence_sha256")
+                identity_indices_out[transitive_index.usize()] <- identities_out.count.i64()
                 identities_out.push(identity)
                 row <- nodes_out[row.usize()].next_sibling
-            return false if identities_out.count != transitive_ids.count
+            return false if identities_out.count != node_ids_out.count
             selected_ok: mutable i64 = 0
             selected: i64 = Population::rh_population_int(nodes_out, raw, texts_out, coverage, "selected", &selected_ok)
             accepted_ok: mutable i64 = 0
@@ -373,7 +375,7 @@ module Population:
             unknown_ok: mutable i64 = 0
             unknown: i64 = Population::rh_population_int(nodes_out, raw, texts_out, coverage, "unknown", &unknown_ok)
             return false if selected_ok != 1 or accepted_ok != 1 or unknown_ok != 1
-            return false if selected != transitive_ids.count.i64() or accepted != accepted_count or unknown != selected - accepted
+            return false if selected != node_ids_out.count.i64() or accepted != accepted_count or unknown != selected - accepted
             true
 
         def rh_population_hex_sha256(texts: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -385,21 +387,55 @@ module Population:
                 i <- i + 1
             true
 
-        def rh_population_seen_i64(values: darray[i64]&, value: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            while i < values.count |i: usize = 0, values, value|:
-                return true if values[i] == value
+        def rh_population_node_index_table(count: usize) -> mutable darray[i64] can[Memory.Allocate, Abort.Panic]:
+            slots: mutable darray[i64] = []
+            capacity: usize = count * 2 + 1
+            while i < capacity |i: usize = 0, capacity, slots|:
+                slots.push(-1)
                 i <- i + 1
+            slots
+
+        def rh_population_node_index(node_ids: darray[i64]&, slots: darray[i64]&, node_id: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if node_id < 0 or slots.count == 0
+            slot: mutable usize = Population::rh_population_node_hash(node_id, slots.count)
+            while probe < slots.count |probe: usize = 0, slot, node_ids, slots, node_id|:
+                node_index: i64 = slots[slot]
+                return -1 if node_index < 0
+                return node_index if node_ids[node_index.usize()] == node_id
+                slot <- (slot + 1) % slots.count
+                probe <- probe + 1
+            -1
+
+        def rh_population_node_insert(node_ids: mutable darray[i64]&, slots: mutable darray[i64]&, node_id: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if node_id < 0 or slots.count == 0
+            slot: mutable usize = Population::rh_population_node_hash(node_id, slots.count)
+            while probe < slots.count |probe: usize = 0, slot, node_ids, slots, node_id|:
+                node_index: i64 = slots[slot]
+                if node_index < 0:
+                    node_ids.push(node_id)
+                    slots[slot] <- node_ids.count.i64() - 1
+                    return true
+                return false if node_ids[node_index.usize()] == node_id
+                slot <- (slot + 1) % slots.count
+                probe <- probe + 1
             false
+
+        def rh_population_node_hash(node_id: i64, capacity: usize) -> usize:
+            value: mutable usize = node_id.usize()
+            hash: mutable usize = 0
+            while value > 0 |value, hash, capacity|:
+                hash <- (hash * 31 + value % 10) % capacity
+                value <- value / 10
+            hash
 
         def rh_population_all_null(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             value: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
             value >= 0 and nodes[value.usize()].kind == Json::RH_JSON_NULL
 
-        def rh_population_identity_index(identities: darray[RhPopulationProjectIdentity]&, graph_node_id: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while i < identities.count |i: usize = 0, identities, graph_node_id|:
-                return i.i64() if identities[i].graph_node_id == graph_node_id
-                i <- i + 1
-            -1
+        def rh_population_identity_index(node_ids: darray[i64]&, slots: darray[i64]&, identity_indices: darray[i64]&, graph_node_id: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            node_index: i64 = Population::rh_population_node_index(node_ids, slots, graph_node_id)
+            return -1 if node_index < 0
+            identity_indices[node_index.usize()]
 
         def rh_population_canonical_family_seen(dependents: darray[RhPopulationDependent]&, identities: darray[RhPopulationProjectIdentity]&, identity_texts: darray[u8]&, identity_index: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             current: RhPopulationProjectIdentity = identities[identity_index.usize()]
@@ -416,9 +452,12 @@ module Population:
             identity_nodes: mutable darray[Json::RhJsonNode] = []
             identity_texts: mutable darray[u8] = []
             identities: mutable darray[RhPopulationProjectIdentity] = []
+            project_node_ids: mutable darray[i64] = []
+            project_node_slots: mutable darray[i64] = []
+            identity_indices: mutable darray[i64] = []
             identity_revision: mutable i64 = 0
             if has_downstream:
-                return -1 if not Population::rh_population_project_identities(downstream_raw, identity_nodes, identity_texts, identities, &identity_revision)
+                return -1 if not Population::rh_population_project_identities(downstream_raw, identity_nodes, identity_texts, identities, project_node_ids, project_node_slots, identity_indices, &identity_revision)
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -530,8 +569,12 @@ module Population:
             ratio_unknown_dependents: mutable darray[i64] = []
             ratio_not_applicable_dependents: mutable darray[i64] = []
             metric_cell_indices: mutable darray[i64] = []
+            identity_selected: mutable darray[bool] = []
             identity_accepted: mutable i64 = 0
             canonical_family_count: mutable i64 = 0
+            while i < identities.count |i: usize = 0, identities, identity_selected|:
+                identity_selected.push(false)
+                i <- i + 1
             while i < metrics.count |i: usize = 0, metrics, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown|:
                 observed.push(0)
                 partial.push(0)
@@ -554,7 +597,7 @@ module Population:
             while i < metrics.count |i: usize = 0, metrics, metric_cell_indices|:
                 metric_cell_indices.push(-1)
                 i <- i + 1
-            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, metric_cell_indices, families_s, families_e, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, ratios, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, has_downstream, identity_accepted, identities, identity_texts, canonical_family_count|:
+            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, metric_cell_indices, families_s, families_e, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, ratios, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, has_downstream, identity_accepted, identities, identity_texts, project_node_ids, project_node_slots, identity_indices, identity_selected, canonical_family_count|:
                 return -1 if not Population::rh_population_unique_object_keys(nodes, texts, dep)
                 ids: mutable i64 = 0
                 ide: mutable i64 = 0
@@ -574,15 +617,14 @@ module Population:
                     graph_node_ok: mutable i64 = 0
                     graph_node_id <- Population::rh_population_int(nodes, raw, texts, dep, "graph_node_id", &graph_node_ok)
                     return -1 if graph_node_ok != 1 or graph_node_id < 0
-                    identity_index <- Population::rh_population_identity_index(identities, graph_node_id)
+                    identity_index <- Population::rh_population_identity_index(project_node_ids, project_node_slots, identity_indices, graph_node_id)
                     return -1 if identity_index < 0
+                    return -1 if identity_selected[identity_index.usize()]
+                    identity_selected[identity_index.usize()] <- true
                     return -1 if identities[identity_index.usize()].accepted and identity_accepted == 9223372036854775807
                     identity_accepted <- identity_accepted + 1 if identities[identity_index.usize()].accepted
                     if identities[identity_index.usize()].accepted and not Population::rh_population_canonical_family_seen(dependents, identities, identity_texts, identity_index):
                         canonical_family_count <- canonical_family_count + 1
-                    while prior < dependents.count |prior: usize = 0, dependents, graph_node_id|:
-                        return -1 if dependents[prior].graph_node_id == graph_node_id
-                        prior <- prior + 1
                 package_count: mutable i64 = 1
                 published_idx: i64 = Population::rh_population_get(nodes, texts, dep, "published_packages")
                 if published_idx >= 0:

@@ -686,6 +686,14 @@ Each downstream report now has a transformation sidecar binding the exact
 graph, optional intrinsic/mapping documents, manual assertions, private-node
 exclusions, and projection/resource configuration to the report bytes; the
 CLI test independently checks those digests and the selected output schema.
+The population identity join also uses a bounded collision-checked node-ID
+index to validate selected candidates and mapping rows, then resolves each
+dependent and rejects duplicate selections by direct indexed lookup. Its CLI
+oracle includes deliberate numeric hash collisions, an unknown mapping, and a
+duplicate node row. Ratio aggregation similarly indexes each dependent's
+metric cells once, so shuffled cells and multiple pooled definitions retain
+the same exact values and coverage. These bounded computation changes leave
+full metric semantics and linked-review source completeness open.
 
 **M06 scope (in progress):** implemented — four-valued policy evaluator
 with an explicit lattice (deny > unknown > warn > allow) so unknown can

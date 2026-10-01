@@ -193,16 +193,23 @@ print("[population] multiple ratio definitions resolve shuffled metric cells wit
 PY
 
 echo "[population] join reviewed project identities from the selected graph population"
-cat > "$T/graph.json" <<'JSON'
-{"schema":"rh-dep-graph/1","ecosystem":"test","nodes":[{"id":0,"name":"acme-core","version":"1.2.0"},{"id":1,"name":"consumer-a","version":"1"},{"id":2,"name":"consumer-b","version":"1"},{"id":3,"name":"consumer-c","version":"1"}],"edges":[{"from":1,"to":0,"scope":"normal"},{"from":2,"to":0,"scope":"normal"},{"from":3,"to":0,"scope":"normal"}],"unresolved":[],"advisories":[]}
-JSON
+python3 - "$T/graph.json" <<'PY'
+import json, sys
+document = {
+    "schema":"rh-dep-graph/1", "ecosystem":"test",
+    "nodes":[{"id":i,"name":"acme-core" if i == 0 else f"consumer-{i}","version":"1.2.0" if i == 0 else "1"} for i in range(16)],
+    "edges":[{"from":i,"to":0,"scope":"normal"} for i in (1, 8, 15)],
+    "unresolved":[], "advisories":[],
+}
+json.dump(document, open(sys.argv[1], "w"), separators=(",", ":"))
+PY
 python3 - "$T/graph.json" "$T/project-map.json" <<'PY'
 import hashlib, json, sys
 graph = open(sys.argv[1], "rb").read()
 doc = {"schema":"rh-project-node-map-input/1", "graph_sha256":hashlib.sha256(graph).hexdigest(), "revision":21,
        "mappings":[
            {"node_id":1,"project_id":"forge:acme/repo-a","family_id":"canonical-family-a","state":"accepted","reviewer_id":91,"reviewed_at":1700000000,"evidence_sha256":"a"*64},
-           {"node_id":3,"project_id":"forge:acme/repo-c","family_id":"canonical-family-a","state":"accepted","reviewer_id":92,"reviewed_at":1700000000,"evidence_sha256":"b"*64},
+           {"node_id":15,"project_id":"forge:acme/repo-c","family_id":"canonical-family-a","state":"accepted","reviewer_id":92,"reviewed_at":1700000000,"evidence_sha256":"b"*64},
        ]}
 json.dump(doc, open(sys.argv[2], "w"), separators=(",", ":"))
 PY
@@ -210,7 +217,7 @@ PY
 python3 - "$T/in.json" "$T/identity-in.json" <<'PY'
 import json, sys
 doc = json.load(open(sys.argv[1]))
-for dependent, graph_node_id in zip(doc["dependents"], [1, 2, 3]):
+for dependent, graph_node_id in zip(doc["dependents"], [1, 8, 15]):
     dependent["graph_node_id"] = graph_node_id
 json.dump(doc, open(sys.argv[2], "w"), separators=(",", ":"))
 PY
@@ -223,8 +230,8 @@ assert result["schema"] == "rh-population-result/4", result
 assert result["project_identity_mapping"] == {"revision":21,"selected":3,"accepted":2,"unknown":1,"distinct_accepted_families":1}, result
 rows = {row["graph_node_id"]: row["project_identity"] for row in result["dependents"]}
 assert rows[1]["project_id"] == "forge:acme/repo-a" and rows[1]["reviewer_id"] == 91, rows
-assert rows[2]["mapping_status"] == "unknown" and rows[2]["project_id"] is None, rows
-assert rows[3]["family_id"] == "canonical-family-a" and rows[3]["evidence_sha256"] == "b"*64, rows
+assert rows[8]["mapping_status"] == "unknown" and rows[8]["project_id"] is None, rows
+assert rows[15]["family_id"] == "canonical-family-a" and rows[15]["evidence_sha256"] == "b"*64, rows
 sidecar = json.loads(pathlib.Path(str(output)+".transformations.json").read_bytes())
 population_raw, downstream_raw = population.read_bytes(), downstream.read_bytes()
 framed = (b"rh-population-identity-input/1\npopulation:" + str(len(population_raw)).encode() + b":" + population_raw
