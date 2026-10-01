@@ -19,8 +19,8 @@ cp "$ROOT/fixtures/packages/cargo-graph.golden.json" "$T/native.json"
 echo "[parser-diff] equal snapshots match"
 "$ROOT/build/rh_cli" parser-diff --native "$T/native.json" --candidate "$T/native.json" --out "$T/match.json" \
   --native-parser native-lock/1 --candidate-parser alt-lock/2 --config cargo-default --visibility public >/dev/null || fail "equal diff"
-python3 - "$T/match.json" <<'PY'
-import hashlib, json, sys
+python3 - "$T/match.json" "$ROOT" <<'PY'
+import glob, hashlib, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-parser-diff/1" and d["status"] == "match", d
 assert d["summary"] == {"mismatches": 0, "mapping": 0, "context": 0, "parser_support": 0, "normalization": 0}, d["summary"]
@@ -28,10 +28,35 @@ metrics = {m["key"]: m for m in d["metrics"]}
 assert metrics["coverage.parser_error_count"]["value"] == 0, metrics
 assert metrics["coverage.mapping_conflict_count"]["value"] == 0, metrics
 assert set(metrics) == {"coverage.parser_error_count", "coverage.mapping_conflict_count"}, metrics
+definitions = {}
+for path in glob.glob(sys.argv[2] + "/metrics/definitions/*.json"):
+  definition = json.load(open(path))
+  definitions[(definition["key"], definition["version"])] = definition
+expected = {
+  "coverage.parser_error_count": (
+    ["native_dependency_graph", "candidate_dependency_graph"],
+    "records",
+    "none; parser-support mismatches retained by the selected differential run"),
+  "coverage.mapping_conflict_count": (
+    ["native_dependency_graph", "candidate_dependency_graph"],
+    "assertions",
+    "none; unmatched package, edge, or unresolved identities in the selected differential run"),
+}
 for metric in metrics.values():
+  key = metric["key"]
+  definition = definitions[(key, metric["version"])]
+  inputs, unit, denominator = expected[key]
+  assert definition["implementation_status"] == "implemented", (key, definition)
+  assert definition["subject_kind"] == "project", (key, definition)
+  assert definition["source_requirements"] == ["parser-diff"], (key, definition["source_requirements"])
+  assert definition["inputs"] == inputs, (key, definition["inputs"])
+  assert definition["output"] == {"type": "integer", "unit": unit}, (key, definition["output"])
+  assert definition["denominator_rule"] == denominator, (key, definition["denominator_rule"])
   assert metric["status"] == "observed", metric
+  assert type(metric["value"]) is int and metric["value"] >= 0, metric
   assert metric["evidence"] == ["parser-diff"], metric
   assert metric["quality_dimensions"] == {"completeness":"complete", "freshness":"unknown", "validity":"valid", "provenance":"evidence_backed"}, metric
+print("[parser-diff] both emitted metric rows match catalog subjects, sources, inputs, types, units, and denominators")
 assert d["parsers"] == {"native": "native-lock/1", "candidate": "alt-lock/2", "configuration": "cargo-default", "visibility": "public"}, d["parsers"]
 assert len(d["cache_key"]) == 16, d
 report = json.load(open(sys.argv[1] + ".transformations.json"))
