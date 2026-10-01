@@ -18,7 +18,7 @@ JSON
 python3 - "$T/out.json" "$T/in.json" <<'PY'
 import hashlib, json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema"] == "rh-population-result/3", d
+assert d["schema"] == "rh-population-result/4", d
 assert d["discovery"]["truncated"] is True and d["discovery"]["page_limit"] == 100, d
 assert d["discovery"]["context"] == "cargo registry snapshot; focal release 1.2.0", d
 assert d["discovery"]["provider_status"] == "rate_limit" and d["discovery"]["replay_attempts"] == 2, d
@@ -98,10 +98,49 @@ d = json.load(open(sys.argv[1]))
 ratio, = d["ratio_metrics"]
 assert ratio["key"] == "maintainer.linked_merge_review_coverage", ratio
 assert ratio["status"] == "partial", ratio
-assert ratio["numerator_count"] == 3 and ratio["denominator_count"] == 4 and ratio["ratio"] == {"num":3,"den":4}, ratio
+assert ratio["numerator_count"] == 3 and ratio["denominator_count"] == 4, ratio
+assert ratio["value"] == {"num":3,"den":4} and ratio["ratio"] == ratio["value"], ratio
+assert ratio["evidence"] == ["population-input"] and ratio["quality_dimensions"] == {
+    "completeness":"partial", "freshness":"unknown", "validity":"valid", "provenance":"evidence_backed"}, ratio
 assert ratio["coverage"] == {"observed_dependents":2,"not_applicable_dependents":0,"unknown_dependents":1,"selected_dependents":3}, ratio
 assert ratio["basis"] == "pooled-configured-count-pairs-over-selected-dependents", ratio
 print("[population] pooled exact ratio retains linked-change denominator and selected-population coverage")
+PY
+
+echo "[population] pooled ratio states retain typed values and explicit absence"
+python3 - "$T/ratio.json" "$T/ratio-observed.json" "$T/ratio-not-applicable.json" "$T/ratio-not-observed.json" <<'PY'
+import copy, json, sys
+source = json.load(open(sys.argv[1]))
+pairs = ((1, 1), (0, 0), (2, 3))
+for path, values in zip(sys.argv[2:], (pairs, ((0, 0),) * 3, ((None, None),) * 3)):
+    document = copy.deepcopy(source)
+    for dependent, pair in zip(document["dependents"], values):
+        rows = {row["key"]: row for row in dependent["metrics"]}
+        unavailable = pair[0] is None
+        for key, value in zip(("maintainer.reviewed_merge_change_count", "maintainer.linked_merge_change_count"), pair):
+            rows[key]["status"] = "unknown" if unavailable else "observed"
+            rows[key]["value"] = value
+    json.dump(document, open(path, "w"), separators=(",", ":"))
+PY
+for state in observed not-applicable not-observed; do
+  "$ROOT/build/rh_cli" population --input "$T/ratio-$state.json" --out "$T/ratio-$state-out.json" >/dev/null || fail "population ratio $state state"
+done
+python3 - "$T" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for state, expected_status, expected_value, expected_reason in (
+    ("observed", "observed", {"num": 3, "den": 4}, None),
+    ("not-applicable", "not_applicable", None, "population-ratio-no-positive-denominator"),
+    ("not-observed", "not_observed", None, "population-ratio-no-known-denominator"),
+):
+    document = json.loads((root / f"ratio-{state}-out.json").read_bytes())
+    row, = document["ratio_metrics"]
+    assert row["status"] == expected_status and row["value"] == expected_value and row["ratio"] == expected_value, row
+    if expected_reason:
+        assert row["reason"] == expected_reason, row
+    assert row["evidence"] == ["population-input"], row
+    assert row["quality_dimensions"]["completeness"] == ("complete" if expected_status == "observed" else "unknown"), row
+print("[population] observed, not-applicable, and not-observed pooled ratios OK")
 PY
 
 echo "[population] join reviewed project identities from the selected graph population"
@@ -131,7 +170,7 @@ python3 - "$T/identity-in.json" "$T/downstream/downstream.json" "$T/identity-out
 import hashlib, json, pathlib, sys
 population, downstream, output = [pathlib.Path(path) for path in sys.argv[1:]]
 result = json.loads(output.read_bytes())
-assert result["schema"] == "rh-population-result/3", result
+assert result["schema"] == "rh-population-result/4", result
 assert result["project_identity_mapping"] == {"revision":21,"selected":3,"accepted":2,"unknown":1,"distinct_accepted_families":1}, result
 rows = {row["graph_node_id"]: row["project_identity"] for row in result["dependents"]}
 assert rows[1]["project_id"] == "forge:acme/repo-a" and rows[1]["reviewer_id"] == 91, rows
@@ -143,7 +182,7 @@ framed = (b"rh-population-identity-input/1\npopulation:" + str(len(population_ra
           + b"\ndownstream:" + str(len(downstream_raw)).encode() + b":" + downstream_raw)
 assert sidecar["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), sidecar
 assert sidecar["normalized_output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest(), sidecar
-assert sidecar["output_schema"] == "rh-population-result/3", sidecar
+assert sidecar["output_schema"] == "rh-population-result/4", sidecar
 assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/focal-library-population/4;dependents=1000;unresolved=1000;metrics=63;ratio-definitions=pooled-count-pairs;identity-join=true").hexdigest(), sidecar
 print("[population] canonical identity, unknown coverage, and input binding OK")
 PY

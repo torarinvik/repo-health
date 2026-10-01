@@ -157,12 +157,13 @@ echo "[schemas] policy observed and not-applicable values are constrained"
 echo "[schemas] population cells constrain observation value and quality states"
 population_negative="$ROOT/fixtures/population/result-negative.json"
 for invalid in unknown-value partial-quality; do
-  python3 - "$ROOT/fixtures/population/result.json" "$population_negative" "$invalid" <<'PY'
+  python3 - "$ROOT/fixtures/population/result-ratio.json" "$population_negative" "$invalid" <<'PY'
 import json, sys
 document = json.load(open(sys.argv[1]))
-cell = document["dependents"][0]["metrics"][1] if sys.argv[3] == "unknown-value" else document["dependents"][1]["metrics"][0]
+cell = document["ratio_metrics"][0]
 if sys.argv[3] == "unknown-value":
-    cell["value"] = 1
+    cell["status"] = "not_observed"
+    cell["reason"] = "population-ratio-no-known-denominator"
 else:
     cell["quality_dimensions"]["completeness"] = "complete"
 json.dump(document, open(sys.argv[2], "w"), separators=(",", ":"))

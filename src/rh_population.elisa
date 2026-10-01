@@ -193,6 +193,48 @@ module Population:
             Base::rh_push_text(out, "\"}")
             true
 
+        def rh_population_emit_ratio_metric(out: mutable darray[u8]&, texts: darray[u8]&, ratio: RhPopulationRatio, numerator: i64, denominator: i64, observed_dependents: i64, not_applicable_dependents: i64, unknown_dependents: i64, selected_dependents: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if numerator < 0 or denominator < 0 or numerator > denominator
+            has_value: bool = denominator > 0
+            emitted: bool =
+                incomplete: bool = has_value and unknown_dependents > 0
+                observation_status: u8 = Observation::RH_ST_OBSERVED if has_value and not incomplete else Observation::RH_ST_PARTIAL if incomplete else Observation::RH_ST_NOT_APPLICABLE if unknown_dependents == 0 else Observation::RH_ST_NOT_OBSERVED
+                observation_value: Observation::RhMetricValue = Observation::RhMetricValue.Ratio(numerator, denominator) if has_value else Observation::RhMetricValue.Absent
+                observation_completeness: Observation::RhCompleteness = Observation::RhCompleteness.Complete if has_value and not incomplete else Observation::RhCompleteness.Partial if incomplete else Observation::RhCompleteness.Unknown
+                observation_validity: Observation::RhValidity = Observation::RhValidity.Valid if has_value else Observation::RhValidity.Unknown
+                observation_quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{completeness: observation_completeness, freshness: Observation::RhFreshness.Unknown, validity: observation_validity, provenance: Observation::RhProvenanceQuality.EvidenceBacked}
+                observation_evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty()
+                Observation::rh_evidence_links_push(&observation_evidence, Observation::RhEvidenceObject.PopulationInput)
+                observation_reason: cstr = "population-ratio-unknown-dependents" if incomplete else "population-ratio-no-positive-denominator" if unknown_dependents == 0 else "population-ratio-no-known-denominator"
+                observation: Observation::RhObservation = Observation::rh_observation_make_with_evidence(observation_status, observation_value, incomplete, observation_quality, observation_evidence)
+                key: sview = string_view_slice(bytes_view(texts), ratio.key_s.usize(), ratio.key_e.usize())
+                version: sview = string_view_slice(bytes_view(texts), ratio.version_s.usize(), ratio.version_e.usize())
+                Observation::rh_observation_emit_metric_views(out, key, version, observation_reason, observation)
+            return false if not emitted
+            out.pop()
+            Base::rh_push_text(out, ",\"numerator_count\":")
+            Base::rh_push_decimal_i64(out, numerator)
+            Base::rh_push_text(out, ",\"denominator_count\":")
+            Base::rh_push_decimal_i64(out, denominator)
+            Base::rh_push_text(out, ",\"ratio\":")
+            Base::rh_push_text(out, "null") if not has_value
+            if has_value:
+                Base::rh_push_text(out, "{\"num\":")
+                Base::rh_push_decimal_i64(out, numerator)
+                Base::rh_push_text(out, ",\"den\":")
+                Base::rh_push_decimal_i64(out, denominator)
+                out.push(125)
+            Base::rh_push_text(out, ",\"coverage\":{\"observed_dependents\":")
+            Base::rh_push_decimal_i64(out, observed_dependents)
+            Base::rh_push_text(out, ",\"not_applicable_dependents\":")
+            Base::rh_push_decimal_i64(out, not_applicable_dependents)
+            Base::rh_push_text(out, ",\"unknown_dependents\":")
+            Base::rh_push_decimal_i64(out, unknown_dependents)
+            Base::rh_push_text(out, ",\"selected_dependents\":")
+            Base::rh_push_decimal_i64(out, selected_dependents)
+            Base::rh_push_text(out, "},\"basis\":\"pooled-configured-count-pairs-over-selected-dependents\"}")
+            true
+
         def rh_population_metric_index(metrics: darray[RhPopulationMetric]&, texts: darray[u8]&, key_s: i64, key_e: i64, version_s: i64, version_e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             while i < metrics.count |i: usize = 0, metrics, texts, key_s, key_e, version_s, version_e|:
                 m: RhPopulationMetric = metrics[i]
@@ -642,7 +684,7 @@ module Population:
                 reason_e: mutable i64 = 0
                 return -1 if not Population::rh_population_str(nodes, texts, unresolved, "package", &us, &ue) or not Population::rh_population_str(nodes, texts, unresolved, "reason", &reason_s, &reason_e) or us == ue or reason_s == reason_e
                 unresolved <- nodes[unresolved.usize()].next_sibling
-            Base::rh_push_text(out, "{\"schema\":\"rh-population-result/3\",\"focal\":{\"package\":")
+            Base::rh_push_text(out, "{\"schema\":\"rh-population-result/4\",\"focal\":{\"package\":")
             Population::rh_population_emit_span(out, texts, focal_s, focal_e)
             Base::rh_push_text(out, ",\"version_policy\":")
             Population::rh_population_emit_span(out, texts, policy_s, policy_e)
@@ -790,34 +832,7 @@ module Population:
                 if i > 0:
                     out.push(44)
                 ratio: RhPopulationRatio = ratios[i]
-                Base::rh_push_text(out, "{\"key\":")
-                Population::rh_population_emit_span(out, texts, ratio.key_s, ratio.key_e)
-                Base::rh_push_text(out, ",\"version\":")
-                Population::rh_population_emit_span(out, texts, ratio.version_s, ratio.version_e)
-                Base::rh_push_text(out, ",\"status\":\"")
-                Base::rh_push_text(out, "partial") if ratio_unknown_dependents[i] > 0 and ratio_denominator_sums[i] > 0
-                Base::rh_push_text(out, "observed") if ratio_unknown_dependents[i] == 0 and ratio_denominator_sums[i] > 0
-                Base::rh_push_text(out, "not_applicable") if ratio_denominator_sums[i] == 0 and ratio_unknown_dependents[i] == 0
-                Base::rh_push_text(out, "unknown") if ratio_unknown_dependents[i] > 0 and ratio_denominator_sums[i] == 0
-                Base::rh_push_text(out, "\",\"numerator_count\":")
-                Base::rh_push_decimal_i64(out, ratio_numerator_sums[i])
-                Base::rh_push_text(out, ",\"denominator_count\":")
-                Base::rh_push_decimal_i64(out, ratio_denominator_sums[i])
-                Base::rh_push_text(out, ",\"ratio\":{\"num\":") if ratio_denominator_sums[i] > 0
-                Base::rh_push_decimal_i64(out, ratio_numerator_sums[i]) if ratio_denominator_sums[i] > 0
-                Base::rh_push_text(out, ",\"den\":") if ratio_denominator_sums[i] > 0
-                Base::rh_push_decimal_i64(out, ratio_denominator_sums[i]) if ratio_denominator_sums[i] > 0
-                Base::rh_push_text(out, "}") if ratio_denominator_sums[i] > 0
-                Base::rh_push_text(out, "null") if ratio_denominator_sums[i] == 0
-                Base::rh_push_text(out, ",\"coverage\":{\"observed_dependents\":")
-                Base::rh_push_decimal_i64(out, ratio_observed_dependents[i])
-                Base::rh_push_text(out, ",\"not_applicable_dependents\":")
-                Base::rh_push_decimal_i64(out, ratio_not_applicable_dependents[i])
-                Base::rh_push_text(out, ",\"unknown_dependents\":")
-                Base::rh_push_decimal_i64(out, ratio_unknown_dependents[i])
-                Base::rh_push_text(out, ",\"selected_dependents\":")
-                Base::rh_push_decimal_i64(out, dependents.count.i64())
-                Base::rh_push_text(out, "},\"basis\":\"pooled-configured-count-pairs-over-selected-dependents\"}")
+                return -1 if not Population::rh_population_emit_ratio_metric(out, texts, ratio, ratio_numerator_sums[i], ratio_denominator_sums[i], ratio_observed_dependents[i], ratio_not_applicable_dependents[i], ratio_unknown_dependents[i], dependents.count.i64())
                 i <- i + 1
             Base::rh_push_text(out, "],\"note\":\"selected dependent population counts projects once even when a repository publishes several packages; provider caps and unresolved mappings remain visible; intrinsic metrics are independent evidence; unknown values are not imputed as zero; path witnesses identify the qualifying package context; configured ratios pool exact count pairs only over observed selected dependents\"}")
             0
