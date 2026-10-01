@@ -1,0 +1,482 @@
+# Bind an imported assessment to a local policy without treating delivery time
+# or provider prose as fresh evidence.
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_observation.elisa"
+include "./rh_policy.elisa"
+include "./rh_policy_parse.elisa"
+include "./rh_sha256.elisa"
+
+module FindingsPolicy:
+    private:
+        const RH_FINDINGS_POLICY_MAX_RULES: i64 = 10000
+        const RH_FINDINGS_POLICY_MAX_FINDINGS: i64 = 10000
+
+        struct RhFindingPolicyBinding:
+            rule_id: mutable i64
+            check_start: mutable i64
+            check_end: mutable i64
+            probe_start: mutable i64
+            probe_end: mutable i64
+            probe_version_start: mutable i64
+            probe_version_end: mutable i64
+            has_probe_version: mutable bool
+            polarity_start: mutable i64
+            polarity_end: mutable i64
+
+        struct RhFindingPolicySource:
+            check_start: mutable i64
+            check_end: mutable i64
+            probe_start: mutable i64
+            probe_end: mutable i64
+            probe_version_start: mutable i64
+            probe_version_end: mutable i64
+            has_probe_version: mutable bool
+            polarity_start: mutable i64
+            polarity_end: mutable i64
+            outcome_start: mutable i64
+            outcome_end: mutable i64
+            outcome_code: mutable i64
+
+        struct RhFindingPolicyRow:
+            finding_index: mutable i64
+            match_count: mutable i64
+            input: mutable Policy::RhPolicyInput
+
+        def rh_fp_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_fp_string(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            index: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            return false if index < 0
+            Json::rh_json_str_span(nodes, index, start_out, end_out)
+
+        def rh_fp_integer(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, object: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            ok_out[0] <- 0
+            index: i64 = Json::rh_json_obj_get(nodes, texts, object, key)
+            return 0 if index < 0
+            Json::rh_json_int(nodes, raw, index, ok_out)
+
+        def rh_fp_span_equal(left: darray[u8]&, left_start: i64, left_end: i64, right: darray[u8]&, right_start: i64, right_end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_span(left, left_start, left_end, right, right_start, right_end)
+
+        def rh_fp_unique_keys(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            key: i64 = nodes[object.usize()].first_child
+            while key >= 0 |key: i64 = nodes[object.usize()].first_child, nodes, texts|:
+                value: i64 = nodes[key.usize()].next_sibling
+                return false if value < 0
+                other: i64 = nodes[value.usize()].next_sibling
+                while other >= 0 |other: i64 = nodes[value.usize()].next_sibling, nodes, texts, key|:
+                    return false if rh_fp_span_equal(texts, nodes[key.usize()].text_start, nodes[key.usize()].text_end, texts, nodes[other.usize()].text_start, nodes[other.usize()].text_end)
+                    other_value: i64 = nodes[other.usize()].next_sibling
+                    return false if other_value < 0
+                    other <- nodes[other_value.usize()].next_sibling
+                key <- nodes[value.usize()].next_sibling
+            true
+
+        def rh_fp_only_binding_root_keys(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            key: i64 = nodes[object.usize()].first_child
+            while key >= 0 |key: i64 = nodes[object.usize()].first_child, nodes, texts|:
+                start: i64 = nodes[key.usize()].text_start
+                end: i64 = nodes[key.usize()].text_end
+                known: bool = rh_fp_eq(texts, start, end, "schema") or rh_fp_eq(texts, start, end, "tool") or rh_fp_eq(texts, start, end, "tool_version") or rh_fp_eq(texts, start, end, "bindings")
+                return false if not known
+                value: i64 = nodes[key.usize()].next_sibling
+                return false if value < 0
+                key <- nodes[value.usize()].next_sibling
+            true
+
+        def rh_fp_only_binding_row_keys(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            key: i64 = nodes[object.usize()].first_child
+            while key >= 0 |key: i64 = nodes[object.usize()].first_child, nodes, texts|:
+                start: i64 = nodes[key.usize()].text_start
+                end: i64 = nodes[key.usize()].text_end
+                known: bool = rh_fp_eq(texts, start, end, "rule_id") or rh_fp_eq(texts, start, end, "check") or rh_fp_eq(texts, start, end, "probe") or rh_fp_eq(texts, start, end, "probe_version") or rh_fp_eq(texts, start, end, "polarity")
+                return false if not known
+                value: i64 = nodes[key.usize()].next_sibling
+                return false if value < 0
+                key <- nodes[value.usize()].next_sibling
+            true
+
+        def rh_fp_outcome(texts: darray[u8]&, start: i64, end: i64, version: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if rh_fp_eq(texts, start, end, "pass")
+            return 1 if rh_fp_eq(texts, start, end, "fail")
+            return 2 if rh_fp_eq(texts, start, end, "unknown")
+            return 3 if rh_fp_eq(texts, start, end, "omitted")
+            return 4 if rh_fp_eq(texts, start, end, "inconclusive")
+            return 5 if rh_fp_eq(texts, start, end, "error")
+            return 6 if version == 2 and rh_fp_eq(texts, start, end, "unavailable")
+            return 7 if version == 2 and rh_fp_eq(texts, start, end, "unsupported")
+            return 8 if version == 2 and rh_fp_eq(texts, start, end, "not_applicable")
+            -1
+
+        def rh_fp_status(outcome: i64) -> u8:
+            return Observation::RH_ST_OBSERVED if outcome == 0 or outcome == 1
+            return Observation::RH_ST_NOT_OBSERVED if outcome == 2 or outcome == 3
+            return Observation::RH_ST_PARTIAL if outcome == 4
+            return Observation::RH_ST_ERROR if outcome == 5
+            return Observation::RH_ST_UNAVAILABLE if outcome == 6
+            return Observation::RH_ST_UNSUPPORTED if outcome == 7
+            return Observation::RH_ST_NOT_APPLICABLE if outcome == 8
+            Observation::RH_ST_CONFLICTED
+
+        def rh_fp_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_json_escape(out, texts, start.usize(), end.usize())
+
+        def rh_fp_emit_nullable_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            if start < 0:
+                Base::rh_push_text(out, "null")
+            else:
+                out.push(34)
+                rh_fp_emit_span(out, texts, start, end)
+                out.push(34)
+
+        def rh_fp_emit_hex(out: mutable darray[u8]&, value: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            out.extend(bytes_view(value))
+
+        def rh_fp_has_id(values: darray[i64]&, value: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < values.count |i: usize = 0, values, value|:
+                return true if values[i] == value
+                i <- i + 1
+            false
+
+        def rh_fp_policy_has_rule(rules: darray[Policy::RhRule]&, rule_id: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < rules.count |i: usize = 0, rules, rule_id|:
+                return true if rules[i].id == rule_id
+                i <- i + 1
+            false
+
+        def rh_fp_binding_for(bindings: darray[RhFindingPolicyBinding]&, rule_id: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            bindings_loop: mutable darray[RhFindingPolicyBinding]& = bindings
+            rule_id_loop: mutable i64 = rule_id
+            while i < bindings_loop.count |found: i64 = -1, i: usize = 0, bindings_loop, rule_id_loop| -> found:
+                found <- i.i64() if bindings_loop[i].rule_id == rule_id_loop
+                i <- i + 1
+
+        def rh_fp_source_matches(binding: RhFindingPolicyBinding, binding_texts: darray[u8]&, source: RhFindingPolicySource, finding_texts: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not rh_fp_span_equal(binding_texts, binding.check_start, binding.check_end, finding_texts, source.check_start, source.check_end)
+            return false if not rh_fp_span_equal(binding_texts, binding.probe_start, binding.probe_end, finding_texts, source.probe_start, source.probe_end)
+            return false if binding.has_probe_version != source.has_probe_version
+            return false if binding.has_probe_version and not rh_fp_span_equal(binding_texts, binding.probe_version_start, binding.probe_version_end, finding_texts, source.probe_version_start, source.probe_version_end)
+            true
+
+        def rh_fp_valid_sha256(texts: darray[u8]&, start: i64, end: i64) -> bool:
+            return false if start < 0 or end - start != 64
+            while i < end |i: i64 = start, texts|:
+                byte: u8 = texts[i.usize()]
+                return false if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
+                i <- i + 1
+            true
+
+        def rh_fp_bindings(raw: darray[u8]&, rules: darray[Policy::RhRule]&, texts_out: mutable darray[u8]&, tool_start_out: mutable i64&, tool_end_out: mutable i64&, version_start_out: mutable i64&, version_end_out: mutable i64&, out: mutable darray[RhFindingPolicyBinding]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts_out)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            return -1 if not rh_fp_unique_keys(nodes, texts_out, root) or not rh_fp_only_binding_root_keys(nodes, texts_out, root)
+            schema_start: mutable i64 = 0
+            schema_end: mutable i64 = 0
+            return -1 if not rh_fp_string(nodes, texts_out, root, "schema", &schema_start, &schema_end) or not rh_fp_eq(texts_out, schema_start, schema_end, "rh-findings-policy-bindings/1")
+            return -1 if not rh_fp_string(nodes, texts_out, root, "tool", tool_start_out, tool_end_out)
+            return -1 if tool_end_out[0] <= tool_start_out[0]
+            return -1 if not rh_fp_string(nodes, texts_out, root, "tool_version", version_start_out, version_end_out)
+            return -1 if version_end_out[0] <= version_start_out[0]
+            bindings_idx: i64 = Json::rh_json_obj_get(nodes, texts_out, root, "bindings")
+            return -1 if bindings_idx < 0 or nodes[bindings_idx.usize()].kind != Json::RH_JSON_ARR or nodes[bindings_idx.usize()].child_count > rules.count.i64()
+            while child >= 0 |child: i64 = nodes[bindings_idx.usize()].first_child, nodes, texts_out, raw, rules, out|:
+                return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ or not rh_fp_unique_keys(nodes, texts_out, child) or not rh_fp_only_binding_row_keys(nodes, texts_out, child)
+                id_ok: mutable i64 = 0
+                rule_id: i64 = rh_fp_integer(nodes, raw, texts_out, child, "rule_id", &id_ok)
+                return -1 if id_ok == 0 or rule_id < 0
+                return -1 if rh_fp_binding_for(out, rule_id) >= 0
+                return -1 if not rh_fp_policy_has_rule(rules, rule_id)
+                check_start: mutable i64 = 0
+                check_end: mutable i64 = 0
+                probe_start: mutable i64 = 0
+                probe_end: mutable i64 = 0
+                probe_version_start: mutable i64 = -1
+                probe_version_end: mutable i64 = -1
+                has_probe_version: mutable bool = false
+                polarity_start: mutable i64 = 0
+                polarity_end: mutable i64 = 0
+                return -1 if not rh_fp_string(nodes, texts_out, child, "check", &check_start, &check_end) or check_end <= check_start
+                return -1 if not rh_fp_string(nodes, texts_out, child, "probe", &probe_start, &probe_end) or probe_end <= probe_start
+                probe_version_idx: i64 = Json::rh_json_obj_get(nodes, texts_out, child, "probe_version")
+                return -1 if probe_version_idx < 0
+                if nodes[probe_version_idx.usize()].kind != Json::RH_JSON_NULL:
+                    has_probe_version <- true
+                    return -1 if not Json::rh_json_str_span(nodes, probe_version_idx, &probe_version_start, &probe_version_end)
+                return -1 if has_probe_version and probe_version_end <= probe_version_start
+                return -1 if not rh_fp_string(nodes, texts_out, child, "polarity", &polarity_start, &polarity_end)
+                return -1 if not (rh_fp_eq(texts_out, polarity_start, polarity_end, "positive") or rh_fp_eq(texts_out, polarity_start, polarity_end, "negative") or rh_fp_eq(texts_out, polarity_start, polarity_end, "neutral"))
+                out.push(RhFindingPolicyBinding{rule_id: rule_id, check_start: check_start, check_end: check_end, probe_start: probe_start, probe_end: probe_end, probe_version_start: probe_version_start, probe_version_end: probe_version_end, has_probe_version: has_probe_version, polarity_start: polarity_start, polarity_end: polarity_end})
+                child <- nodes[child.usize()].next_sibling
+            while rule_index < rules.count |rule_index: usize = 0, rules, out|:
+                rule: Policy::RhRule = rules[rule_index]
+                return -1 if rule.state == Policy::RH_RULE_ACTIVE and rh_fp_binding_for(out, rule.id) < 0
+                rule_index <- rule_index + 1
+            0
+
+        def rh_fp_sources(raw: darray[u8]&, nodes_out: mutable darray[Json::RhJsonNode]&, texts_out: mutable darray[u8]&, assessment_id_out: mutable i64&, assessment_id_end_out: mutable i64&, tool_start_out: mutable i64&, tool_end_out: mutable i64&, tool_version_start_out: mutable i64&, tool_version_end_out: mutable i64&, subject_revision_start_out: mutable i64&, subject_revision_end_out: mutable i64&, assessed_at_out: mutable i64&, result_version_out: mutable i64&, out: mutable darray[RhFindingPolicySource]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            root: i64 = Json::rh_json_parse(raw, nodes_out, texts_out)
+            return -1 if root < 0 or nodes_out[root.usize()].kind != Json::RH_JSON_OBJ or not rh_fp_unique_keys(nodes_out, texts_out, root)
+            schema_start: mutable i64 = 0
+            schema_end: mutable i64 = 0
+            return -1 if not rh_fp_string(nodes_out, texts_out, root, "schema", &schema_start, &schema_end)
+            result_version_out[0] <- 1 if rh_fp_eq(texts_out, schema_start, schema_end, "rh-findings-result/1")
+            result_version_out[0] <- 2 if rh_fp_eq(texts_out, schema_start, schema_end, "rh-findings-result/2")
+            return -1 if result_version_out[0] == 0
+            assessment: i64 = Json::rh_json_obj_get(nodes_out, texts_out, root, "assessment")
+            return -1 if assessment < 0 or nodes_out[assessment.usize()].kind != Json::RH_JSON_OBJ or not rh_fp_unique_keys(nodes_out, texts_out, assessment)
+            return -1 if not rh_fp_string(nodes_out, texts_out, assessment, "id", assessment_id_out, assessment_id_end_out) or assessment_id_end_out[0] <= assessment_id_out[0]
+            return -1 if not rh_fp_string(nodes_out, texts_out, assessment, "tool", tool_start_out, tool_end_out) or tool_end_out[0] <= tool_start_out[0]
+            return -1 if not rh_fp_string(nodes_out, texts_out, assessment, "tool_version", tool_version_start_out, tool_version_end_out) or tool_version_end_out[0] <= tool_version_start_out[0]
+            return -1 if not rh_fp_string(nodes_out, texts_out, assessment, "subject_revision", subject_revision_start_out, subject_revision_end_out) or subject_revision_end_out[0] <= subject_revision_start_out[0]
+            at_ok: mutable i64 = 0
+            assessed_at_out[0] <- rh_fp_integer(nodes_out, raw, texts_out, assessment, "assessed_at", &at_ok)
+            return -1 if at_ok == 0 or assessed_at_out[0] < 0
+            findings_idx: i64 = Json::rh_json_obj_get(nodes_out, texts_out, root, "findings")
+            return -1 if findings_idx < 0 or nodes_out[findings_idx.usize()].kind != Json::RH_JSON_ARR or nodes_out[findings_idx.usize()].child_count > RH_FINDINGS_POLICY_MAX_FINDINGS
+            while child >= 0 |child: i64 = nodes_out[findings_idx.usize()].first_child, nodes_out, texts_out, raw, result_version_out, out|:
+                return -1 if nodes_out[child.usize()].kind != Json::RH_JSON_OBJ or not rh_fp_unique_keys(nodes_out, texts_out, child)
+                check_start: mutable i64 = 0
+                check_end: mutable i64 = 0
+                probe_start: mutable i64 = 0
+                probe_end: mutable i64 = 0
+                version_start: mutable i64 = -1
+                version_end: mutable i64 = -1
+                has_version: mutable bool = false
+                polarity_start: mutable i64 = 0
+                polarity_end: mutable i64 = 0
+                outcome_start: mutable i64 = 0
+                outcome_end: mutable i64 = 0
+                return -1 if not rh_fp_string(nodes_out, texts_out, child, "check", &check_start, &check_end) or check_end <= check_start
+                return -1 if not rh_fp_string(nodes_out, texts_out, child, "probe", &probe_start, &probe_end) or probe_end <= probe_start
+                version_idx: i64 = Json::rh_json_obj_get(nodes_out, texts_out, child, "probe_version")
+                return -1 if version_idx < 0
+                if nodes_out[version_idx.usize()].kind != Json::RH_JSON_NULL:
+                    has_version <- true
+                    return -1 if not Json::rh_json_str_span(nodes_out, version_idx, &version_start, &version_end)
+                return -1 if has_version and version_end <= version_start
+                return -1 if not rh_fp_string(nodes_out, texts_out, child, "polarity", &polarity_start, &polarity_end)
+                return -1 if not (rh_fp_eq(texts_out, polarity_start, polarity_end, "positive") or rh_fp_eq(texts_out, polarity_start, polarity_end, "negative") or rh_fp_eq(texts_out, polarity_start, polarity_end, "neutral"))
+                return -1 if not rh_fp_string(nodes_out, texts_out, child, "outcome", &outcome_start, &outcome_end)
+                outcome_code: i64 = rh_fp_outcome(texts_out, outcome_start, outcome_end, result_version_out[0])
+                return -1 if outcome_code < 0
+                out.push(RhFindingPolicySource{check_start: check_start, check_end: check_end, probe_start: probe_start, probe_end: probe_end, probe_version_start: version_start, probe_version_end: version_end, has_probe_version: has_version, polarity_start: polarity_start, polarity_end: polarity_end, outcome_start: outcome_start, outcome_end: outcome_end, outcome_code: outcome_code})
+                child <- nodes_out[child.usize()].next_sibling
+            0
+
+        def rh_fp_transform(raw: darray[u8]&, findings_raw: darray[u8]&, findings_version: i64, texts_out: mutable darray[u8]&, source_start_out: mutable i64&, source_end_out: mutable i64&, config_start_out: mutable i64&, config_end_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts_out)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ or not rh_fp_unique_keys(nodes, texts_out, root)
+            schema_start: mutable i64 = 0
+            schema_end: mutable i64 = 0
+            adapter_start: mutable i64 = 0
+            adapter_end: mutable i64 = 0
+            output_schema_start: mutable i64 = 0
+            output_schema_end: mutable i64 = 0
+            output_sha_start: mutable i64 = 0
+            output_sha_end: mutable i64 = 0
+            return -1 if not rh_fp_string(nodes, texts_out, root, "schema", &schema_start, &schema_end) or not rh_fp_eq(texts_out, schema_start, schema_end, "rh-adapter-transformation-report/1")
+            return -1 if not rh_fp_string(nodes, texts_out, root, "adapter", &adapter_start, &adapter_end) or not rh_fp_eq(texts_out, adapter_start, adapter_end, "scorecard-findings")
+            return -1 if not rh_fp_string(nodes, texts_out, root, "source_input_sha256", source_start_out, source_end_out) or not rh_fp_valid_sha256(texts_out, source_start_out[0], source_end_out[0])
+            return -1 if not rh_fp_string(nodes, texts_out, root, "configuration_sha256", config_start_out, config_end_out) or not rh_fp_valid_sha256(texts_out, config_start_out[0], config_end_out[0])
+            return -1 if not rh_fp_string(nodes, texts_out, root, "output_schema", &output_schema_start, &output_schema_end) or not rh_fp_eq(texts_out, output_schema_start, output_schema_end, "rh-findings-result/1" if findings_version == 1 else "rh-findings-result/2")
+            return -1 if not rh_fp_string(nodes, texts_out, root, "normalized_output_sha256", &output_sha_start, &output_sha_end) or not rh_fp_valid_sha256(texts_out, output_sha_start, output_sha_end)
+            expected_output_sha: mutable darray[u8] = []
+            Sha256::rh_sha256(findings_raw, expected_output_sha)
+            return -1 if not Base::rh_bytes_equal_span(texts_out, output_sha_start, output_sha_end, expected_output_sha, 0, expected_output_sha.count.i64())
+            0
+
+        def rh_fp_match_rows(rules: darray[Policy::RhRule]&, bindings: darray[RhFindingPolicyBinding]&, binding_texts: darray[u8]&, sources: darray[RhFindingPolicySource]&, finding_texts: darray[u8]&, age_secs: i64, rows_out: mutable darray[RhFindingPolicyRow]&, inputs_out: mutable darray[Policy::RhPolicyInput]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            while rule_index < rules.count |rule_index: usize = 0, rules, bindings, binding_texts, sources, finding_texts, age_secs, rows_out, inputs_out|:
+                rule: Policy::RhRule = rules[rule_index]
+                binding_index: i64 = rh_fp_binding_for(bindings, rule.id)
+                matched_index: mutable i64 = -1
+                matched_count: mutable i64 = 0
+                if binding_index >= 0:
+                    binding: RhFindingPolicyBinding = bindings[binding_index.usize()]
+                    while source_index < sources.count |source_index: usize = 0, sources, binding, binding_texts, finding_texts, matched_index, matched_count|:
+                        return -1 if matched_count == 9223372036854775807
+                        if rh_fp_source_matches(binding, binding_texts, sources[source_index], finding_texts):
+                            matched_count <- matched_count + 1
+                            matched_index <- source_index.i64()
+                        source_index <- source_index + 1
+                status: mutable u8 = Observation::RH_ST_NOT_OBSERVED
+                number: mutable i64 = 0
+                sample: mutable i64 = 0
+                complete: mutable bool = false
+                if matched_count == 1:
+                    source: RhFindingPolicySource = sources[matched_index.usize()]
+                    binding: RhFindingPolicyBinding = bindings[binding_index.usize()]
+                    complete <- true
+                    if not rh_fp_span_equal(binding_texts, binding.polarity_start, binding.polarity_end, finding_texts, source.polarity_start, source.polarity_end):
+                        status <- Observation::RH_ST_CONFLICTED
+                    else:
+                        status <- rh_fp_status(source.outcome_code)
+                        if source.outcome_code == 0:
+                            number <- 1
+                            sample <- 1
+                        elif source.outcome_code == 1:
+                            number <- 0
+                            sample <- 1
+                elif matched_count > 1:
+                    status <- Observation::RH_ST_CONFLICTED
+                input: Policy::RhPolicyInput = Policy::RhPolicyInput{status: status, num: number, den: 1, sample: sample, age_secs: age_secs, complete: complete}
+                inputs_out.push(input)
+                rows_out.push(RhFindingPolicyRow{finding_index: matched_index, match_count: matched_count, input: input})
+                rule_index <- rule_index + 1
+            0
+
+    public:
+        # Evaluate local rules against exact check/probe bindings from a single
+        # normalized assessment. Full SHA-256 values bind evidence, losses,
+        # mappings, and local rule bytes into the emitted decision.
+        def rh_findings_policy_report(findings_raw: darray[u8]&, transformations_raw: darray[u8]&, policy_raw: darray[u8]&, bindings_raw: darray[u8]&, subject_id: i64, now: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if subject_id < 0 or now < 0 or findings_raw.count > 16777216 or transformations_raw.count > 1048576 or policy_raw.count > 1048576 or bindings_raw.count > 1048576
+            rules: mutable darray[Policy::RhRule] = []
+            exceptions: mutable darray[Policy::RhException] = []
+            return -1 if PolicyParse::rh_policy_parse(policy_raw, rules, exceptions) != 0 or rules.count == 0 or rules.count.i64() > RH_FINDINGS_POLICY_MAX_RULES or exceptions.count > 0
+            bindings: mutable darray[RhFindingPolicyBinding] = []
+            binding_texts: mutable darray[u8] = []
+            binding_tool_start: mutable i64 = 0
+            binding_tool_end: mutable i64 = 0
+            binding_version_start: mutable i64 = 0
+            binding_version_end: mutable i64 = 0
+            return -1 if rh_fp_bindings(bindings_raw, rules, binding_texts, &binding_tool_start, &binding_tool_end, &binding_version_start, &binding_version_end, bindings) != 0
+            finding_nodes: mutable darray[Json::RhJsonNode] = []
+            finding_texts: mutable darray[u8] = []
+            assessment_id_start: mutable i64 = 0
+            assessment_id_end: mutable i64 = 0
+            tool_start: mutable i64 = 0
+            tool_end: mutable i64 = 0
+            tool_version_start: mutable i64 = 0
+            tool_version_end: mutable i64 = 0
+            revision_start: mutable i64 = 0
+            revision_end: mutable i64 = 0
+            assessed_at: mutable i64 = 0
+            findings_version: mutable i64 = 0
+            sources: mutable darray[RhFindingPolicySource] = []
+            return -1 if rh_fp_sources(findings_raw, finding_nodes, finding_texts, &assessment_id_start, &assessment_id_end, &tool_start, &tool_end, &tool_version_start, &tool_version_end, &revision_start, &revision_end, &assessed_at, &findings_version, sources) != 0
+            return -1 if not rh_fp_span_equal(binding_texts, binding_tool_start, binding_tool_end, finding_texts, tool_start, tool_end) or not rh_fp_span_equal(binding_texts, binding_version_start, binding_version_end, finding_texts, tool_version_start, tool_version_end)
+            return -1 if now < assessed_at
+            transformations_texts: mutable darray[u8] = []
+            source_sha_start: mutable i64 = 0
+            source_sha_end: mutable i64 = 0
+            config_sha_start: mutable i64 = 0
+            config_sha_end: mutable i64 = 0
+            return -1 if rh_fp_transform(transformations_raw, findings_raw, findings_version, transformations_texts, &source_sha_start, &source_sha_end, &config_sha_start, &config_sha_end) != 0
+            age_secs: i64 = now - assessed_at
+            rows: mutable darray[RhFindingPolicyRow] = []
+            inputs: mutable darray[Policy::RhPolicyInput] = []
+            return -1 if rh_fp_match_rows(rules, bindings, binding_texts, sources, finding_texts, age_secs, rows, inputs) != 0
+            empty_exceptions: darray[Policy::RhException] = []
+            fired: mutable darray[i64] = []
+            excepted: mutable darray[i64] = []
+            digest_input: mutable darray[u8] = []
+            Sha256::rh_sha256(findings_raw, digest_input)
+            artifact: u64 =
+                acc: mutable u64 = 0
+                while i < 16 |i: i64 = 0, digest_input, acc|:
+                    byte: u8 = digest_input[i.usize()]
+                    digit: u64 = (byte - 48).u64() if byte >= 48 and byte <= 57 else (byte - 87).u64()
+                    acc <- (acc << 4) | digit
+                    i <- i + 1
+                acc
+            decision: u8 = Policy::rh_policy_eval(rules, inputs, empty_exceptions, subject_id, artifact, 0, 0, now, fired, excepted)
+            findings_sha: mutable darray[u8] = []
+            policy_sha: mutable darray[u8] = []
+            bindings_sha: mutable darray[u8] = []
+            transformations_sha: mutable darray[u8] = []
+            Sha256::rh_sha256(findings_raw, findings_sha)
+            Sha256::rh_sha256(policy_raw, policy_sha)
+            Sha256::rh_sha256(bindings_raw, bindings_sha)
+            Sha256::rh_sha256(transformations_raw, transformations_sha)
+            Base::rh_push_text(out, "{\"schema\":\"rh-findings-policy-result/1\",\"subject_id\":")
+            Base::rh_push_decimal_i64(out, subject_id)
+            Base::rh_push_text(out, ",\"assessment\":{\"id\":\"")
+            rh_fp_emit_span(out, finding_texts, assessment_id_start, assessment_id_end)
+            Base::rh_push_text(out, "\",\"tool\":\"")
+            rh_fp_emit_span(out, finding_texts, tool_start, tool_end)
+            Base::rh_push_text(out, "\",\"tool_version\":\"")
+            rh_fp_emit_span(out, finding_texts, tool_version_start, tool_version_end)
+            Base::rh_push_text(out, "\",\"subject_revision\":\"")
+            rh_fp_emit_span(out, finding_texts, revision_start, revision_end)
+            Base::rh_push_text(out, "\",\"assessed_at\":")
+            Base::rh_push_decimal_i64(out, assessed_at)
+            Base::rh_push_text(out, "},\"binding\":{\"findings_sha256\":\"")
+            rh_fp_emit_hex(out, findings_sha)
+            Base::rh_push_text(out, "\",\"source_input_sha256\":\"")
+            Base::rh_json_escape(out, transformations_texts, source_sha_start.usize(), source_sha_end.usize())
+            Base::rh_push_text(out, "\",\"transformations_sha256\":\"")
+            rh_fp_emit_hex(out, transformations_sha)
+            Base::rh_push_text(out, "\",\"normalizer_configuration_sha256\":\"")
+            Base::rh_json_escape(out, transformations_texts, config_sha_start.usize(), config_sha_end.usize())
+            Base::rh_push_text(out, "\",\"policy_sha256\":\"")
+            rh_fp_emit_hex(out, policy_sha)
+            Base::rh_push_text(out, "\",\"bindings_sha256\":\"")
+            rh_fp_emit_hex(out, bindings_sha)
+            Base::rh_push_text(out, "\"},\"evaluation\":{\"evaluated_at\":")
+            Base::rh_push_decimal_i64(out, now)
+            Base::rh_push_text(out, ",\"assessment_age_secs\":")
+            Base::rh_push_decimal_i64(out, age_secs)
+            Base::rh_push_text(out, "},\"decision\":\"")
+            Base::rh_push_text(out, Policy::rh_decision_label(decision))
+            Base::rh_push_text(out, "\",\"rule_results\":[")
+            while rule_index < rules.count |rule_index: usize = 0, rules, rows, sources, finding_texts, out, fired|:
+                if rule_index > 0:
+                    out.push(44)
+                rule: Policy::RhRule = rules[rule_index]
+                row: RhFindingPolicyRow = rows[rule_index]
+                if row.match_count == 1:
+                    source: RhFindingPolicySource = sources[row.finding_index.usize()]
+                    rule_decision: u8 = Policy::rh_rule_verdict(rule, row.input)
+                    Base::rh_push_text(out, "{\"rule_id\":")
+                    Base::rh_push_decimal_i64(out, rule.id)
+                    Base::rh_push_text(out, ",\"decision\":\"")
+                    Base::rh_push_text(out, Policy::rh_decision_label(rule_decision))
+                    Base::rh_push_text(out, "\",\"fired\":")
+                    Base::rh_push_text(out, "true") if rh_fp_has_id(fired, rule.id) else Base::rh_push_text(out, "false")
+                    Base::rh_push_text(out, ",\"status\":\"")
+                    Base::rh_push_text(out, Observation::rh_status_label(row.input.status))
+                    Base::rh_push_text(out, "\",\"sample\":")
+                    Base::rh_push_decimal_i64(out, row.input.sample)
+                    Base::rh_push_text(out, ",\"complete\":")
+                    Base::rh_push_text(out, "true") if row.input.complete else Base::rh_push_text(out, "false")
+                    Base::rh_push_text(out, ",\"match_count\":1,\"finding_index\":")
+                    Base::rh_push_decimal_i64(out, row.finding_index)
+                    Base::rh_push_text(out, ",\"value\":")
+                    if row.input.status == Observation::RH_ST_OBSERVED:
+                        Base::rh_push_text(out, "{\"num\":")
+                        Base::rh_push_decimal_i64(out, row.input.num)
+                        Base::rh_push_text(out, ",\"den\":1}")
+                    else:
+                        Base::rh_push_text(out, "null")
+                    Base::rh_push_text(out, ",\"finding\":{\"check\":\"")
+                    rh_fp_emit_span(out, finding_texts, source.check_start, source.check_end)
+                    Base::rh_push_text(out, "\",\"probe\":\"")
+                    rh_fp_emit_span(out, finding_texts, source.probe_start, source.probe_end)
+                    Base::rh_push_text(out, "\",\"probe_version\":")
+                    rh_fp_emit_nullable_span(out, finding_texts, source.probe_version_start, source.probe_version_end)
+                    Base::rh_push_text(out, ",\"outcome\":\"")
+                    rh_fp_emit_span(out, finding_texts, source.outcome_start, source.outcome_end)
+                    Base::rh_push_text(out, "\",\"polarity\":\"")
+                    rh_fp_emit_span(out, finding_texts, source.polarity_start, source.polarity_end)
+                    Base::rh_push_text(out, "\"}}")
+                else:
+                    rule_decision2: u8 = Policy::rh_rule_verdict(rule, row.input)
+                    Base::rh_push_text(out, "{\"rule_id\":")
+                    Base::rh_push_decimal_i64(out, rule.id)
+                    Base::rh_push_text(out, ",\"decision\":\"")
+                    Base::rh_push_text(out, Policy::rh_decision_label(rule_decision2))
+                    Base::rh_push_text(out, "\",\"fired\":")
+                    Base::rh_push_text(out, "true") if rh_fp_has_id(fired, rule.id) else Base::rh_push_text(out, "false")
+                    Base::rh_push_text(out, ",\"status\":\"")
+                    Base::rh_push_text(out, Observation::rh_status_label(row.input.status))
+                    Base::rh_push_text(out, "\",\"sample\":0,\"complete\":false,\"match_count\":")
+                    Base::rh_push_decimal_i64(out, row.match_count)
+                    Base::rh_push_text(out, ",\"finding_index\":null,\"value\":null,\"finding\":null}")
+                rule_index <- rule_index + 1
+            Base::rh_push_text(out, "],\"note\":\"policy consumes only exact bound check/probe findings; pass maps to 1 and fail to 0; other typed outcomes remain unknown; age is evaluated_at minus assessment.assessed_at; delivery paths never refresh age; policy and evidence SHA-256 values bind this decision\"}")
+            0

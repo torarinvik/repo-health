@@ -53,8 +53,8 @@ source = open(sys.argv[2], "rb").read()
 transformation = json.load(open(sys.argv[3]))
 assert result["schema"] == "rh-findings-result/2", result
 assert json.loads(source)["schema"] == "rh-scorecard-findings-input/2", source
-assert result["summary"] == {"total": 5, "pass": 1, "fail": 0, "unknown": 1, "omitted": 0, "inconclusive": 0, "error": 0, "unavailable": 1, "unsupported": 1, "not_applicable": 1}, result
-assert [item["outcome"] for item in result["findings"][-3:]] == ["unavailable", "unsupported", "not_applicable"], result
+assert result["summary"] == {"total": 6, "pass": 1, "fail": 1, "unknown": 1, "omitted": 0, "inconclusive": 0, "error": 0, "unavailable": 1, "unsupported": 1, "not_applicable": 1}, result
+assert [item["outcome"] for item in result["findings"][2:5]] == ["unavailable", "unsupported", "not_applicable"], result
 assert transformation["output_schema"] == "rh-findings-result/2", transformation
 assert transformation["normalizer_version"] == "2.0.0", transformation
 assert transformation["source_input_sha256"] == hashlib.sha256(source).hexdigest(), transformation

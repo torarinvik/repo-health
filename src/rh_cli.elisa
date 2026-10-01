@@ -45,6 +45,7 @@ include "./rh_ecosystem_lookup_transformation.elisa"
 include "./rh_adapter_manifest.elisa"
 include "./rh_findings.elisa"
 include "./rh_findings_transformation.elisa"
+include "./rh_findings_policy.elisa"
 include "./rh_resolution.elisa"
 include "./rh_resolution_transformation.elisa"
 include "./rh_parser_diff.elisa"
@@ -178,6 +179,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli ecosystem lookup --ecosystem <id> --name <package> --out <file>  (one live lookup)")
     rh_cli_err("       rh_cli adapter-manifest --input <file> --out <file>")
     rh_cli_err("       rh_cli findings --input <file> --out <file>")
+    rh_cli_err("       rh_cli findings-policy --findings <result> --transformations <sidecar> --policy <rules> --bindings <file> --subject-id N --now <unix-seconds> --out <file>")
     rh_cli_err("       rh_cli resolution --input <rh-dep-graph/1> --out <file>")
     rh_cli_err("       rh_cli parser-diff --native <file> --candidate <file> --out <file> [--native-parser N] [--candidate-parser N] [--config C] [--visibility public|private]")
     rh_cli_err("       rh_cli downstream --graph <dep-graph.json> --subject <id> --out <dir> [--snapshot-root <dir>] [--identity-revision <n>] [--mapping <file>] [--project-map <rh-project-node-map-input/1>] [--mirror a:b]... [--intrinsics <file>] [--private <id>]... [--unavailable <id>]")
@@ -1475,6 +1477,62 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 ffq <- ffq + 1
         return rh_cli_usage(2) if fi_idx < 0 or fo_idx < 0
         return rh_do_findings(slots[fi_idx], slots[fo_idx])
+    if Base::rh_streq(cmd, "findings-policy"):
+        fp_findings_idx, fp_transformations_idx, fp_policy_idx, fp_bindings_idx, fp_subject_idx, fp_now_idx, fp_out_idx =
+            while fpq < argc |fp_findings_idx: i64 = -1, fp_transformations_idx: i64 = -1, fp_policy_idx: i64 = -1, fp_bindings_idx: i64 = -1, fp_subject_idx: i64 = -1, fp_now_idx: i64 = -1, fp_out_idx: i64 = -1, fpq: i64 = 2, slots| -> fp_findings_idx, fp_transformations_idx, fp_policy_idx, fp_bindings_idx, fp_subject_idx, fp_now_idx, fp_out_idx:
+                argfp: u8& = slots[fpq].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(argfp, "--findings"):
+                    if fpq + 1 < argc:
+                        fpq <- fpq + 1
+                        fp_findings_idx <- fpq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(argfp, "--transformations"):
+                    if fpq + 1 < argc:
+                        fpq <- fpq + 1
+                        fp_transformations_idx <- fpq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(argfp, "--policy"):
+                    if fpq + 1 < argc:
+                        fpq <- fpq + 1
+                        fp_policy_idx <- fpq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(argfp, "--bindings"):
+                    if fpq + 1 < argc:
+                        fpq <- fpq + 1
+                        fp_bindings_idx <- fpq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(argfp, "--subject-id"):
+                    if fpq + 1 < argc:
+                        fpq <- fpq + 1
+                        fp_subject_idx <- fpq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(argfp, "--now"):
+                    if fpq + 1 < argc:
+                        fpq <- fpq + 1
+                        fp_now_idx <- fpq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(argfp, "--out"):
+                    if fpq + 1 < argc:
+                        fpq <- fpq + 1
+                        fp_out_idx <- fpq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                fpq <- fpq + 1
+        return rh_cli_usage(2) if fp_findings_idx < 0 or fp_transformations_idx < 0 or fp_policy_idx < 0 or fp_bindings_idx < 0 or fp_subject_idx < 0 or fp_now_idx < 0 or fp_out_idx < 0
+        subject_ok: mutable i64 = 0
+        subject_id: i64 = rh_parse_cstr_int(slots[fp_subject_idx], &subject_ok)
+        now_ok: mutable i64 = 0
+        now: i64 = rh_parse_cstr_int(slots[fp_now_idx], &now_ok)
+        return rh_cli_usage(2) if subject_ok == 0 or now_ok == 0
+        return rh_do_findings_policy(slots[fp_findings_idx], slots[fp_transformations_idx], slots[fp_policy_idx], slots[fp_bindings_idx], subject_id, now, slots[fp_out_idx])
     if Base::rh_streq(cmd, "resolution"):
         rsi_idx, rso_idx =
             while rsq < argc |rsi_idx: i64 = -1, rso_idx: i64 = -1, rsq: i64 = 2, slots| -> rsi_idx, rso_idx:
@@ -6232,6 +6290,28 @@ def rh_do_findings(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
         rh_cli_err("findings: cannot write transformation report")
         return 4
     rh_cli_out("findings: assessment observed")
+    0
+
+def rh_do_findings_policy(findings_path: cstr, transformations_path: cstr, policy_path: cstr, bindings_path: cstr, subject_id: i64, now: i64, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(findings_path) or not Git::rh_arg_safe(transformations_path) or not Git::rh_arg_safe(policy_path) or not Git::rh_arg_safe(bindings_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected findings-policy argument (allowlist)")
+        return 3
+    findings_raw: mutable darray[u8] = []
+    transformations_raw: mutable darray[u8] = []
+    policy_raw: mutable darray[u8] = []
+    bindings_raw: mutable darray[u8] = []
+    if Base::rh_io_read(findings_path, findings_raw) < 0 or Base::rh_io_read(transformations_path, transformations_raw) < 0 or Base::rh_io_read(policy_path, policy_raw) < 0 or Base::rh_io_read(bindings_path, bindings_raw) < 0:
+        rh_cli_err("findings-policy: cannot read required evidence or local policy")
+        return 4
+    result: mutable darray[u8] = []
+    if FindingsPolicy::rh_findings_policy_report(findings_raw, transformations_raw, policy_raw, bindings_raw, subject_id, now, result) != 0:
+        rh_cli_err("findings-policy: invalid binding, assessment, transformation, or policy (fail closed)")
+        return 4
+    result.push(10)
+    if not Base::rh_io_write(out_path, result):
+        rh_cli_err("findings-policy: cannot write result")
+        return 4
+    rh_cli_out("findings-policy: bound decision observed")
     0
 
 # --- M03-11 resolution-instance execution path. ---
