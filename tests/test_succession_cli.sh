@@ -25,8 +25,8 @@ open(sys.argv[1], "w").write(json.dumps({
   "predecessor":0,"successor":1,"presence":[alice,bob]}))
 PY
 "$ROOT/build/rh_cli" succession --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "succession run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
+python3 - "$T/out.json" "$ROOT" <<'PY'
+import glob, json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-continuity-metrics/1", d
 assert d["metric"] == "succession.handover_overlap_months", d
@@ -41,12 +41,58 @@ assert metrics["succession.handover_overlap_months"]["value"] == 3, metrics
 assert metrics["succession.declared_handovers"]["status"] == "observed", metrics
 assert metrics["succession.declared_handovers"]["value"] == 1, metrics
 assert metrics["succession.observed_activity_overlap_months"]["value"] == 3, metrics
+expected = {
+  "succession.handover_overlap_months": (
+    ["generic-git", "accepted-handover-declaration"],
+    ["actor_month_presence", "declared_predecessor", "declared_successor", "coverage_window"],
+    "months",
+    "none; count of complete calendar months in which the distinct declared predecessor and successor are both active"),
+  "succession.declared_handovers": (
+    ["generic-git", "accepted-handover-declaration"],
+    ["declared_predecessor", "declared_successor", "coverage_window"],
+    "handovers",
+    "none; count one valid explicit predecessor/successor pair; absence or a same-actor pair is not_applicable"),
+  "succession.observed_activity_overlap_months": (
+    ["generic-git", "accepted-handover-declaration"],
+    ["actor_month_presence", "declared_predecessor", "declared_successor", "coverage_window"],
+    "months",
+    "none; count of complete months with accepted activity by both distinct declared participants"),
+  "succession.successor_follow_up_active_months": (
+    ["generic-git", "accepted-handover-declaration"],
+    ["actor_month_presence", "declared_successor", "handover_month", "follow_up_window", "coverage_window"],
+    "months",
+    "none; count of complete months after the handover month when the declared successor is active within the requested follow-up window and observed coverage"),
+  "succession.activity_primary_actor_changes": (
+    ["generic-git", "complete-month-activity"],
+    ["complete_month_actor_event_counts", "coverage_window"],
+    "changes",
+    "adjacent complete-month pairs where both months have one unique positive event-count maximum; ambiguous or empty months break the sequence"),
+}
+assert set(metrics) == set(expected), metrics
+definitions = {}
+for path in glob.glob(sys.argv[2] + "/metrics/definitions/*.json"):
+  definition = json.load(open(path))
+  if definition.get("key", "").startswith("succession."):
+    definitions[(definition["key"], definition["version"])] = definition
 for metric in metrics.values():
   assert metric["version"] == "1.0.0", metric
   assert metric["evidence"] == ["evidence/git-log.bin"], metric
   assert set(metric["quality_dimensions"]) == {"completeness", "freshness", "validity", "provenance"}, metric
+  key = metric["key"]
+  definition = definitions[(key, metric["version"])]
+  sources, inputs, unit, denominator = expected[key]
+  assert definition["subject_kind"] == "project", (key, definition)
+  assert definition["source_requirements"] == sources, (key, definition["source_requirements"])
+  assert definition["inputs"] == inputs, (key, definition["inputs"])
+  assert definition["output"]["type"] == "integer" and definition["output"]["unit"] == unit, (key, definition["output"])
+  assert definition["denominator_rule"] == denominator, (key, definition["denominator_rule"])
+  if metric["value"] is None:
+    assert metric["status"] in ("unsupported", "not_applicable") and metric.get("reason"), metric
+  else:
+    assert metric["status"] in ("observed", "partial") and type(metric["value"]) is int and metric["value"] >= 0, metric
 assert metrics["succession.handover_overlap_months"]["quality_dimensions"] == {
   "completeness":"complete", "freshness":"unknown", "validity":"valid", "provenance":"evidence_backed"}, metrics
+print("[succession] five emitted rows match catalog subjects, sources, inputs, types, units, and denominators")
 print("[succession] overlap OK")
 PY
 python3 - "$T/in.json" "$T/out.json" <<'PY'
