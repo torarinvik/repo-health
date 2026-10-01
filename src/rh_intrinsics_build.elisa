@@ -66,6 +66,54 @@ module IntrinsicsBuild:
                 key_node <- nodes[value_node.usize()].next_sibling
             true
 
+        def rh_ib_sha256_hex(texts: darray[u8]&, start: i64, end: i64) -> bool:
+            return false if start < 0 or end - start != 64
+            while offset < 64 |offset: i64 = 0, texts, start|:
+                byte: u8 = texts[(start + offset).usize()]
+                return false if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
+                offset <- offset + 1
+            true
+
+        # Returns 0 when no source population was supplied, 1 for an atomic
+        # complete population, 2 for a known incomplete population, and -1 for
+        # malformed or contradictory source metadata.
+        def rh_ib_change_source_status(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, report: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            source: i64 = Json::rh_json_obj_get(nodes, texts, report, "change_review_source")
+            return 0 if source < 0
+            return -1 if nodes[source.usize()].kind != Json::RH_JSON_OBJ or nodes[source.usize()].child_count != 16 or not rh_ib_unique_object_keys(nodes, texts, source)
+            return -1 if not rh_ib_string_is(nodes, texts, source, "source", "github-review-chain")
+            status_complete: bool = rh_ib_string_is(nodes, texts, source, "status", "complete")
+            status_partial: bool = rh_ib_string_is(nodes, texts, source, "status", "partial")
+            return -1 if not status_complete and not status_partial
+            collection_complete: bool = rh_ib_string_is(nodes, texts, source, "collection_status", "complete")
+            collection_partial: bool = rh_ib_string_is(nodes, texts, source, "collection_status", "partial")
+            return -1 if not collection_complete and not collection_partial
+            atomic_idx: i64 = Json::rh_json_obj_get(nodes, texts, source, "atomic_snapshot")
+            return -1 if atomic_idx < 0 or nodes[atomic_idx.usize()].kind != Json::RH_JSON_BOOL
+            atomic_snapshot: bool = Json::rh_json_is_true(nodes, raw, atomic_idx)
+            source_as_of: mutable i64 = 0
+            return -1 if not rh_ib_integer(nodes, raw, texts, source, "as_of", &source_as_of) or source_as_of < 0
+            repository_start: mutable i64 = 0
+            repository_end: mutable i64 = 0
+            scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, report, "scope")
+            return -1 if scope_idx < 0 or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ or not rh_ib_unique_object_keys(nodes, texts, scope_idx)
+            scope_repository_start: mutable i64 = 0
+            scope_repository_end: mutable i64 = 0
+            return -1 if not rh_ib_string(nodes, texts, source, "repository", &repository_start, &repository_end) or not rh_ib_string(nodes, texts, scope_idx, "repository", &scope_repository_start, &scope_repository_end)
+            return -1 if not Base::rh_bytes_equal_span(texts, repository_start, repository_end, texts, scope_repository_start, scope_repository_end)
+            sha_start: mutable i64 = 0
+            sha_end: mutable i64 = 0
+            return -1 if not rh_ib_string(nodes, texts, source, "source_sha256", &sha_start, &sha_end) or not rh_ib_sha256_hex(texts, sha_start, sha_end)
+            reason_start: mutable i64 = 0
+            reason_end: mutable i64 = 0
+            return -1 if not rh_ib_string(nodes, texts, source, "reason", &reason_start, &reason_end)
+            if status_complete:
+                return -1 if not collection_complete or not atomic_snapshot or reason_end != reason_start
+                1
+            else:
+                return -1 if collection_complete and atomic_snapshot or reason_end == reason_start
+                2
+
         # Returns 1 for an exact observed scalar, 0 for a valid unavailable
         # state, and -1 for malformed or ambiguous source metrics.
         def rh_ib_metric(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, report: i64, expected_schema: u8&, metric_key: u8&, value_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -103,20 +151,35 @@ module IntrinsicsBuild:
             status: mutable i64 = 0
             status_end: mutable i64 = 0
             return -1 if not rh_ib_string(nodes, texts, review, "status", &status, &status_end)
+            source_status: i64 = rh_ib_change_source_status(nodes, raw, texts, report)
+            return -1 if source_status < 0
             if rh_ib_text_eq(texts, status, status_end, "observed"):
+                return -1 if source_status != 1
                 return -1 if not rh_ib_integer(nodes, raw, texts, review, field, &value_out[0]) or value_out[0] < 0
                 1
             elif rh_ib_text_eq(texts, status, status_end, "unknown"):
+                return -1 if source_status != 0
                 field_idx: i64 = Json::rh_json_obj_get(nodes, texts, review, field)
                 return -1 if field_idx >= 0 and nodes[field_idx.usize()].kind != Json::RH_JSON_NULL
                 0
             elif rh_ib_text_eq(texts, status, status_end, "not_applicable"):
+                return -1 if source_status != 1
                 field_idx: i64 = Json::rh_json_obj_get(nodes, texts, review, field)
                 if field_idx >= 0 and nodes[field_idx.usize()].kind != Json::RH_JSON_NULL:
                     return -1 if not rh_ib_integer(nodes, raw, texts, review, field, &value_out[0]) or value_out[0] < 0
                     1
                 else:
                     0
+            elif rh_ib_text_eq(texts, status, status_end, "partial"):
+                return -1 if source_status != 2
+                field_idx: i64 = Json::rh_json_obj_get(nodes, texts, review, field)
+                return -1 if field_idx < 0 or nodes[field_idx.usize()].kind != Json::RH_JSON_NULL
+                lower_bound: i64 = Json::rh_json_obj_get(nodes, texts, review, "observed_lower_bound")
+                return -1 if lower_bound < 0 or nodes[lower_bound.usize()].kind != Json::RH_JSON_OBJ or not rh_ib_unique_object_keys(nodes, texts, lower_bound)
+                numerator: mutable i64 = 0
+                denominator: mutable i64 = 0
+                return -1 if not rh_ib_integer(nodes, raw, texts, lower_bound, "numerator", &numerator) or not rh_ib_integer(nodes, raw, texts, lower_bound, "denominator", &denominator) or numerator < 0 or denominator < 0 or numerator > denominator
+                0
             else:
                 -1
 

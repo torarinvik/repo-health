@@ -326,7 +326,8 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 m = {x["key"]: x for x in d["metrics"]}
 for key in ("maintainer.reviewed_merge_change_count", "maintainer.linked_merge_change_count"):
-    assert m[key]["status"] == "observed" and m[key]["value"] == 0, m[key]
+    assert m[key]["status"] == "unsupported" and m[key]["value"] is None, m[key]
+    assert m[key]["reason"] == "change-population-completeness-not-supplied", m[key]
 for key, reason in (
     ("concentration.release_actor_count_80", "no-release-actions"),
     ("concentration.review_actor_count_80", "no-review-actions"),
@@ -493,19 +494,52 @@ python3 - "$T/change-links-out.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 change_review = d["change_review"]
-assert change_review == {"status": "observed", "numerator": 1, "denominator": 2, "basis": "unique-linked-merge-change-identifiers", "excluded_unlinked_merge_actions": 1}, d
+assert change_review == {"status": "unknown", "numerator": None, "denominator": None, "basis": "unique-linked-merge-change-identifiers", "excluded_unlinked_merge_actions": 1, "reason": "merge-change-identifiers-not-supplied"}, d
 change_metrics = {row["key"]: row for row in d["metrics"]}
-for key, count in (("maintainer.reviewed_merge_change_count", 1), ("maintainer.linked_merge_change_count", 2)):
+for key in ("maintainer.reviewed_merge_change_count", "maintainer.linked_merge_change_count"):
     metric = change_metrics[key]
-    assert metric["status"] == "observed" and metric["value"] == count, metric
+    assert metric["status"] == "unsupported" and metric["value"] is None, metric
+    assert metric["reason"] == "change-population-completeness-not-supplied", metric
     assert metric["evidence"] == ["roles-input"], metric
     assert metric["quality_dimensions"] == {
-        "completeness": "complete",
+        "completeness": "unknown",
         "freshness": "unknown",
-        "validity": "valid",
+        "validity": "unknown",
         "provenance": "evidence_backed",
     }, metric
 PY
+
+cat > "$T/change-links-complete.json" <<'JSON'
+{"schema":"rh-roles-input/1","provider":"github","scope":{"repository":"example/project"},"as_of":100,"linked_change_population":{"source":"github-review-chain","repository":"example/project","as_of":100,"collection_status":"complete","status":"complete","atomic_snapshot":true,"source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reason":""},"declarations":[],"observed_actions":[{"kind":"merge","at":10,"change_id":"pr-1"},{"kind":"merge","at":12,"change_id":"pr-2"},{"kind":"review","at":14,"change_id":"pr-1"}]}
+JSON
+"$ROOT/build/rh_cli" roles --input "$T/change-links-complete.json" --out "$T/change-links-complete-out.json" >/dev/null || fail "complete linked change review share"
+python3 - "$T/change-links-complete-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["change_review_source"]["status"] == "complete", d
+assert d["change_review"] == {"status":"observed","numerator":1,"denominator":2,"basis":"unique-linked-merge-change-identifiers","excluded_unlinked_merge_actions":0}, d
+metrics = {row["key"]: row for row in d["metrics"]}
+assert metrics["maintainer.reviewed_merge_change_count"]["status"] == "observed", metrics
+assert metrics["maintainer.linked_merge_change_count"]["value"] == 2, metrics
+print("[roles] complete atomic source permits exact linked-change counts")
+PY
+
+cat > "$T/change-links-partial.json" <<'JSON'
+{"schema":"rh-roles-input/1","provider":"github","scope":{"repository":"example/project"},"as_of":100,"linked_change_population":{"source":"github-review-chain","repository":"example/project","as_of":100,"collection_status":"complete","status":"partial","atomic_snapshot":false,"source_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","reason":"github-pull-list-pagination-non-atomic"},"declarations":[],"observed_actions":[{"kind":"merge","at":10,"change_id":"pr-1"},{"kind":"merge","at":12,"change_id":"pr-2"},{"kind":"review","at":14,"change_id":"pr-1"}]}
+JSON
+"$ROOT/build/rh_cli" roles --input "$T/change-links-partial.json" --out "$T/change-links-partial-out.json" >/dev/null || fail "partial linked change review share"
+python3 - "$T/change-links-partial-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["change_review_source"]["status"] == "partial", d
+assert d["change_review"] == {"status":"partial","numerator":None,"denominator":None,"basis":"unique-linked-merge-change-identifiers","excluded_unlinked_merge_actions":0,"observed_lower_bound":{"numerator":1,"denominator":2},"reason":"change-population-source-incomplete"}, d
+metrics = {row["key"]: row for row in d["metrics"]}
+for key, count in (("maintainer.reviewed_merge_change_count",1), ("maintainer.linked_merge_change_count",2)):
+    assert metrics[key]["status"] == "partial" and metrics[key]["value"] == count, metrics[key]
+    assert metrics[key]["quality_dimensions"]["completeness"] == "partial", metrics[key]
+print("[roles] non-atomic source retains lower bounds with partial quality")
+PY
+
 printf '{"schema":"rh-roles-input/1","declarations":[],"observed_actions":[{"kind":"merge","at":1,"change_id":""}]}' > "$T/empty-change-id.json"
 if "$ROOT/build/rh_cli" roles --input "$T/empty-change-id.json" --out "$T/empty-change-id-out.json" >/dev/null 2>&1; then fail "empty change identifier accepted"; fi
 printf '{"schema":"rh-roles-input/1","declarations":[],"observed_actions":[{"kind":"release","at":1,"change_id":"release-1"}]}' > "$T/wrong-change-kind.json"
