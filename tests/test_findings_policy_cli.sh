@@ -49,9 +49,10 @@ assert warn["binding"]["policy_sha256"] == hashlib.sha256(warn_policy_bytes).hex
 assert deny["binding"]["policy_sha256"] == hashlib.sha256(deny_policy_bytes).hexdigest()
 assert warn["binding"]["policy_sha256"] != deny["binding"]["policy_sha256"]
 assert warn["binding"]["bindings_sha256"] == deny["binding"]["bindings_sha256"] == hashlib.sha256(bindings_bytes).hexdigest()
+assert len(warn["binding"]["rule_context_digest"]) == 16
 for result, decision in ((warn, "warn"), (deny, "deny")):
     row = result["rule_results"][0]
-    assert row["rule_id"] == 7 and row["decision"] == decision and row["fired"] is True, row
+    assert row["rule_id"] == 7 and row["decision"] == decision and row["fired"] is True and row["excepted"] is False, row
     assert row["status"] == "observed" and row["sample"] == 1 and row["complete"] is True, row
     assert row["finding_index"] == 5 and row["match_count"] == 1, row
     assert row["value"] == {"num": 0, "den": 1}, row
@@ -64,6 +65,7 @@ for result, decision in ((warn, "warn"), (deny, "deny")):
     }, row
 print("[findings-policy] two local policies produce distinct decisions over the same unchanged assessment")
 PY
+python3 "$ROOT/tests/findings_policy_exceptions.py" "$ROOT/build/rh_cli" "$T"
 
 echo "[findings-policy] assessment age comes from source time and stale evidence is unknown"
 "$ROOT/build/rh_cli" findings-policy --findings "$T/findings.json" --transformations "$T/findings.json.transformations.json" --policy "$T/policy-deny.json" --bindings "$T/bindings.json" --subject-id 42 --now 1700000200 --out "$T/stale.json" >/dev/null || fail "stale policy evaluation"

@@ -11,6 +11,7 @@ module FindingsPolicy:
     private:
         const RH_FINDINGS_POLICY_MAX_RULES: i64 = 10000
         const RH_FINDINGS_POLICY_MAX_FINDINGS: i64 = 10000
+        const RH_FINDINGS_POLICY_MAX_EXCEPTIONS: i64 = 10000
 
         struct RhFindingPolicyBinding:
             rule_id: mutable i64
@@ -139,6 +140,57 @@ module FindingsPolicy:
                 return true if values[i] == value
                 i <- i + 1
             false
+
+        def rh_fp_has_approved(exceptions: darray[Policy::RhException]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            while i < exceptions.count |i: usize = 0, exceptions|:
+                return true if exceptions[i].state == Policy::RH_EXC_APPROVED
+                i <- i + 1
+            false
+
+        # Waivers bind to parsed rule semantics and exact binding bytes. The
+        # semantic rule digest excludes exception rows to avoid a signature cycle.
+        def rh_fp_rule_context(rules: darray[Policy::RhRule]&, bindings_raw: darray[u8]&) -> u64 can[Memory.Allocate, Abort.Panic]:
+            rule_material: mutable darray[u8] = []
+            Base::rh_push_text(rule_material, "rh-findings-policy-rules/1\n")
+            while i < rules.count |i: usize = 0, rules, rule_material|:
+                rule: Policy::RhRule = rules[i]
+                Base::rh_push_decimal_i64(rule_material, rule.id)
+                rule_material.push(58)
+                Base::rh_push_decimal_i64(rule_material, rule.op.i64())
+                rule_material.push(58)
+                Base::rh_push_decimal_i64(rule_material, rule.thr_num)
+                rule_material.push(58)
+                Base::rh_push_decimal_i64(rule_material, rule.thr_den)
+                rule_material.push(58)
+                Base::rh_push_decimal_i64(rule_material, rule.need_fresh_secs)
+                rule_material.push(58)
+                Base::rh_push_decimal_i64(rule_material, rule.min_sample)
+                rule_material.push(58)
+                Base::rh_push_decimal_i64(rule_material, rule.on_violation.i64())
+                rule_material.push(58)
+                Base::rh_push_decimal_i64(rule_material, 1 if rule.requires_complete else 0)
+                rule_material.push(58)
+                Base::rh_push_decimal_i64(rule_material, rule.state.i64())
+                rule_material.push(10)
+                i <- i + 1
+            rules_sha: mutable darray[u8] = []
+            Sha256::rh_sha256(rule_material, rules_sha)
+            bindings_sha: mutable darray[u8] = []
+            Sha256::rh_sha256(bindings_raw, bindings_sha)
+            context_material: mutable darray[u8] = []
+            Base::rh_push_text(context_material, "rh-findings-policy-context/1\n")
+            context_material.extend(bytes_view(rules_sha))
+            context_material.push(10)
+            context_material.extend(bytes_view(bindings_sha))
+            context_sha: mutable darray[u8] = []
+            Sha256::rh_sha256(context_material, context_sha)
+            acc: mutable u64 = 0
+            while i < 16 |i: i64 = 0, context_sha, acc|:
+                byte: u8 = context_sha[i.usize()]
+                digit: u64 = (byte - 48).u64() if byte >= 48 and byte <= 57 else (byte - 87).u64()
+                acc <- (acc << 4) | digit
+                i <- i + 1
+            acc
 
         def rh_fp_policy_has_rule(rules: darray[Policy::RhRule]&, rule_id: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             while i < rules.count |i: usize = 0, rules, rule_id|:
@@ -333,11 +385,13 @@ module FindingsPolicy:
         # Evaluate local rules against exact check/probe bindings from a single
         # normalized assessment. Full SHA-256 values bind evidence, losses,
         # mappings, and local rule bytes into the emitted decision.
-        def rh_findings_policy_report(findings_raw: darray[u8]&, transformations_raw: darray[u8]&, policy_raw: darray[u8]&, bindings_raw: darray[u8]&, subject_id: i64, now: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_findings_policy_report(findings_raw: darray[u8]&, transformations_raw: darray[u8]&, policy_raw: darray[u8]&, bindings_raw: darray[u8]&, approver_keys_raw: darray[u8]&, has_approver_keys: bool, subject_id: i64, now: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if subject_id < 0 or now < 0 or findings_raw.count > 16777216 or transformations_raw.count > 1048576 or policy_raw.count > 1048576 or bindings_raw.count > 1048576
             rules: mutable darray[Policy::RhRule] = []
             exceptions: mutable darray[Policy::RhException] = []
-            return -1 if PolicyParse::rh_policy_parse(policy_raw, rules, exceptions) != 0 or rules.count == 0 or rules.count.i64() > RH_FINDINGS_POLICY_MAX_RULES or exceptions.count > 0
+            return -1 if PolicyParse::rh_policy_parse(policy_raw, rules, exceptions) != 0 or rules.count == 0 or rules.count.i64() > RH_FINDINGS_POLICY_MAX_RULES or exceptions.count.i64() > RH_FINDINGS_POLICY_MAX_EXCEPTIONS
+            if rh_fp_has_approved(exceptions):
+                return -1 if not has_approver_keys or PolicyParse::rh_policy_approvals_verify(approver_keys_raw, exceptions) != 0
             bindings: mutable darray[RhFindingPolicyBinding] = []
             binding_texts: mutable darray[u8] = []
             binding_tool_start: mutable i64 = 0
@@ -361,6 +415,7 @@ module FindingsPolicy:
             return -1 if rh_fp_sources(findings_raw, finding_nodes, finding_texts, &assessment_id_start, &assessment_id_end, &tool_start, &tool_end, &tool_version_start, &tool_version_end, &revision_start, &revision_end, &assessed_at, &findings_version, sources) != 0
             return -1 if not rh_fp_span_equal(binding_texts, binding_tool_start, binding_tool_end, finding_texts, tool_start, tool_end) or not rh_fp_span_equal(binding_texts, binding_version_start, binding_version_end, finding_texts, tool_version_start, tool_version_end)
             return -1 if now < assessed_at
+            rule_context: u64 = rh_fp_rule_context(rules, bindings_raw)
             transformations_texts: mutable darray[u8] = []
             source_sha_start: mutable i64 = 0
             source_sha_end: mutable i64 = 0
@@ -371,7 +426,6 @@ module FindingsPolicy:
             rows: mutable darray[RhFindingPolicyRow] = []
             inputs: mutable darray[Policy::RhPolicyInput] = []
             return -1 if rh_fp_match_rows(rules, bindings, binding_texts, sources, finding_texts, age_secs, rows, inputs) != 0
-            empty_exceptions: darray[Policy::RhException] = []
             fired: mutable darray[i64] = []
             excepted: mutable darray[i64] = []
             digest_input: mutable darray[u8] = []
@@ -384,7 +438,7 @@ module FindingsPolicy:
                     acc <- (acc << 4) | digit
                     i <- i + 1
                 acc
-            decision: u8 = Policy::rh_policy_eval(rules, inputs, empty_exceptions, subject_id, artifact, 0, 0, now, fired, excepted)
+            decision: u8 = Policy::rh_policy_eval(rules, inputs, exceptions, subject_id, artifact, 0, rule_context, now, fired, excepted)
             findings_sha: mutable darray[u8] = []
             policy_sha: mutable darray[u8] = []
             bindings_sha: mutable darray[u8] = []
@@ -417,6 +471,8 @@ module FindingsPolicy:
             rh_fp_emit_hex(out, policy_sha)
             Base::rh_push_text(out, "\",\"bindings_sha256\":\"")
             rh_fp_emit_hex(out, bindings_sha)
+            Base::rh_push_text(out, "\",\"rule_context_digest\":\"")
+            Base::rh_push_hex_u64(out, rule_context)
             Base::rh_push_text(out, "\"},\"evaluation\":{\"evaluated_at\":")
             Base::rh_push_decimal_i64(out, now)
             Base::rh_push_text(out, ",\"assessment_age_secs\":")
@@ -431,13 +487,16 @@ module FindingsPolicy:
                 row: RhFindingPolicyRow = rows[rule_index]
                 if row.match_count == 1:
                     source: RhFindingPolicySource = sources[row.finding_index.usize()]
-                    rule_decision: u8 = Policy::rh_rule_verdict(rule, row.input)
+                    is_excepted: bool = rh_fp_has_id(excepted, rule.id)
+                    rule_decision: u8 = Policy::RH_DEC_ALLOW if is_excepted else Policy::rh_rule_verdict(rule, row.input)
                     Base::rh_push_text(out, "{\"rule_id\":")
                     Base::rh_push_decimal_i64(out, rule.id)
                     Base::rh_push_text(out, ",\"decision\":\"")
                     Base::rh_push_text(out, Policy::rh_decision_label(rule_decision))
                     Base::rh_push_text(out, "\",\"fired\":")
                     Base::rh_push_text(out, "true") if rh_fp_has_id(fired, rule.id) else Base::rh_push_text(out, "false")
+                    Base::rh_push_text(out, ",\"excepted\":")
+                    Base::rh_push_text(out, "true") if is_excepted else Base::rh_push_text(out, "false")
                     Base::rh_push_text(out, ",\"status\":\"")
                     Base::rh_push_text(out, Observation::rh_status_label(row.input.status))
                     Base::rh_push_text(out, "\",\"sample\":")
@@ -465,18 +524,21 @@ module FindingsPolicy:
                     rh_fp_emit_span(out, finding_texts, source.polarity_start, source.polarity_end)
                     Base::rh_push_text(out, "\"}}")
                 else:
-                    rule_decision2: u8 = Policy::rh_rule_verdict(rule, row.input)
+                    is_excepted2: bool = rh_fp_has_id(excepted, rule.id)
+                    rule_decision2: u8 = Policy::RH_DEC_ALLOW if is_excepted2 else Policy::rh_rule_verdict(rule, row.input)
                     Base::rh_push_text(out, "{\"rule_id\":")
                     Base::rh_push_decimal_i64(out, rule.id)
                     Base::rh_push_text(out, ",\"decision\":\"")
                     Base::rh_push_text(out, Policy::rh_decision_label(rule_decision2))
                     Base::rh_push_text(out, "\",\"fired\":")
                     Base::rh_push_text(out, "true") if rh_fp_has_id(fired, rule.id) else Base::rh_push_text(out, "false")
+                    Base::rh_push_text(out, ",\"excepted\":")
+                    Base::rh_push_text(out, "true") if is_excepted2 else Base::rh_push_text(out, "false")
                     Base::rh_push_text(out, ",\"status\":\"")
                     Base::rh_push_text(out, Observation::rh_status_label(row.input.status))
                     Base::rh_push_text(out, "\",\"sample\":0,\"complete\":false,\"match_count\":")
                     Base::rh_push_decimal_i64(out, row.match_count)
                     Base::rh_push_text(out, ",\"finding_index\":null,\"value\":null,\"finding\":null}")
                 rule_index <- rule_index + 1
-            Base::rh_push_text(out, "],\"note\":\"policy consumes only exact bound check/probe findings; pass maps to 1 and fail to 0; other typed outcomes remain unknown; age is evaluated_at minus assessment.assessed_at; delivery paths never refresh age; policy and evidence SHA-256 values bind this decision\"}")
+            Base::rh_push_text(out, "],\"note\":\"policy consumes only exact bound check/probe findings; pass maps to 1 and fail to 0; other typed outcomes remain unknown; age is evaluated_at minus assessment.assessed_at; delivery paths never refresh age; SHA-256 values bind this decision; approved exceptions require a verified keyring and match subject, assessment digest, local rule context, and expiry\"}")
             0
