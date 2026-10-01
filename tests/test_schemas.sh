@@ -30,7 +30,7 @@ for p in sorted(glob.glob(os.path.join(root, "schemas", "*.schema.json"))):
     assert s["schema"] == "rh-jsonschema/1", p
     assert s["targets"], p
     names.add(s["name"])
-for want in ("connector-manifest", "canonical-repo", "dep-graph", "adapter-transformation", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result", "pylock-artifact-observation-result", "pylock-marker-evaluation", "projection-snapshot", "cyclonedx", "spdx", "inventory-result", "continuity-metrics", "registry-meta", "registry-meta-result", "distribution", "archive", "role-publication", "homebrew", "osv-query-input", "osv-commit-query-input", "osv-query-batch-result", "osv-query-batch-pages-result", "osv-query-batch-hydrated-result", "snapshot-reconcile-input", "snapshot-reconcile-result", "forge-events-input", "ingest-input", "postgres-legacy-ingest-input", "postgres-command", "postgres-result", "github-review-capability-probe-result", "github-collaborator-probe-result", "gitlab-capability-matrix", "forge-capability-matrix", "bitbucket-capability-matrix", "correction-evidence-policy", "correction-evidence-verification", "privacy-history"):
+for want in ("connector-manifest", "canonical-repo", "dep-graph", "adapter-transformation", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result", "pylock-artifact-observation-result", "pylock-marker-evaluation", "projection-snapshot", "cyclonedx", "spdx", "inventory-result", "continuity-metrics", "succession-result", "registry-meta", "registry-meta-result", "distribution", "archive", "role-publication", "homebrew", "osv-query-input", "osv-commit-query-input", "osv-query-batch-result", "osv-query-batch-pages-result", "osv-query-batch-hydrated-result", "snapshot-reconcile-input", "snapshot-reconcile-result", "forge-events-input", "ingest-input", "postgres-legacy-ingest-input", "postgres-command", "postgres-result", "github-review-capability-probe-result", "github-collaborator-probe-result", "gitlab-capability-matrix", "forge-capability-matrix", "bitbucket-capability-matrix", "correction-evidence-policy", "correction-evidence-verification", "privacy-history"):
     assert want in names, ("missing schema", want)
 print("[schemas] families OK:", ", ".join(sorted(names)))
 PY
@@ -89,6 +89,30 @@ PY
 done
 rm -f "$continuity_negative"
 echo "[schemas] observed, partial, unsupported, and ratio states are constrained"
+
+echo "[schemas] succession observations constrain value, censoring, and quality"
+succession_negative="$ROOT/fixtures/succession/result-negative.json"
+for invalid in observed-null unsupported-value partial-quality; do
+  python3 - "$ROOT/fixtures/succession/result-observed.json" "$ROOT/fixtures/succession/result-censored.json" "$succession_negative" "$invalid" <<'PY'
+import json, sys
+observed_path, censored_path, target, invalid = sys.argv[1:]
+document = json.load(open(censored_path if invalid == "partial-quality" else observed_path))
+metrics = {row["key"]: row for row in document["metrics"]}
+if invalid == "observed-null":
+    metrics["succession.handover_overlap_months"]["value"] = None
+elif invalid == "unsupported-value":
+    metrics["succession.activity_primary_actor_changes"]["value"] = 0
+else:
+    metrics["succession.successor_follow_up_active_months"]["quality_dimensions"]["completeness"] = "complete"
+json.dump(document, open(target, "w"), separators=(",", ":"))
+PY
+  if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+    rm -f "$succession_negative"
+    fail "succession schema accepted $invalid metric state"
+  fi
+done
+rm -f "$succession_negative"
+echo "[schemas] succession observed, partial, unsupported, and absent states are constrained"
 
 echo "[schemas] negative control: a malformed document is rejected"
 tmp="$ROOT/build/tmp_schema_neg"

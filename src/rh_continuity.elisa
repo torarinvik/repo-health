@@ -499,6 +499,28 @@ module Continuity:
             return rh_continuity_emit_observation(out, key, Observation::RhMetricValue.Absent, Observation::RH_ST_NOT_APPLICABLE, reason, "") if denominator == 0
             rh_continuity_emit_u64_ratio(out, key, numerator, denominator, bounded)
 
+        def rh_continuity_emit_follow_up_count(out: mutable darray[u8]&, count: i64, status: u8, reason: cstr, has_follow_up: bool, observed_months: i64, requested_months: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            emitted: bool = rh_continuity_emit_count(out, "succession.successor_follow_up_active_months", count, status, reason, "")
+            return false if not emitted
+            if has_follow_up:
+                out.pop()
+                Base::rh_push_text(out, ",\"observed_months\":")
+                Base::rh_push_decimal_i64(out, observed_months)
+                Base::rh_push_text(out, ",\"requested_months\":")
+                Base::rh_push_decimal_i64(out, requested_months)
+                out.push(125)
+            true
+
+        def rh_continuity_emit_activity_change_count(out: mutable darray[u8]&, count: i64, status: u8, reason: cstr, eligible_month_pairs: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            emitted: bool = rh_continuity_emit_count(out, "succession.activity_primary_actor_changes", count, status, reason, "")
+            return false if not emitted
+            if status == Observation::RH_ST_OBSERVED:
+                out.pop()
+                Base::rh_push_text(out, ",\"eligible_month_pairs\":")
+                Base::rh_push_decimal_i64(out, eligible_month_pairs)
+                out.push(125)
+            true
+
     public:
         # Publish the 23 continuity observations through the shared typed writer.
         # The exact window, denominator components, profiles, and evidence paths
@@ -681,7 +703,7 @@ module Continuity:
         # `not_applicable` — an absent declaration is not a claim of zero overlap.
         # A non-positive complete-month count is `not_applicable` too (no window,
         # nothing to measure). The count is a plain count (unit: count), not a ratio.
-        def rh_succession_metrics_write(out: mutable darray[u8]&, presence: darray[u8]&, predecessor: i64, successor: i64, n_months: i64, handover_month: i64, follow_up_months: i64, activity_counts: darray[i64]&, activity_counts_present: bool) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_succession_metrics_write(out: mutable darray[u8]&, presence: darray[u8]&, predecessor: i64, successor: i64, n_months: i64, handover_month: i64, follow_up_months: i64, activity_counts: darray[i64]&, activity_counts_present: bool) -> bool can[Memory.Allocate, Abort.Panic]:
             pair_valid: bool = predecessor >= 0 and successor >= 0 and predecessor != successor and n_months > 0
             overlap: mutable i64 = -1
             if pair_valid:
@@ -776,44 +798,25 @@ module Continuity:
                     Base::rh_push_text(out, "true")
                 activity_index <- activity_index + 1
             Base::rh_push_text(out, "],\"evidence\":[\"evidence/git-log.bin\"],\"note\":\"declared predecessor/successor overlap and successor activity after the explicit handover month; activity-derived primary actor is selected only for a unique positive monthly event-count maximum; ties and empty months are unknown; incomplete follow-up is censored; no motive attribution or causal transfer is inferred\",\"metrics\":[")
-            Base::rh_push_text(out, "{\"key\":\"succession.declared_handovers\",\"version\":\"1.0.0\",\"status\":\"")
-            if pair_valid:
-                Base::rh_push_text(out, "observed\",\"value\":1")
-            elif predecessor == successor and predecessor >= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"predecessor-and-successor-are-the-same-actor\"")
-            else:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-declared-predecessor-successor-pair\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]},")
-            Base::rh_push_text(out, "{\"key\":\"succession.observed_activity_overlap_months\",\"version\":\"1.0.0\",\"status\":\"")
-            if pair_valid:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, overlap)
-            elif predecessor == successor and predecessor >= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"predecessor-and-successor-are-the-same-actor\"")
-            else:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-declared-predecessor-successor-pair\"")
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]}, {\"key\":\"succession.successor_follow_up_active_months\",\"version\":\"1.0.0\",\"status\":\"")
-            if predecessor < 0 or successor < 0 or handover_month < 0 or follow_up_months <= 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-explicit-handover-follow-up-window\"")
-            else:
-                Base::rh_push_text(out, "partial\",\"value\":") if not follow_complete
-                Base::rh_push_text(out, "observed\",\"value\":") if follow_complete
-                Base::rh_push_decimal_i64(out, follow_active_months)
-                Base::rh_push_text(out, ",\"observed_months\":")
-                Base::rh_push_decimal_i64(out, follow_observed_months)
-                Base::rh_push_text(out, ",\"requested_months\":")
-                Base::rh_push_decimal_i64(out, follow_up_months)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]}, {\"key\":\"succession.activity_primary_actor_changes\",\"version\":\"1.0.0\",\"status\":\"")
-            if not activity_counts_present or activity_change_by_month.count == 0:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"monthly-event-count-matrix-not-supplied\"")
-            elif eligible_month_pairs == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-adjacent-known-primary-actors\"")
-            else:
-                Base::rh_push_text(out, "observed\",\"value\":")
-                Base::rh_push_decimal_i64(out, activity_change_count)
-                Base::rh_push_text(out, ",\"eligible_month_pairs\":")
-                Base::rh_push_decimal_i64(out, eligible_month_pairs)
-            Base::rh_push_text(out, ",\"evidence\":[\"evidence/git-log.bin\"]}]}")
+            pair_reason: cstr = "predecessor-and-successor-are-the-same-actor" if predecessor == successor and predecessor >= 0 else "no-declared-predecessor-successor-pair"
+            pair_status: u8 = Observation::RH_ST_OBSERVED if pair_valid else Observation::RH_ST_NOT_APPLICABLE
+            handover_ok: bool = rh_continuity_emit_count(out, "succession.handover_overlap_months", overlap, pair_status, pair_reason if not pair_valid else "", "")
+            out.push(44) if handover_ok
+            declared_ok: bool = handover_ok and rh_continuity_emit_count(out, "succession.declared_handovers", 1, pair_status, pair_reason if not pair_valid else "", "")
+            out.push(44) if declared_ok
+            overlap_ok: bool = declared_ok and rh_continuity_emit_count(out, "succession.observed_activity_overlap_months", overlap, pair_status, pair_reason if not pair_valid else "", "")
+            out.push(44) if overlap_ok
+            has_follow_up: bool = predecessor >= 0 and successor >= 0 and handover_month >= 0 and follow_up_months > 0
+            follow_status: u8 = Observation::RH_ST_NOT_APPLICABLE if not has_follow_up else Observation::RH_ST_PARTIAL if not follow_complete else Observation::RH_ST_OBSERVED
+            follow_reason: cstr = "no-explicit-handover-follow-up-window" if not has_follow_up else ""
+            follow_ok: bool = overlap_ok and rh_continuity_emit_follow_up_count(out, follow_active_months, follow_status, follow_reason, has_follow_up, follow_observed_months, follow_up_months)
+            out.push(44) if follow_ok
+            activity_status: u8 = Observation::RH_ST_UNSUPPORTED if not activity_counts_present or activity_change_by_month.count == 0 else Observation::RH_ST_NOT_APPLICABLE if eligible_month_pairs == 0 else Observation::RH_ST_OBSERVED
+            activity_reason: cstr = "monthly-event-count-matrix-not-supplied" if not activity_counts_present or activity_change_by_month.count == 0 else "no-adjacent-known-primary-actors" if eligible_month_pairs == 0 else ""
+            activity_ok: bool = follow_ok and rh_continuity_emit_activity_change_count(out, activity_change_count, activity_status, activity_reason, eligible_month_pairs)
+            return false if not activity_ok
+            Base::rh_push_text(out, "]}")
+            true
 
     private:
         def rh_continuity_gcd(a: u64, b: u64) -> u64:

@@ -36,9 +36,17 @@ assert d["pair"] == {"predecessor": 0, "successor": 1}, d
 assert d["window_complete_months"] == 12, d
 assert "no motive attribution" in d["note"], d
 metrics = {m["key"]: m for m in d["metrics"]}
+assert len(metrics) == 5, metrics
+assert metrics["succession.handover_overlap_months"]["value"] == 3, metrics
 assert metrics["succession.declared_handovers"]["status"] == "observed", metrics
 assert metrics["succession.declared_handovers"]["value"] == 1, metrics
 assert metrics["succession.observed_activity_overlap_months"]["value"] == 3, metrics
+for metric in metrics.values():
+  assert metric["version"] == "1.0.0", metric
+  assert metric["evidence"] == ["evidence/git-log.bin"], metric
+  assert set(metric["quality_dimensions"]) == {"completeness", "freshness", "validity", "provenance"}, metric
+assert metrics["succession.handover_overlap_months"]["quality_dimensions"] == {
+  "completeness":"complete", "freshness":"unknown", "validity":"valid", "provenance":"evidence_backed"}, metrics
 print("[succession] overlap OK")
 PY
 python3 - "$T/in.json" "$T/out.json" <<'PY'
@@ -73,6 +81,8 @@ assert d["handover_month"] == 5, d
 assert d["follow_up"] == {"requested_months":6,"observed_months":6,"successor_active_months":6}, d
 m = {x["key"]: x for x in d["metrics"]}["succession.successor_follow_up_active_months"]
 assert m["status"] == "observed" and m["value"] == 6, m
+assert m["observed_months"] == 6 and m["requested_months"] == 6, m
+assert m["quality_dimensions"]["completeness"] == "complete", m
 print("[succession] complete follow-up OK")
 PY
 python3 - "$T/follow-up.json" "$T/censored.json" <<'PY'
@@ -87,6 +97,8 @@ d = json.load(open(sys.argv[1]))
 assert d["follow_up"] == {"requested_months":10,"observed_months":6,"successor_active_months":6}, d
 m = {x["key"]: x for x in d["metrics"]}["succession.successor_follow_up_active_months"]
 assert m["status"] == "partial" and m["value"] == 6 and m["requested_months"] == 10, m
+assert m["observed_months"] == 6, m
+assert m["quality_dimensions"]["completeness"] == "partial" and m["quality_dimensions"]["validity"] == "unknown", m
 print("[succession] right-censored follow-up OK")
 PY
 
@@ -99,6 +111,7 @@ d = json.load(open(sys.argv[1]))
 assert d["activity_primary_actor_change_by_month"] == [None,None,None,False,True,False], d
 m = {x["key"]: x for x in d["metrics"]}["succession.activity_primary_actor_changes"]
 assert m["status"] == "observed" and m["value"] == 1 and m["eligible_month_pairs"] == 3, m
+assert m["quality_dimensions"]["completeness"] == "complete", m
 print("[succession] ties break the series; only adjacent known primary actors are compared")
 PY
 
@@ -119,6 +132,10 @@ assert "no-declared" in d["reason"], d
 metrics = {m["key"]: m for m in d["metrics"]}
 assert metrics["succession.declared_handovers"]["status"] == "not_applicable", metrics
 assert metrics["succession.observed_activity_overlap_months"]["status"] == "not_applicable", metrics
+assert metrics["succession.handover_overlap_months"]["value"] is None, metrics
+assert metrics["succession.handover_overlap_months"]["reason"] == "no-declared-predecessor-successor-pair", metrics
+assert metrics["succession.activity_primary_actor_changes"]["status"] == "unsupported", metrics
+assert all(m["value"] is None for m in metrics.values()), metrics
 print("[succession] not_applicable OK")
 PY
 
