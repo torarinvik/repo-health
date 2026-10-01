@@ -130,7 +130,7 @@ module RolesProvider:
             return false if members < 0 or nodes[members.usize()].kind != Json::RH_JSON_ARR or nodes[members.usize()].child_count > RH_ROLES_PROVIDER_MAX_MEMBERS
             true
 
-        def rh_rp_read_normalized_declarations(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, declarations: mutable darray[RhProviderDeclaration]&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_rp_read_normalized_declarations(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, root: i64, declarations: mutable darray[RhProviderDeclaration]&, slots: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic]:
             members: i64 = Json::rh_json_obj_get(nodes, texts, root, "declarations")
             return false if members < 0 or nodes[members.usize()].kind != Json::RH_JSON_ARR
             member_array: Json::RhJsonNode = nodes[members.usize()]
@@ -153,12 +153,7 @@ module RolesProvider:
                 declared_at: i64 = RolesProvider::rh_rp_int(nodes, raw, texts, member, "declared_at", &declared_ok)
                 return false if declared_ok == 0 or declared_at < 0
                 declaration: RhProviderDeclaration = RhProviderDeclaration{actor: actor, role: role, permission: permission.u8(), declared_at: declared_at}
-                existing: i64 = RolesProvider::rh_rp_existing(declarations, actor)
-                if existing >= 0:
-                    declarations[existing.usize()] <- declaration
-                else:
-                    return false if declarations.count >= RH_ROLES_PROVIDER_MAX_MEMBERS
-                    declarations.push(declaration)
+                return false if not RolesProvider::rh_rp_declaration_upsert(declarations, slots, declaration)
                 member <- nodes[member.usize()].next_sibling
             true
 
@@ -227,11 +222,39 @@ module RolesProvider:
             return 8 if role == Roles::RH_ROLE_MEMBER
             0
 
-        def rh_rp_existing(declarations: darray[RhProviderDeclaration]&, actor: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while i < declarations.count.i64() |i: i64 = 0, declarations, actor|:
-                return i if declarations[i.usize()].actor == actor
+        def rh_rp_actor_hash(actor: i64) -> usize:
+            key: mutable u64 = actor.u64()
+            hash: u64 =
+                while byte_index < 8 |hash: mutable u64 = 0xcbf29ce484222325, byte_index: usize = 0, key| -> hash:
+                    shift: u64 = byte_index.u64() * 8
+                    hash <- (hash ^ ((key >> shift).u8().u64())) * 0x100000001b3
+                    byte_index <- byte_index + 1
+            hash.usize()
+
+        def rh_rp_index_table(capacity: usize) -> mutable darray[i64] can[Memory.Allocate, Abort.Panic]:
+            slots: mutable darray[i64] = []
+            while i < capacity |i: usize = 0, capacity, slots|:
+                slots.push(0)
                 i <- i + 1
-            -1
+            slots
+
+        def rh_rp_declaration_upsert(declarations: mutable darray[RhProviderDeclaration]&, slots: mutable darray[i64]&, declaration: RhProviderDeclaration) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if slots.count == 0
+            slot: mutable usize = RolesProvider::rh_rp_actor_hash(declaration.actor) % slots.count
+            while probe < slots.count |probe: usize = 0, slot, slots, declarations, declaration|:
+                index: i64 = slots[slot]
+                if index == 0:
+                    return false if declarations.count.i64() >= RH_ROLES_PROVIDER_MAX_MEMBERS
+                    declarations.push(declaration)
+                    slots[slot] <- declarations.count.i64()
+                    return true
+                prior_index: usize = (index - 1).usize()
+                if declarations[prior_index].actor == declaration.actor:
+                    declarations[prior_index] <- declaration
+                    return true
+                slot <- (slot + 1) % slots.count
+                probe <- probe + 1
+            false
 
     public:
         # Resume only an authenticated, incomplete GitHub or GitLab snapshot
@@ -297,8 +320,12 @@ module RolesProvider:
                 latest_cursor_page: i64 = RolesProvider::rh_rp_cursor_page(latest_texts, next_s, next_e)
                 return -1 if latest_cursor_page != latest_pages + 1
             declarations: mutable darray[RhProviderDeclaration] = []
-            return -1 if not RolesProvider::rh_rp_read_normalized_declarations(previous_nodes, previous, previous_texts, previous_root, declarations)
-            return -1 if not RolesProvider::rh_rp_read_normalized_declarations(latest_nodes, latest, latest_texts, latest_root, declarations)
+            previous_members: i64 = Json::rh_json_obj_get(previous_nodes, previous_texts, previous_root, "declarations")
+            latest_members: i64 = Json::rh_json_obj_get(latest_nodes, latest_texts, latest_root, "declarations")
+            declaration_capacity: usize = (previous_nodes[previous_members.usize()].child_count + latest_nodes[latest_members.usize()].child_count).usize() * 2 + 1
+            declaration_slots: mutable darray[i64] = RolesProvider::rh_rp_index_table(declaration_capacity)
+            return -1 if not RolesProvider::rh_rp_read_normalized_declarations(previous_nodes, previous, previous_texts, previous_root, declarations, declaration_slots)
+            return -1 if not RolesProvider::rh_rp_read_normalized_declarations(latest_nodes, latest, latest_texts, latest_root, declarations, declaration_slots)
             Base::rh_push_text(out, "{\"schema\":\"rh-roles-input/1\",\"provider\":\"")
             Base::rh_json_escape(out, previous_texts, previous_provider_s.usize(), previous_provider_e.usize())
             Base::rh_push_text(out, "\",\"authorization\":{\"state\":\"authorized\"},\"scope\":{\"")
@@ -424,7 +451,10 @@ module RolesProvider:
             Base::rh_push_text(out, ",\"declarations\":[")
             declarations: mutable darray[RhProviderDeclaration] = []
             arr: Json::RhJsonNode = nodes[members.usize()]
-            while member >= 0 |member: i64 = arr.first_child, nodes, raw, texts, declarations, github, gitlab, captured_at, auth_state|:
+            declaration_slots: mutable darray[i64] = []
+            if auth_state == 1:
+                declaration_slots <- RolesProvider::rh_rp_index_table((arr.child_count * 2 + 1).usize())
+            while member >= 0 |member: i64 = arr.first_child, nodes, raw, texts, declarations, declaration_slots, github, gitlab, captured_at, auth_state|:
                 return -1 if nodes[member.usize()].kind != Json::RH_JSON_OBJ
                 actor_ok: mutable i64 = 0
                 actor: i64 = RolesProvider::rh_rp_int(nodes, raw, texts, member, "id", &actor_ok)
@@ -436,11 +466,7 @@ module RolesProvider:
                 if auth_state == 1:
                     permission: u8 = RolesProvider::rh_rp_permission(role)
                     normalized: RhProviderDeclaration = RhProviderDeclaration{actor: actor, role: role, permission: permission, declared_at: captured_at}
-                    existing: i64 = RolesProvider::rh_rp_existing(declarations, actor)
-                    if existing >= 0:
-                        declarations[existing.usize()] <- normalized
-                    else:
-                        declarations.push(normalized)
+                    return -1 if not RolesProvider::rh_rp_declaration_upsert(declarations, declaration_slots, normalized)
                 member <- nodes[member.usize()].next_sibling
             while i < declarations.count.i64() |i: i64 = 0, declarations, out|:
                 out.push(44) if i > 0

@@ -103,6 +103,29 @@ assert actor == [{"actor_id": 7002, "role": "owner", "permission": 1, "source": 
 print("[roles-provider] duplicate replacement + bounded declarations OK")
 PY
 
+echo "[roles-provider] colliding actor IDs retain exact replacement identity"
+python3 - "$T/collision-page.json" <<'PY'
+import json, sys
+d = json.load(open("fixtures/roles/github-provider-input.json"))
+d["members"] = [
+    {"id": 1, "permission": "admin"},
+    {"id": 12, "permission": "pull"},
+    {"id": 12, "permission": "admin"},
+    {"id": 2, "permission": "push"},
+    {"id": 3, "permission": "triage"},
+    {"id": 4, "permission": "read"},
+]
+json.dump(d, open(sys.argv[1], "w"), separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" roles-import --input "$T/collision-page.json" --out "$T/collision-page.out" >/dev/null || fail "colliding actor IDs"
+python3 - "$T/collision-page.out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert [row["actor_id"] for row in d["declarations"]] == [1, 12, 2, 3, 4], d
+assert next(row for row in d["declarations"] if row["actor_id"] == 12)["role"] == "owner", d
+print("[roles-provider] exact numeric IDs survive actor-index hash collisions")
+PY
+
 echo "[roles-provider] opaque pagination state is retained"
 python3 - "fixtures/roles/github-provider-input.json" "$T/paginated.json" <<'PY'
 import json, sys
