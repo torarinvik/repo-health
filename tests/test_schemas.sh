@@ -42,9 +42,11 @@ python3 - "$ROOT/schemas/evidence-bundle-manifest.spec.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["schema"] == "rh-evidence-bundle-manifest-schema/1", d
-assert set(d["versions"]) == {"1", "2"}, d
+assert set(d["versions"]) == {"1", "2", "3"}, d
 assert "expected-output-sha256-report.md" in d["versions"]["2"]["expected_outputs"], d
 assert "expected-output-sha256-report.md" in d["versions"]["1"]["optional_outputs"], d
+assert "object-sha256-evidence/git-refs.txt" in d["versions"]["3"]["repeated_sha256"], d
+assert "evidence/git-refs.txt" in d["files_by_version"]["3"], d
 print("[schemas] evidence bundle text manifest contract is versioned")
 PY
 python3 - "$ROOT" <<'PY'
