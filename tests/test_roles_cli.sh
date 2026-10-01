@@ -191,6 +191,23 @@ assert "never guessed" in d["note"], d["note"]
 print("[roles] declared queries + tally OK")
 PY
 
+echo "[roles] action actor-type tallies use the typed single-pass result"
+cat > "$T/service-actions.json" <<'JSON'
+{"schema":"rh-roles-input/1","authorization":{"state":"authorized"},"permission_inventory_complete":false,"declarations":[],"observed_actions":[{"actor_id":10,"actor_type":"service","kind":"release","at":10},{"actor_id":11,"actor_type":"service","kind":"merge","at":11},{"actor_id":12,"actor_type":"service","kind":"review","at":12}]}
+JSON
+"$ROOT/build/rh_cli" roles --input "$T/service-actions.json" --out "$T/service-actions-out.json" >/dev/null || fail "typed service action counts"
+python3 - "$T/service-actions-out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["action_events_by_actor_type"] == {
+    "status": "observed",
+    "release": {"human": 0, "bot": 0, "service": 1, "unknown": 0},
+    "merge": {"human": 0, "bot": 0, "service": 1, "unknown": 0},
+    "review": {"human": 0, "bot": 0, "service": 1, "unknown": 0},
+}, d["action_events_by_actor_type"]
+print("[roles] release/merge/review service counts OK")
+PY
+
 echo "[roles] determinism"
 "$ROOT/build/rh_cli" roles --input "$T/in.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "roles output not deterministic"
