@@ -1,6 +1,6 @@
 # Narrow POSIX process bridge; argv/env are NUL-delimited, never shell text.
 include "./rh_base.elisa"
-extern rh_process_run(executable: cstr, argv_flat: cstr, env_flat: cstr, input_data: cstr, input_length: usize, stdout_path: cstr, stderr_path: cstr, max_output_bytes: usize, timeout_ms: i32, code_out: mutable i32&) -> i32
+extern rh_process_run(executable: cstr, argv_flat: cstr, env_flat: cstr, input_data: cstr, input_length: usize, stdout_path: cstr, stderr_path: cstr, max_output_bytes: usize, timeout_ms: i32, code_out: mutable i32&, elapsed_ms_out: mutable i64&, stdout_bytes_out: mutable usize&, stderr_bytes_out: mutable usize&, peak_group_processes_out: mutable usize&, peak_group_memory_bytes_out: mutable u64&) -> i32
 
 module Process:
     public:
@@ -20,6 +20,11 @@ module Process:
         struct RhProcessResult:
             kind: RhProcessKind
             code: i32
+            elapsed_ms: i64
+            stdout_bytes: usize
+            stderr_bytes: usize
+            peak_group_processes: usize
+            peak_group_memory_bytes: u64
 
         def rh_append_arg(buffer: mutable darray[u8]&, value: u8&) -> void can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_text(buffer, value)
@@ -34,7 +39,7 @@ module Process:
             result.kind == RhProcessKind.Exit and result.code == 0
 
         def rh_setup_error(code: i32) -> RhProcessResult:
-            RhProcessResult{kind: RhProcessKind.SetupError, code: code}
+            RhProcessResult{kind: RhProcessKind.SetupError, code: code, elapsed_ms: -1, stdout_bytes: 0, stderr_bytes: 0, peak_group_processes: 0, peak_group_memory_bytes: 0}
 
     public:
         def rh_run_with_timeout(executable: cstr, argv: darray[u8]&, env: darray[u8]&, stdout_path: cstr, stderr_path: cstr, timeout_ms: i32) -> RhProcessResult can[Unsafe.PointerCast]:
@@ -55,7 +60,12 @@ module Process:
             env_ptr: cstr = (&env[0]).cast[cstr] can Unsafe.PointerCast
             input_ptr: mutable cstr = (&input[0]).cast[cstr] can Unsafe.PointerCast if input.count > 0 else ""
             code: mutable i32 = 0
-            kind_code: i32 = rh_process_run(executable, argv_ptr, env_ptr, input_ptr, input.count, stdout_path, stderr_path, max_output_bytes, timeout_ms, &code)
+            elapsed_ms: mutable i64 = -1
+            stdout_bytes: mutable usize = 0
+            stderr_bytes: mutable usize = 0
+            peak_group_processes: mutable usize = 0
+            peak_group_memory_bytes: mutable u64 = 0
+            kind_code: i32 = rh_process_run(executable, argv_ptr, env_ptr, input_ptr, input.count, stdout_path, stderr_path, max_output_bytes, timeout_ms, &code, &elapsed_ms, &stdout_bytes, &stderr_bytes, &peak_group_processes, &peak_group_memory_bytes)
             kind: RhProcessKind =
                 if kind_code == 0: RhProcessKind.Exit
                 elif kind_code == 1: RhProcessKind.Timeout
@@ -65,7 +75,7 @@ module Process:
                 elif kind_code == 5: RhProcessKind.IoError
                 elif kind_code == 6: RhProcessKind.CapacityLimit
                 else: RhProcessKind.ResourceLimit
-            RhProcessResult{kind: kind, code: code}
+            RhProcessResult{kind: kind, code: code, elapsed_ms: elapsed_ms, stdout_bytes: stdout_bytes, stderr_bytes: stderr_bytes, peak_group_processes: peak_group_processes, peak_group_memory_bytes: peak_group_memory_bytes}
 
     public:
         def rh_run(executable: cstr, argv: darray[u8]&, env: darray[u8]&, stdout_path: cstr, stderr_path: cstr) -> RhProcessResult can[Unsafe.PointerCast]:

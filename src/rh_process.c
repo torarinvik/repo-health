@@ -51,6 +51,37 @@ enum {
 static pthread_mutex_t rh_process_capacity_mutex = PTHREAD_MUTEX_INITIALIZER;
 static size_t rh_process_active_groups = 0;
 
+typedef struct {
+    int64_t elapsed_ms;
+    size_t stdout_bytes;
+    size_t stderr_bytes;
+    size_t peak_group_processes;
+    uint64_t peak_group_memory_bytes;
+} rh_process_metrics;
+
+static void rh_process_metrics_reset(rh_process_metrics *metrics) {
+    if (metrics == NULL) return;
+    metrics->elapsed_ms = -1;
+    metrics->stdout_bytes = 0;
+    metrics->stderr_bytes = 0;
+    metrics->peak_group_processes = 0;
+    metrics->peak_group_memory_bytes = 0;
+}
+
+static void rh_process_metrics_publish(const rh_process_metrics *metrics,
+                                       int64_t *elapsed_ms_out,
+                                       size_t *stdout_bytes_out,
+                                       size_t *stderr_bytes_out,
+                                       size_t *peak_group_processes_out,
+                                       uint64_t *peak_group_memory_bytes_out) {
+    if (metrics == NULL) return;
+    if (elapsed_ms_out != NULL) *elapsed_ms_out = metrics->elapsed_ms;
+    if (stdout_bytes_out != NULL) *stdout_bytes_out = metrics->stdout_bytes;
+    if (stderr_bytes_out != NULL) *stderr_bytes_out = metrics->stderr_bytes;
+    if (peak_group_processes_out != NULL) *peak_group_processes_out = metrics->peak_group_processes;
+    if (peak_group_memory_bytes_out != NULL) *peak_group_memory_bytes_out = metrics->peak_group_memory_bytes;
+}
+
 static int rh_process_result(int *code_out, int kind, int code) {
     if (code_out != NULL) *code_out = code;
     return kind;
@@ -230,7 +261,9 @@ static int rh_process_run_inner(const char *executable, const char *argv_flat,
                    const char *env_flat, const char *input_data,
                    size_t input_length, const char *stdout_path,
                    const char *stderr_path, size_t max_output_bytes,
-                   int timeout_ms, int *code_out) {
+                   int timeout_ms, int *code_out,
+                   rh_process_metrics *metrics) {
+    rh_process_metrics_reset(metrics);
     if (code_out == NULL) return RH_PROCESS_SETUP_ERROR;
     *code_out = 0;
     if (executable == NULL || argv_flat == NULL ||
@@ -337,6 +370,8 @@ static int rh_process_run_inner(const char *executable, const char *argv_flat,
         (void)kill(-child, SIGKILL); (void)waitpid(child, NULL, 0);
         rh_process_close(&input_pipe[1]); rh_process_close(&stdout_pipe[0]);
         rh_process_close(&stderr_pipe[0]); rh_process_close(&stdout_file); rh_process_close(&stderr_file);
+        int64_t finished = rh_process_millis();
+        if (metrics != NULL && finished >= started) metrics->elapsed_ms = finished - started;
         return rh_process_result(code_out, RH_PROCESS_SETUP_ERROR, mask_error);
     }
     int pipe_was_pending = sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1;
@@ -354,6 +389,12 @@ static int rh_process_run_inner(const char *executable, const char *argv_flat,
             uint64_t group_memory = 0;
             int usage_error = rh_process_group_usage(child, &group_processes, &group_memory);
             last_resource_sample = now;
+            if (metrics != NULL && usage_error == 0) {
+                if (group_processes > metrics->peak_group_processes)
+                    metrics->peak_group_processes = group_processes;
+                if (group_memory > metrics->peak_group_memory_bytes)
+                    metrics->peak_group_memory_bytes = group_memory;
+            }
             if (usage_error != 0 || group_processes > RH_PROCESS_MAX_GROUP_PROCESSES ||
                 group_memory > RH_PROCESS_MAX_GROUP_MEMORY_BYTES) {
                 result_kind = RH_PROCESS_RESOURCE_LIMIT;
@@ -395,6 +436,11 @@ static int rh_process_run_inner(const char *executable, const char *argv_flat,
             for (;;) {
                 ssize_t bytes = read(*read_fds[stream], buffer, sizeof(buffer));
                 if (bytes > 0) {
+                    if (metrics != NULL) {
+                        size_t *stream_bytes = stream == 0 ? &metrics->stdout_bytes : &metrics->stderr_bytes;
+                        if ((size_t)bytes > SIZE_MAX - *stream_bytes) *stream_bytes = SIZE_MAX;
+                        else *stream_bytes += (size_t)bytes;
+                    }
                     if ((size_t)bytes > max_output_bytes - output_bytes) {
                         result_kind = RH_PROCESS_OUTPUT_LIMIT; result_code = (int)max_output_bytes; (void)kill(-child, SIGKILL); goto finished;
                     }
@@ -432,6 +478,8 @@ finished:
         result_kind = RH_PROCESS_IO_ERROR;
         result_code = ECHILD;
     }
+    int64_t finished = rh_process_millis();
+    if (metrics != NULL && finished >= started) metrics->elapsed_ms = finished - started;
     return rh_process_result(code_out, result_kind, result_code);
 }
 
@@ -440,7 +488,15 @@ int rh_process_run(const char *executable, const char *argv_flat,
                    const char *env_flat, const char *input_data,
                    size_t input_length, const char *stdout_path,
                    const char *stderr_path, size_t max_output_bytes,
-                   int timeout_ms, int *code_out) {
+                   int timeout_ms, int *code_out, int64_t *elapsed_ms_out,
+                   size_t *stdout_bytes_out, size_t *stderr_bytes_out,
+                   size_t *peak_group_processes_out,
+                   uint64_t *peak_group_memory_bytes_out) {
+    rh_process_metrics metrics;
+    rh_process_metrics_reset(&metrics);
+    rh_process_metrics_publish(&metrics, elapsed_ms_out, stdout_bytes_out,
+                               stderr_bytes_out, peak_group_processes_out,
+                               peak_group_memory_bytes_out);
     if (code_out == NULL) return RH_PROCESS_SETUP_ERROR;
     int lock_error = pthread_mutex_lock(&rh_process_capacity_mutex);
     if (lock_error != 0)
@@ -454,7 +510,11 @@ int rh_process_run(const char *executable, const char *argv_flat,
 
     int result = rh_process_run_inner(executable, argv_flat, env_flat, input_data,
                                       input_length, stdout_path, stderr_path,
-                                      max_output_bytes, timeout_ms, code_out);
+                                      max_output_bytes, timeout_ms, code_out,
+                                      &metrics);
+    rh_process_metrics_publish(&metrics, elapsed_ms_out, stdout_bytes_out,
+                               stderr_bytes_out, peak_group_processes_out,
+                               peak_group_memory_bytes_out);
     lock_error = pthread_mutex_lock(&rh_process_capacity_mutex);
     if (lock_error == 0) {
         rh_process_active_groups -= 1;

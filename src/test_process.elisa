@@ -37,11 +37,21 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     byte_output: mutable darray[u8] = []
     byte_read_status: i64 = Base::rh_io_read("/tmp/rh-process-bytes.out", byte_output)
     process_check(Process::rh_succeeded(byte_result) and byte_read_status >= 0 and Base::rh_bytes_equal_literal(byte_output, 0, byte_output.count.i64(), "byte-vector-argument"), "byte-vector-appends-one-terminator", &failures, output)
+    process_check(byte_result.elapsed_ms >= 0 and byte_result.stdout_bytes == byte_output.count and byte_result.stderr_bytes == 0, "process-captures-time-and-stream-byte-counts", &failures, output)
+    stream_counts_ok: bool =
+        stream_args: mutable darray[u8] = []
+        Process::rh_append_arg(stream_args, "sh")
+        Process::rh_append_arg(stream_args, "-c")
+        Process::rh_append_arg(stream_args, "printf stdout; printf stderr >&2")
+        stream_args.push(0)
+        stream_result: Process::RhProcessResult = Process::rh_run("/bin/sh", stream_args, env, "/dev/null", "/dev/null")
+        Process::rh_succeeded(stream_result) and stream_result.stdout_bytes == 6 and stream_result.stderr_bytes == 6
+    process_check(stream_counts_ok, "process-counts-output-streams-separately", &failures, output)
     yes_args: mutable darray[u8] = []
     Process::rh_append_arg(yes_args, "yes")
     yes_args.push(0)
     overflow_result: Process::RhProcessResult = Process::rh_run_with_output_limit("/usr/bin/yes", yes_args, env, "/tmp/rh-process-overflow.out", "/dev/null", 128, 1000)
-    process_check(overflow_result.kind == Process::RhProcessKind.OutputLimit and overflow_result.code == 128, "combined-output-byte-limit", &failures, output)
+    process_check(overflow_result.kind == Process::RhProcessKind.OutputLimit and overflow_result.code == 128 and overflow_result.stdout_bytes > 128, "combined-output-byte-limit-and-observed-bytes", &failures, output)
     cat_args: mutable darray[u8] = []
     Process::rh_append_arg(cat_args, "cat")
     cat_args.push(0)
@@ -72,14 +82,14 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     Process::rh_append_arg(memory_args, "memory")
     memory_args.push(0)
     memory_result: Process::RhProcessResult = Process::rh_run_with_output_limit("/usr/bin/env", memory_args, env, "/dev/null", "/dev/null", 1024, 10000)
-    process_check(memory_result.kind == Process::RhProcessKind.ResourceLimit and memory_result.code == 1024, "process-group-memory-ceiling", &failures, output)
+    process_check(memory_result.kind == Process::RhProcessKind.ResourceLimit and memory_result.code == 1024 and memory_result.peak_group_memory_bytes > 1024 * 1024 * 1024, "process-group-memory-ceiling-and-peak", &failures, output)
     process_args: mutable darray[u8] = []
     Process::rh_append_arg(process_args, "env")
     Process::rh_append_arg(process_args, "build/test_process_tree")
     Process::rh_append_arg(process_args, "processes")
     process_args.push(0)
     process_result: Process::RhProcessResult = Process::rh_run_with_output_limit("/usr/bin/env", process_args, env, "/dev/null", "/dev/null", 1024, 10000)
-    process_check(process_result.kind == Process::RhProcessKind.ResourceLimit and process_result.code == 64, "process-group-descendant-ceiling", &failures, output)
+    process_check(process_result.kind == Process::RhProcessKind.ResourceLimit and process_result.code == 64 and process_result.peak_group_processes > 64, "process-group-descendant-ceiling-and-peak", &failures, output)
     descendant_marker: cstr = "/tmp/rh-process-descendant-survived"
     descendant_args: mutable darray[u8] = []
     Process::rh_append_arg(descendant_args, "sh")
@@ -93,11 +103,12 @@ def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast,
     pause_args.push(0)
     pause_result: Process::RhProcessResult = Process::rh_run_with_timeout("/bin/sleep", pause_args, env, "/dev/null", "/dev/null", 1000)
     process_check(descendant_timeout.kind == Process::RhProcessKind.Timeout and Process::rh_succeeded(pause_result) and not file_exists(descendant_marker), "timeout-kills-descendant-process-group", &failures, output)
+    process_check(pause_result.elapsed_ms >= 0 and pause_result.peak_group_processes > 0, "process-group-usage-is-sampled", &failures, output)
     bad_args: mutable darray[u8] = []
     Process::rh_append_arg(bad_args, "missing")
     bad_args.push(0)
     missing_result: Process::RhProcessResult = Process::rh_run_with_output_limit("/missing/repo-health-command", bad_args, env, "/dev/null", "/dev/null", 1024, 1000)
-    process_check(missing_result.kind == Process::RhProcessKind.SetupError and missing_result.code > 0, "missing-executable-fails-closed", &failures, output)
+    process_check(missing_result.kind == Process::RhProcessKind.SetupError and missing_result.code > 0 and missing_result.elapsed_ms == -1, "missing-executable-fails-closed-without-fabricated-measurement", &failures, output)
 
     invalid_limit_result: Process::RhProcessResult = Process::rh_run_with_output_limit("/usr/bin/true", bad_args, env, "/dev/null", "/dev/null", 0, 1000)
     process_check(invalid_limit_result.kind == Process::RhProcessKind.SetupError and invalid_limit_result.code > 0, "invalid-output-limit-fails-closed", &failures, output)
