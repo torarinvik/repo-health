@@ -28,7 +28,7 @@ rm -rf "$T"; mkdir -p "$T/big" && git init -q -b main "$T/big" && (
   done
 ) >/dev/null 2>&1
 start=$(date +%s)
-RH_SCAN_MAX_COMMITS=3 "$ROOT/build/rh_cli" scan --repo "$T/big" --out "$T/rep-big" >/dev/null 2>&1 || fail "big scan crashed"
+RH_SCAN_MAX_COMMITS=3 "$ROOT/build/rh_cli" scan --repo "$T/big" --out "$T/rep-big" --window-days 365 >/dev/null 2>&1 || fail "big scan crashed"
 end=$(date +%s)
 elapsed=$((end - start))
 [[ $elapsed -lt 60 ]] || fail "bounded scan exceeded wall clock (${elapsed}s)"
@@ -39,6 +39,12 @@ m = {x["key"]: x for x in d["metrics"]}
 cov = m["history.coverage_state"]["value"]
 assert cov["label"] == "truncated", cov
 assert m["coverage.window_completeness"]["status"] == "partial", m
+coverage = {(row["key"], row["version"]): row for row in d["metrics"] if row["key"] == "coverage.window_completeness"}
+v1 = coverage[("coverage.window_completeness", "1.0.0")]
+v2 = coverage[("coverage.window_completeness", "2.0.0")]
+assert v1["value"]["num"] == v1["value"]["den"], (v1, v2)
+assert v1["value"]["num"] > v2["value"]["den"], (v1, v2)
+assert 0 <= v2["value"]["num"] <= v2["value"]["den"], (v1, v2)
 print("[limits] truncated state OK:", cov["label"])
 PY
 
