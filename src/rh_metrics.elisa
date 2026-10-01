@@ -46,6 +46,9 @@ module Metrics:
         def rh_count_desc_less(left: u64, right: u64) -> bool:
             left > right
 
+        def rh_count_asc_less(left: u64, right: u64) -> bool:
+            left < right
+
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_gcd(a: u64, b: u64) -> u64:
             while y != 0 |x: u64 = a, y: u64 = b| -> x:
@@ -172,14 +175,10 @@ module Metrics:
             true
 
         # Gini coefficient as a reduced exact fraction num/den:
-        #   G = sum_i sum_j |x_i - x_j| / (2 * n * sum_i x_i)
-        # The double sum is computed exactly over nonzero actor counts. Returns
-        # false when the population is empty (caller reports not_applicable) or on
-        # overflow (bounded error) — never a fabricated number. A single nonzero
-        # actor yields 0/1 (perfect equality is impossible with n=1, but Gini is
-        # undefined for n<2; callers must treat n<2 as not_applicable, which the
-        # zero denominator of the 2*n factor would produce anyway). Display
-        # rounding is never stored here.
+        #   G = sum_{j<k} |x_j - x_k| / (n * sum_i x_i)
+        # Sort a positive-count copy, then sum x_i*i - prefix_sum. This is the
+        # same unordered-pair numerator without the quadratic pair scan. Returns
+        # false when the population is empty or on bounded overflow.
         def rh_gini(counts: darray[u64]&, num_out: mutable u64&, den_out: mutable u64&) -> bool can[Memory.Allocate, Abort.Panic]:
             total, nonzero =
                 for i in 0..<counts.count |total: u64 = 0, nonzero: u64 = 0| -> total, nonzero:
@@ -190,23 +189,25 @@ module Metrics:
                         nonzero <- nonzero + 1
             if total == 0 or nonzero < 2:
                 return false
-            # S = sum_{j<k} |x_j - x_k| over nonzero counts (unordered pairs)
-            pair: u64 =
-                while j < counts.count |pair: u64 = 0, j: usize = 0| -> pair:
-                    a: u64 = counts[j]
-                    j <- j + 1
-                    continue if a == 0
-                    while k < counts.count |k: usize = j, counts, pair, a|:
-                        b: u64 = counts[k]
-                        k <- k + 1
-                        continue if b == 0
-                        diff: u64 = (a if a >= b else b) - (b if a >= b else a)
-                        return false if pair > RH_U64MAX - diff
-                        pair <- pair + diff
-                # Gini = S / (n * total)
-            num: u64 = pair
             return false if nonzero > RH_U64MAX / total
             den: u64 = nonzero * total
+            positive_counts: mutable darray[u64] =
+                for i in 0..<counts.count |positive: mutable darray[u64] = []| -> positive:
+                    count: u64 = counts[i]
+                    positive.push(count) if count > 0
+            sort[u64](positive_counts, rh_count_asc_less)
+            num: u64 =
+                for i in 0..<positive_counts.count |pair: u64 = 0, prefix: u64 = 0, positive_counts| -> pair:
+                    count: u64 = positive_counts[i]
+                    rank: u64 = i.u64()
+                    return false if rank > RH_U64MAX / count
+                    weighted: u64 = rank * count
+                    return false if weighted < prefix
+                    contribution: u64 = weighted - prefix
+                    return false if pair > RH_U64MAX - contribution
+                    pair <- pair + contribution
+                    return false if prefix > RH_U64MAX - count
+                    prefix <- prefix + count
             g: u64 = Metrics::rh_gcd(num, den)
             num_out[0] <- num / g
             den_out[0] <- den / g

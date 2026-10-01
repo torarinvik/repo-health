@@ -515,7 +515,12 @@ The `test_oracles` suite checks the exact 50% result for 10,000 ascending
 sparse counts. In a three-sample local profile, the 10,000-node uniform
 metrics stage moved from 92.466 ms to 8.720 ms median with the same workload
 digest; those process timings include startup and dataset construction.
-`tests/test_m00.sh` and the profile pass.
+`Metrics::rh_gini` now sorts a positive-count scratch vector and derives its
+exact unordered-pair numerator from rank-weighted values and prefix sums in one
+pass, replacing its pairwise scan with O(n log n) work while leaving caller
+order intact. The continuity oracle verifies the exact 3333/10000 result for
+the sequence 1 through 10,000. `tests/test_m00.sh`, `tests/test_m04.sh`, and
+the full local gate pass.
 
 **M04-01 declaration-summary increment:** Role, source, and positive-revocation
 tallies now share one scoped pass and return an immutable `RhRoleSummary`, replacing
