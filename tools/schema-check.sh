@@ -91,6 +91,10 @@ def check_obj(obj, spec, ctx):
         if lower in obj and upper in obj:
             left, right = obj[lower], obj[upper]
             assert number_ok(left) and number_ok(right) and left <= right, (ctx, "unordered fields", lower, left, upper, right)
+    for fields in spec.get("equal_fields", []):
+        assert fields and all(field in obj for field in fields), (ctx, "missing equal fields", fields)
+        first = obj[fields[0]]
+        assert all(obj[field] == first for field in fields[1:]), (ctx, "unequal fields", fields)
     for k, variant_spec in spec.get("variants", {}).items():
         if k not in obj:
             continue
@@ -105,8 +109,11 @@ def check_obj(obj, spec, ctx):
     if conditional is not None and conditional["field"] in obj:
         discriminator = conditional["field"]
         cases = conditional["cases"]
-        assert obj[discriminator] in cases, (ctx, "unknown conditional case", discriminator, obj[discriminator])
-        check_obj(obj, cases[obj[discriminator]], "%s<%s=%s>" % (ctx, discriminator, obj[discriminator]))
+        value = obj[discriminator]
+        case_key = value if isinstance(value, str) else str(value)
+        assert case_key in cases or "otherwise" in cases, (ctx, "unknown conditional case", discriminator, value)
+        selected = cases[case_key] if case_key in cases else cases["otherwise"]
+        check_obj(obj, selected, "%s<%s=%s>" % (ctx, discriminator, value))
     for k, item_type in spec.get("item_types", {}).items():
         if k in obj:
             assert isinstance(obj[k], list), (ctx, "bad list", k)

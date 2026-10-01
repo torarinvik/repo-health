@@ -329,7 +329,7 @@ lineage_backup="$tmp/lineage-input.json"
 cp "$lineage_input" "$lineage_backup"
 restore_lineage_input() { cp "$lineage_backup" "$lineage_input"; }
 trap restore_lineage_input EXIT
-for variant in absent count count_pair count_summary timestamp ratio boolean enumeration; do
+for variant in absent count count_pair count_summary count_summary_empty count_summary_single timestamp ratio boolean enumeration; do
   python3 - "$lineage_input" "$variant" <<'PY'
 import json, sys
 path, kind = sys.argv[1:]
@@ -340,6 +340,8 @@ payloads = {
     "count": {"kind": "count", "value": 17},
     "count_pair": {"kind": "count_pair", "first": 3, "second": 4},
     "count_summary": {"kind": "count_summary", "count": 2, "sum": 8, "min": 3, "max": 5},
+    "count_summary_empty": {"kind": "count_summary", "count": 0, "sum": 0, "min": 0, "max": 0},
+    "count_summary_single": {"kind": "count_summary", "count": 1, "sum": 5, "min": 5, "max": 5},
     "timestamp": {"kind": "timestamp", "value": 1700000000},
     "ratio": {"kind": "ratio", "num": 1, "den": 2},
     "boolean": {"kind": "boolean", "value": True},
@@ -355,23 +357,28 @@ PY
   bash "$ROOT/tools/schema-check.sh" >/dev/null || fail "schema rejected valid $variant observation variant"
   restore_lineage_input
 done
-echo "[schemas] all tagged observation variants accepted"
-python3 - "$lineage_input" <<'PY'
+echo "[schemas] all tagged observation variants and summary boundary cases accepted"
+for invalid in range empty singleton; do
+python3 - "$lineage_input" "$invalid" <<'PY'
 import json, sys
-path = sys.argv[1]
+path, invalid = sys.argv[1:]
 document = json.load(open(path))
-document["metrics"][0]["observation"]["value"] = {
-    "kind": "count_summary", "count": 2, "sum": 8, "min": 9, "max": 7
+summaries = {
+    "range": {"kind": "count_summary", "count": 2, "sum": 8, "min": 9, "max": 7},
+    "empty": {"kind": "count_summary", "count": 0, "sum": 1, "min": 0, "max": 1},
+    "singleton": {"kind": "count_summary", "count": 1, "sum": 5, "min": 4, "max": 5},
 }
+document["metrics"][0]["observation"]["value"] = summaries[invalid]
 json.dump(document, open(path, "w"), separators=(",", ":"))
 PY
 if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
   restore_lineage_input
   trap - EXIT
-  fail "schema accepted an unordered count summary range"
+  fail "schema accepted invalid count summary $invalid state"
 fi
 restore_lineage_input
-echo "[schemas] count summary range ordering is constrained"
+done
+echo "[schemas] count summary range, empty, and singleton invariants are constrained"
 python3 - "$lineage_input" <<'PY'
 import json, sys
 path = sys.argv[1]
@@ -392,6 +399,44 @@ lineage_result_backup="$tmp/lineage-result.json"
 cp "$lineage_result" "$lineage_result_backup"
 restore_lineage_result() { cp "$lineage_result_backup" "$lineage_result"; }
 trap restore_lineage_result EXIT
+for variant in empty singleton populated; do
+  python3 - "$lineage_result" "$variant" <<'PY'
+import json, sys
+path, variant = sys.argv[1:]
+document = json.load(open(path))
+summaries = {
+    "empty": {"kind": "count_summary", "count": 0, "sum": 0, "min": 0, "max": 0},
+    "singleton": {"kind": "count_summary", "count": 1, "sum": 5, "min": 5, "max": 5},
+    "populated": {"kind": "count_summary", "count": 2, "sum": 8, "min": 3, "max": 5},
+}
+document["metrics"][0]["observation"]["value"] = summaries[variant]
+json.dump(document, open(path, "w"), separators=(",", ":"))
+PY
+  bash "$ROOT/tools/schema-check.sh" >/dev/null || fail "result schema rejected $variant count summary"
+  restore_lineage_result
+done
+echo "[schemas] result count summary boundary cases are accepted"
+for invalid in range empty singleton; do
+  python3 - "$lineage_result" "$invalid" <<'PY'
+import json, sys
+path, invalid = sys.argv[1:]
+document = json.load(open(path))
+summaries = {
+    "range": {"kind": "count_summary", "count": 2, "sum": 8, "min": 9, "max": 7},
+    "empty": {"kind": "count_summary", "count": 0, "sum": 1, "min": 0, "max": 1},
+    "singleton": {"kind": "count_summary", "count": 1, "sum": 5, "min": 4, "max": 5},
+}
+document["metrics"][0]["observation"]["value"] = summaries[invalid]
+json.dump(document, open(path, "w"), separators=(",", ":"))
+PY
+  if bash "$ROOT/tools/schema-check.sh" >/dev/null 2>&1; then
+    restore_lineage_result
+    trap - EXIT
+    fail "result schema accepted invalid count summary $invalid state"
+  fi
+  restore_lineage_result
+done
+echo "[schemas] result count summary range, empty, and singleton invariants are constrained"
 python3 - "$lineage_result" <<'PY'
 import json, sys
 path = sys.argv[1]
