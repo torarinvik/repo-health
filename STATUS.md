@@ -690,10 +690,14 @@ The population identity join also uses a bounded collision-checked node-ID
 index to validate selected candidates and mapping rows, then resolves each
 dependent and rejects duplicate selections by direct indexed lookup. Its CLI
 oracle includes deliberate numeric hash collisions, an unknown mapping, and a
-duplicate node row. Ratio aggregation similarly indexes each dependent's
-metric cells once, so shuffled cells and multiple pooled definitions retain
-the same exact values and coverage. These bounded computation changes leave
-full metric semantics and linked-review source completeness open.
+duplicate node row. Elisa `hash_sview` plus exact span checks index dependent
+IDs, published-package names, dependent families, and accepted canonical
+families; the CLI fixture includes colliding string keys and keeps its
+duplicate-ID failure case. Ratio aggregation similarly indexes each
+dependent's metric cells once, so shuffled cells and multiple pooled
+definitions retain the same exact values and coverage. These bounded
+computation changes leave full metric semantics and linked-review source
+completeness open.
 
 **M06 scope (in progress):** implemented — four-valued policy evaluator
 with an explicit lattice (deny > unknown > warn > allow) so unknown can

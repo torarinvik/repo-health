@@ -267,6 +267,30 @@ module Population:
                 i <- i + 1
             false
 
+        def rh_population_span_index_table(count: usize) -> mutable darray[i64] can[Memory.Allocate, Abort.Panic]:
+            slots: mutable darray[i64] = []
+            capacity: usize = count * 2 + 1
+            while i < capacity |i: usize = 0, capacity, slots|:
+                slots.push(-1)
+                i <- i + 1
+            slots
+
+        def rh_population_span_index_insert(values_s: mutable darray[i64]&, values_e: mutable darray[i64]&, texts: darray[u8]&, slots: mutable darray[i64]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if s < 0 or e <= s or e > texts.count.i64() or slots.count == 0
+            hash: usize = hash_sview(string_view_slice(bytes_view(texts), s.usize(), e.usize())).usize()
+            slot: mutable usize = hash % slots.count
+            while probe < slots.count |probe: usize = 0, slot, values_s, values_e, texts, slots, s, e|:
+                index: i64 = slots[slot]
+                if index < 0:
+                    values_s.push(s)
+                    values_e.push(e)
+                    slots[slot] <- values_s.count.i64() - 1
+                    return 1
+                return 0 if Base::rh_bytes_equal_span(texts, values_s[index.usize()], values_e[index.usize()], texts, s, e)
+                slot <- (slot + 1) % slots.count
+                probe <- probe + 1
+            -1
+
         def rh_population_path_valid(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, path_idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if path_idx < 0 or nodes[path_idx.usize()].kind != Json::RH_JSON_ARR or nodes[path_idx.usize()].child_count == 0
             path_nodes_s: mutable darray[i64] = []
@@ -437,16 +461,6 @@ module Population:
             return -1 if node_index < 0
             identity_indices[node_index.usize()]
 
-        def rh_population_canonical_family_seen(dependents: darray[RhPopulationDependent]&, identities: darray[RhPopulationProjectIdentity]&, identity_texts: darray[u8]&, identity_index: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            current: RhPopulationProjectIdentity = identities[identity_index.usize()]
-            while i < dependents.count |i: usize = 0, dependents, identities, identity_texts, current|:
-                previous_index: i64 = dependents[i].identity_index
-                if previous_index >= 0:
-                    previous: RhPopulationProjectIdentity = identities[previous_index.usize()]
-                    return true if previous.accepted and Base::rh_bytes_equal_span(identity_texts, current.family_s, current.family_e, identity_texts, previous.family_s, previous.family_e)
-                i <- i + 1
-            false
-
     public:
         def rh_population_report(raw: darray[u8]&, downstream_raw: darray[u8]&, has_downstream: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             identity_nodes: mutable darray[Json::RhJsonNode] = []
@@ -551,8 +565,15 @@ module Population:
             return -1 if nodes[dep_idx.usize()].child_count > RH_POP_MAX_DEPENDENTS
             dependents: mutable darray[RhPopulationDependent] = []
             cells: mutable darray[RhPopulationCell] = []
+            dependent_ids_s: mutable darray[i64] = []
+            dependent_ids_e: mutable darray[i64] = []
+            dependent_id_slots: mutable darray[i64] = Population::rh_population_span_index_table(nodes[dep_idx.usize()].child_count)
             families_s: mutable darray[i64] = []
             families_e: mutable darray[i64] = []
+            family_slots: mutable darray[i64] = Population::rh_population_span_index_table(nodes[dep_idx.usize()].child_count)
+            canonical_families_s: mutable darray[i64] = []
+            canonical_families_e: mutable darray[i64] = []
+            canonical_family_slots: mutable darray[i64] = Population::rh_population_span_index_table(identities.count)
             observed: mutable darray[i64] = []
             partial: mutable darray[i64] = []
             unavailable: mutable darray[i64] = []
@@ -597,7 +618,7 @@ module Population:
             while i < metrics.count |i: usize = 0, metrics, metric_cell_indices|:
                 metric_cell_indices.push(-1)
                 i <- i + 1
-            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, metric_cell_indices, families_s, families_e, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, ratios, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, has_downstream, identity_accepted, identities, identity_texts, project_node_ids, project_node_slots, identity_indices, identity_selected, canonical_family_count|:
+            while dep >= 0 |dep: i64 = nodes[dep_idx.usize()].first_child, nodes, texts, metrics, dependents, cells, dependent_ids_s, dependent_ids_e, dependent_id_slots, metric_cell_indices, families_s, families_e, family_slots, canonical_families_s, canonical_families_e, canonical_family_slots, observed, partial, unavailable, unknown, sums, mins, maxs, policy_pass, policy_fail, policy_unknown, ratios, ratio_numerator_sums, ratio_denominator_sums, ratio_observed_dependents, ratio_unknown_dependents, ratio_not_applicable_dependents, has_downstream, identity_accepted, identities, identity_texts, project_node_ids, project_node_slots, identity_indices, identity_selected, canonical_family_count|:
                 return -1 if not Population::rh_population_unique_object_keys(nodes, texts, dep)
                 ids: mutable i64 = 0
                 ide: mutable i64 = 0
@@ -611,6 +632,7 @@ module Population:
                 re: mutable i64 = 0
                 return -1 if not Population::rh_population_str(nodes, texts, dep, "id", &ids, &ide) or not Population::rh_population_str(nodes, texts, dep, "family", &fs, &fe) or not Population::rh_population_str(nodes, texts, dep, "package", &ps, &pe) or not Population::rh_population_str(nodes, texts, dep, "version", &vs, &ve) or not Population::rh_population_str(nodes, texts, dep, "relation", &rs, &re)
                 return -1 if ids == ide or fs == fe or ps == pe or vs == ve or not Population::rh_population_relation_valid(texts, rs, re)
+                return -1 if Population::rh_population_span_index_insert(dependent_ids_s, dependent_ids_e, texts, dependent_id_slots, ids, ide) != 1
                 graph_node_id: mutable i64 = -1
                 identity_index: mutable i64 = -1
                 if has_downstream:
@@ -623,8 +645,10 @@ module Population:
                     identity_selected[identity_index.usize()] <- true
                     return -1 if identities[identity_index.usize()].accepted and identity_accepted == 9223372036854775807
                     identity_accepted <- identity_accepted + 1 if identities[identity_index.usize()].accepted
-                    if identities[identity_index.usize()].accepted and not Population::rh_population_canonical_family_seen(dependents, identities, identity_texts, identity_index):
-                        canonical_family_count <- canonical_family_count + 1
+                    if identities[identity_index.usize()].accepted:
+                        family_inserted: i64 = Population::rh_population_span_index_insert(canonical_families_s, canonical_families_e, identity_texts, canonical_family_slots, identities[identity_index.usize()].family_s, identities[identity_index.usize()].family_e)
+                        return -1 if family_inserted < 0
+                        canonical_family_count <- canonical_family_count + 1 if family_inserted == 1
                 package_count: mutable i64 = 1
                 published_idx: i64 = Population::rh_population_get(nodes, texts, dep, "published_packages")
                 if published_idx >= 0:
@@ -632,24 +656,19 @@ module Population:
                     package_count <- nodes[published_idx.usize()].child_count
                     package_names_s: mutable darray[i64] = []
                     package_names_e: mutable darray[i64] = []
-                    while published >= 0 |published: i64 = nodes[published_idx.usize()].first_child, nodes, texts, package_names_s, package_names_e|:
+                    package_name_slots: mutable darray[i64] = Population::rh_population_span_index_table(nodes[published_idx.usize()].child_count)
+                    while published >= 0 |published: i64 = nodes[published_idx.usize()].first_child, nodes, texts, package_names_s, package_names_e, package_name_slots|:
                         published_s: mutable i64 = 0
                         published_e: mutable i64 = 0
-                        return -1 if not Json::rh_json_str_span(nodes, published, &published_s, &published_e) or published_s == published_e or Population::rh_population_seen_span(package_names_s, package_names_e, texts, published_s, published_e)
-                        package_names_s.push(published_s)
-                        package_names_e.push(published_e)
+                        return -1 if not Json::rh_json_str_span(nodes, published, &published_s, &published_e) or published_s == published_e or Population::rh_population_span_index_insert(package_names_s, package_names_e, texts, package_name_slots, published_s, published_e) != 1
                         published <- nodes[published.usize()].next_sibling
-                while j < dependents.count |j: usize = 0, dependents, texts, ids, ide|:
-                    return -1 if Base::rh_bytes_equal_span(texts, dependents[j].id_s, dependents[j].id_e, texts, ids, ide)
-                    j <- j + 1
                 path_idx: i64 = Population::rh_population_get(nodes, texts, dep, "path_witness")
                 return -1 if not Population::rh_population_path_valid(nodes, texts, path_idx)
                 return -1 if not Population::rh_population_path_ends_at(nodes, texts, path_idx, focal_s, focal_e)
                 return -1 if Population::rh_population_eq(texts, rs, re, "direct") and nodes[path_idx.usize()].child_count != 2
                 return -1 if Population::rh_population_eq(texts, rs, re, "transitive") and nodes[path_idx.usize()].child_count < 3
-                if not Population::rh_population_seen_span(families_s, families_e, texts, fs, fe):
-                    families_s.push(fs)
-                    families_e.push(fe)
+                family_inserted: i64 = Population::rh_population_span_index_insert(families_s, families_e, texts, family_slots, fs, fe)
+                return -1 if family_inserted < 0
                 while metric_index < metrics.count |metric_index: usize = 0, metrics, metric_cell_indices|:
                     metric_cell_indices[metric_index] <- -1
                     metric_index <- metric_index + 1

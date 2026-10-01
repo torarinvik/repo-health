@@ -12,7 +12,7 @@ bash "$ROOT/tools/build.sh" >/dev/null
 
 rm -rf "$T"; mkdir -p "$T"
 cat > "$T/in.json" <<'JSON'
-{"schema":"rh-population-input/1","focal_package":"acme-core","version_policy":"latest-published","discovery_source":"local-reverse-index","discovery_mode":"historical","discovery_context":"cargo registry snapshot; focal release 1.2.0","discovery_as_of":1700000000,"page_limit":100,"truncated":true,"provider_status":"rate_limit","replay_attempts":2,"mapping_revision":4,"deduplication_unit":"accepted-project-family","metric_definitions":[{"key":"history.months_active","version":"1"},{"key":"review.coverage","version":"2"}],"dependents":[{"id":"repo-a","family":"family-a","package":"acme-core","version":"1.2.0","relation":"direct","published_packages":["acme-core","acme-cli"],"path_witness":["app","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"observed","value":12,"policy":"pass"},{"key":"review.coverage","version":"2","status":"unknown","value":null,"policy":"unknown"}]},{"id":"repo-b","family":"family-a","package":"acme-core","version":"1.1.0","relation":"transitive","path_witness":["tool","dep","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"partial","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":3,"policy":"fail"}]},{"id":"repo-c","family":"family-c","package":"acme-core","version":"1.0.0","relation":"direct","path_witness":["service","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"unavailable","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":5,"policy":"pass"}]}],"unresolved":[{"package":"unknown-pkg","reason":"mapping review required"}]}
+{"schema":"rh-population-input/1","focal_package":"acme-core","version_policy":"latest-published","discovery_source":"local-reverse-index","discovery_mode":"historical","discovery_context":"cargo registry snapshot; focal release 1.2.0","discovery_as_of":1700000000,"page_limit":100,"truncated":true,"provider_status":"rate_limit","replay_attempts":2,"mapping_revision":4,"deduplication_unit":"accepted-project-family","metric_definitions":[{"key":"history.months_active","version":"1"},{"key":"review.coverage","version":"2"}],"dependents":[{"id":"key-0","family":"key-0","package":"acme-core","version":"1.2.0","relation":"direct","published_packages":["key-0","key-12"],"path_witness":["app","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"observed","value":12,"policy":"pass"},{"key":"review.coverage","version":"2","status":"unknown","value":null,"policy":"unknown"}]},{"id":"key-9","family":"key-0","package":"acme-core","version":"1.1.0","relation":"transitive","path_witness":["tool","dep","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"partial","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":3,"policy":"fail"}]},{"id":"key-18","family":"key-9","package":"acme-core","version":"1.0.0","relation":"direct","path_witness":["service","acme-core"],"metrics":[{"key":"history.months_active","version":"1","status":"unavailable","value":null,"policy":"unknown"},{"key":"review.coverage","version":"2","status":"observed","value":5,"policy":"pass"}]}],"unresolved":[{"package":"unknown-pkg","reason":"mapping review required"}]}
 JSON
 "$ROOT/build/rh_cli" population --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "population run"
 python3 - "$T/out.json" "$T/in.json" <<'PY'
@@ -48,16 +48,16 @@ assert by[("review.coverage", "2")]["coverage"] == {"observed": 2, "selected_dep
 assert by[("review.coverage", "2")]["distribution"] == {"count": 2, "sum": 8, "min": 3, "max": 5}, by
 assert by[("review.coverage", "2")]["policy_counts"] == {"pass": 1, "fail": 1, "unknown": 1}, by
 cells = {(row["id"], cell["key"]): cell for row in d["dependents"] for cell in row["metrics"]}
-observed = cells[("repo-a", "history.months_active")]
+observed = cells[("key-0", "history.months_active")]
 assert observed["status"] == "observed" and observed["value"] == 12 and observed["policy"] == "pass", observed
 assert observed["evidence"] == ["population-input"] and observed["quality_dimensions"] == {
     "completeness":"complete", "freshness":"unknown", "validity":"valid", "provenance":"evidence_backed"}, observed
-partial = cells[("repo-b", "history.months_active")]
+partial = cells[("key-9", "history.months_active")]
 assert partial["status"] == "partial" and partial["value"] is None and partial["reason"] == "population-cell-partial", partial
 assert partial["quality_dimensions"]["completeness"] == "partial" and partial["evidence"] == ["population-input"], partial
-unavailable = cells[("repo-c", "history.months_active")]
+unavailable = cells[("key-18", "history.months_active")]
 assert unavailable["status"] == "unavailable" and unavailable["value"] is None and unavailable["reason"] == "population-cell-unavailable", unavailable
-unknown = cells[("repo-a", "review.coverage")]
+unknown = cells[("key-0", "review.coverage")]
 assert unknown["status"] == "not_observed" and unknown["value"] is None and unknown["reason"] == "population-cell-unknown", unknown
 assert unknown["policy"] == "unknown" and unknown["quality_dimensions"]["validity"] == "unknown", unknown
 assert "counts projects once" in d["note"], d
@@ -208,8 +208,8 @@ import hashlib, json, sys
 graph = open(sys.argv[1], "rb").read()
 doc = {"schema":"rh-project-node-map-input/1", "graph_sha256":hashlib.sha256(graph).hexdigest(), "revision":21,
        "mappings":[
-           {"node_id":1,"project_id":"forge:acme/repo-a","family_id":"canonical-family-a","state":"accepted","reviewer_id":91,"reviewed_at":1700000000,"evidence_sha256":"a"*64},
-           {"node_id":15,"project_id":"forge:acme/repo-c","family_id":"canonical-family-a","state":"accepted","reviewer_id":92,"reviewed_at":1700000000,"evidence_sha256":"b"*64},
+           {"node_id":1,"project_id":"forge:acme/repo-a","family_id":"key-0","state":"accepted","reviewer_id":91,"reviewed_at":1700000000,"evidence_sha256":"a"*64},
+           {"node_id":15,"project_id":"forge:acme/repo-c","family_id":"key-9","state":"accepted","reviewer_id":92,"reviewed_at":1700000000,"evidence_sha256":"b"*64},
        ]}
 json.dump(doc, open(sys.argv[2], "w"), separators=(",", ":"))
 PY
@@ -227,11 +227,11 @@ import hashlib, json, pathlib, sys
 population, downstream, output = [pathlib.Path(path) for path in sys.argv[1:]]
 result = json.loads(output.read_bytes())
 assert result["schema"] == "rh-population-result/4", result
-assert result["project_identity_mapping"] == {"revision":21,"selected":3,"accepted":2,"unknown":1,"distinct_accepted_families":1}, result
+assert result["project_identity_mapping"] == {"revision":21,"selected":3,"accepted":2,"unknown":1,"distinct_accepted_families":2}, result
 rows = {row["graph_node_id"]: row["project_identity"] for row in result["dependents"]}
 assert rows[1]["project_id"] == "forge:acme/repo-a" and rows[1]["reviewer_id"] == 91, rows
 assert rows[8]["mapping_status"] == "unknown" and rows[8]["project_id"] is None, rows
-assert rows[15]["family_id"] == "canonical-family-a" and rows[15]["evidence_sha256"] == "b"*64, rows
+assert rows[15]["family_id"] == "key-9" and rows[15]["evidence_sha256"] == "b"*64, rows
 sidecar = json.loads(pathlib.Path(str(output)+".transformations.json").read_bytes())
 population_raw, downstream_raw = population.read_bytes(), downstream.read_bytes()
 framed = (b"rh-population-identity-input/1\npopulation:" + str(len(population_raw)).encode() + b":" + population_raw
@@ -277,7 +277,7 @@ sed 's/"path_witness":\["service","acme-core"\]/"path_witness":[]/' "$T/in.json"
 "$ROOT/build/rh_cli" population --input "$T/bad-path.json" --out "$T/x" >/dev/null 2>&1; rc_path=$?
 sed 's/"path_witness":\["service","acme-core"\]/"path_witness":["service","other-package"]/' "$T/in.json" > "$T/bad-path-target.json"
 "$ROOT/build/rh_cli" population --input "$T/bad-path-target.json" --out "$T/x" >/dev/null 2>&1; rc_path_target=$?
-sed 's/"id":"repo-c"/"id":"repo-a"/' "$T/in.json" > "$T/bad-duplicate.json"
+sed 's/"id":"key-18"/"id":"key-0"/' "$T/in.json" > "$T/bad-duplicate.json"
 "$ROOT/build/rh_cli" population --input "$T/bad-duplicate.json" --out "$T/x" >/dev/null 2>&1; rc_duplicate=$?
 sed 's/"status":"unknown","value":null/"status":"unknown","value":1/' "$T/in.json" > "$T/bad-value.json"
 "$ROOT/build/rh_cli" population --input "$T/bad-value.json" --out "$T/x" >/dev/null 2>&1; rc_value=$?
