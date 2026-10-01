@@ -15,9 +15,9 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-adoption-input/2","cutoff":1000,"support_assertion":{"supported_major":2,"source":"fixture/support-policy","reviewer_id":77,"reviewed_at":500,"evidence_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"adoptions":[{"first_seen":0,"confirmed_introduction":null,"confirmed_removal":null,"last_seen":900,"first_version_ord":1001001,"latest_version_ord":2000001},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":null,"last_seen":850,"first_version_ord":1001001,"latest_version_ord":1001000},{"first_seen":100,"confirmed_introduction":200,"confirmed_removal":500,"last_seen":500,"first_version_ord":1001001,"latest_version_ord":1001001},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":null},{"first_seen":null,"confirmed_introduction":null,"confirmed_removal":500},{"first_seen":null,"confirmed_introduction":0,"confirmed_removal":null,"last_seen":900}]}
 JSON
 "$ROOT/build/rh_cli" adoption --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "adoption run"
-python3 - "$T/in.json" "$T/out.json" <<'PY'
-import hashlib, json, sys
-source, output = sys.argv[1:]
+python3 - "$T/in.json" "$T/out.json" "$ROOT" <<'PY'
+import glob, hashlib, json, sys
+source, output, root = sys.argv[1:]
 d = json.load(open(output))
 assert d["schema"] == "rh-adoption-result/2", d
 assert d["cutoff"] == 1000, d
@@ -35,6 +35,99 @@ assert d["adoptions"][4]["duration_seconds"] is None and d["adoptions"][4]["dura
 assert d["adoptions"][5]["confirmed_introduction"] == 0 and d["adoptions"][5]["duration_seconds"] == 900, d
 assert d["status_counts"] == {"unknown": 1, "first_seen_only": 1, "confirmed_introduced": 2, "confirmed_removal": 2}, d
 metrics = {m["key"]: m for m in d["metrics"]}
+definitions = {}
+for path in glob.glob(root + "/metrics/definitions/*.json"):
+    definition = json.load(open(path))
+    definitions[(definition["key"], definition["version"])] = definition
+expected_inputs = {
+    **{key: ["adoption_records", "coverage_cutoff"] for key in (
+        "adoption.unknown_count", "adoption.first_seen_only_count",
+        "adoption.confirmed_introduction_count", "adoption.confirmed_removal_count",
+        "adoption.duration_confirmed_count", "adoption.duration_right_censored_count",
+        "adoption.duration_unknown_count", "adoption.confirmed_duration_distribution",
+        "adoption.right_censored_duration_distribution")},
+    **{key: ["adoption_records", "coverage_cutoff", "version_observations"] for key in (
+        "adoption.observed_upgrade_count", "adoption.version_comparison_count")},
+    **{key: ["adoption_records", "coverage_cutoff", "version_observations", "supported_major_assertions"] for key in (
+        "adoption.supported_line_adoption_count", "adoption.supported_line_assessed_count",
+        "downstream_condition.supported_version_adoption_share")},
+    "adoption.observed_upgrade_lag_distribution": [
+        "adoption_records", "coverage_cutoff", "upstream_release_at", "target_version_ord",
+        "first_qualifying_version_ord", "first_qualifying_snapshot_at"],
+    "adoption.right_censored_upgrade_lag_distribution": [
+        "adoption_records", "coverage_cutoff", "upstream_release_at", "target_version_ord",
+        "first_qualifying_version_ord", "first_qualifying_snapshot_at", "complete_followup_through",
+        "snapshot_coverage", "snapshot_runs", "coverage_source", "coverage_capability"],
+    **{key: ["adoption_records", "coverage_cutoff", "snapshot_coverage", "snapshot_runs", "coverage_source", "coverage_capability"] for key in (
+        "adoption.snapshot_coverage_gap_count", "adoption.snapshot_coverage_uncovered_seconds")},
+}
+expected_types = {
+    **{key: "integer" for key in (
+        "adoption.unknown_count", "adoption.first_seen_only_count", "adoption.confirmed_introduction_count",
+        "adoption.confirmed_removal_count", "adoption.observed_upgrade_count", "adoption.version_comparison_count",
+        "adoption.supported_line_adoption_count", "adoption.supported_line_assessed_count",
+        "adoption.duration_confirmed_count", "adoption.duration_right_censored_count", "adoption.duration_unknown_count",
+        "adoption.snapshot_coverage_gap_count", "adoption.snapshot_coverage_uncovered_seconds")},
+    **{key: "histogram" for key in (
+        "adoption.confirmed_duration_distribution", "adoption.right_censored_duration_distribution",
+        "adoption.observed_upgrade_lag_distribution", "adoption.right_censored_upgrade_lag_distribution")},
+    "downstream_condition.supported_version_adoption_share": "ratio",
+}
+expected_units = {
+    **{key: "adoptions" for key in expected_types if key not in (
+        "adoption.snapshot_coverage_gap_count", "adoption.snapshot_coverage_uncovered_seconds",
+        "downstream_condition.supported_version_adoption_share")},
+    "adoption.snapshot_coverage_gap_count": "gaps",
+    "adoption.snapshot_coverage_uncovered_seconds": "seconds",
+    "downstream_condition.supported_version_adoption_share": "ratio",
+}
+expected_denominators = {
+    **{key: "none; count of adoption records in the supplied bounded snapshot" for key in (
+        "adoption.unknown_count", "adoption.first_seen_only_count",
+        "adoption.confirmed_introduction_count", "adoption.confirmed_removal_count")},
+    **{key: "none; count of qualifying adoption records in the supplied bounded snapshot" for key in (
+        "adoption.observed_upgrade_count", "adoption.version_comparison_count",
+        "adoption.supported_line_adoption_count", "adoption.duration_confirmed_count",
+        "adoption.duration_right_censored_count", "adoption.duration_unknown_count")},
+    "adoption.supported_line_assessed_count": "none; count of adoption records with both latest version ordinal and a cutoff-known cohort support assertion",
+    **{key: "none; histogram counts qualifying adoption records, with each record assigned to exactly one fixed elapsed-duration bucket" for key in (
+        "adoption.confirmed_duration_distribution", "adoption.right_censored_duration_distribution")},
+    **{key: "none; histogram counts records in the explicit eligible state, with each record assigned to exactly one fixed elapsed-time bucket" for key in (
+        "adoption.observed_upgrade_lag_distribution", "adoption.right_censored_upgrade_lag_distribution")},
+    **{key: "none; aggregate across adoption records with supplied intervals or reconstructed complete snapshot-run histories" for key in (
+        "adoption.snapshot_coverage_gap_count", "adoption.snapshot_coverage_uncovered_seconds")},
+    "downstream_condition.supported_version_adoption_share": "count dependency relations with both latest observed version ordinal and a cutoff-known cohort support assertion; null when none are assessable",
+}
+assert set(metrics) == set(expected_inputs) == set(expected_types) == set(expected_units) == set(expected_denominators), set(metrics)
+for key, metric in metrics.items():
+    identity = (key, metric["version"])
+    definition = definitions[identity]
+    assert definition["implementation_status"] == "implemented", (identity, definition)
+    assert definition["subject_kind"] == "project", (identity, definition["subject_kind"])
+    assert definition["source_requirements"] == ["captured-adoption-document"], (identity, definition["source_requirements"])
+    assert definition["inputs"] == expected_inputs[key], (identity, definition["inputs"])
+    assert definition["output"]["type"] == expected_types[key], (identity, definition["output"])
+    assert definition["output"]["unit"] == expected_units[key], (identity, definition["output"])
+    assert definition["denominator_rule"] == expected_denominators[key], (identity, definition["denominator_rule"])
+    if expected_types[key] == "histogram":
+        assert definition["output"]["shape"] == "fixed_bucket_histogram", (identity, definition["output"])
+        assert definition["output"]["bucket_upper_seconds"] == [604799, 2591999, 7775999, 31535999, None], (identity, definition["output"])
+        if metric["status"] == "observed":
+            value = metric["value"]
+            assert set(value) == {"bucket_upper_seconds", "counts", "population_count"}, (identity, value)
+            assert value["bucket_upper_seconds"] == definition["output"]["bucket_upper_seconds"], (identity, value)
+            assert len(value["counts"]) == 5 and all(type(count) is int and count >= 0 for count in value["counts"]), (identity, value)
+            assert sum(value["counts"]) == value["population_count"] > 0, (identity, value)
+        else:
+            assert metric["status"] == "not_applicable" and metric["value"] is None, (identity, metric)
+    elif expected_types[key] == "ratio":
+        assert definition["output"]["numerator"] and definition["output"]["denominator"], (identity, definition["output"])
+        assert metric["status"] == "observed" and set(metric["value"]) == {"num", "den"} and metric["value"]["den"] > 0, (identity, metric)
+    elif metric["status"] == "observed":
+        assert type(metric["value"]) is int and metric["value"] >= 0, (identity, metric)
+    else:
+        assert metric["status"] == "not_applicable" and metric["value"] is None, (identity, metric)
+print("[adoption] all 18 emitted rows match catalog sources, inputs, types, units, and value shapes")
 for metric in metrics.values():
     assert metric["evidence"] == ["adoption-input"], metric
     assert set(metric["quality_dimensions"]) == {"completeness", "freshness", "validity", "provenance"}, metric
