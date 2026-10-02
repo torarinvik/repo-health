@@ -110,9 +110,9 @@ cat > "$T/quota.json" <<'JSON'
 {"schema":"rh-quota-input/1","host_id":1,"capacity":2,"refill_per_second":1,"base_backoff_seconds":10,"max_backoff_seconds":40,"ops":[{"op":"consume","now":0},{"op":"consume","now":0},{"op":"consume","now":0},{"op":"failure","now":0},{"op":"consume","now":5},{"op":"success","now":100},{"op":"consume","now":100},{"op":"stop","now":101},{"op":"consume","now":101},{"op":"cancel","now":200}]}
 JSON
 "$ROOT/build/rh_cli" ops quota --input "$T/quota.json" --out "$T/quota.out" >/dev/null || fail "quota run"
-python3 - "$T/quota.out" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
+python3 - "$T/quota.json" "$T/quota.out" <<'PY'
+import hashlib, json, sys
+d = json.load(open(sys.argv[2]))
 o = d["ops"]
 assert d["schema"] == "rh-quota-result/1", d
 assert [x.get("consumed") for x in o] == [True, True, False, None, False, None, True, None, False, None], o
@@ -125,8 +125,22 @@ assert o[5]["backoff_until"] == 0, o[5]
 assert o[7]["stopped"] is True and o[8]["consumed"] is False, (o[7], o[8])
 assert o[9]["tokens"] == 2, o[9]
 assert d["final"]["stopped"] is True and d["final"]["tokens"] == 2, d["final"]
+source = open(sys.argv[1], "rb").read()
+output = open(sys.argv[2], "rb").read()
+report = json.load(open(sys.argv[2] + ".transformations.json"))
+configuration = b"repo-health/ops-quota/1;token-bucket=host-scoped;backoff=bounded-exponential;stop=operator;cancel=refund"
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "host-quota-state-machine" and report["output_schema"] == d["schema"], report
+assert report["source_input_sha256"] == hashlib.sha256(source).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(output).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), report
+assert [field["state"] for field in report["fields"]] == ["preserved", "transformed", "unsupported", "discarded"], report
 print("[ops] quota state machine OK")
+print("[ops] quota transformation report binds exact operation sequence and policy")
 PY
+"$ROOT/build/rh_cli" ops quota --input "$T/quota.json" --out "$T/quota-replay.out" >/dev/null || fail "quota replay"
+cmp -s "$T/quota.out" "$T/quota-replay.out" || fail "quota result must be deterministic"
+cmp -s "$T/quota.out.transformations.json" "$T/quota-replay.out.transformations.json" || fail "quota transformation report must be deterministic"
 
 echo "[ops] exponential backoff grows and is capped"
 cat > "$T/backoff.json" <<'JSON'
@@ -144,6 +158,7 @@ PY
 echo "[ops] determinism + fail-closed negatives"
 "$ROOT/build/rh_cli" ops monitor --input "$T/mon.json" --out "$T/mon2.out" >/dev/null || fail "rerun"
 cmp -s "$T/mon.out" "$T/mon2.out" || fail "monitor output not deterministic"
+cmp -s "$T/mon.out.transformations.json" "$T/mon2.out.transformations.json" || fail "monitor transformation report not deterministic"
 set +e
 printf '{"schema":"rh-monitor-input/2","events":[]}' > "$T/badms.json"
 "$ROOT/build/rh_cli" ops monitor --input "$T/badms.json" --out "$T/x" >/dev/null 2>&1; rc_ms=$?
