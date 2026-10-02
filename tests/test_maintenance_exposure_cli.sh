@@ -55,6 +55,47 @@ PY
 cmp -s "$T/out.json" "$T/out2.json" || fail "maintenance exposure output not deterministic"
 cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "maintenance exposure transformation report not deterministic"
 
+python3 - "$T/stress-role-input.json" <<'PY'
+import json, sys
+events = [
+    {"id": f"stress-{index}", "actor": f"actor-{index:03}", "role": "author", "at": index + 1}
+    for index in range(100)
+]
+with open(sys.argv[1], "w") as output:
+    json.dump({"schema":"rh-role-grain-input/1","identity_revision":3,"as_known_revision":3,"events":events,"corrections":[]}, output, separators=(",", ":"))
+    output.write("\n")
+PY
+"$ROOT/build/rh_cli" role-grain --input "$T/stress-role-input.json" --out "$T/stress-role.json" >/dev/null || fail "stress role-grain evidence generation"
+"$ROOT/build/rh_cli" store put --root "$T/evidence-store" --file "$T/stress-role.json" | awk '{print $3}' > "$T/stress.ref" || fail "store stress role evidence"
+python3 - "$T/stress.ref" "$T/stress-input.json" <<'PY'
+import json, pathlib, sys
+evidence = pathlib.Path(sys.argv[1]).read_text().strip()
+node_count = 40
+graph = {
+    "schema":"rh-dep-graph/1", "ecosystem":"npm",
+    "nodes":[{"id":node,"name":f"node-{node}","version":"1"} for node in range(node_count)],
+    "edges":[{"from":node,"to":0,"scope":"normal"} for node in range(1, node_count)],
+    "unresolved":[], "advisories":[],
+}
+mappings = [
+    {"node":node,"state":"accepted","reviewed_by":"stress-reviewer","reviewed_at":node + 1,"complete":True,"evidence_ref":evidence}
+    for node in range(node_count)
+]
+result = {"schema":"rh-maintenance-exposure-input/1","subject_node":0,"mapping_revision":9,"graph":graph,"mappings":mappings}
+with open(sys.argv[2], "w") as output:
+    json.dump(result, output, separators=(",", ":"))
+    output.write("\n")
+PY
+"$ROOT/build/rh_cli" maintenance-exposure --input "$T/stress-input.json" --out "$T/stress-output.json" --evidence-store "$T/evidence-store" >/dev/null || fail "bounded actor-range overlap run"
+python3 - "$T/stress-output.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert result["known_pair_count"] == 39 and result["unknown_pair_count"] == 0, result
+assert len(result["dependents"]) == 39, result
+assert all(row["state"] == "known" and row["shared_actor_count"] == 100 for row in result["dependents"]), result
+print("[maintenance-exposure] actor-range overlap scales across a bounded dependent graph")
+PY
+
 python3 - "$T/input.json" "$T" <<'PY'
 import json, os, sys
 src, out = sys.argv[1:]

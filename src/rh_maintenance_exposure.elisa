@@ -12,15 +12,14 @@ module MaintenanceExposure:
         const RH_EXPOSURE_MAX_ACTORS_PER_NODE: i64 = 256
 
         struct RhExposureActor:
-            node: mutable i64
             actor_s: mutable i64
             actor_e: mutable i64
 
         struct RhExposureMapping:
-            node: mutable i64
             evidence_s: mutable i64
             evidence_e: mutable i64
-            complete: mutable bool
+            actors_start: mutable usize
+            actors_count: mutable usize
 
         def rh_exposure_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_obj_get(nodes, texts, object, key)
@@ -49,6 +48,20 @@ module MaintenanceExposure:
 
         def rh_exposure_role(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             rh_exposure_span_eq(texts, start, end, "author") or rh_exposure_span_eq(texts, start, end, "committer") or rh_exposure_span_eq(texts, start, end, "reviewer") or rh_exposure_span_eq(texts, start, end, "releaser")
+
+        def rh_exposure_overlap(actors: darray[RhExposureActor]&, actor_texts: darray[u8]&, subject: RhExposureMapping, dependent: RhExposureMapping) -> i64 can[Memory.Allocate, Abort.Panic]:
+            actors_loop: mutable darray[RhExposureActor]& = actors
+            actor_texts_loop: mutable darray[u8]& = actor_texts
+            subject_loop: mutable RhExposureMapping = subject
+            dependent_loop: mutable RhExposureMapping = dependent
+            while subject_offset < subject_loop.actors_count |overlap: i64 = 0, subject_offset: usize = 0, dependent_offset: usize = 0, actors_loop, actor_texts_loop, subject_loop, dependent_loop| -> overlap:
+                subject_actor: mutable RhExposureActor = actors_loop[subject_loop.actors_start + subject_offset]
+                while dependent_offset < dependent_loop.actors_count |dependent_offset, actors_loop, actor_texts_loop, subject_loop, dependent_loop, subject_actor, overlap|:
+                    dependent_actor: RhExposureActor = actors_loop[dependent_loop.actors_start + dependent_offset]
+                    overlap <- overlap + 1 if Base::rh_bytes_equal_span(actor_texts_loop, subject_actor.actor_s, subject_actor.actor_e, actor_texts_loop, dependent_actor.actor_s, dependent_actor.actor_e)
+                    dependent_offset <- dependent_offset + 1
+                subject_offset <- subject_offset + 1
+                dependent_offset <- 0
 
     public:
         # Input binds one package graph to accepted, complete role-evidence
@@ -94,15 +107,17 @@ module MaintenanceExposure:
             visited: mutable darray[bool] = []
             mapped: mutable darray[bool] = []
             mapping_seen: mutable darray[bool] = []
-            while i < node_count |i: i64 = 0, node_count, visited, mapped, mapping_seen|:
+            mapping_row_by_node: mutable darray[i64] = []
+            while i < node_count |i: i64 = 0, node_count, visited, mapped, mapping_seen, mapping_row_by_node|:
                 visited.push(false)
                 mapped.push(false)
                 mapping_seen.push(false)
+                mapping_row_by_node.push(-1)
                 i <- i + 1
             actors: mutable darray[RhExposureActor] = []
             actor_texts: mutable darray[u8] = []
             mapping_rows: mutable darray[RhExposureMapping] = []
-            while mapping >= 0 |mapping: i64 = nodes[mappings_idx.usize()].first_child, nodes, texts, raw, graph_nodes, node_count, mapped, mapping_seen, actors, actor_texts, mapping_rows, evidence_root|:
+            while mapping >= 0 |mapping: i64 = nodes[mappings_idx.usize()].first_child, nodes, texts, raw, graph_nodes, node_count, mapped, mapping_seen, mapping_row_by_node, actors, actor_texts, mapping_rows, evidence_root|:
                 return -1 if nodes[mapping.usize()].kind != Json::RH_JSON_OBJ
                 node_id: mutable i64 = -1
                 return -1 if not rh_exposure_int(nodes, raw, texts, mapping, "node", &node_id) or node_id < 0 or node_id >= node_count or mapping_seen[node_id.usize()]
@@ -162,7 +177,7 @@ module MaintenanceExposure:
                 return -1 if ledger < 0 or role_nodes[ledger.usize()].kind != Json::RH_JSON_ARR or role_nodes[ledger.usize()].child_count > RH_EXPOSURE_MAX_ROLE_EVENTS
                 mapping_seen[node_id.usize()] <- true
                 mapped[node_id.usize()] <- is_complete
-                mapping_rows.push(RhExposureMapping{node: node_id, evidence_s: evidence_s, evidence_e: evidence_e, complete: is_complete})
+                actors_start: usize = actors.count
                 mapped_actor_count: mutable i64 = 0
                 if is_complete:
                     while event >= 0 |event: i64 = role_nodes[ledger.usize()].first_child, role_nodes, role_texts, role_raw, actors, actor_texts, node_id|:
@@ -188,8 +203,8 @@ module MaintenanceExposure:
                             rh_exposure_int(role_nodes, role_raw, role_texts, event, "at", &event_at) and event_at >= 0
                         return -1 if not event_time_valid
                         duplicate: mutable bool = false
-                        while i < actors.count |i: usize = 0, actors, actor_texts, node_id, role_texts, actor_s, actor_e, duplicate|:
-                            duplicate <- true if actors[i].node == node_id and Base::rh_bytes_equal_span(actor_texts, actors[i].actor_s, actors[i].actor_e, role_texts, actor_s, actor_e)
+                        while i < actors.count |i: usize = actors_start, actors, actor_texts, role_texts, actor_s, actor_e, duplicate|:
+                            duplicate <- true if Base::rh_bytes_equal_span(actor_texts, actors[i].actor_s, actors[i].actor_e, role_texts, actor_s, actor_e)
                             i <- i + 1
                         if not duplicate:
                             mapped_actor_count <- mapped_actor_count + 1
@@ -198,8 +213,10 @@ module MaintenanceExposure:
                             while actor_copy_cursor < actor_e |actor_copy_cursor: i64 = actor_s, role_texts, actor_texts|:
                                 actor_texts.push(role_texts[actor_copy_cursor.usize()])
                                 actor_copy_cursor <- actor_copy_cursor + 1
-                            actors.push(RhExposureActor{node: node_id, actor_s: copied_actor_s, actor_e: actor_texts.count.i64()})
+                            actors.push(RhExposureActor{actor_s: copied_actor_s, actor_e: actor_texts.count.i64()})
                         event <- role_nodes[event.usize()].next_sibling
+                mapping_rows.push(RhExposureMapping{evidence_s: evidence_s, evidence_e: evidence_e, actors_start: actors_start, actors_count: mapped_actor_count.usize()})
+                mapping_row_by_node[node_id.usize()] <- (mapping_rows.count - 1).i64()
                 mapping <- nodes[mapping.usize()].next_sibling
             head: mutable darray[i64] = []
             while i < node_count |i: i64 = 0, node_count, head|:
@@ -240,8 +257,10 @@ module MaintenanceExposure:
             Base::rh_push_decimal_i64(out, subject)
             Base::rh_push_text(out, ",\"dependents\":[")
             wrote_pair: mutable bool = false
-            while node_id < node_count |node_id: i64 = 0, node_count, visited, mapped, mapping_rows, actors, actor_texts, texts, out, subject, known_pairs, unknown_pairs|:
+            while node_id < node_count |node_id: i64 = 0, node_count, visited, mapped, mapping_rows, mapping_row_by_node, actors, actor_texts, texts, out, subject, known_pairs, unknown_pairs|:
                 if visited[node_id.usize()] and node_id != subject:
+                    subject_mapping: i64 = mapping_row_by_node[subject.usize()]
+                    dependent_mapping: i64 = mapping_row_by_node[node_id.usize()]
                     if wrote_pair:
                         out.push(44)
                     Base::rh_push_text(out, "{\"node\":")
@@ -249,23 +268,18 @@ module MaintenanceExposure:
                     Base::rh_push_text(out, ",\"state\":\"")
                     if mapped[subject.usize()] and mapped[node_id.usize()]:
                         Base::rh_push_text(out, "known\",\"shared_actor_count\":")
-                        overlap: mutable i64 = 0
-                        while i < actors.count |i: usize = 0, actors, actor_texts, subject, node_id, overlap|:
-                            current_actor: RhExposureActor = actors[i]
-                            if current_actor.node == subject:
-                                while j < actors.count |j: usize = 0, actors, actor_texts, current_actor, node_id, overlap|:
-                                    overlap <- overlap + 1 if actors[j].node == node_id and Base::rh_bytes_equal_span(actor_texts, current_actor.actor_s, current_actor.actor_e, actor_texts, actors[j].actor_s, actors[j].actor_e)
-                                    j <- j + 1
-                            i <- i + 1
+                        subject_row: RhExposureMapping = mapping_rows[subject_mapping.usize()]
+                        dependent_row: RhExposureMapping = mapping_rows[dependent_mapping.usize()]
+                        overlap: i64 = rh_exposure_overlap(actors, actor_texts, subject_row, dependent_row)
                         Base::rh_push_decimal_i64(out, overlap)
                         known_pairs <- known_pairs + 1
                     else:
                         Base::rh_push_text(out, "unknown\",\"shared_actor_count\":null")
                         unknown_pairs <- unknown_pairs + 1
                     Base::rh_push_text(out, ",\"subject_evidence_ref\":")
-                    _ = rh_exposure_emit_mapping(out, mapping_rows, texts, subject)
+                    _ = rh_exposure_emit_mapping(out, mapping_rows, mapping_row_by_node, texts, subject)
                     Base::rh_push_text(out, ",\"dependent_evidence_ref\":")
-                    _ = rh_exposure_emit_mapping(out, mapping_rows, texts, node_id)
+                    _ = rh_exposure_emit_mapping(out, mapping_rows, mapping_row_by_node, texts, node_id)
                     Base::rh_push_text(out, "}")
                     wrote_pair <- true
                 node_id <- node_id + 1
@@ -276,10 +290,7 @@ module MaintenanceExposure:
             Base::rh_push_text(out, "}")
             0
 
-        def rh_exposure_emit_mapping(out: mutable darray[u8]&, mappings: darray[RhExposureMapping]&, texts: darray[u8]&, node: i64) -> void can[Memory.Allocate, Abort.Panic]:
-            while i < mappings.count |i: usize = 0, mappings, texts, node|:
-                if mappings[i].node == node:
-                    rh_exposure_emit(out, texts, mappings[i].evidence_s, mappings[i].evidence_e)
-                    return
-                i <- i + 1
-            Base::rh_push_text(out, "null")
+        def rh_exposure_emit_mapping(out: mutable darray[u8]&, mappings: darray[RhExposureMapping]&, row_by_node: darray[i64]&, texts: darray[u8]&, node: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            row: i64 = row_by_node[node.usize()]
+            return Base::rh_push_text(out, "null") if row < 0
+            rh_exposure_emit(out, texts, mappings[row.usize()].evidence_s, mappings[row.usize()].evidence_e)
