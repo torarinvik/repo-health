@@ -254,6 +254,114 @@ for field, value in expected.items():
 print("[identity] all 1,024 lifecycle/metadata pairings match independent classification and graph oracles")
 PY
 
+echo "[identity] actor metadata × triangle lifecycle cross-product"
+python3 - "$T/metadata-triangle.json" "$T/metadata-triangle-expected.json" <<'PY'
+import itertools, json, pathlib, sys
+
+input_path, expected_path = map(pathlib.Path, sys.argv[1:])
+states = ("accepted", "proposed", "rejected", "revoked")
+kinds = ("human", "bot_known", "service_known", "unresolved")
+sources = ("provider", "project", "operator", "unknown")
+lifecycles = tuple(itertools.product(states, repeat=3))
+metadata = tuple(itertools.product(kinds, sources, (False, True), (False, True)))
+edges = ((0, 1), (1, 2), (2, 0))
+actor_count = len(lifecycles) * len(metadata) * 3
+links = []
+actor_kinds = []
+actor_kind_sources = []
+actor_kind_observed_at = []
+actor_kind_evidence_refs = []
+classifications = []
+kind_counts = {kind: 0 for kind in kinds}
+source_counts = {source: 0 for source in sources}
+time_counts = {"observed": 0, "unknown": 0}
+evidence_counts = {"present": 0, "unknown": 0}
+parent = list(range(actor_count))
+
+def find(actor):
+    while parent[actor] != actor:
+        actor = parent[actor]
+    return actor
+
+for lifecycle_index, lifecycle in enumerate(lifecycles):
+    for metadata_index in range(len(metadata)):
+        first_actor = (lifecycle_index * len(metadata) + metadata_index) * 3
+        for edge_index, (left, right) in enumerate(edges):
+            links.append({
+                "a": first_actor + left,
+                "b": first_actor + right,
+                "state": lifecycle[edge_index],
+                "revision_added": edge_index + 1,
+            })
+        for position in range(3):
+            actor_id = first_actor + position
+            kind, source, has_time, has_evidence = metadata[(metadata_index + position * 21) % len(metadata)]
+            observed_at = 1800000000 + actor_id if has_time else None
+            evidence_ref = f"evidence:triangle-actor-{actor_id}" if has_evidence else None
+            actor_kinds.append(kind)
+            actor_kind_sources.append(source)
+            actor_kind_observed_at.append(observed_at)
+            actor_kind_evidence_refs.append(evidence_ref)
+            classifications.append({
+                "actor_id": actor_id,
+                "kind": kind,
+                "source": source,
+                "observed_at": observed_at,
+                "evidence_ref": evidence_ref,
+            })
+            kind_counts[kind] += 1
+            source_counts[source] += 1
+            time_counts["observed" if has_time else "unknown"] += 1
+            evidence_counts["present" if has_evidence else "unknown"] += 1
+        for edge_index, (left, right) in enumerate(edges):
+            if lifecycle[edge_index] == "accepted":
+                left_root, right_root = find(first_actor + left), find(first_actor + right)
+                parent[max(left_root, right_root)] = min(left_root, right_root)
+
+clusters = {}
+for actor in range(actor_count):
+    clusters.setdefault(find(actor), []).append(actor)
+cluster_id_by_actor = [find(actor) for actor in range(actor_count)]
+document = {
+    "schema": "rh-identity-input/1",
+    "actor_count": actor_count,
+    "links": links,
+    "actor_kinds": actor_kinds,
+    "actor_kind_sources": actor_kind_sources,
+    "actor_kind_observed_at": actor_kind_observed_at,
+    "actor_kind_evidence_refs": actor_kind_evidence_refs,
+}
+expected = {
+    "actor_count": actor_count,
+    "clusters": list(clusters.values()),
+    "cluster_id_by_actor": cluster_id_by_actor,
+    "identity_revision": max((link["revision_added"] for link in links
+                               if link["state"] in ("accepted", "revoked")), default=0),
+    "actor_kinds": kind_counts,
+    "actor_kind_sources": source_counts,
+    "actor_kind_observation_times": time_counts,
+    "actor_kind_evidence_references": evidence_counts,
+    "actor_classifications": classifications,
+    "accepted_actor_clusters": len(clusters),
+    "known_human_accounts": kind_counts["human"],
+}
+input_path.write_text(json.dumps(document, separators=(",", ":")) + "\n")
+expected_path.write_text(json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+"$ROOT/build/rh_cli" identity --input "$T/metadata-triangle.json" --out "$T/metadata-triangle.out" >/dev/null || fail "actor metadata and triangle lifecycle cross-product"
+python3 - "$T/metadata-triangle-expected.json" "$T/metadata-triangle.out" <<'PY'
+import json, sys
+expected, actual = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
+for field, value in expected.items():
+    if field in ("accepted_actor_clusters", "known_human_accounts"):
+        continue
+    assert actual[field] == value, (field, actual.get(field), value)
+metrics = {metric["key"]: metric["value"] for metric in actual["metrics"]}
+assert metrics["contributor.accepted_actor_clusters"] == expected["accepted_actor_clusters"], metrics
+assert metrics["contributor.known_human_accounts"] == expected["known_human_accounts"], metrics
+print("[identity] all 4,096 triangle lifecycle/metadata pairings match independent graph and classification oracles")
+PY
+
 echo "[identity] rejecting a link changes nothing; revoking recomputes"
 "$ROOT/build/rh_cli" identity --input "$T/b.json" --out "$T/b.out" >/dev/null || fail "B run"
 python3 - "$T/a.out" "$T/b.out" <<'PY'
