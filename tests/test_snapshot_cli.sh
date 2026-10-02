@@ -31,10 +31,25 @@ assert d["columns"]["edges"] == {"from": [0, 0], "to": [1, 2], "scope": ["normal
 assert "canonical input" in d["note"], d
 print("[snapshot] digest + columnar rows OK")
 PY
+python3 - "$T/graph.json" "$T/out.json" <<'PY'
+import hashlib, json, sys
+raw = open(sys.argv[1], "rb").read()
+normalized = open(sys.argv[2], "rb").read()
+sidecar = json.load(open(sys.argv[2] + ".transformations.json"))
+configuration = b"repo-health/columnar-graph-snapshot/1;nodes=id,name,version;edges=from,to,scope;rights=input-scoped"
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "columnar-graph-snapshot" and sidecar["output_schema"] == "rh-columnar-snapshot/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["preserved", "preserved", "transformed", "discarded", "unsupported"], sidecar
+print("[snapshot] transformation sidecar binds selected columns and dropped graph fields")
+PY
 
 echo "[snapshot] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" snapshot --input "$T/graph.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "snapshot output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "snapshot transformation report not deterministic"
 sed 's/"schema":"rh-dep-graph\/1"/"schema":"rh-dep-graph\/2"/' "$T/graph.json" > "$T/bad-schema.json"
 set +e
 "$ROOT/build/rh_cli" snapshot --input "$T/bad-schema.json" --out "$T/x" >/dev/null 2>&1; rc_schema=$?
