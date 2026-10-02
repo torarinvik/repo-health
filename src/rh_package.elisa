@@ -3731,11 +3731,201 @@ module Package:
             0
 
     private:
+        const RH_PYPI_REQ_CONDITIONAL_LOCK: i64 = -2
+
         def rh_pypi_lock_seen(seen: darray[i64]&, node: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             while i < seen.count |i: usize = 0, seen, node|:
                 return true if seen[i] == node
                 i <- i + 1
             false
+
+        struct RhUvDependency:
+            name_s: mutable i64
+            name_e: mutable i64
+            version_s: mutable i64
+            version_e: mutable i64
+            marker_s: mutable i64
+            marker_e: mutable i64
+            specifier_s: mutable i64
+            specifier_e: mutable i64
+            has_extra: mutable bool
+
+        def rh_uv_skip_string(lock: darray[u8]&, start: usize, end: usize) -> i64:
+            return -1 if start >= end or lock[start] != 34
+            while cursor < end |cursor: usize = start + 1, lock, end|:
+                return (cursor + 1).i64() if lock[cursor] == 34
+                return -1 if lock[cursor] == 92 or lock[cursor] < 32
+                cursor <- cursor + 1
+            -1
+
+        def rh_uv_name_valid(pool: darray[u8]&, start: usize, end: usize) -> bool:
+            return false if start >= end
+            for index in start..<end |index, pool|:
+                return false if not rh_pypi_name_char(pool[index])
+            true
+
+        # uv dependency references are one-line inline tables in schema v1
+        # revision 3. Marker- or extra-conditioned references remain unresolved.
+        def rh_uv_dependency(lock: darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, out: mutable RhUvDependency&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= end or lock[start] != 123 or lock[end - 1] != 125
+            out <- RhUvDependency{name_s: -1, name_e: -1, version_s: -1, version_e: -1, marker_s: -1, marker_e: -1, specifier_s: -1, specifier_e: -1, has_extra: false}
+            cursor: mutable usize = start + 1
+            limit: usize = end - 1
+            seen: mutable u8 = 0
+            while cursor < limit |cursor, limit, lock, pool, out, seen|:
+                while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9 or lock[cursor] == 44) |cursor, limit, lock|:
+                    cursor <- cursor + 1
+                break if cursor >= limit
+                key_s: usize = cursor
+                while cursor < limit and ((lock[cursor] >= 97 and lock[cursor] <= 122) or lock[cursor] == 45) |cursor, limit, lock|:
+                    cursor <- cursor + 1
+                return false if cursor == key_s
+                key_e: usize = cursor
+                while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, limit, lock|:
+                    cursor <- cursor + 1
+                return false if cursor >= limit or lock[cursor] != 61
+                cursor <- cursor + 1
+                while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, limit, lock|:
+                    cursor <- cursor + 1
+                if rh_span_lit(lock, key_s, key_e, "source"):
+                    return false if (seen & 16) != 0 or cursor >= limit or lock[cursor] != 123
+                    seen <- seen | 16
+                    cursor <- cursor + 1
+                    while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, limit, lock|:
+                        cursor <- cursor + 1
+                    registry_s: usize = cursor
+                    while cursor < limit and ((lock[cursor] >= 97 and lock[cursor] <= 122) or lock[cursor] == 45) |cursor, limit, lock|:
+                        cursor <- cursor + 1
+                    return false if not rh_span_lit(lock, registry_s, cursor, "registry")
+                    while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, limit, lock|:
+                        cursor <- cursor + 1
+                    return false if cursor >= limit or lock[cursor] != 61
+                    cursor <- cursor + 1
+                    while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, limit, lock|:
+                        cursor <- cursor + 1
+                    registry_url_start: usize = cursor + 1
+                    nested_end: i64 = rh_uv_skip_string(lock, cursor, limit)
+                    return false if nested_end < 0 or not rh_span_lit(lock, registry_url_start, (nested_end - 1).usize(), "https://pypi.org/simple")
+                    cursor <- nested_end.usize()
+                    while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, limit, lock|:
+                        cursor <- cursor + 1
+                    return false if cursor >= limit or lock[cursor] != 125
+                    cursor <- cursor + 1
+                elif rh_span_lit(lock, key_s, key_e, "extra"):
+                    return false if (seen & 32) != 0 or cursor >= limit or lock[cursor] != 91
+                    seen <- seen | 32
+                    out.has_extra <- true
+                    cursor <- cursor + 1
+                    while cursor < limit and lock[cursor] != 93 |cursor, limit, lock|:
+                        while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9 or lock[cursor] == 44) |cursor, limit, lock|:
+                            cursor <- cursor + 1
+                        break if cursor >= limit or lock[cursor] == 93
+                        extra_end: i64 = rh_uv_skip_string(lock, cursor, limit)
+                        return false if extra_end < 0
+                        cursor <- extra_end.usize()
+                    return false if cursor >= limit or lock[cursor] != 93
+                    cursor <- cursor + 1
+                else:
+                    field: u8 = 0 if rh_span_lit(lock, key_s, key_e, "name") else 1 if rh_span_lit(lock, key_s, key_e, "version") else 2 if rh_span_lit(lock, key_s, key_e, "marker") else 3 if rh_span_lit(lock, key_s, key_e, "specifier") else 255
+                    return false if field == 255
+                    bit: u8 = 1 if field == 0 else 2 if field == 1 else 4 if field == 2 else 8
+                    return false if (seen & bit) != 0
+                    seen <- seen | bit
+                    value_s: mutable i64 = -1
+                    value_e: mutable i64 = -1
+                    value_end: i64 = rh_quoted_span(lock, cursor, limit, pool, &value_s, &value_e)
+                    return false if value_end < 0
+                    out.name_s <- value_s if field == 0
+                    out.name_e <- value_e if field == 0
+                    out.version_s <- value_s if field == 1
+                    out.version_e <- value_e if field == 1
+                    out.marker_s <- value_s if field == 2
+                    out.marker_e <- value_e if field == 2
+                    out.specifier_s <- value_s if field == 3
+                    out.specifier_e <- value_e if field == 3
+                    cursor <- value_end.usize()
+                while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, limit, lock|:
+                    cursor <- cursor + 1
+                return false if cursor < limit and lock[cursor] != 44
+            return false if out.name_s < 0 or (out.version_s >= 0 and out.specifier_s >= 0)
+            true
+
+        def rh_uv_registry_source(lock: darray[u8]&, start: usize, end: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= end or lock[start] != 123 or lock[end - 1] != 125
+            cursor: mutable usize = start + 1
+            while cursor < end - 1 and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, end, lock|:
+                cursor <- cursor + 1
+            return false if not rh_span_lit(lock, cursor, cursor + 8, "registry")
+            cursor <- cursor + 8
+            while cursor < end - 1 and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, end, lock|:
+                cursor <- cursor + 1
+            return false if cursor >= end - 1 or lock[cursor] != 61
+            cursor <- cursor + 1
+            while cursor < end - 1 and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, end, lock|:
+                cursor <- cursor + 1
+            registry_start: usize = cursor + 1
+            quoted_end: i64 = rh_uv_skip_string(lock, cursor, end - 1)
+            return false if quoted_end < 0 or not rh_span_lit(lock, registry_start, (quoted_end - 1).usize(), "https://pypi.org/simple")
+            cursor <- quoted_end.usize()
+            while cursor < end - 1 and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, end, lock|:
+                cursor <- cursor + 1
+            cursor == end - 1
+
+        def rh_uv_archive(lock: darray[u8]&, pool: mutable darray[u8]&, start: usize, end: usize, node: i64, artifacts: mutable darray[RhArtifact]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if start >= end or lock[start] != 123 or lock[end - 1] != 125
+            cursor: mutable usize = start + 1
+            limit: usize = end - 1
+            hash_s: mutable i64 = -1
+            hash_e: mutable i64 = -1
+            seen: mutable u8 = 0
+            while cursor < limit |cursor, limit, lock, pool, hash_s, hash_e, seen|:
+                while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9 or lock[cursor] == 44) |cursor, limit, lock|:
+                    cursor <- cursor + 1
+                break if cursor >= limit
+                key_s: usize = cursor
+                while cursor < limit and ((lock[cursor] >= 97 and lock[cursor] <= 122) or lock[cursor] == 45) |cursor, limit, lock|:
+                    cursor <- cursor + 1
+                return false if cursor == key_s
+                key_e: usize = cursor
+                while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, limit, lock|:
+                    cursor <- cursor + 1
+                return false if cursor >= limit or lock[cursor] != 61
+                cursor <- cursor + 1
+                while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, limit, lock|:
+                    cursor <- cursor + 1
+                is_hash: bool = rh_span_lit(lock, key_s, key_e, "hash")
+                is_url: bool = rh_span_lit(lock, key_s, key_e, "url")
+                is_time: bool = rh_span_lit(lock, key_s, key_e, "upload-time")
+                is_size: bool = rh_span_lit(lock, key_s, key_e, "size")
+                return false if not is_hash and not is_url and not is_time and not is_size
+                bit: u8 = 1 if is_hash else 2 if is_url else 4 if is_size else 8
+                return false if (seen & bit) != 0
+                seen <- seen | bit
+                if is_size:
+                    digit_start: usize = cursor
+                    while cursor < limit and lock[cursor] >= 48 and lock[cursor] <= 57 |cursor, limit, lock|:
+                        cursor <- cursor + 1
+                    size_ok: mutable i64 = 0
+                    size_value: i64 = Base::rh_parse_i64(lock, digit_start, cursor, &size_ok)
+                    return false if cursor == digit_start or size_ok != 1 or size_value < 0
+                else:
+                    value_s: mutable i64 = -1
+                    value_e: mutable i64 = -1
+                    value_end: i64 = rh_uv_skip_string(lock, cursor, limit) if is_url or is_time else rh_quoted_span(lock, cursor, limit, pool, &value_s, &value_e)
+                    return false if value_end < 0
+                    if is_hash:
+                        hash_s <- value_s
+                        hash_e <- value_e
+                    cursor <- value_end.usize()
+                while cursor < limit and (lock[cursor] == 32 or lock[cursor] == 9) |cursor, limit, lock|:
+                    cursor <- cursor + 1
+                return false if cursor < limit and lock[cursor] != 44
+            return false if hash_s < 0 or hash_e - hash_s != 71 or not rh_span_lit(pool, hash_s.usize(), (hash_s + 7).usize(), "sha256:")
+            while h < 64 |h: usize = 0, hash_s, pool|:
+                b: u8 = pool[(hash_s + 7 + h.i64()).usize()]
+                return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102) or (b >= 65 and b <= 70))
+                h <- h + 1
+            rh_artifact_add_expected(artifacts, node, RH_ART_KIND_ARCHIVE, hash_s, hash_e) >= 0
 
         # Poetry lock parser for the 1.1/2.x package-table subset. Package
         # versions and requirements are retained independently; conditional
@@ -4093,11 +4283,225 @@ module Package:
             return -1 if not lock_version_seen or package_count <= 0 or seen.count != package_count
             package_count
     public:
+        def rh_pypi_uv_lock_parse(lock: darray[u8]&, pkgs: mutable darray[RhPkgNode]&, pool: mutable darray[u8]&, reqs: mutable darray[RhRequire]&, artifacts: mutable darray[RhArtifact]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if lock.count > 8388608
+            mode: mutable u8 = 0
+            array_mode: mutable u8 = 0
+            current: mutable i64 = -1
+            package_name_s: mutable i64 = -1
+            package_name_e: mutable i64 = -1
+            package_version_s: mutable i64 = -1
+            package_version_e: mutable i64 = -1
+            seen_nodes: mutable darray[i64] = []
+            package_count: mutable i64 = 0
+            version_seen: mutable bool = false
+            revision_seen: mutable bool = false
+            requires_python_seen: mutable bool = false
+            resolution_markers_seen: mutable bool = false
+            manifest_seen: mutable bool = false
+            manifest_members_seen: mutable bool = false
+            name_seen: mutable bool = false
+            version_value_seen: mutable bool = false
+            source_seen: mutable bool = false
+            dependencies_seen: mutable bool = false
+            sdist_seen: mutable bool = false
+            wheels_seen: mutable bool = false
+            while line_start < lock.count |line_start: usize = 0, lock, pool, pkgs, reqs, artifacts, mode, array_mode, current, package_name_s, package_name_e, package_version_s, package_version_e, seen_nodes, package_count, version_seen, revision_seen, requires_python_seen, resolution_markers_seen, manifest_seen, manifest_members_seen, name_seen, version_value_seen, source_seen, dependencies_seen, sdist_seen, wheels_seen|:
+                line_end: usize =
+                    while j < lock.count and lock[j] != 10 |j: usize = line_start| -> j:
+                        j <- j + 1
+                s: mutable usize = line_start
+                e: mutable usize = line_end
+                while s < e and (lock[s] == 32 or lock[s] == 9 or lock[s] == 13) |s, e, lock|:
+                    s <- s + 1
+                while e > s and (lock[e - 1] == 32 or lock[e - 1] == 9 or lock[e - 1] == 13) |s, e, lock|:
+                    e <- e - 1
+                if array_mode != 0:
+                    return -1 if s >= e
+                    if e - s == 1 and lock[s] == 93:
+                        array_mode <- 0
+                    elif array_mode == 1 or array_mode == 2:
+                        table_end: mutable usize = e
+                        table_end <- table_end - 1 if lock[table_end - 1] == 44
+                        return -1 if lock[s] != 123 or lock[table_end - 1] != 125
+                        if array_mode == 1:
+                            return -1 if current < 0 or reqs.count.i64() >= 200000
+                            parsed: mutable RhUvDependency = RhUvDependency{name_s: -1, name_e: -1, version_s: -1, version_e: -1, marker_s: -1, marker_e: -1, specifier_s: -1, specifier_e: -1, has_extra: false}
+                            return -1 if not rh_uv_dependency(lock, pool, s, table_end, parsed)
+                            return -1 if not rh_uv_name_valid(pool, parsed.name_s.usize(), parsed.name_e.usize())
+                            conditional: bool = parsed.marker_s >= 0 or parsed.has_extra
+                            req_start: mutable i64 = -1
+                            req_end: mutable i64 = -1
+                            if conditional:
+                                if parsed.marker_s >= 0:
+                                    req_start <- parsed.marker_s
+                                    req_end <- parsed.marker_e
+                                else:
+                                    req_start <- pool.count.i64()
+                                    Base::rh_push_text(pool, "extra activation")
+                                    req_end <- pool.count.i64()
+                            elif parsed.specifier_s >= 0:
+                                req_start <- parsed.specifier_s
+                                req_end <- parsed.specifier_e
+                            reqs.push(RhRequire{from: current, name_s: parsed.name_s, name_e: parsed.name_e, ver_s: parsed.version_s if not conditional else RH_PYPI_REQ_CONDITIONAL_LOCK, ver_e: parsed.version_e if not conditional else RH_PYPI_REQ_CONDITIONAL_LOCK, src_s: -1, src_e: -1, req_s: req_start, req_e: req_end, declared_s: -1, declared_e: -1, scope_name_s: -1, scope_name_e: -1, depctx: RH_SCOPE_NORMAL, optional: 1 if parsed.has_extra else 0})
+                        else:
+                            return -1 if current < 0 or not rh_uv_archive(lock, pool, s, table_end, current, artifacts)
+                    elif array_mode == 3 or array_mode == 4:
+                        return -1 if lock[s] != 34
+                        return -1 if array_mode == 3
+                        quoted_end: i64 = rh_uv_skip_string(lock, s, e)
+                        return -1 if quoted_end < 0
+                        array_end: mutable usize = quoted_end.usize()
+                        while array_end < e and (lock[array_end] == 32 or lock[array_end] == 9 or lock[array_end] == 44) |array_end, e, lock|:
+                            array_end <- array_end + 1
+                        return -1 if array_end < e and lock[array_end] != 93
+                        array_mode <- 0 if array_end < e and lock[array_end] == 93
+                    else:
+                        return -1
+                    line_start <- line_end + 1
+                    continue
+                if s < e and lock[s] == 35:
+                    line_start <- line_end + 1
+                    continue
+                if s >= e:
+                    line_start <- line_end + 1
+                    continue
+                if lock[s] == 91:
+                    if Base::rh_bytes_equal_literal(lock, s.i64(), e.i64(), "[[package]]"):
+                        return -1 if package_count >= 10000 or (package_count > 0 and (current < 0 or not source_seen))
+                        current <- -1
+                        package_name_s <- -1
+                        package_name_e <- -1
+                        package_version_s <- -1
+                        package_version_e <- -1
+                        name_seen <- false
+                        version_value_seen <- false
+                        source_seen <- false
+                        dependencies_seen <- false
+                        sdist_seen <- false
+                        wheels_seen <- false
+                        mode <- 1
+                        package_count <- package_count + 1
+                    elif Base::rh_bytes_equal_literal(lock, s.i64(), e.i64(), "[manifest]"):
+                        return -1 if current >= 0 or manifest_seen
+                        mode <- 2
+                        manifest_seen <- true
+                    else:
+                        return -1
+                    line_start <- line_end + 1
+                    continue
+                ks: mutable i64 = 0
+                ke: mutable i64 = 0
+                return -1 if not rh_toml_key(lock, s, e, &ks, &ke)
+                if mode == 0:
+                    if Base::rh_bytes_equal_literal(lock, ks, ke, "version"):
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if version_seen or not rh_span_lit(lock, value_start, e, "1")
+                        version_seen <- true
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "revision"):
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if revision_seen or not rh_span_lit(lock, value_start, e, "3")
+                        revision_seen <- true
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "requires-python"):
+                        return -1 if requires_python_seen
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if rh_uv_skip_string(lock, value_start, e) < 0
+                        requires_python_seen <- true
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "resolution-markers"):
+                        return -1 if resolution_markers_seen
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if value_start >= e or lock[value_start] != 91
+                        return -1 if value_start + 1 < e and lock[value_start + 1] != 93
+                        array_mode <- 3 if value_start + 1 >= e
+                        resolution_markers_seen <- true
+                        line_start <- line_end + 1
+                        continue
+                    else:
+                        return -1
+                elif mode == 2:
+                    if Base::rh_bytes_equal_literal(lock, ks, ke, "members"):
+                        return -1 if manifest_members_seen
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if value_start >= e or lock[value_start] != 91
+                        return -1 if value_start + 1 < e and lock[value_start + 1] != 93
+                        array_mode <- 4 if value_start + 1 >= e
+                        manifest_members_seen <- true
+                        line_start <- line_end + 1
+                        continue
+                    else:
+                        return -1
+                else:
+                    if Base::rh_bytes_equal_literal(lock, ks, ke, "name"):
+                        return -1 if name_seen or current >= 0 or rh_toml_qstring(lock, ke.usize(), e, pool, &package_name_s, &package_name_e) < 0
+                        name_seen <- true
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "version"):
+                        return -1 if version_value_seen or current >= 0 or rh_toml_qstring(lock, ke.usize(), e, pool, &package_version_s, &package_version_e) < 0
+                        version_value_seen <- true
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "source"):
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if source_seen or current < 0 or not rh_uv_registry_source(lock, value_start, e)
+                        source_seen <- true
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "dependencies"):
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if dependencies_seen or current < 0 or value_start >= e or lock[value_start] != 91
+                        dependencies_seen <- true
+                        array_mode <- 1 if value_start + 1 >= e or lock[value_start + 1] != 93
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "sdist"):
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if sdist_seen or current < 0 or not rh_uv_archive(lock, pool, value_start, e, current, artifacts)
+                        sdist_seen <- true
+                    elif Base::rh_bytes_equal_literal(lock, ks, ke, "wheels"):
+                        value_start: mutable usize = ke.usize()
+                        while value_start < e and (lock[value_start] == 32 or lock[value_start] == 9 or lock[value_start] == 61) |value_start, e, lock|:
+                            value_start <- value_start + 1
+                        return -1 if wheels_seen or current < 0 or value_start >= e or lock[value_start] != 91
+                        wheels_seen <- true
+                        array_mode <- 2 if value_start + 1 >= e or lock[value_start + 1] != 93
+                    else:
+                        return -1
+                    if current < 0 and name_seen and version_value_seen:
+                        return -1 if not rh_uv_name_valid(pool, package_name_s.usize(), package_name_e.usize())
+                        current <- rh_pypi_find(pkgs, pool, package_name_s.usize(), package_name_e.usize(), package_version_s.usize(), package_version_e.usize())
+                        if current < 0:
+                            current <- rh_node_add(pkgs, RH_ECO_PYPI)
+                            return -1 if current < 0
+                            node: mutable RhPkgNode = pkgs[current.usize()]
+                            node.name_s <- package_name_s
+                            node.name_e <- package_name_e
+                            node.ver_s <- package_version_s
+                            node.ver_e <- package_version_e
+                            node.src_kind <- RH_PSRC_REGISTRY
+                            pkgs[current.usize()] <- node
+                        return -1 if rh_pypi_lock_seen(seen_nodes, current)
+                        seen_nodes.push(current)
+                    if current >= 0 and not source_seen and (Base::rh_bytes_equal_literal(lock, ks, ke, "dependencies") or Base::rh_bytes_equal_literal(lock, ks, ke, "sdist") or Base::rh_bytes_equal_literal(lock, ks, ke, "wheels")):
+                        return -1
+                line_start <- line_end + 1
+            return -1 if array_mode != 0 or not version_seen or not revision_seen or package_count <= 0 or seen_nodes.count != package_count or current < 0 or not source_seen
+            package_count
+
+    public:
         def rh_pypi_resolve_locked(pkgs: mutable darray[RhPkgNode]&, pool: darray[u8]&, reqs: darray[RhRequire]&, edges: mutable darray[RhDepEdge]&, unresolved: mutable darray[RhUnresolved]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             before_edges: usize = edges.count
             while r < reqs.count |r: usize = 0, pkgs, pool, reqs, edges, unresolved|:
                 q: RhRequire = reqs[r]
-                if q.from >= 0 and q.from < pkgs.count.i64() and pkgs[q.from.usize()].requires_python_s >= 0:
+                if q.ver_s == RH_PYPI_REQ_CONDITIONAL_LOCK or (q.from >= 0 and q.from < pkgs.count.i64() and pkgs[q.from.usize()].requires_python_s >= 0):
                     unresolved.push(RhUnresolved{from: q.from, name_s: q.name_s, name_e: q.name_e, req_s: q.req_s, req_e: q.req_e, reason: RH_UNRES_CONTEXT, depctx: q.depctx, optional: q.optional})
                     r <- r + 1
                     continue
@@ -4530,7 +4934,7 @@ module Package:
                 q: RhRequire = reqs[r]
                 s: i64 = q.ver_s if q.req_s < 0 else q.req_s
                 e: i64 = q.ver_e if q.req_s < 0 else q.req_e
-                if s >= 0 and e >= 0:
+                if q.ver_s != RH_PYPI_REQ_CONDITIONAL_LOCK and s >= 0 and e >= 0:
                     if not rh_req_range_supported(pool, s, e):
                         total <- total + 1
                 r <- r + 1

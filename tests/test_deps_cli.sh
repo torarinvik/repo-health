@@ -345,7 +345,7 @@ framed = str(len(source)).encode() + b":" + source + b"0:0:"
 assert report["adapter"] == "python-pyproject-graph", report
 assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), report
 assert report["normalized_output_sha256"] == hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), report
-assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/python-pyproject/1;poetry-lock=absent;osv=none").hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/python-pyproject/2;lock=none;osv=none").hexdigest(), report
 assert {field["state"] for field in report["fields"]} >= {"preserved", "transformed", "unknown", "unsupported", "discarded"}, report
 assert g["ecosystem"] == "pypi", g
 assert [n["name"] for n in g["nodes"]] == ["root", "Django", "pytest"], g["nodes"]
@@ -525,7 +525,7 @@ project, lock = (open(path, "rb").read() for path in sys.argv[2:])
 report = json.load(open(sys.argv[1] + ".transformations.json"))
 framed = b"".join(str(len(value)).encode() + b":" + value for value in (project, lock, b""))
 assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), report
-assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/python-pyproject/1;poetry-lock=present;osv=none").hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/python-pyproject/2;lock=poetry;osv=none").hexdigest(), report
 nodes = graph["nodes"]
 assert [n["name"] for n in nodes] == ["root", "requests", "urllib3", "pytest", "conditional"], nodes
 assert {(e["from"], e["to"], e["scope"], e.get("optional", False)) for e in graph["edges"]} == {(0, 1, "normal", False), (1, 2, "normal", False), (1, 2, "dev", False), (0, 3, "dev", True)}, graph["edges"]
@@ -536,6 +536,98 @@ assert {a["package_node"] for a in graph["artifacts"]} == {1}, graph["artifacts"
 assert graph["unresolved"] == [{"from": 0, "name": "conditional", "requirement": "^1.0", "reason": "context"}], graph["unresolved"]
 print("[deps] Poetry lock graph, scopes, and Python condition retention OK")
 PY
+
+echo "[deps] uv.lock v1 revision 3 resolves exact edges and retains artifact hashes"
+mkdir -p "$T/uv-lock"
+cat > "$T/uv-lock/pyproject.toml" <<'EOF'
+[project]
+name = "uv-demo"
+version = "1.0.0"
+requires-python = ">=3.9"
+dependencies = ["alpha==1.4.2"]
+EOF
+cp "$ROOT/fixtures/packages/uv-lock-v1-r3.lock" "$T/uv-lock/uv.lock"
+"$ROOT/build/rh_cli" deps --repo "$T/uv-lock" --out "$T/uv-lock-out" \
+  | grep -q "ecosystems=1 pypi=2/3 unresolved=1 unsupported=0" || fail "uv lock summary"
+python3 - "$T/uv-lock-out/deps-pypi-graph.json" "$T/uv-lock/pyproject.toml" "$T/uv-lock/uv.lock" <<'PY'
+import hashlib, json, sys
+graph = json.load(open(sys.argv[1]))
+project, lock = (open(path, "rb").read() for path in sys.argv[2:])
+report = json.load(open(sys.argv[1] + ".transformations.json"))
+framed = b"".join(str(len(value)).encode() + b":" + value for value in (project, lock, b""))
+assert report["source_input_sha256"] == hashlib.sha256(framed).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(b"repo-health/python-pyproject/2;lock=uv;osv=none").hexdigest(), report
+assert [node["name"] for node in graph["nodes"]] == ["root", "alpha", "beta", "gamma"], graph["nodes"]
+assert {(edge["from"], edge["to"]) for edge in graph["edges"]} == {(0, 1), (1, 2)}, graph["edges"]
+assert len(graph["unresolved"]) == 1, graph["unresolved"]
+unresolved = graph["unresolved"][0]
+assert unresolved["from"] == 2 and unresolved["name"] == "gamma" and unresolved["reason"] == "context", unresolved
+assert "python_full_version" in unresolved["requirement"] and "3.12" in unresolved["requirement"], unresolved
+assert "https://" not in json.dumps(graph), graph
+assert {artifact["expected_digest"] for artifact in graph["artifacts"]} == {
+    "sha256:" + "a" * 64, "sha256:" + "b" * 64,
+    "sha256:" + "c" * 64, "sha256:" + "d" * 64,
+}, graph["artifacts"]
+print("[deps] uv.lock exact graph, conditional edge, and artifact evidence OK")
+PY
+
+echo "[deps] unsupported uv revision fails before publishing any ecosystem graph"
+mkdir -p "$T/unsupported-uv"
+cp "$T/uv-lock/pyproject.toml" "$T/unsupported-uv/pyproject.toml"
+sed 's/revision = 3/revision = 4/' "$ROOT/fixtures/packages/uv-lock-v1-r3.lock" > "$T/unsupported-uv/uv.lock"
+cp "$ROOT/fixtures/packages/cargo-v2-root.lock" "$T/unsupported-uv/Cargo.lock"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/unsupported-uv" --out "$T/unsupported-uv-out" >/dev/null 2>&1
+rc_bad_uv_revision=$?
+set -e
+[[ "$rc_bad_uv_revision" -eq 4 ]] || fail "unsupported uv lock revision must fail closed (got $rc_bad_uv_revision)"
+[[ ! -f "$T/unsupported-uv-out/deps-pypi-graph.json" ]] || fail "unsupported uv revision published a partial graph"
+[[ ! -f "$T/unsupported-uv-out/deps-cargo-graph.json" ]] || fail "unsupported uv revision allowed another ecosystem graph to publish"
+
+echo "[deps] nonempty uv resolution markers and overflowing archive sizes fail closed"
+mkdir -p "$T/unsupported-uv-markers" "$T/unsupported-uv-size"
+cp "$T/uv-lock/pyproject.toml" "$T/unsupported-uv-markers/pyproject.toml"
+cp "$T/uv-lock/pyproject.toml" "$T/unsupported-uv-size/pyproject.toml"
+python3 - "$ROOT/fixtures/packages/uv-lock-v1-r3.lock" "$T/unsupported-uv-markers/uv.lock" <<'PY'
+import sys
+source = open(sys.argv[1]).read()
+assert "resolution-markers = []" in source
+open(sys.argv[2], "w").write(source.replace(
+    "resolution-markers = []",
+    "resolution-markers = [\n    \"python_full_version < '3.12'\",\n]",
+))
+PY
+sed 's/size = 42/size = 999999999999999999999999999999/' \
+  "$ROOT/fixtures/packages/uv-lock-v1-r3.lock" > "$T/unsupported-uv-size/uv.lock"
+for kind in markers size; do
+  set +e
+  "$ROOT/build/rh_cli" deps --repo "$T/unsupported-uv-$kind" --out "$T/unsupported-uv-$kind-out" >/dev/null 2>&1
+  rc_unsupported_uv=$?
+  set -e
+  [[ "$rc_unsupported_uv" -eq 4 ]] || fail "unsupported uv $kind must fail closed (got $rc_unsupported_uv)"
+  [[ ! -f "$T/unsupported-uv-$kind-out/deps-pypi-graph.json" ]] || fail "unsupported uv $kind published a partial graph"
+done
+
+echo "[deps] custom uv registries and ambiguous Python lockfile selection fail closed"
+mkdir -p "$T/unsupported-uv-source"
+cp "$T/uv-lock/pyproject.toml" "$T/unsupported-uv-source/pyproject.toml"
+sed 's#https://pypi.org/simple#https://packages.example/simple#g' "$ROOT/fixtures/packages/uv-lock-v1-r3.lock" > "$T/unsupported-uv-source/uv.lock"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/unsupported-uv-source" --out "$T/unsupported-uv-source-out" >/dev/null 2>&1
+rc_custom_uv_source=$?
+set -e
+[[ "$rc_custom_uv_source" -eq 4 ]] || fail "custom uv registry must fail closed (got $rc_custom_uv_source)"
+[[ ! -f "$T/unsupported-uv-source-out/deps-pypi-graph.json" ]] || fail "unsupported uv source published a partial graph"
+mkdir -p "$T/ambiguous-python-locks"
+cp "$T/uv-lock/pyproject.toml" "$T/ambiguous-python-locks/pyproject.toml"
+cp "$ROOT/fixtures/packages/uv-lock-v1-r3.lock" "$T/ambiguous-python-locks/uv.lock"
+printf 'not parsed because both Python lockfiles are present\n' > "$T/ambiguous-python-locks/poetry.lock"
+set +e
+"$ROOT/build/rh_cli" deps --repo "$T/ambiguous-python-locks" --out "$T/ambiguous-python-locks-out" >/dev/null 2>&1
+rc_both_python_locks=$?
+set -e
+[[ "$rc_both_python_locks" -eq 4 ]] || fail "simultaneous Poetry and uv locks must fail closed (got $rc_both_python_locks)"
+[[ ! -f "$T/ambiguous-python-locks-out/deps-pypi-graph.json" ]] || fail "ambiguous Python locks published a graph"
 
 echo "[deps] legacy Poetry metadata.files hashes attach only to one exact package"
 mkdir -p "$T/poetry-legacy-files"

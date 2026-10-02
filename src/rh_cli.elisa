@@ -4092,6 +4092,33 @@ def rh_deps_poetry_preflight(repo: cstr, poetry_lock_ptr: cstr) -> i64 can[Memor
     _ = Package::rh_pypi_resolve_locked(check_pkgs, check_pool, check_reqs, check_edges, check_unresolved)
     0
 
+def rh_deps_uv_preflight(repo: cstr, uv_lock_ptr: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    pyproject_path: mutable darray[u8] = []
+    requirements_path: mutable darray[u8] = []
+    return -1 if not rh_out_path(repo, "pyproject.toml", pyproject_path) or not rh_out_path(repo, "requirements.txt", requirements_path)
+    pyproject_ptr: cstr = (&pyproject_path[0]).cast[cstr] can Unsafe.PointerCast
+    requirements_ptr: cstr = (&requirements_path[0]).cast[cstr] can Unsafe.PointerCast
+    return -1 if not file_exists(pyproject_ptr) or file_exists(requirements_ptr)
+    manifest_bytes: mutable darray[u8] = []
+    lock_bytes: mutable darray[u8] = []
+    return -1 if Base::rh_io_read(pyproject_ptr, manifest_bytes) < 0 or Base::rh_io_read(uv_lock_ptr, lock_bytes) < 0
+    check_pkgs: mutable darray[Package::RhPkgNode] = []
+    check_pool: mutable darray[u8] = []
+    check_reqs: mutable darray[Package::RhRequire] = []
+    check_artifacts: mutable darray[Package::RhArtifact] = []
+    check_edges: mutable darray[Package::RhDepEdge] = []
+    check_unresolved: mutable darray[Package::RhUnresolved] = []
+    check_unknown: mutable i64 = 0
+    if Package::rh_pypi_parse_pep621(manifest_bytes, check_pkgs, check_pool, check_reqs, check_edges, check_unresolved, &check_unknown) < 0:
+        rh_cli_err("deps: malformed PEP 621 manifest for uv.lock")
+        return -1
+    check_unresolved <- []
+    if Package::rh_pypi_uv_lock_parse(lock_bytes, check_pkgs, check_pool, check_reqs, check_artifacts) < 0:
+        rh_cli_err("deps: uv.lock parser rejected a field, package source, or revision")
+        return -1
+    _ = Package::rh_pypi_resolve_locked(check_pkgs, check_pool, check_reqs, check_edges, check_unresolved)
+    0
+
 def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cstr, has_osv_url: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(repo) or not Git::rh_arg_safe(out):
         rh_cli_err("rejected deps argument (allowlist)")
@@ -4113,9 +4140,21 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         rh_cli_err("deps: bad repo path")
         return 3
     poetry_lock_ptr: cstr = (&poetry_lock_path[0]).cast[cstr] can Unsafe.PointerCast
+    uv_lock_path: mutable darray[u8] = []
+    if not rh_out_path(repo, "uv.lock", uv_lock_path):
+        rh_cli_err("deps: bad repo path")
+        return 3
+    uv_lock_ptr: cstr = (&uv_lock_path[0]).cast[cstr] can Unsafe.PointerCast
+    if file_exists(poetry_lock_ptr) and file_exists(uv_lock_ptr):
+        rh_cli_err("deps: poetry.lock and uv.lock are both present; choose one PyPI lockfile")
+        return 4
     if file_exists(poetry_lock_ptr):
         if rh_deps_poetry_preflight(repo, poetry_lock_ptr) < 0:
             rh_cli_err("deps: malformed or unsupported Poetry manifest/lock subset; refusing partial dependency graphs")
+            return 4
+    if file_exists(uv_lock_ptr):
+        if rh_deps_uv_preflight(repo, uv_lock_ptr) < 0:
+            rh_cli_err("deps: malformed or unsupported uv manifest/lock subset; refusing partial dependency graphs")
             return 4
     resolved_osv_path: mutable cstr = osv_path
     resolved_has_osv: mutable bool = has_osv
@@ -4557,8 +4596,10 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         yedges: mutable darray[Package::RhDepEdge] = []
         yunres: mutable darray[Package::RhUnresolved] = []
         yartifacts: mutable darray[Package::RhArtifact] = []
-        poetry_lock_bytes: mutable darray[u8] = []
+        python_lock_bytes: mutable darray[u8] = []
         has_poetry_lock: bool = file_exists(poetry_lock_ptr)
+        has_uv_lock: bool = file_exists(uv_lock_ptr)
+        python_lock_kind: u8 = 1 if has_poetry_lock else 2 if has_uv_lock else 0
         yroot: i64 = |pyb, ypkgs, ypool, yreqs, yedges, yunres|
             yunk: mutable i64 = 0
             block_result: i64 = Package::rh_pypi_parse_pep621(pyb, ypkgs, ypool, yreqs, yedges, yunres, &yunk)
@@ -4566,15 +4607,21 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
         if yroot < 0:
             rh_cli_err("deps: malformed pyproject.toml PEP 621 subset (structured failure, no partial graph)")
             return 4
-        if has_poetry_lock:
-            if Base::rh_io_read(poetry_lock_ptr, poetry_lock_bytes) < 0:
-                rh_cli_err("deps: cannot read poetry.lock")
+        if python_lock_kind != 0:
+            lock_ptr: cstr = poetry_lock_ptr if python_lock_kind == 1 else uv_lock_ptr
+            if Base::rh_io_read(lock_ptr, python_lock_bytes) < 0:
+                rh_cli_err("deps: cannot read selected PyPI lockfile")
                 return 4
             yunres <- []
-            poetry_unknown: mutable i64 = 0
-            if Package::rh_pypi_poetry_lock_parse(poetry_lock_bytes, ypkgs, ypool, yreqs, yartifacts, &poetry_unknown) < 0:
-                rh_cli_err("deps: malformed or unsupported poetry.lock subset (structured failure, no partial graph)")
-                return 4
+            if python_lock_kind == 1:
+                poetry_unknown: mutable i64 = 0
+                if Package::rh_pypi_poetry_lock_parse(python_lock_bytes, ypkgs, ypool, yreqs, yartifacts, &poetry_unknown) < 0:
+                    rh_cli_err("deps: malformed or unsupported poetry.lock subset (structured failure, no partial graph)")
+                    return 4
+            else:
+                if Package::rh_pypi_uv_lock_parse(python_lock_bytes, ypkgs, ypool, yreqs, yartifacts) < 0:
+                    rh_cli_err("deps: malformed or unsupported uv.lock subset (structured failure, no partial graph)")
+                    return 4
             _ = Package::rh_pypi_resolve_locked(ypkgs, ypool, yreqs, yedges, yunres)
         yunsup: i64 = Package::rh_unsupported_range_count(yreqs, ypool)
         yfind: mutable darray[Package::RhAdvisory] = []
@@ -4599,23 +4646,23 @@ def rh_do_deps(repo: cstr, out: cstr, osv_path: cstr, has_osv: bool, osv_url: cs
             Base::rh_push_decimal_i64(pyproject_transform_input, pyb.count.i64())
             pyproject_transform_input.push(58)
             pyproject_transform_input.extend(bytes_view(pyb))
-            Base::rh_push_decimal_i64(pyproject_transform_input, poetry_lock_bytes.count.i64())
+            Base::rh_push_decimal_i64(pyproject_transform_input, python_lock_bytes.count.i64())
             pyproject_transform_input.push(58)
-            pyproject_transform_input.extend(bytes_view(poetry_lock_bytes))
+            pyproject_transform_input.extend(bytes_view(python_lock_bytes))
             Base::rh_push_decimal_i64(pyproject_transform_input, osv_source_bytes.count.i64())
             pyproject_transform_input.push(58)
             pyproject_transform_input.extend(bytes_view(osv_source_bytes))
             pyproject_transform_input
         pyproject_transform_configuration: mutable darray[u8] =
             pyproject_transform_configuration: mutable darray[u8] = []
-            Base::rh_push_text(pyproject_transform_configuration, "repo-health/python-pyproject/1;poetry-lock=")
-            Base::rh_push_text(pyproject_transform_configuration, "present" if has_poetry_lock else "absent")
+            Base::rh_push_text(pyproject_transform_configuration, "repo-health/python-pyproject/2;lock=")
+            Base::rh_push_text(pyproject_transform_configuration, "poetry" if python_lock_kind == 1 else "uv" if python_lock_kind == 2 else "none")
             Base::rh_push_text(pyproject_transform_configuration, ";osv=")
             Base::rh_push_text(pyproject_transform_configuration, "fetched" if has_osv_url else "file" if resolved_has_osv else "none")
             pyproject_transform_configuration.push(0)
             pyproject_transform_configuration
         pyproject_transform_configuration_ptr: cstr = (&pyproject_transform_configuration[0]).cast[cstr] can Unsafe.PointerCast
-        if not AdapterTransformationCli::rh_write_sidecar(pyproject_transform_input, yg, "python-pyproject-graph", "rh-dep-graph/1", pyproject_transform_configuration_ptr, "[{\"source\":\"PEP 621 project dependency declarations and optional groups\",\"target\":\"PyPI root requirements and scopes\",\"state\":\"preserved\"},{\"source\":\"exact Poetry lock package identities, versions, and dependencies\",\"target\":\"resolved nodes, scoped edges, and artifacts\",\"state\":\"transformed\"},{\"source\":\"markers, version ranges, and unsupported Poetry constructs\",\"target\":\"unresolved requirements\",\"state\":\"unknown\"},{\"source\":\"unsupported PEP 621 or Poetry syntax\",\"target\":\"graph projection\",\"state\":\"unsupported\"},{\"source\":\"optional retained OSV response\",\"target\":\"advisory matches\",\"state\":\"transformed\"},{\"source\":\"unmodeled pyproject and Poetry metadata\",\"target\":\"canonical graph\",\"state\":\"discarded\"}]", yfp):
+        if not AdapterTransformationCli::rh_write_sidecar(pyproject_transform_input, yg, "python-pyproject-graph", "rh-dep-graph/1", pyproject_transform_configuration_ptr, "[{\"source\":\"PEP 621 project dependency declarations and optional groups\",\"target\":\"PyPI root requirements and scopes\",\"state\":\"preserved\"},{\"source\":\"exact Poetry or uv lock package identities, versions, dependencies, and supported SHA-256 artifacts\",\"target\":\"resolved nodes, scoped edges, and artifacts\",\"state\":\"transformed\"},{\"source\":\"markers, version ranges, and unsupported Python lock constructs\",\"target\":\"unresolved requirements\",\"state\":\"unknown\"},{\"source\":\"unsupported PEP 621 or Poetry/uv syntax\",\"target\":\"graph projection\",\"state\":\"unsupported\"},{\"source\":\"optional retained OSV response\",\"target\":\"advisory matches\",\"state\":\"transformed\"},{\"source\":\"unmodeled pyproject and Poetry/uv metadata\",\"target\":\"canonical graph\",\"state\":\"discarded\"}]", yfp):
             rh_cli_err("deps: cannot write pyproject transformation report")
             return 4
         ecosystem_summaries.push(Package::RhDepsEcosystemSummary{
