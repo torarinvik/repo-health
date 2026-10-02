@@ -3,7 +3,7 @@
 **Document version:** 0.2.0  
 **Status:** Research-informed delivery plan; implementation evidence tracked separately in [STATUS.md](STATUS.md)  
 **Prepared:** 2026-09-18  
-**Updated:** 2026-10-01
+**Updated:** 2026-10-02
 **Companions:** [Architecture.md](Architecture.md), [research paper](REPO_HEALTH_RESEARCH_PAPER.md)  
 **Architecture baseline:** repo-health Architecture 0.1.0
 
