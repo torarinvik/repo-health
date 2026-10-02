@@ -1,0 +1,233 @@
+# rh_alpine_index.elisa — bounded Alpine APKINDEX v2 text metadata (M08).
+#
+# This adapter accepts the decoded plaintext APKINDEX body only. It retains
+# bounded package declarations, leaves dependency expressions opaque, and
+# omits free-form descriptions, maintainer data, and repository URLs.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module AlpineIndex:
+    private:
+        const RH_APKINDEX_MAX_BYTES: usize = 8388608
+        const RH_APKINDEX_MAX_PACKAGES: i64 = 50000
+        const RH_APKINDEX_MAX_FIELDS: i64 = 300000
+        const RH_APKINDEX_MAX_FIELDS_PER_PACKAGE: i64 = 32
+        const RH_APKINDEX_MAX_RELATIONS: i64 = 200000
+
+        struct RhApkField:
+            key: mutable u8
+            value_s: mutable i64
+            value_e: mutable i64
+
+        struct RhApkPackage:
+            field_start: mutable i64
+            field_count: mutable i64
+
+        def rh_apk_utf8(raw: darray[u8]&) -> bool:
+            while i < raw.count |i: usize = 0, raw|:
+                b: u8 = raw[i]
+                if b < 128:
+                    i <- i + 1
+                elif b >= 194 and b <= 223:
+                    return false if i + 1 >= raw.count or raw[i + 1] < 128 or raw[i + 1] > 191
+                    i <- i + 2
+                elif b == 224:
+                    return false if i + 2 >= raw.count or raw[i + 1] < 160 or raw[i + 1] > 191 or raw[i + 2] < 128 or raw[i + 2] > 191
+                    i <- i + 3
+                elif (b >= 225 and b <= 236) or (b >= 238 and b <= 239):
+                    return false if i + 2 >= raw.count or raw[i + 1] < 128 or raw[i + 1] > 191 or raw[i + 2] < 128 or raw[i + 2] > 191
+                    i <- i + 3
+                elif b == 237:
+                    return false if i + 2 >= raw.count or raw[i + 1] < 128 or raw[i + 1] > 159 or raw[i + 2] < 128 or raw[i + 2] > 191
+                    i <- i + 3
+                elif b == 240:
+                    return false if i + 3 >= raw.count or raw[i + 1] < 144 or raw[i + 1] > 191 or raw[i + 2] < 128 or raw[i + 2] > 191 or raw[i + 3] < 128 or raw[i + 3] > 191
+                    i <- i + 4
+                elif b >= 241 and b <= 243:
+                    return false if i + 3 >= raw.count or raw[i + 1] < 128 or raw[i + 1] > 191 or raw[i + 2] < 128 or raw[i + 2] > 191 or raw[i + 3] < 128 or raw[i + 3] > 191
+                    i <- i + 4
+                elif b == 244:
+                    return false if i + 3 >= raw.count or raw[i + 1] < 128 or raw[i + 1] > 143 or raw[i + 2] < 128 or raw[i + 2] > 191 or raw[i + 3] < 128 or raw[i + 3] > 191
+                    i <- i + 4
+                else:
+                    return false
+            true
+
+        def rh_apk_known_field(key: u8) -> bool:
+            key == 67 or key == 80 or key == 86 or key == 65 or key == 83 or key == 73 or key == 84 or key == 85 or key == 76 or key == 68 or key == 112 or key == 105 or key == 111 or key == 109 or key == 116 or key == 99 or key == 107
+
+        def rh_apk_find(fields: darray[RhApkField]&, package: RhApkPackage, key: u8) -> i64:
+            while i < package.field_count |i: i64 = 0, fields, package, key|:
+                index: i64 = package.field_start + i
+                return index if fields[index.usize()].key == key
+                i <- i + 1
+            -1
+
+        def rh_apk_finish_record(packages: mutable darray[RhApkPackage]&, field_start: i64, field_count: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if field_count == 0
+            return -1 if field_count > RH_APKINDEX_MAX_FIELDS_PER_PACKAGE or packages.count.i64() >= RH_APKINDEX_MAX_PACKAGES
+            packages.push(RhApkPackage{field_start: field_start, field_count: field_count})
+            0
+
+        def rh_apk_parse(raw: darray[u8]&, fields: mutable darray[RhApkField]&, packages: mutable darray[RhApkPackage]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count == 0 or raw.count > RH_APKINDEX_MAX_BYTES or not AlpineIndex::rh_apk_utf8(raw)
+            field_start: mutable i64 = 0
+            field_count: mutable i64 = 0
+            while line_start <= raw.count |line_start: usize = 0, raw, fields, packages, field_start, field_count|:
+                line_end: usize =
+                    while j < raw.count and raw[j] != 10 |j: usize = line_start, raw| -> j:
+                        j <- j + 1
+                s: usize = line_start
+                e: mutable usize = line_end
+                e <- e - 1 if e > s and raw[e - 1] == 13
+                if s == e:
+                    return -1 if AlpineIndex::rh_apk_finish_record(packages, field_start, field_count) != 0
+                    field_start <- fields.count.i64()
+                    field_count <- 0
+                else:
+                    return -1 if raw[s] == 32 or raw[s] == 9 or e - s < 2 or raw[s + 1] != 58
+                    key: u8 = raw[s]
+                    return -1 if not ((key >= 65 and key <= 90) or (key >= 97 and key <= 122))
+                    return -1 if not AlpineIndex::rh_apk_known_field(key) and key >= 65 and key <= 90
+                    return -1 if fields.count.i64() >= RH_APKINDEX_MAX_FIELDS or field_count >= RH_APKINDEX_MAX_FIELDS_PER_PACKAGE
+                    if AlpineIndex::rh_apk_known_field(key):
+                        while prior < field_count |prior: i64 = 0, fields, field_start, key|:
+                            return -1 if fields[(field_start + prior).usize()].key == key
+                            prior <- prior + 1
+                    value_s: mutable usize = s + 2
+                    value_s <- value_s + 1 if value_s < e and raw[value_s] == 32
+                    while value_i < e |value_i: usize = value_s, e, raw|:
+                        return -1 if raw[value_i] < 32 or raw[value_i] == 127
+                        value_i <- value_i + 1
+                    fields.push(RhApkField{key: key, value_s: value_s.i64(), value_e: e.i64()})
+                    field_count <- field_count + 1
+                line_start <- line_end + 1
+            return -1 if AlpineIndex::rh_apk_finish_record(packages, field_start, field_count) != 0
+            packages.count.i64()
+
+        def rh_apk_valid_name(raw: darray[u8]&, field: RhApkField) -> bool:
+            return false if field.value_s < 0 or field.value_e <= field.value_s
+            while i < field.value_e |i: i64 = field.value_s, raw|:
+                b: u8 = raw[i.usize()]
+                valid: bool = (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 43 or b == 45 or b == 46 or b == 95
+                return false if not valid
+                i <- i + 1
+            true
+
+        def rh_apk_parse_uint(raw: darray[u8]&, field: RhApkField) -> i64:
+            return -1 if field.value_s < 0 or field.value_e <= field.value_s
+            value: mutable i64 = 0
+            while i < field.value_e |i: i64 = field.value_s, raw, value|:
+                b: u8 = raw[i.usize()]
+                return -1 if b < 48 or b > 57
+                digit: i64 = (b - 48).i64()
+                return -1 if value > (9223372036854775807 - digit) / 10
+                value <- value * 10 + digit
+                i <- i + 1
+            value
+
+        def rh_apk_emit_field(out: mutable darray[u8]&, raw: darray[u8]&, fields: darray[RhApkField]&, package: RhApkPackage, key: u8, quote: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            index: i64 = AlpineIndex::rh_apk_find(fields, package, key)
+            if index < 0:
+                Base::rh_push_text(out, "null")
+                return true
+            field: RhApkField = fields[index.usize()]
+            return false if field.value_e <= field.value_s and not quote
+            if quote:
+                out.push(34)
+                Base::rh_json_escape(out, raw, field.value_s.usize(), field.value_e.usize())
+                out.push(34)
+            else:
+                number: i64 = AlpineIndex::rh_apk_parse_uint(raw, field)
+                return false if number < 0
+                Base::rh_push_decimal_i64(out, number)
+            true
+
+        def rh_apk_relation_count(packages: darray[RhApkPackage]&, fields: darray[RhApkField]&) -> i64:
+            count: mutable i64 = 0
+            while pi < packages.count |pi: usize = 0, packages, fields, count|:
+                package: RhApkPackage = packages[pi]
+                count <- count + 1 if AlpineIndex::rh_apk_find(fields, package, 68) >= 0
+                count <- count + 1 if AlpineIndex::rh_apk_find(fields, package, 112) >= 0
+                count <- count + 1 if AlpineIndex::rh_apk_find(fields, package, 105) >= 0
+                pi <- pi + 1
+            count
+
+        def rh_apk_emit_relations(out: mutable darray[u8]&, raw: darray[u8]&, fields: darray[RhApkField]&, package: RhApkPackage) -> bool can[Memory.Allocate, Abort.Panic]:
+            first: mutable bool = true
+            while i < package.field_count |i: i64 = 0, fields, package, raw, out, first|:
+                field: RhApkField = fields[(package.field_start + i).usize()]
+                if field.key == 68 or field.key == 112 or field.key == 105:
+                    return false if field.value_e <= field.value_s
+                    out.push(44) if not first
+                    first <- false
+                    Base::rh_push_text(out, "{\"kind\":\"")
+                    Base::rh_push_text(out, "depends" if field.key == 68 else "provides" if field.key == 112 else "install-if")
+                    Base::rh_push_text(out, "\",\"expression\":\"")
+                    Base::rh_json_escape(out, raw, field.value_s.usize(), field.value_e.usize())
+                    Base::rh_push_text(out, "\"}")
+                i <- i + 1
+            true
+
+    public:
+        def rh_alpine_index_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            fields: mutable darray[RhApkField] = []
+            packages: mutable darray[RhApkPackage] = []
+            return -1 if AlpineIndex::rh_apk_parse(raw, fields, packages) <= 0
+            return -1 if AlpineIndex::rh_apk_relation_count(packages, fields) > RH_APKINDEX_MAX_RELATIONS
+            unknown_lowercase: mutable i64 = 0
+            omitted_fields: mutable i64 = 0
+            while pi < packages.count |pi: usize = 0, packages, fields, raw, unknown_lowercase, omitted_fields|:
+                package: RhApkPackage = packages[pi]
+                checksum_index: i64 = AlpineIndex::rh_apk_find(fields, package, 67)
+                name_index: i64 = AlpineIndex::rh_apk_find(fields, package, 80)
+                version_index: i64 = AlpineIndex::rh_apk_find(fields, package, 86)
+                return -1 if checksum_index < 0 or name_index < 0 or version_index < 0
+                return -1 if fields[checksum_index.usize()].value_e <= fields[checksum_index.usize()].value_s
+                return -1 if not AlpineIndex::rh_apk_valid_name(raw, fields[name_index.usize()]) or fields[version_index.usize()].value_e <= fields[version_index.usize()].value_s
+                while fi < package.field_count |fi: i64 = 0, package, fields, unknown_lowercase, omitted_fields|:
+                    field: RhApkField = fields[(package.field_start + fi).usize()]
+                    if not AlpineIndex::rh_apk_known_field(field.key):
+                        unknown_lowercase <- unknown_lowercase + 1
+                    omitted_fields <- omitted_fields + 1 if field.key == 84 or field.key == 85 or field.key == 109
+                    return -1 if (field.key == 83 or field.key == 73 or field.key == 116 or field.key == 107) and AlpineIndex::rh_apk_parse_uint(raw, field) < 0
+                    fi <- fi + 1
+                pi <- pi + 1
+
+            Base::rh_push_text(out, "{\"schema\":\"rh-alpine-apkindex-result/1\",\"format\":\"alpine-apkindex-v2-text\",\"packages\":[")
+            while pi < packages.count |pi: usize = 0, packages, fields, raw, out|:
+                package: RhApkPackage = packages[pi]
+                out.push(44) if pi > 0
+                Base::rh_push_text(out, "{\"name\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 80, true)
+                Base::rh_push_text(out, ",\"version\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 86, true)
+                Base::rh_push_text(out, ",\"architecture\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 65, true)
+                Base::rh_push_text(out, ",\"checksum_claim\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 67, true)
+                Base::rh_push_text(out, ",\"package_size\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 83, false)
+                Base::rh_push_text(out, ",\"installed_size\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 73, false)
+                Base::rh_push_text(out, ",\"license\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 76, true)
+                Base::rh_push_text(out, ",\"origin\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 111, true)
+                Base::rh_push_text(out, ",\"build_time\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 116, false)
+                Base::rh_push_text(out, ",\"commit\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 99, true)
+                Base::rh_push_text(out, ",\"provider_priority\":")
+                return -1 if not AlpineIndex::rh_apk_emit_field(out, raw, fields, package, 107, false)
+                Base::rh_push_text(out, ",\"relations\":[")
+                return -1 if not AlpineIndex::rh_apk_emit_relations(out, raw, fields, package)
+                Base::rh_push_text(out, "]}")
+                pi <- pi + 1
+            Base::rh_push_text(out, "],\"unknown_lowercase_fields\":")
+            Base::rh_push_decimal_i64(out, unknown_lowercase)
+            Base::rh_push_text(out, ",\"omitted_free_text_fields\":")
+            Base::rh_push_decimal_i64(out, omitted_fields)
+            Base::rh_push_text(out, ",\"note\":\"Input is a decoded APKINDEX v2 text body; package checksum and relation values are declarations, dependency expressions remain opaque, and signatures, repository archives, and package contents are not verified\"}")
+            0

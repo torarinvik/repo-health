@@ -1163,6 +1163,19 @@ expanded, or executed. The public result is
 `schemas/arch-pkgbuild.schema.json` and
 `tests/test_arch_pkgbuild_cli.sh`.
 
+The Alpine distribution path is `src/rh_alpine_index.elisa` with
+`rh_cli apkindex --input <decoded-APKINDEX-text> --out <file>`. It accepts a
+bounded plaintext APKINDEX v2 body, retains package name/version and selected
+architecture, checksum, size, license, origin, build, commit, and provider
+priority declarations, and carries `D`, `p`, and `i` relation values as opaque
+expressions. It omits descriptions, maintainers, and repository URLs; unknown
+lowercase fields are counted, while unknown uppercase fields fail closed
+because [apk-tools parses them as package-support metadata](https://github.com/alpinelinux/apk-tools/blob/master/src/package.c). This does not
+decompress repository archives, verify signatures, inspect package contents,
+or resolve dependencies. `rh-alpine-apkindex-result/1` is covered by
+`schemas/alpine-apkindex-result.schema.json` and
+`tests/test_alpine_apkindex_cli.sh`.
+
 ### 13.3 Connector admission checklist
 
 Every new connector needs a source documentation review, capability manifest, authentication model, URL/transport security review, pagination tests, incremental/reconciliation design, source-to-canonical mapping table, fixture corpus, resource budgets, rights review, and operator documentation.

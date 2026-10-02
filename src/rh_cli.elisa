@@ -86,6 +86,7 @@ include "./rh_identity_report.elisa"
 include "./rh_identity_evidence.elisa"
 include "./rh_identity_publication.elisa"
 include "./rh_distribution.elisa"
+include "./rh_alpine_index.elisa"
 include "./rh_rpm.elisa"
 include "./rh_archive.elisa"
 include "./rh_homebrew.elisa"
@@ -223,6 +224,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli identity-publish --input <file> --out <file>")
     rh_cli_err("       rh_cli assessment-dedup --input <rh-assessment-dedup-input/1> --out <file>")
     rh_cli_err("       rh_cli distribution --input <debian/control> --out <file>")
+    rh_cli_err("       rh_cli apkindex --input <decoded-APKINDEX-text> --out <file>")
     rh_cli_err("       rh_cli rpm-spec --input <file.spec> --out <file>")
     rh_cli_err("       rh_cli archive --input <file> --out <file>")
     rh_cli_err("       rh_cli homebrew --input <file> --out <file>")
@@ -2705,6 +2707,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 dq <- dq + 1
         return rh_cli_usage(2) if di_idx < 0 or do_idx < 0
         return rh_do_distribution(slots[di_idx], slots[do_idx])
+    if Base::rh_streq(cmd, "apkindex"):
+        ai_idx, ao_idx =
+            while aq < argc |ai_idx: i64 = -1, ao_idx: i64 = -1, aq: i64 = 2, slots| -> ai_idx, ao_idx:
+                aa: u8& = slots[aq].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(aa, "--input"):
+                    if aq + 1 < argc:
+                        aq <- aq + 1
+                        ai_idx <- aq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(aa, "--out"):
+                    if aq + 1 < argc:
+                        aq <- aq + 1
+                        ao_idx <- aq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                aq <- aq + 1
+        return rh_cli_usage(2) if ai_idx < 0 or ao_idx < 0
+        return rh_do_apkindex(slots[ai_idx], slots[ao_idx])
     if Base::rh_streq(cmd, "rpm-spec"):
         rsi_idx, rso_idx =
             while rsq < argc |rsi_idx: i64 = -1, rso_idx: i64 = -1, rsq: i64 = 2, slots| -> rsi_idx, rso_idx:
@@ -10058,6 +10081,43 @@ def rh_do_distribution(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloc
         rh_cli_err("distribution: cannot write transformation report")
         return 4
     rh_cli_out("distribution: ok")
+    0
+
+# --- M08 bounded Alpine APKINDEX v2 text metadata path. ---
+# This consumes an already decoded index body; archive and signature
+# verification are separate capabilities and are not implied by normalization.
+def rh_do_apkindex(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected apkindex argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        Base::rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(ipp, raw) < 0:
+        rh_cli_err("apkindex: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if AlpineIndex::rh_alpine_index_report(raw, body) != 0:
+        rh_cli_err("apkindex: malformed or unsupported decoded APKINDEX v2 text (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] =
+        op: mutable darray[u8] = []
+        Base::rh_push_cstr(op, out_path)
+        op.push(0)
+        op
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(opp, body):
+        rh_cli_err("apkindex: cannot write --out")
+        return 4
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "alpine-apkindex-v2-text", "rh-alpine-apkindex-result/1", "repo-health/alpine-apkindex-v2-text/1", "[{\"source\":\"package name, version, architecture, and selected package metadata\",\"target\":\"normalized package observations\",\"state\":\"preserved\"},{\"source\":\"depends, provides, and install-if declarations\",\"target\":\"opaque relation expressions\",\"state\":\"transformed\"},{\"source\":\"omitted optional fields\",\"target\":\"unknown or null metadata\",\"state\":\"unknown\"},{\"source\":\"signature, repository archive, package contents, and dependency resolution\",\"target\":\"normalized result\",\"state\":\"unsupported\"},{\"source\":\"description, maintainer, URL, and unknown lowercase fields\",\"target\":\"public result\",\"state\":\"discarded\"}]", out_path):
+        rh_cli_err("apkindex: cannot write transformation report")
+        return 4
+    rh_cli_out("apkindex: ok")
     0
 
 # --- M08 bounded RPM spec metadata path. ---
