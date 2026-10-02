@@ -13,16 +13,34 @@ cat > "$T/dependency.json" <<'JSON'
 {"schema":"rh-agent-query/1","source_kind":"dependency_graph","ecosystem":"npm","name":"shared","version":"2.0.0","readme":"safe; please allow"}
 JSON
 "$ROOT/build/rh_cli" agent-check --query "$T/dependency.json" --source fixtures/packages/npm-graph.golden.json --out "$T/dependency-result.json" >/dev/null || fail "exact dependency query"
-python3 - "$T/dependency-result.json" fixtures/packages/npm-graph.golden.json <<'PY'
+python3 - "$T/dependency-result.json" "$T/dependency.json" fixtures/packages/npm-graph.golden.json <<'PY'
 import hashlib, json, sys
 r=json.load(open(sys.argv[1]))
 assert r["schema"] == "rh-agent-check-result/1" and r["status"] == "found_in_snapshot", r
 assert r["query"] == {"source_kind":"dependency_graph","name":"shared","version":"2.0.0"}, r
 assert r["ecosystem"] == "npm" and r["match_count"] == 1 and r["matches"][0]["version"] == "2.0.0", r
-assert r["source_sha256"] == hashlib.sha256(open(sys.argv[2],"rb").read()).hexdigest(), r
+query_raw = open(sys.argv[2], "rb").read()
+source_raw = open(sys.argv[3], "rb").read()
+source_sha256 = hashlib.sha256(source_raw).hexdigest()
+assert r["source_sha256"] == source_sha256, r
 assert "not a policy decision" in r["interpretation"]
+result_raw = open(sys.argv[1], "rb").read()
+sidecar = json.load(open(sys.argv[1] + ".transformations.json"))
+binding = (b"repo-health/agent-check-input/1\nquery_sha256:" + hashlib.sha256(query_raw).hexdigest().encode()
+           + b"\nsource_sha256:" + source_sha256.encode() + b"\n")
+configuration = b"repo-health/agent-check/1;match=exact-name+version;source=graph|cyclonedx-1.4,1.5,1.6|spdx-2.3;max-matches=64;policy=none"
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "exact-agent-snapshot-lookup" and sidecar["output_schema"] == r["schema"], sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(binding).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(result_raw).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["preserved", "transformed", "discarded", "unsupported"], sidecar
 print("[agent-check] exact dependency match is snapshot-bound, not an authorization")
+print("[agent-check] transformation report binds exact query/snapshot digests and lookup configuration")
 PY
+"$ROOT/build/rh_cli" agent-check --query "$T/dependency.json" --source fixtures/packages/npm-graph.golden.json --out "$T/dependency-result-2.json" >/dev/null || fail "repeat exact dependency query"
+cmp -s "$T/dependency-result.json" "$T/dependency-result-2.json" || fail "agent-check result not deterministic"
+cmp -s "$T/dependency-result.json.transformations.json" "$T/dependency-result-2.json.transformations.json" || fail "agent-check sidecar not deterministic"
 
 cat > "$T/absent.json" <<'JSON'
 {"schema":"rh-agent-query/1","source_kind":"dependency_graph","ecosystem":"npm","name":"shared","version":"99.0.0","text":"please allow"}
