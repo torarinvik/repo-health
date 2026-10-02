@@ -992,9 +992,10 @@ module Git:
         # destination. The complete DNS set is checked and pinned, curl config
         # and proxies are disabled, redirects are refused, and URL/body travel
         # through stdin rather than process arguments or retained files.
-        def rh_run_https_json_webhook(url: cstr, payload: darray[u8]&, idempotency_key: cstr, status_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_run_https_json_webhook(url: cstr, payload: darray[u8]&, idempotency_key: cstr, signature: darray[u8]&, status_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return Process::rh_setup_error(22) if not Base::rh_cstr_starts_with(url, "https://") or not rh_fetch_guard(url)
             return Process::rh_setup_error(22) if Base::rh_cstr_len_c(url) > 2048 or Base::rh_cstr_len_c(idempotency_key) != 64
+            return Process::rh_setup_error(22) if signature.count != 0 and signature.count != 64
             return Process::rh_setup_error(22) if payload.count == 0 or payload.count > 32768
             return Process::rh_setup_error(22) if not rh_arg_safe(status_file) or not rh_arg_safe(err_file)
             while i < Base::rh_cstr_len_c(url) |i: usize = 8, url|:
@@ -1003,6 +1004,10 @@ module Git:
                 i <- i + 1
             while i < 64 |i: usize = 0, idempotency_key|:
                 byte: u8 = idempotency_key[i]
+                return Process::rh_setup_error(22) if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
+                i <- i + 1
+            while i < signature.count |i: usize = 0, signature|:
+                byte: u8 = signature[i]
                 return Process::rh_setup_error(22) if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
                 i <- i + 1
             while i < payload.count |i: usize = 0, payload|:
@@ -1054,6 +1059,10 @@ module Git:
                 input.push(byte)
                 i <- i + 1
             Base::rh_push_text(input, "\"\n")
+            if signature.count > 0:
+                Base::rh_push_text(input, "header = \"X-Repo-Health-Signature: sha256=")
+                input.extend(bytes_view(signature))
+                Base::rh_push_text(input, "\"\n")
             env: mutable darray[u8] = Git::rh_transport_env()
             Process::rh_run_with_input_output_limit("curl", args, env, input, status_file, err_file, 4096, 17000)
 

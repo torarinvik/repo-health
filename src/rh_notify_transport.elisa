@@ -4,6 +4,7 @@ include "./rh_json.elisa"
 include "./rh_git.elisa"
 include "./rh_notify_report.elisa"
 include "./rh_sha256.elisa"
+include "./rh_store.elisa"
 
 module NotifyTransport:
     private:
@@ -15,6 +16,8 @@ module NotifyTransport:
             id: mutable i64
             endpoint_start: mutable i64
             endpoint_end: mutable i64
+            signing_key_start: mutable i64
+            signing_key_end: mutable i64
 
         struct RhNotifyDeliveryCounts:
             sent: mutable i64
@@ -25,6 +28,7 @@ module NotifyTransport:
         struct RhNotifyTransportRuntime:
             transport_texts: mutable darray[u8]
             destinations: mutable darray[RhTransportDestination]
+            signing_keys: mutable darray[u8]
             state: mutable darray[u8]
             status_ptr: cstr
             error_ptr: cstr
@@ -63,6 +67,16 @@ module NotifyTransport:
             while key >= 0 |key: i64 = nodes[object.usize()].first_child, nodes, texts, first, second|:
                 return false if nodes[key.usize()].kind != Json::RH_JSON_STR
                 return false if not Base::rh_bytes_equal_literal(texts, nodes[key.usize()].text_start, nodes[key.usize()].text_end, first) and not Base::rh_bytes_equal_literal(texts, nodes[key.usize()].text_start, nodes[key.usize()].text_end, second)
+                value: i64 = nodes[key.usize()].next_sibling
+                return false if value < 0
+                key <- nodes[value.usize()].next_sibling
+            true
+
+        def rh_nt_destination_only_keys(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, object: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while key >= 0 |key: i64 = nodes[object.usize()].first_child, nodes, texts|:
+                return false if nodes[key.usize()].kind != Json::RH_JSON_STR
+                allowed: bool = Base::rh_bytes_equal_literal(texts, nodes[key.usize()].text_start, nodes[key.usize()].text_end, "id") or Base::rh_bytes_equal_literal(texts, nodes[key.usize()].text_start, nodes[key.usize()].text_end, "endpoint") or Base::rh_bytes_equal_literal(texts, nodes[key.usize()].text_start, nodes[key.usize()].text_end, "signing_key_file")
+                return false if not allowed
                 value: i64 = nodes[key.usize()].next_sibling
                 return false if value < 0
                 key <- nodes[value.usize()].next_sibling
@@ -197,7 +211,7 @@ module NotifyTransport:
             endpoint.push(0)
             endpoint
 
-        def rh_nt_parse_transport(raw: darray[u8]&, texts_out: mutable darray[u8]&, out: mutable darray[RhTransportDestination]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def rh_nt_parse_transport(raw: darray[u8]&, texts_out: mutable darray[u8]&, out: mutable darray[RhTransportDestination]&, signing_keys_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Unsafe.PointerCast]:
             nodes: mutable darray[Json::RhJsonNode] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts_out)
             return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ or not rh_nt_unique_keys(nodes, texts_out, root) or not rh_nt_only_keys(nodes, texts_out, root, "schema", "destinations")
@@ -207,13 +221,15 @@ module NotifyTransport:
             destinations_idx: i64 = Json::rh_json_obj_get(nodes, texts_out, root, "destinations")
             return -1 if destinations_idx < 0 or nodes[destinations_idx.usize()].kind != Json::RH_JSON_ARR or nodes[destinations_idx.usize()].child_count > RH_NT_MAX_DESTINATIONS
             while destination >= 0 |destination: i64 = nodes[destinations_idx.usize()].first_child, nodes, texts_out, out|:
-                return -1 if nodes[destination.usize()].kind != Json::RH_JSON_OBJ or not rh_nt_unique_keys(nodes, texts_out, destination) or not rh_nt_only_keys(nodes, texts_out, destination, "id", "endpoint")
+                return -1 if nodes[destination.usize()].kind != Json::RH_JSON_OBJ or not rh_nt_unique_keys(nodes, texts_out, destination) or not rh_nt_destination_only_keys(nodes, texts_out, destination)
                 id_ok: mutable i64 = 0
                 destination_id: i64 = rh_nt_integer(nodes, raw, texts_out, destination, "id", &id_ok)
                 endpoint_start: mutable i64 = 0
                 endpoint_end: mutable i64 = 0
                 return -1 if id_ok == 0 or destination_id < 0 or not rh_nt_string(nodes, texts_out, destination, "endpoint", &endpoint_start, &endpoint_end) or endpoint_start == endpoint_end or endpoint_end - endpoint_start > 2048
                 return -1 if rh_nt_find_destination(out, destination_id) >= 0
+                signing_key_start: mutable i64 = -1
+                signing_key_end: mutable i64 = -1
                 endpoint: mutable darray[u8] = []
                 while i < endpoint_end |i: i64 = endpoint_start, texts_out, endpoint|:
                     byte: u8 = texts_out[i.usize()]
@@ -223,7 +239,28 @@ module NotifyTransport:
                 endpoint.push(0)
                 endpoint_ptr: cstr = (&endpoint[0]).cast[cstr] can Unsafe.PointerCast
                 return -1 if not Base::rh_cstr_starts_with(endpoint_ptr, "https://") or not Git::rh_fetch_guard(endpoint_ptr)
-                out.push(RhTransportDestination{id: destination_id, endpoint_start: endpoint_start, endpoint_end: endpoint_end})
+                signing_path: i64 = Json::rh_json_obj_get(nodes, texts_out, destination, "signing_key_file")
+                if signing_path >= 0:
+                    signing_path_start: mutable i64 = 0
+                    signing_path_end: mutable i64 = 0
+                    return -1 if not Json::rh_json_str_span(nodes, signing_path, &signing_path_start, &signing_path_end) or signing_path_start == signing_path_end or signing_path_end - signing_path_start > 4096
+                    signing_path_bytes: mutable darray[u8] = []
+                    while path_index < signing_path_end |path_index: i64 = signing_path_start, texts_out, signing_path_bytes|:
+                        path_byte: u8 = texts_out[path_index.usize()]
+                        return -1 if path_byte < 32 or path_byte == 127
+                        signing_path_bytes.push(path_byte)
+                        path_index <- path_index + 1
+                    signing_path_bytes.push(0)
+                    signing_path_ptr: cstr = (&signing_path_bytes[0]).cast[cstr] can Unsafe.PointerCast
+                    return -1 if Store::rh_store_private_file(signing_path_ptr) != 0
+                    key_size: i64 = Base::rh_file_size(signing_path_ptr)
+                    return -1 if key_size < 32 or key_size > 4096
+                    signing_key: mutable darray[u8] = []
+                    return -1 if Base::rh_io_read(signing_path_ptr, signing_key) != key_size or signing_key.count.i64() != key_size
+                    signing_key_start <- signing_keys_out.count.i64()
+                    signing_keys_out.extend(bytes_view(signing_key))
+                    signing_key_end <- signing_keys_out.count.i64()
+                out.push(RhTransportDestination{id: destination_id, endpoint_start: endpoint_start, endpoint_end: endpoint_end, signing_key_start: signing_key_start, signing_key_end: signing_key_end})
                 destination <- nodes[destination.usize()].next_sibling
             0
 
@@ -258,6 +295,14 @@ module NotifyTransport:
             payload: mutable darray[u8] = []
             return -1 if not rh_nt_payload(raw, input_nodes, input_texts, request.event, request.destination_id, delivery.idempotency, payload)
             endpoint: mutable darray[u8] = rh_nt_endpoint_ptr(runtime.transport_texts, runtime.destinations[transport_index.usize()])
+            destination_config: RhTransportDestination = runtime.destinations[transport_index.usize()]
+            signing_key: mutable darray[u8] = []
+            if destination_config.signing_key_start >= 0:
+                while key_index < destination_config.signing_key_end |key_index: i64 = destination_config.signing_key_start, destination_config, runtime, signing_key|:
+                    signing_key.push(runtime.signing_keys[key_index.usize()])
+                    key_index <- key_index + 1
+            signature: mutable darray[u8] = []
+            Sha256::rh_hmac_sha256(signing_key, payload, signature) if signing_key.count > 0
             _ = remove_file(runtime.status_ptr)
             _ = remove_file(runtime.error_ptr)
             delivery.idempotency.push(0)
@@ -265,7 +310,7 @@ module NotifyTransport:
             endpoint_ptr: cstr = (&endpoint[0]).cast[cstr] can Unsafe.PointerCast
             status_ptr: cstr = runtime.status_ptr
             error_ptr: cstr = runtime.error_ptr
-            transport_result: Process::RhProcessResult = Git::rh_run_https_json_webhook(endpoint_ptr, payload, idempotency_ptr, status_ptr, error_ptr)
+            transport_result: Process::RhProcessResult = Git::rh_run_https_json_webhook(endpoint_ptr, payload, idempotency_ptr, signature, status_ptr, error_ptr)
             if Process::rh_succeeded(transport_result) and rh_nt_read_status(runtime.status_ptr, &delivery.http_status) and delivery.http_status >= 200 and delivery.http_status < 300:
                 delivery.label <- "sent"
                 runtime.counts.sent <- runtime.counts.sent + 1
@@ -343,7 +388,8 @@ module NotifyTransport:
             cooldown_idx: i64 = Json::rh_json_obj_get(input_nodes, input_texts, root, "cooldown_secs")
             transport_texts: mutable darray[u8] = []
             transport_destinations: mutable darray[RhTransportDestination] = []
-            return -1 if rh_nt_parse_transport(transport_raw, transport_texts, transport_destinations) != 0
+            signing_keys: mutable darray[u8] = []
+            return -1 if rh_nt_parse_transport(transport_raw, transport_texts, transport_destinations, signing_keys) != 0
 
             # Validate all policy input and persisted state before the first
             # external side effect. The result is discarded; events are then
@@ -364,7 +410,7 @@ module NotifyTransport:
             error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
             state: mutable darray[u8] = []
             state.extend(bytes_view(initial_state))
-            runtime: mutable RhNotifyTransportRuntime = RhNotifyTransportRuntime{transport_texts: transport_texts, destinations: transport_destinations, state: state, status_ptr: status_ptr, error_ptr: error_ptr, counts: RhNotifyDeliveryCounts{sent: 0, failed: 0, unconfigured: 0, not_attempted: 0}}
+            runtime: mutable RhNotifyTransportRuntime = RhNotifyTransportRuntime{transport_texts: transport_texts, destinations: transport_destinations, signing_keys: signing_keys, state: state, status_ptr: status_ptr, error_ptr: error_ptr, counts: RhNotifyDeliveryCounts{sent: 0, failed: 0, unconfigured: 0, not_attempted: 0}}
             event_index: mutable i64 = 0
             Base::rh_push_text(out, "{\"schema\":\"rh-notify-delivery-result/1\",\"deliveries\":[")
             while event >= 0 |event: i64 = input_nodes[events_idx.usize()].first_child, input_nodes, input_texts, raw, destinations_idx, cooldown_idx, runtime, event_index, out|:

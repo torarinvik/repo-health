@@ -311,9 +311,14 @@ answer set, disables redirects and proxy use, and bounds response size and
 time. A 2xx response advances cooldown state. Other outcomes leave the event
 retryable. Receivers should deduplicate the stable `Idempotency-Key`, because a
 crash after remote acceptance and before local state publication can cause a
-retry. This transport does not add endpoint authentication or provider-specific
-message adapters; use only endpoints whose exposure model is acceptable for
-the minimal notification fields it sends.
+retry. A destination may set `signing_key_file` to an operator-managed key file
+containing 32 to 4096 bytes. The sender restricts that file to owner access and
+adds `X-Repo-Health-Signature: sha256=<lowercase-hex>` to the curl configuration
+sent through stdin; the signature is HMAC-SHA256 over the exact compact JSON
+webhook body. Receivers must verify the HMAC in constant time against the exact
+request body and reject invalid or missing signatures when signing is enabled.
+Unsigned destinations remain supported. Provider-specific message adapters
+remain separate work.
 
 Record: input and transport-config digests, destination ID, delivery counts,
 HTTP outcomes, state-store revision, and any retry or receiver-side

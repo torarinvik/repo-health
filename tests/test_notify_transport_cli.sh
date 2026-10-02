@@ -105,6 +105,78 @@ grep -Fq -- '\"artifact_digest\":\"aaaaaaaaaaaaaaaa\"' "$T/curl.stdin" || fail "
 ! grep -Fq -- "https://notifications.example.net" "$T/curl.args" || fail "endpoint appeared in process arguments"
 echo "[notify-transport] policy-gated HTTPS delivery and request bounds OK"
 
+echo "[notify-transport] optional HMAC signing authenticates the exact body"
+"$REAL_PYTHON" - "$T/signing.key" "$T/signed.json" <<'PY'
+import json, os, sys
+key_path, config_path = sys.argv[1:]
+with open(key_path, "wb") as key_file:
+    key_file.write(bytes(range(32)))
+os.chmod(key_path, 0o644)
+with open(config_path, "w", encoding="utf-8") as config_file:
+    json.dump({"schema":"rh-notify-transport-config/1", "destinations":[{"id":1, "endpoint":"https://notifications.example.net/hooks/repo-health", "signing_key_file":key_path}]}, config_file, separators=(",", ":"))
+PY
+"$ROOT/build/rh_cli" notify-deliver --input "$INPUT" --transport "$T/signed.json" --out "$T/signed-result.json" --state "$T/signed.state" >/dev/null || fail "signed delivery"
+"$REAL_PYTHON" - "$T/signing.key" "$T/signed.json" "$T/signed-result.json" "$T/signed-result.json.transformations.json" "$T/curl.args" "$T/curl.stdin" <<'PY'
+import hashlib, hmac, json, os, re, stat, sys
+key_path, config_path, result_path, sidecar_path, args_path, curl_config_path = sys.argv[1:]
+key = open(key_path, "rb").read()
+assert stat.S_IMODE(os.stat(key_path).st_mode) == 0o600
+result = open(result_path, encoding="utf-8").read()
+sidecar = open(sidecar_path, encoding="utf-8").read()
+args = open(args_path, encoding="utf-8").read()
+curl_config = open(curl_config_path, encoding="utf-8").read()
+delivery_id = json.loads(result)["deliveries"][0]["delivery_id"]
+payload = json.dumps({"schema":"rh-notification-webhook/1", "delivery_id":delivery_id, "destination_id":1, "rule_id":42, "subject_id":7, "artifact_digest":"aaaaaaaaaaaaaaaa", "occurred_at":1700000000}, separators=(",", ":"))
+data_line = next(line for line in curl_config.splitlines() if line.startswith("data = "))
+assert json.loads(data_line[len("data = "):]) == payload, data_line
+header = re.search(r'^header = "X-Repo-Health-Signature: sha256=([0-9a-f]{64})"$', curl_config, re.M)
+assert header, curl_config
+assert header.group(1) == hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()
+assert header.group(1) not in args and key_path not in args
+assert header.group(1) not in result and header.group(1) not in sidecar
+assert key_path not in result and key_path not in sidecar
+assert key.hex() not in result and key.hex() not in sidecar
+PY
+
+reject_signing_config() {
+  local config_path="$1" label="$2" rc
+  rm -f "$T/curl.args" "$T/rejected.state"
+  set +e
+  "$ROOT/build/rh_cli" notify-deliver --input "$INPUT" --transport "$config_path" --out "$T/rejected.out" --state "$T/rejected.state" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [[ "$rc" -eq 4 ]] || fail "$label must fail closed (got $rc)"
+  [[ ! -e "$T/curl.args" ]] || fail "$label reached curl"
+  [[ ! -e "$T/rejected.state" ]] || fail "$label advanced notification state"
+}
+
+cat > "$T/missing-key.json" <<JSON
+{"schema":"rh-notify-transport-config/1","destinations":[{"id":1,"endpoint":"https://notifications.example.net/hooks/repo-health","signing_key_file":"$T/missing.key"}]}
+JSON
+reject_signing_config "$T/missing-key.json" "missing signing key"
+"$REAL_PYTHON" - "$T/short.key" <<'PY'
+import sys
+open(sys.argv[1], "wb").write(b"short signing key")
+PY
+cat > "$T/short-key.json" <<JSON
+{"schema":"rh-notify-transport-config/1","destinations":[{"id":1,"endpoint":"https://notifications.example.net/hooks/repo-health","signing_key_file":"$T/short.key"}]}
+JSON
+reject_signing_config "$T/short-key.json" "short signing key"
+"$REAL_PYTHON" - "$T/large.key" <<'PY'
+import sys
+open(sys.argv[1], "wb").write(bytes(4097))
+PY
+cat > "$T/large-key.json" <<JSON
+{"schema":"rh-notify-transport-config/1","destinations":[{"id":1,"endpoint":"https://notifications.example.net/hooks/repo-health","signing_key_file":"$T/large.key"}]}
+JSON
+reject_signing_config "$T/large-key.json" "oversized signing key"
+ln -s "$T/signing.key" "$T/symlink.key"
+cat > "$T/symlink-key.json" <<JSON
+{"schema":"rh-notify-transport-config/1","destinations":[{"id":1,"endpoint":"https://notifications.example.net/hooks/repo-health","signing_key_file":"$T/symlink.key"}]}
+JSON
+reject_signing_config "$T/symlink-key.json" "symlink signing key"
+echo "[notify-transport] signing key bounds, permissions, and fail-closed paths OK"
+
 echo "[notify-transport] failed delivery is retryable without cooldown advancement"
 export RH_NOTIFY_CURL_HTTP=503
 "$ROOT/build/rh_cli" notify-deliver --input "$INPUT" --transport "$CONFIG" --out "$T/failed.json" --state "$T/retry.state" >/dev/null || fail "HTTP failure report"
