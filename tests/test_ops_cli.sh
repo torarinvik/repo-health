@@ -19,9 +19,9 @@ cat > "$T/mon.json" <<'JSON'
 {"schema":"rh-monitor-input/1","expected_interval":60,"now":1200,"events":[{"kind":"observed"},{"kind":"observed"},{"kind":"unknown"},{"kind":"stale_partial"},{"kind":"error"},{"kind":"parser_reject"},{"kind":"object_failure"},{"kind":"truncation"},{"kind":"policy_evaluated"},{"kind":"policy_unknown"},{"kind":"success","now":1150},{"kind":"queue_age","value":30},{"kind":"cursor_lag","value":90}]}
 JSON
 "$ROOT/build/rh_cli" ops monitor --input "$T/mon.json" --out "$T/mon.out" >/dev/null || fail "monitor run"
-python3 - "$T/mon.out" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
+python3 - "$T/mon.json" "$T/mon.out" <<'PY'
+import hashlib, json, sys
+d = json.load(open(sys.argv[2]))
 assert d["schema"] == "rh-monitor-result/2", d
 assert d["service"] == {"queue_age_max": 30, "cursor_lag_max": 90, "last_success_epoch": 1150,
                         "freshness_age": 50, "freshness_state": "fresh", "errors": 1, "parser_rejects": 1, "object_failures": 1}, d["service"]
@@ -34,8 +34,22 @@ assert any(x.startswith("rh_project_observed_rate_bp") for x in d["exposition"])
 assert "rh_project_policy_unknown_rate_bp 5000" in d["exposition"], d["exposition"]
 assert "separate" in d["note"], d["note"]
 assert d["source_freshness"] == [], d["source_freshness"]
+source = open(sys.argv[1], "rb").read()
+output = open(sys.argv[2], "rb").read()
+report = json.load(open(sys.argv[2] + ".transformations.json"))
+configuration = b"repo-health/ops-monitor/2;service-project=separate;missing-rate=null;missing-freshness=unknown;freshness=age-vs-positive-interval"
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "service-and-project-monitoring" and report["output_schema"] == d["schema"], report
+assert report["source_input_sha256"] == hashlib.sha256(source).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(output).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), report
+assert [field["state"] for field in report["fields"]] == ["preserved", "transformed", "unknown", "unsupported"], report
 print("[ops] monitor series OK")
+print("[ops] transformation report binds exact monitor input, result, and policy")
 PY
+"$ROOT/build/rh_cli" ops monitor --input "$T/mon.json" --out "$T/mon-replay.out" >/dev/null || fail "monitor replay"
+cmp -s "$T/mon.out" "$T/mon-replay.out" || fail "monitor result must be deterministic"
+cmp -s "$T/mon.out.transformations.json" "$T/mon-replay.out.transformations.json" || fail "monitor transformation report must be deterministic"
 
 echo "[ops] source/capability freshness remains individually attributable"
 printf '%s\n' '{"schema":"rh-monitor-input/1","expected_interval":60,"now":1061,"events":[{"kind":"source_success","source_instance_id":"source-a","capability":"issues","now":1000},{"kind":"source_success","source_instance_id":"source-b","capability":"reviews","now":1061}]}' > "$T/source-freshness.json"
