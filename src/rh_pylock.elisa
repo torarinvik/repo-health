@@ -260,19 +260,28 @@ module Pylock:
                 return true if artifacts[index].owner == owner
             false
 
-        def rh_pylock_lower(value: u8) -> u8:
-            return value + 32 if value >= 65 and value <= 90
-            value
-
         def rh_pylock_name_eq(pool: darray[u8]&, a_s: i64, a_e: i64, b_s: i64, b_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if a_s < 0 or b_s < 0 or a_e - a_s != b_e - b_s
             for i in 0..<(a_e - a_s).usize() |pool, a_s, b_s|:
-                a: mutable u8 = rh_pylock_lower(pool[(a_s + i.i64()).usize()])
-                b: mutable u8 = rh_pylock_lower(pool[(b_s + i.i64()).usize()])
-                a <- 45 if a == 95 or a == 46
-                b <- 45 if b == 95 or b == 46
-                return false if a != b
+                return false if pool[(a_s + i.i64()).usize()] != pool[(b_s + i.i64()).usize()]
             true
+
+        # PEP 751 names are already PEP 503-normalized: lowercase ASCII
+        # alphanumerics with single internal hyphens. Validate spans without
+        # allocating a canonical copy so resolution can use exact byte equality.
+        def rh_pylock_normalized_name(pool: darray[u8]&, start: i64, end: i64) -> bool can[Abort.Panic]:
+            return false if start < 0 or end <= start
+            previous_hyphen: mutable bool = false
+            for index in start.usize()..<end.usize() |index, pool|:
+                value: u8 = pool[index]
+                if (value >= 97 and value <= 122) or (value >= 48 and value <= 57):
+                    previous_hyphen <- false
+                elif value == 45:
+                    return false if index == start.usize() or previous_hyphen
+                    previous_hyphen <- true
+                else:
+                    return false
+            not previous_hyphen
 
         def rh_pylock_equal(pool: darray[u8]&, a_s: i64, a_e: i64, b_s: i64, b_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if a_s < 0 or b_s < 0 or a_e - a_s != b_e - b_s
@@ -1545,6 +1554,7 @@ module Pylock:
             for package_id in 0..<packages.count |package_id, packages|:
                 pkg5: RhPylockPackage = packages[package_id]
                 return -1 if pkg5.name_s < 0 or pkg5.name_s == pkg5.name_e
+                return -1 if not rh_pylock_normalized_name(pool, pkg5.name_s, pkg5.name_e)
                 return -1 if (pkg5.index_s < 0 and pkg5.index_e >= 0) or (pkg5.index_s >= 0 and pkg5.index_s == pkg5.index_e)
                 return -1 if pkg5.source_kind == 1 and (pkg5.source_type_s < 0 or pkg5.source_type_s == pkg5.source_type_e or pkg5.source_commit_s < 0 or pkg5.source_commit_s == pkg5.source_commit_e or pkg5.source_locator_kind == 0)
                 return -1 if pkg5.source_kind == 2 and (pkg5.source_locator_kind != 2 or pkg5.source_locator_s < 0)
@@ -1554,6 +1564,7 @@ module Pylock:
             for reference_id in 0..<refs.count |reference_id, refs|:
                 reference: RhPylockReference = refs[reference_id]
                 return -1 if reference.name_s < 0 or reference.name_s == reference.name_e
+                return -1 if not rh_pylock_normalized_name(pool, reference.name_s, reference.name_e)
                 return -1 if reference.version_s >= 0 and reference.version_s == reference.version_e
             for artifact_id in 0..<artifacts.count |artifact_id, artifacts|:
                 artifact: mutable RhPylockArtifact = artifacts[artifact_id]
