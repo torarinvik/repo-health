@@ -544,6 +544,8 @@ the event-share cohort pass derives recency from its existing final-month
 result. This removes repeated matrix reads while preserving cohort and
 zero-month behavior.
 
+**M04-02 actor-key span-copy increment:** `rh_cs_parse` now copies a validated author-email span into its owned actor pool with `string_view_slice` and `darray.extend`, replacing the per-byte append loop while preserving first-appearance IDs and input ownership. `tests/test_continuity_cli.sh` and `tests/test_m04.sh` pass.
+
 **M04 scope (in progress):** implemented — persistence cohorts over an
 actor-by-complete-month presence matrix (one active day is one month;
 component measures returned alongside membership), a coverage basis
