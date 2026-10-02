@@ -1158,7 +1158,7 @@ scans a real repo, asserts the output is clean, and injects verdict
 language into a copy to prove the reviewer rejects it (negative control).
 
 **M12 public-contract stability:** `ops/public-contracts.json` registers
-136 public machine-readable contracts, including the research lineage,
+144 public machine-readable contracts, including the research lineage,
 population, ingestion, drill-down, role-grain, adapter-manifest, and
 conformance-ledger contracts, each with its version token, a stability class
 (frozen/additive), and a compatibility rule; the version token must literally
@@ -1166,7 +1166,10 @@ appear in the artifact and each contract cites a test token that must exist.
 `rh_cli pilot-review` records mapping-review, correction-turnaround,
 decision-usefulness, provider-outage, and measured-cost inputs as
 `rh-pilot-review-result/1`; it does not turn supplied observations into an
-independent audit or release verdict. `tests/test_contracts.sh` enforces this,
+independent audit or release verdict. `docs/operations/PILOT.md` defines the
+consent-based stages, private case ledger, aggregate record, and closeout gate;
+the external maintainer pilot and governance sign-off remain open.
+`tests/test_contracts.sh` enforces this,
 checks that an unknown registry
 version has no fallback, and that schema tests are independent of generated
 code. This is the machine-checkable half of the release packet's stability
