@@ -86,6 +86,7 @@ include "./rh_identity_report.elisa"
 include "./rh_identity_evidence.elisa"
 include "./rh_identity_publication.elisa"
 include "./rh_distribution.elisa"
+include "./rh_debian_index.elisa"
 include "./rh_alpine_index.elisa"
 include "./rh_freebsd_catalog.elisa"
 include "./rh_rpm.elisa"
@@ -225,6 +226,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli identity-publish --input <file> --out <file>")
     rh_cli_err("       rh_cli assessment-dedup --input <rh-assessment-dedup-input/1> --out <file>")
     rh_cli_err("       rh_cli distribution --input <debian/control> --out <file>")
+    rh_cli_err("       rh_cli debian-index --input <decoded-Packages-Deb822> --out <file>")
     rh_cli_err("       rh_cli apkindex --input <decoded-APKINDEX-text> --out <file>")
     rh_cli_err("       rh_cli freebsd-catalog --input <decoded-data.pkg-JSON> --out <file>")
     rh_cli_err("       rh_cli rpm-spec --input <file.spec> --out <file>")
@@ -2709,6 +2711,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 dq <- dq + 1
         return rh_cli_usage(2) if di_idx < 0 or do_idx < 0
         return rh_do_distribution(slots[di_idx], slots[do_idx])
+    if Base::rh_streq(cmd, "debian-index"):
+        dpi_idx, dpo_idx =
+            while dpq < argc |dpi_idx: i64 = -1, dpo_idx: i64 = -1, dpq: i64 = 2, slots| -> dpi_idx, dpo_idx:
+                dpa: u8& = slots[dpq].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(dpa, "--input"):
+                    if dpq + 1 < argc:
+                        dpq <- dpq + 1
+                        dpi_idx <- dpq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(dpa, "--out"):
+                    if dpq + 1 < argc:
+                        dpq <- dpq + 1
+                        dpo_idx <- dpq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                dpq <- dpq + 1
+        return rh_cli_usage(2) if dpi_idx < 0 or dpo_idx < 0
+        return rh_do_debian_index(slots[dpi_idx], slots[dpo_idx])
     if Base::rh_streq(cmd, "apkindex"):
         ai_idx, ao_idx =
             while aq < argc |ai_idx: i64 = -1, ao_idx: i64 = -1, aq: i64 = 2, slots| -> ai_idx, ao_idx:
@@ -10151,6 +10174,43 @@ def rh_do_distribution(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloc
         rh_cli_err("distribution: cannot write transformation report")
         return 4
     rh_cli_out("distribution: ok")
+    0
+
+# --- M08 bounded Debian binary Packages index path. ---
+# Input is decoded Deb822 text. Archive download, signature verification,
+# package extraction, and dependency resolution remain separate operations.
+def rh_do_debian_index(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected debian-index argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        Base::rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(ipp, raw) < 0:
+        rh_cli_err("debian-index: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if DebianIndex::rh_debian_packages_report(raw, body) != 0:
+        rh_cli_err("debian-index: malformed or unsupported decoded Packages Deb822 input (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] =
+        op: mutable darray[u8] = []
+        Base::rh_push_cstr(op, out_path)
+        op.push(0)
+        op
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(opp, body):
+        rh_cli_err("debian-index: cannot write --out")
+        return 4
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "debian-packages-deb822", "rh-debian-packages-index-result/1", "repo-health/debian-packages-deb822/1", "[{\"source\":\"Debian package identity, version, architecture, and selected metadata\",\"target\":\"binary catalog observations\",\"state\":\"preserved\"},{\"source\":\"folded package relation fields\",\"target\":\"opaque relation expressions\",\"state\":\"transformed\"},{\"source\":\"absent optional package metadata\",\"target\":\"nullable fields\",\"state\":\"unknown\"},{\"source\":\"archive bytes, signatures, and dependency satisfiability\",\"target\":\"normalized result\",\"state\":\"unsupported\"},{\"source\":\"archive paths, descriptions, maintainers, and unmodeled fields\",\"target\":\"public result\",\"state\":\"discarded\"}]", out_path):
+        rh_cli_err("debian-index: cannot write transformation report")
+        return 4
+    rh_cli_out("debian-index: ok")
     0
 
 # --- M08 bounded Alpine APKINDEX v2 text metadata path. ---

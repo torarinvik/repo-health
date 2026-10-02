@@ -1,0 +1,398 @@
+# rh_debian_index.elisa — bounded Debian binary Packages index reader (M08).
+#
+# Reads decoded Deb822 stanzas only. Relation fields remain opaque expressions;
+# archive paths and descriptive or maintainer text are never published.
+
+include "./rh_base.elisa"
+
+module DebianIndex:
+    private:
+        const RH_DEB_INDEX_MAX_BYTES: usize = 8388608
+        const RH_DEB_INDEX_MAX_PACKAGES: i64 = 25000
+        const RH_DEB_INDEX_MAX_FIELDS: i64 = 200000
+        const RH_DEB_INDEX_MAX_FIELDS_PER_PACKAGE: i64 = 128
+        const RH_DEB_INDEX_MAX_RELATIONS: i64 = 200000
+        const RH_DEB_INDEX_MAX_FIELD_NAME: usize = 128
+
+        const RH_DEB_UNKNOWN: u8 = 0
+        const RH_DEB_PACKAGE: u8 = 1
+        const RH_DEB_VERSION: u8 = 2
+        const RH_DEB_ARCHITECTURE: u8 = 3
+        const RH_DEB_SOURCE: u8 = 4
+        const RH_DEB_SECTION: u8 = 5
+        const RH_DEB_PRIORITY: u8 = 6
+        const RH_DEB_MULTI_ARCH: u8 = 7
+        const RH_DEB_ESSENTIAL: u8 = 8
+        const RH_DEB_DEPENDS: u8 = 10
+        const RH_DEB_PRE_DEPENDS: u8 = 11
+        const RH_DEB_RECOMMENDS: u8 = 12
+        const RH_DEB_SUGGESTS: u8 = 13
+        const RH_DEB_ENHANCES: u8 = 14
+        const RH_DEB_BREAKS: u8 = 15
+        const RH_DEB_CONFLICTS: u8 = 16
+        const RH_DEB_PROVIDES: u8 = 17
+        const RH_DEB_REPLACES: u8 = 18
+        const RH_DEB_SIZE: u8 = 19
+        const RH_DEB_INSTALLED_SIZE: u8 = 20
+        const RH_DEB_SHA256: u8 = 21
+        const RH_DEB_DESCRIPTION: u8 = 32
+        const RH_DEB_MAINTAINER: u8 = 33
+        const RH_DEB_FILENAME: u8 = 34
+        const RH_DEB_MD5SUM: u8 = 35
+        const RH_DEB_HOMEPAGE: u8 = 36
+
+        struct RhDebField:
+            key: mutable u8
+            name_s: mutable i64
+            name_e: mutable i64
+            value_s: mutable i64
+            value_e: mutable i64
+
+        struct RhDebPackage:
+            field_start: mutable i64
+            field_count: mutable i64
+
+        def rh_deb_field_is(raw: darray[u8]&, start: usize, end: usize, literal: u8&) -> bool:
+            literal_length: usize = Base::rh_cstr_len_c(literal)
+            return false if end < start or end - start != literal_length
+            for offset in 0..<literal_length |offset, raw, start, literal|:
+                source: mutable u8 = raw[start + offset]
+                expected: mutable u8 = literal[offset]
+                source <- source + 32 if source >= 65 and source <= 90
+                expected <- expected + 32 if expected >= 65 and expected <= 90
+                return false if source != expected
+            true
+
+        def rh_deb_field_key(raw: darray[u8]&, start: usize, end: usize) -> u8:
+            return RH_DEB_PACKAGE if DebianIndex::rh_deb_field_is(raw, start, end, "Package")
+            return RH_DEB_VERSION if DebianIndex::rh_deb_field_is(raw, start, end, "Version")
+            return RH_DEB_ARCHITECTURE if DebianIndex::rh_deb_field_is(raw, start, end, "Architecture")
+            return RH_DEB_SOURCE if DebianIndex::rh_deb_field_is(raw, start, end, "Source")
+            return RH_DEB_SECTION if DebianIndex::rh_deb_field_is(raw, start, end, "Section")
+            return RH_DEB_PRIORITY if DebianIndex::rh_deb_field_is(raw, start, end, "Priority")
+            return RH_DEB_MULTI_ARCH if DebianIndex::rh_deb_field_is(raw, start, end, "Multi-Arch")
+            return RH_DEB_ESSENTIAL if DebianIndex::rh_deb_field_is(raw, start, end, "Essential")
+            return RH_DEB_DEPENDS if DebianIndex::rh_deb_field_is(raw, start, end, "Depends")
+            return RH_DEB_PRE_DEPENDS if DebianIndex::rh_deb_field_is(raw, start, end, "Pre-Depends")
+            return RH_DEB_RECOMMENDS if DebianIndex::rh_deb_field_is(raw, start, end, "Recommends")
+            return RH_DEB_SUGGESTS if DebianIndex::rh_deb_field_is(raw, start, end, "Suggests")
+            return RH_DEB_ENHANCES if DebianIndex::rh_deb_field_is(raw, start, end, "Enhances")
+            return RH_DEB_BREAKS if DebianIndex::rh_deb_field_is(raw, start, end, "Breaks")
+            return RH_DEB_CONFLICTS if DebianIndex::rh_deb_field_is(raw, start, end, "Conflicts")
+            return RH_DEB_PROVIDES if DebianIndex::rh_deb_field_is(raw, start, end, "Provides")
+            return RH_DEB_REPLACES if DebianIndex::rh_deb_field_is(raw, start, end, "Replaces")
+            return RH_DEB_SIZE if DebianIndex::rh_deb_field_is(raw, start, end, "Size")
+            return RH_DEB_INSTALLED_SIZE if DebianIndex::rh_deb_field_is(raw, start, end, "Installed-Size")
+            return RH_DEB_SHA256 if DebianIndex::rh_deb_field_is(raw, start, end, "SHA256")
+            return RH_DEB_DESCRIPTION if DebianIndex::rh_deb_field_is(raw, start, end, "Description")
+            return RH_DEB_MAINTAINER if DebianIndex::rh_deb_field_is(raw, start, end, "Maintainer")
+            return RH_DEB_FILENAME if DebianIndex::rh_deb_field_is(raw, start, end, "Filename")
+            return RH_DEB_MD5SUM if DebianIndex::rh_deb_field_is(raw, start, end, "MD5sum")
+            return RH_DEB_HOMEPAGE if DebianIndex::rh_deb_field_is(raw, start, end, "Homepage")
+            RH_DEB_UNKNOWN
+
+        def rh_deb_field_name_equal(raw: darray[u8]&, left_s: i64, left_e: i64, right_s: usize, right_e: usize) -> bool:
+            return false if left_s < 0 or left_e - left_s != (right_e - right_s).i64()
+            while offset < left_e - left_s |offset: i64 = 0, raw, left_s, right_s|:
+                left: mutable u8 = raw[(left_s + offset).usize()]
+                right: mutable u8 = raw[right_s + offset.usize()]
+                left <- left + 32 if left >= 65 and left <= 90
+                right <- right + 32 if right >= 65 and right <= 90
+                return false if left != right
+                offset <- offset + 1
+            true
+
+        def rh_deb_relation_key(key: u8) -> bool:
+            key >= RH_DEB_DEPENDS and key <= RH_DEB_REPLACES
+
+        def rh_deb_retained_key(key: u8) -> bool:
+            key >= RH_DEB_PACKAGE and key <= RH_DEB_ESSENTIAL or key >= RH_DEB_DEPENDS and key <= RH_DEB_REPLACES or key >= RH_DEB_SIZE and key <= RH_DEB_SHA256
+
+        def rh_deb_omitted_key(key: u8) -> bool:
+            key >= RH_DEB_DESCRIPTION and key <= RH_DEB_HOMEPAGE
+
+        def rh_deb_line_valid(raw: darray[u8]&, start: usize, end: usize) -> bool:
+            for index in start..<end |index, raw|:
+                b: u8 = raw[index]
+                return false if b == 0 or b == 127 or (b < 32 and b != 9)
+            true
+
+        def rh_deb_finish_package(packages: mutable darray[RhDebPackage]&, field_start: i64, field_count: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return 0 if field_count == 0
+            return -1 if field_count > RH_DEB_INDEX_MAX_FIELDS_PER_PACKAGE or packages.count.i64() >= RH_DEB_INDEX_MAX_PACKAGES
+            packages.push(RhDebPackage{field_start: field_start, field_count: field_count})
+            0
+
+        def rh_deb_parse(raw: darray[u8]&, pool: mutable darray[u8]&, fields: mutable darray[RhDebField]&, packages: mutable darray[RhDebPackage]&, unknown_out: mutable i64&, omitted_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count == 0 or raw.count > RH_DEB_INDEX_MAX_BYTES or not Base::rh_utf8_valid(raw)
+            field_start: mutable i64 = 0
+            field_count: mutable i64 = 0
+            current_field: mutable i64 = -1
+            while line_start <= raw.count |line_start: usize = 0, raw, pool, fields, packages, unknown_out, omitted_out, field_start, field_count, current_field|:
+                line_end: usize =
+                    while j < raw.count and raw[j] != 10 |j: usize = line_start, raw| -> j:
+                        j <- j + 1
+                s: usize = line_start
+                e: mutable usize = line_end
+                e <- e - 1 if e > s and raw[e - 1] == 13
+                horizontal_end: mutable usize = s
+                while horizontal_end < e and (raw[horizontal_end] == 32 or raw[horizontal_end] == 9) |horizontal_end, e, raw|:
+                    horizontal_end <- horizontal_end + 1
+                if horizontal_end == e:
+                    return -1 if DebianIndex::rh_deb_finish_package(packages, field_start, field_count) != 0
+                    field_start <- fields.count.i64()
+                    field_count <- 0
+                    current_field <- -1
+                else:
+                    return -1 if not DebianIndex::rh_deb_line_valid(raw, s, e)
+                    if raw[s] == 32 or raw[s] == 9:
+                        return -1 if current_field < field_start or current_field < 0
+                        indent_end: mutable usize = s
+                        while indent_end < e and (raw[indent_end] == 32 or raw[indent_end] == 9) |indent_end, e, raw|:
+                            indent_end <- indent_end + 1
+                        value_end: mutable usize = e
+                        while value_end > indent_end and (raw[value_end - 1] == 32 or raw[value_end - 1] == 9) |value_end, indent_end, raw|:
+                            value_end <- value_end - 1
+                        field: RhDebField = fields[current_field.usize()]
+                        if DebianIndex::rh_deb_retained_key(field.key):
+                            return -1 if not DebianIndex::rh_deb_relation_key(field.key)
+                            return -1 if value_end == indent_end + 1 and raw[indent_end] == 46
+                            if value_end > indent_end:
+                                if field.value_e > field.value_s:
+                                    pool.push(32)
+                                return -1 if Base::rh_absorb_span(raw, indent_end.i64(), value_end.i64(), pool) < 0
+                            field.value_e <- pool.count.i64()
+                            fields[current_field.usize()] <- field
+                    else:
+                        return -1 if raw[s] == 35
+                        colon: mutable usize = s
+                        while colon < e and raw[colon] != 58 |colon, e, raw|:
+                            colon <- colon + 1
+                        return -1 if colon == s or colon >= e or colon - s > RH_DEB_INDEX_MAX_FIELD_NAME
+                        return -1 if raw[s] == 45 or raw[s] == 35
+                        for tag_index in s..<colon |tag_index, raw|:
+                            return -1 if raw[tag_index] < 33 or raw[tag_index] > 126 or raw[tag_index] == 58
+                        return -1 if fields.count.i64() >= RH_DEB_INDEX_MAX_FIELDS or field_count >= RH_DEB_INDEX_MAX_FIELDS_PER_PACKAGE
+                        while prior < field_count |prior: i64 = 0, fields, field_start, field_count, raw, s, colon|:
+                            existing: RhDebField = fields[(field_start + prior).usize()]
+                            return -1 if DebianIndex::rh_deb_field_name_equal(raw, existing.name_s, existing.name_e, s, colon)
+                            prior <- prior + 1
+                        value_s: mutable usize = colon + 1
+                        while value_s < e and (raw[value_s] == 32 or raw[value_s] == 9) |value_s, e, raw|:
+                            value_s <- value_s + 1
+                        value_e: mutable usize = e
+                        while value_e > value_s and (raw[value_e - 1] == 32 or raw[value_e - 1] == 9) |value_e, value_s, raw|:
+                            value_e <- value_e - 1
+                        key: u8 = DebianIndex::rh_deb_field_key(raw, s, colon)
+                        stored_s: mutable i64 = -1
+                        stored_e: mutable i64 = -1
+                        if DebianIndex::rh_deb_retained_key(key):
+                            stored_s <- pool.count.i64()
+                            return -1 if Base::rh_absorb_span(raw, value_s.i64(), value_e.i64(), pool) < 0
+                            stored_e <- pool.count.i64()
+                        unknown_out[0] <- unknown_out[0] + 1 if key == RH_DEB_UNKNOWN
+                        omitted_out[0] <- omitted_out[0] + 1 if DebianIndex::rh_deb_omitted_key(key)
+                        fields.push(RhDebField{key: key, name_s: s.i64(), name_e: colon.i64(), value_s: stored_s, value_e: stored_e})
+                        current_field <- fields.count.i64() - 1
+                        field_count <- field_count + 1
+                line_start <- line_end + 1
+            return -1 if DebianIndex::rh_deb_finish_package(packages, field_start, field_count) != 0 or packages.count == 0
+            packages.count.i64()
+
+        def rh_deb_find(fields: darray[RhDebField]&, package: RhDebPackage, key: u8) -> i64:
+            while i < package.field_count |i: i64 = 0, fields, package, key|:
+                index: i64 = package.field_start + i
+                return index if fields[index.usize()].key == key
+                i <- i + 1
+            -1
+
+        def rh_deb_value_valid(pool: darray[u8]&, field: RhDebField) -> bool:
+            return false if field.value_s < 0 or field.value_e <= field.value_s
+            for index in field.value_s.usize()..<field.value_e.usize() |index, pool|:
+                b: u8 = pool[index]
+                return false if b == 0 or b == 127 or (b < 32 and b != 9)
+            true
+
+        def rh_deb_package_name_valid(pool: darray[u8]&, field: RhDebField) -> bool:
+            return false if not DebianIndex::rh_deb_value_valid(pool, field) or field.value_e - field.value_s < 2
+            first: u8 = pool[field.value_s.usize()]
+            return false if not ((first >= 97 and first <= 122) or (first >= 48 and first <= 57))
+            for index in field.value_s.usize()..<field.value_e.usize() |index, pool|:
+                b: u8 = pool[index]
+                allowed: bool = (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 43 or b == 45 or b == 46
+                return false if not allowed
+            true
+
+        def rh_deb_version_valid(pool: darray[u8]&, field: RhDebField) -> bool:
+            return false if not DebianIndex::rh_deb_value_valid(pool, field)
+            start: usize = field.value_s.usize()
+            end: usize = field.value_e.usize()
+            cursor: mutable usize = start
+            colon: mutable usize = end
+            while cursor < end |cursor, pool, colon|:
+                return false if pool[cursor] == 58 and colon != end
+                colon <- cursor if pool[cursor] == 58
+                cursor <- cursor + 1
+            version_start: mutable usize = start
+            if colon != end:
+                return false if colon == start or colon + 1 >= end
+                while digit < colon |digit: usize = start, pool|:
+                    return false if pool[digit] < 48 or pool[digit] > 57
+                    digit <- digit + 1
+                version_start <- colon + 1
+            return false if pool[version_start] < 48 or pool[version_start] > 57
+            while index < end |index: usize = start, pool|:
+                b: u8 = pool[index]
+                valid: bool = (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 43 or b == 45 or b == 46 or b == 58 or b == 126
+                return false if not valid
+                index <- index + 1
+            true
+
+        def rh_deb_architecture_valid(pool: darray[u8]&, field: RhDebField) -> bool:
+            return false if not DebianIndex::rh_deb_value_valid(pool, field)
+            return true if Base::rh_bytes_equal_literal(pool, field.value_s, field.value_e, "all")
+            first: u8 = pool[field.value_s.usize()]
+            return false if not ((first >= 97 and first <= 122) or (first >= 48 and first <= 57))
+            for index in field.value_s.usize()..<field.value_e.usize() |index, pool|:
+                b: u8 = pool[index]
+                allowed: bool = (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 45
+                return false if not allowed
+            true
+
+        def rh_deb_uint_valid(pool: darray[u8]&, field: RhDebField) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not DebianIndex::rh_deb_value_valid(pool, field)
+            ok: mutable i64 = 0
+            number: i64 = Base::rh_parse_i64(pool, field.value_s.usize(), field.value_e.usize(), &ok)
+            ok == 1 and number >= 0
+
+        def rh_deb_sha256_valid(pool: darray[u8]&, field: RhDebField) -> bool:
+            return false if not DebianIndex::rh_deb_value_valid(pool, field) or field.value_e - field.value_s != 64
+            for index in field.value_s.usize()..<field.value_e.usize() |index, pool|:
+                b: u8 = pool[index]
+                return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102) or (b >= 65 and b <= 70))
+            true
+
+        def rh_deb_validate_package(fields: darray[RhDebField]&, pool: darray[u8]&, package: RhDebPackage) -> bool can[Memory.Allocate, Abort.Panic]:
+            package_idx: i64 = DebianIndex::rh_deb_find(fields, package, RH_DEB_PACKAGE)
+            version_idx: i64 = DebianIndex::rh_deb_find(fields, package, RH_DEB_VERSION)
+            architecture_idx: i64 = DebianIndex::rh_deb_find(fields, package, RH_DEB_ARCHITECTURE)
+            return false if package_idx < 0 or version_idx < 0 or architecture_idx < 0
+            return false if not DebianIndex::rh_deb_package_name_valid(pool, fields[package_idx.usize()]) or not DebianIndex::rh_deb_version_valid(pool, fields[version_idx.usize()]) or not DebianIndex::rh_deb_architecture_valid(pool, fields[architecture_idx.usize()])
+            while i < package.field_count |i: i64 = 0, fields, pool, package|:
+                field: RhDebField = fields[(package.field_start + i).usize()]
+                if DebianIndex::rh_deb_retained_key(field.key):
+                    return false if not DebianIndex::rh_deb_value_valid(pool, field)
+                    return false if (field.key == RH_DEB_SIZE or field.key == RH_DEB_INSTALLED_SIZE) and not DebianIndex::rh_deb_uint_valid(pool, field)
+                    return false if field.key == RH_DEB_SHA256 and not DebianIndex::rh_deb_sha256_valid(pool, field)
+                    if field.key == RH_DEB_MULTI_ARCH:
+                        valid: bool = Base::rh_bytes_equal_literal(pool, field.value_s, field.value_e, "no") or Base::rh_bytes_equal_literal(pool, field.value_s, field.value_e, "foreign") or Base::rh_bytes_equal_literal(pool, field.value_s, field.value_e, "same") or Base::rh_bytes_equal_literal(pool, field.value_s, field.value_e, "allowed")
+                        return false if not valid
+                    if field.key == RH_DEB_ESSENTIAL:
+                        valid: bool = Base::rh_bytes_equal_literal(pool, field.value_s, field.value_e, "yes") or Base::rh_bytes_equal_literal(pool, field.value_s, field.value_e, "no")
+                        return false if not valid
+                i <- i + 1
+            true
+
+        def rh_deb_emit_optional_string(out: mutable darray[u8]&, pool: darray[u8]&, fields: darray[RhDebField]&, package: RhDebPackage, key: u8) -> bool can[Memory.Allocate, Abort.Panic]:
+            index: i64 = DebianIndex::rh_deb_find(fields, package, key)
+            if index < 0:
+                Base::rh_push_text(out, "null")
+                return true
+            field: RhDebField = fields[index.usize()]
+            out.push(34)
+            Base::rh_json_escape(out, pool, field.value_s.usize(), field.value_e.usize())
+            out.push(34)
+            true
+
+        def rh_deb_emit_uint(out: mutable darray[u8]&, pool: darray[u8]&, fields: darray[RhDebField]&, package: RhDebPackage, key: u8) -> bool can[Memory.Allocate, Abort.Panic]:
+            index: i64 = DebianIndex::rh_deb_find(fields, package, key)
+            if index < 0:
+                Base::rh_push_text(out, "null")
+                return true
+            field: RhDebField = fields[index.usize()]
+            ok: mutable i64 = 0
+            number: i64 = Base::rh_parse_i64(pool, field.value_s.usize(), field.value_e.usize(), &ok)
+            return false if ok != 1 or number < 0
+            Base::rh_push_decimal_i64(out, number)
+            true
+
+        def rh_deb_emit_relations(out: mutable darray[u8]&, pool: darray[u8]&, fields: darray[RhDebField]&, package: RhDebPackage) -> bool can[Memory.Allocate, Abort.Panic]:
+            first: mutable bool = true
+            while i < package.field_count |i: i64 = 0, fields, pool, package, out, first|:
+                field: RhDebField = fields[(package.field_start + i).usize()]
+                if DebianIndex::rh_deb_relation_key(field.key):
+                    out.push(44) if not first
+                    first <- false
+                    Base::rh_push_text(out, "{\"kind\":\"")
+                    Base::rh_push_text(out, "depends" if field.key == RH_DEB_DEPENDS else "pre-depends" if field.key == RH_DEB_PRE_DEPENDS else "recommends" if field.key == RH_DEB_RECOMMENDS else "suggests" if field.key == RH_DEB_SUGGESTS else "enhances" if field.key == RH_DEB_ENHANCES else "breaks" if field.key == RH_DEB_BREAKS else "conflicts" if field.key == RH_DEB_CONFLICTS else "provides" if field.key == RH_DEB_PROVIDES else "replaces")
+                    Base::rh_push_text(out, "\",\"expression\":\"")
+                    Base::rh_json_escape(out, pool, field.value_s.usize(), field.value_e.usize())
+                    Base::rh_push_text(out, "\"}")
+                i <- i + 1
+            true
+
+    public:
+        def rh_debian_packages_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            pool: mutable darray[u8] = []
+            fields: mutable darray[RhDebField] = []
+            packages: mutable darray[RhDebPackage] = []
+            unknown_fields: mutable i64 = 0
+            omitted_fields: mutable i64 = 0
+            return -1 if DebianIndex::rh_deb_parse(raw, pool, fields, packages, &unknown_fields, &omitted_fields) <= 0
+            relations: mutable i64 = 0
+            while pi < packages.count |pi: usize = 0, packages, fields, pool, relations|:
+                package: RhDebPackage = packages[pi]
+                return -1 if not DebianIndex::rh_deb_validate_package(fields, pool, package)
+                while fi < package.field_count |fi: i64 = 0, package, fields, relations|:
+                    field: RhDebField = fields[(package.field_start + fi).usize()]
+                    relations <- relations + 1 if DebianIndex::rh_deb_relation_key(field.key)
+                    return -1 if relations > RH_DEB_INDEX_MAX_RELATIONS
+                    fi <- fi + 1
+                pi <- pi + 1
+
+            Base::rh_push_text(out, "{\"schema\":\"rh-debian-packages-index-result/1\",\"format\":\"debian-packages-deb822\",\"packages\":[")
+            while pi < packages.count |pi: usize = 0, packages, fields, pool, out|:
+                package: RhDebPackage = packages[pi]
+                package_idx: i64 = DebianIndex::rh_deb_find(fields, package, RH_DEB_PACKAGE)
+                version_idx: i64 = DebianIndex::rh_deb_find(fields, package, RH_DEB_VERSION)
+                architecture_idx: i64 = DebianIndex::rh_deb_find(fields, package, RH_DEB_ARCHITECTURE)
+                out.push(44) if pi > 0
+                Base::rh_push_text(out, "{\"name\":\"")
+                Base::rh_json_escape(out, pool, fields[package_idx.usize()].value_s.usize(), fields[package_idx.usize()].value_e.usize())
+                Base::rh_push_text(out, "\",\"version\":\"")
+                Base::rh_json_escape(out, pool, fields[version_idx.usize()].value_s.usize(), fields[version_idx.usize()].value_e.usize())
+                Base::rh_push_text(out, "\",\"architecture\":\"")
+                Base::rh_json_escape(out, pool, fields[architecture_idx.usize()].value_s.usize(), fields[architecture_idx.usize()].value_e.usize())
+                Base::rh_push_text(out, "\",\"source\":")
+                return -1 if not DebianIndex::rh_deb_emit_optional_string(out, pool, fields, package, RH_DEB_SOURCE)
+                Base::rh_push_text(out, ",\"section\":")
+                return -1 if not DebianIndex::rh_deb_emit_optional_string(out, pool, fields, package, RH_DEB_SECTION)
+                Base::rh_push_text(out, ",\"priority\":")
+                return -1 if not DebianIndex::rh_deb_emit_optional_string(out, pool, fields, package, RH_DEB_PRIORITY)
+                Base::rh_push_text(out, ",\"multi_arch\":")
+                return -1 if not DebianIndex::rh_deb_emit_optional_string(out, pool, fields, package, RH_DEB_MULTI_ARCH)
+                Base::rh_push_text(out, ",\"essential\":")
+                return -1 if not DebianIndex::rh_deb_emit_optional_string(out, pool, fields, package, RH_DEB_ESSENTIAL)
+                Base::rh_push_text(out, ",\"archive_size\":")
+                return -1 if not DebianIndex::rh_deb_emit_uint(out, pool, fields, package, RH_DEB_SIZE)
+                Base::rh_push_text(out, ",\"installed_size\":")
+                return -1 if not DebianIndex::rh_deb_emit_uint(out, pool, fields, package, RH_DEB_INSTALLED_SIZE)
+                Base::rh_push_text(out, ",\"sha256_claim\":")
+                hash_idx: i64 = DebianIndex::rh_deb_find(fields, package, RH_DEB_SHA256)
+                if hash_idx < 0:
+                    Base::rh_push_text(out, "null")
+                else:
+                    hash: RhDebField = fields[hash_idx.usize()]
+                    Base::rh_push_text(out, "\"sha256:")
+                    Base::rh_json_escape(out, pool, hash.value_s.usize(), hash.value_e.usize())
+                    out.push(34)
+                Base::rh_push_text(out, ",\"relations\":[")
+                return -1 if not DebianIndex::rh_deb_emit_relations(out, pool, fields, package)
+                Base::rh_push_text(out, "]}")
+                pi <- pi + 1
+            Base::rh_push_text(out, "],\"unknown_fields\":")
+            Base::rh_push_decimal_i64(out, unknown_fields)
+            Base::rh_push_text(out, ",\"omitted_fields\":")
+            Base::rh_push_decimal_i64(out, omitted_fields)
+            Base::rh_push_text(out, ",\"note\":\"Input is a decoded Debian Packages Deb822 index; relation values and SHA-256 are source declarations, package archive bytes and signatures are not verified, and dependencies are not resolved\"}")
+            0

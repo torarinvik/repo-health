@@ -1041,7 +1041,7 @@ Demonstrate that the architecture works beyond GitHub-like forges, Git histories
 | Source hosting | SourceHut, SourceForge, cgit/gitweb-fronted servers. | Generic VCS plus separate metadata channels. |
 | Package ecosystems | PyPI, Maven, NuGet, RubyGems, Composer, Go, distribution packages. | Ecosystem-native names, versions, ranges, support lines. |
 | Inventory formats | Additional SPDX/CycloneDX versions and formats. | Lossless import, unknown fields, provenance. |
-| Distribution data | Bounded Debian `debian/control` metadata with source assertions and declared relations. | Upstream mapping, patches, distribution versions. |
+| Distribution data | Bounded Debian `debian/control` metadata and binary `Packages` Deb822 catalogs, alongside the Arch, Alpine, FreeBSD, RPM, and Homebrew slices. | Upstream mapping, patches, distribution versions, archive verification. |
 | Archives/releases | Release-only sites, source archives, archival identifiers. | Useful reports without invented development history. |
 
 This is a candidate queue, not a promise that every source exposes the same data. Order work by user value, feasible access, data rights, and which abstraction boundary it tests.
@@ -1190,6 +1190,23 @@ public result is `rh-freebsd-catalog-result/1`, covered by
 `schemas/freebsd-catalog-result.schema.json` and
 `tests/test_freebsd_catalog_cli.sh` ([P35], [P36]).
 
+The Debian binary catalog path is `src/rh_debian_index.elisa` with
+`rh_cli debian-index --input <decoded-Packages-Deb822> --out <file>`. It
+accepts bounded UTF-8 Deb822 package stanzas, requires package name, Debian
+version token, and architecture, preserves source/section/priority/Multi-Arch
+metadata, archive size, installed size, and SHA-256 claims, and retains the
+binary relationship fields as opaque expressions. Folded relationship lines
+are joined with a single space; simple-field folding, duplicate fields,
+invalid UTF-8, invalid field values, and resource-limit excess fail closed.
+Field names are case-insensitive as specified by Deb822. Package archive paths,
+MD5 claims, descriptions, maintainers, and unknown values are withheld;
+unknown and intentionally omitted fields are counted. Versions are retained as
+Debian version strings but are not ordered, and the adapter does not resolve
+relations, inspect package bytes, or verify repository signatures. The public
+result is `rh-debian-packages-index-result/1`, covered by
+`schemas/debian-packages-index-result.schema.json` and
+`tests/test_debian_index_cli.sh` ([P39], [P40], [P41]).
+
 ### 13.3 Connector admission checklist
 
 Every new connector needs a source documentation review, capability manifest, authentication model, URL/transport security review, pagination tests, incremental/reconciliation design, source-to-canonical mapping table, fixture corpus, resource budgets, rights review, and operator documentation.
@@ -1263,7 +1280,7 @@ any live collector work.
 
 ### 13.6 Ecosystem parser admission
 
-For each package ecosystem, document name normalization, version ordering, prerelease behavior, constraints, aliases, registry identity, optional/platform conditions, local/path dependencies, and lockfile guarantees. The current bounded admission set includes Cargo, npm package/shrinkwrap, pnpm v9.0 and Yarn Classic v1 lockfiles, PyPI requirements/PEP 621, Go modules, RubyGems, Composer, NuGet `packages.config`, and Maven `pom.xml`. Pnpm is limited to one root importer; exact locked versions map through snapshot keys, peer-specific paths remain separate graph nodes, and workspace/Git/path conditions stay unresolved. It fails closed on other pnpm revisions, multiple importers, unknown fields, and unsupported constructs. Yarn resolves only exact name/range selectors from v1, rejects Berry revisions and aliases, and is used only when the npm and pnpm lockfiles are absent. Node lock selection prefers npm shrinkwrap, npm package lock, pnpm, then Yarn. NuGet IDs compare case-insensitively with punctuation preserved, while Maven coordinates use exact `groupId:artifactId` names. Exact versions resolve to registry nodes, and range/property syntax remains unresolved with an unsupported-range metric.
+For each package ecosystem, document name normalization, version ordering, prerelease behavior, constraints, aliases, registry identity, optional/platform conditions, local/path dependencies, and lockfile guarantees. The current bounded admission set includes Cargo, npm package/shrinkwrap, pnpm v9.0 and Yarn Classic v1 lockfiles, PyPI requirements/PEP 621/Poetry/uv, Go modules, RubyGems, Composer, NuGet `packages.config`, Maven `pom.xml`, and Debian binary `Packages` Deb822 catalogs. Pnpm is limited to one root importer; exact locked versions map through snapshot keys, peer-specific paths remain separate graph nodes, and workspace/Git/path conditions stay unresolved. It fails closed on other pnpm revisions, multiple importers, unknown fields, and unsupported constructs. Yarn resolves only exact name/range selectors from v1, rejects Berry revisions and aliases, and is used only when the npm and pnpm lockfiles are absent. Node lock selection prefers npm shrinkwrap, npm package lock, pnpm, then Yarn. NuGet IDs compare case-insensitively with punctuation preserved, while Maven coordinates use exact `groupId:artifactId` names. Exact versions resolve to registry nodes, and range/property syntax remains unresolved with an unsupported-range metric.
 
 Support begins at a declared format/version subset. Unsupported versions return unsupported, not partial success disguised as completeness. Add official examples plus adversarial fixtures and an independent oracle where feasible.
 
@@ -2163,6 +2180,9 @@ These primary sources were checked while preparing the design and the current im
 [P36]: https://github.com/freebsd/pkg/blob/main/libpkg/pkg_manifest.c "FreeBSD pkg manifest field types and dependency declarations"
 [P37]: https://docs.astral.sh/uv/concepts/resolution/ "uv lock schema versioning, revisions, and universal resolution"
 [P38]: https://docs.astral.sh/uv/reference/internals/metadata/ "uv workspace metadata export and lockfile stability guidance"
+[P39]: https://manpages.debian.org/unstable/dpkg-dev/deb822.5.en.html "Deb822 stanza, field-name, continuation, and UTF-8 syntax"
+[P40]: https://www.debian.org/doc/debian-policy/ch-controlfields.html "Debian binary package control fields and mandatory identity"
+[P41]: https://www.debian.org/doc/debian-policy/ch-relationships.html "Debian package relationship grammar and meanings"
 
 | Reference | Implementation use |
 |---|---|
@@ -2191,6 +2211,7 @@ These primary sources were checked while preparing the design and the current im
 | [P33] | Pin pnpm support to lockfile v9.0; join exact importer and snapshot versions while preserving peer-suffixed paths as distinct resolution nodes. |
 | [P35] / [P36] | Pin the FreeBSD adapter to decoded `data.pkg` JSON and its documented package/dependency manifest fields; keep archive decompression and signature checks outside the parser. |
 | [P37] / [P38] | Pin uv lock support to one exact schema/revision and fail closed on new layouts; revisit the documented workspace metadata export before widening this direct offline parser. |
+| [P39] / [P40] / [P41] | Parse decoded Debian binary Packages stanzas with Deb822 continuation rules; preserve package identity and declared relations while withholding archive paths and avoiding version ordering or dependency resolution. |
 
 ## 29. Final implementation rule
 
