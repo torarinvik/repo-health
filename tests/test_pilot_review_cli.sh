@@ -70,10 +70,18 @@ assert all(d["decision_usefulness"][key] is None for key in ("reviewed_findings"
 PY
 sed 's/"reviewed_findings":6/"reviewed_findings":1/' "$T/in.json" > "$T/bad-denominator.json"
 sed 's/,"correct_findings_count":5//' "$T/in.json" > "$T/partial-details.json"
+python3 - "$T/in.json" "$T/mapping-overflow.json" <<'PY'
+import json, sys
+from pathlib import Path
+d = json.loads(Path(sys.argv[1]).read_bytes())
+d["mapping_review"] = {"sampled": 9223372036854775807, "accepted": 9223372036854775807, "needs_review": 9223372036854775807}
+Path(sys.argv[2]).write_text(json.dumps(d, separators=(",", ":")) + "\n")
+PY
 set +e
 "$ROOT/build/rh_cli" pilot-review --input "$T/bad-denominator.json" --out "$T/x" >/dev/null 2>&1; rc_denominator=$?
 "$ROOT/build/rh_cli" pilot-review --input "$T/partial-details.json" --out "$T/x" >/dev/null 2>&1; rc_partial=$?
+"$ROOT/build/rh_cli" pilot-review --input "$T/mapping-overflow.json" --out "$T/x" >/dev/null 2>&1; rc_mapping_overflow=$?
 set -e
-[[ "$rc_denominator" -eq 4 && "$rc_partial" -eq 4 ]] || fail "invalid finding denominators must fail closed (got $rc_denominator/$rc_partial)"
+[[ "$rc_denominator" -eq 4 && "$rc_partial" -eq 4 && "$rc_mapping_overflow" -eq 4 ]] || fail "invalid denominators must fail closed (got $rc_denominator/$rc_partial/$rc_mapping_overflow)"
 
 echo "test_pilot_review_cli OK"

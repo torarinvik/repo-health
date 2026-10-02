@@ -8,6 +8,9 @@ include "./rh_json.elisa"
 
 module PilotReview:
     private:
+        const RH_PILOT_INVALID: i64 = -1
+        const RH_PILOT_ABSENT: i64 = -2
+
         def rh_pilot_get(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_obj_get(nodes, texts, obj, key)
 
@@ -15,24 +18,19 @@ module PilotReview:
             Base::rh_bytes_equal_literal(texts, s, e, literal)
 
         def rh_pilot_span(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-            idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
-            return false if idx < 0 or nodes[idx.usize()].kind != Json::RH_JSON_STR
-            node: Json::RhJsonNode = nodes[idx.usize()]
-            return false if node.text_end <= node.text_start
-            s_out[0] <- node.text_start
-            e_out[0] <- node.text_end
-            true
+            valid: bool = |s_out, e_out|
+                idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
+                Json::rh_json_str_span(nodes, idx, s_out, e_out) and e_out[0] > s_out[0]
+            valid
 
-        def rh_pilot_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, out_ok: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
-            Json::rh_json_int(nodes, raw, idx, out_ok)
-
-        def rh_pilot_bool(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, out_ok: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-            idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
-            out_ok[0] <- 0
-            return false if idx < 0 or nodes[idx.usize()].kind != Json::RH_JSON_BOOL
-            out_ok[0] <- 1
-            Json::rh_json_is_true(nodes, raw, idx)
+        def rh_pilot_bool(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            result: i64 =
+                idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
+                if idx < 0 or nodes[idx.usize()].kind != Json::RH_JSON_BOOL:
+                    RH_PILOT_INVALID
+                else:
+                    1 if Json::rh_json_is_true(nodes, raw, idx) else 0
+            result
 
         def rh_pilot_obj(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
@@ -47,15 +45,19 @@ module PilotReview:
         def rh_pilot_nonnegative(value: i64, ok: i64) -> bool:
             ok != 0 and value >= 0
 
-        def rh_pilot_optional_nonnegative(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-            idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
-            return true if idx < 0 or nodes[idx.usize()].kind == Json::RH_JSON_NULL
-            ok: mutable i64 = 0
-            value: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, obj, key, &ok)
-            return false if not PilotReview::rh_pilot_nonnegative(value, ok)
-            value_out[0] <- value
-            present_out[0] <- 1
-            true
+        def rh_pilot_optional_nonnegative(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            result: i64 =
+                idx: i64 = PilotReview::rh_pilot_get(nodes, texts, obj, key)
+                if idx < 0 or nodes[idx.usize()].kind == Json::RH_JSON_NULL:
+                    RH_PILOT_ABSENT
+                else:
+                    ok: mutable i64 = 0
+                    value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
+                    if not PilotReview::rh_pilot_nonnegative(value, ok):
+                        RH_PILOT_INVALID
+                    else:
+                        value
+            result
 
     public:
         def rh_pilot_review_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -63,9 +65,11 @@ module PilotReview:
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
             return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
-            schema_s: mutable i64 = -1
-            schema_e: mutable i64 = -1
-            return -1 if not PilotReview::rh_pilot_span(nodes, texts, root, "schema", &schema_s, &schema_e) or not PilotReview::rh_pilot_eq(texts, schema_s, schema_e, "rh-pilot-review-input/1")
+            schema_valid: bool =
+                schema_s: mutable i64 = -1
+                schema_e: mutable i64 = -1
+                PilotReview::rh_pilot_span(nodes, texts, root, "schema", &schema_s, &schema_e) and PilotReview::rh_pilot_eq(texts, schema_s, schema_e, "rh-pilot-review-input/1")
+            return -1 if not schema_valid
             review_s: mutable i64 = -1
             review_e: mutable i64 = -1
             reviewer_s: mutable i64 = -1
@@ -73,9 +77,8 @@ module PilotReview:
             scope_s: mutable i64 = -1
             scope_e: mutable i64 = -1
             return -1 if not PilotReview::rh_pilot_span(nodes, texts, root, "review_id", &review_s, &review_e) or not PilotReview::rh_pilot_span(nodes, texts, root, "reviewer", &reviewer_s, &reviewer_e) or not PilotReview::rh_pilot_span(nodes, texts, root, "scope", &scope_s, &scope_e)
-            reviewed_ok: mutable i64 = 0
-            reviewed_at: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, root, "reviewed_at", &reviewed_ok)
-            return -1 if not PilotReview::rh_pilot_nonnegative(reviewed_at, reviewed_ok)
+            reviewed_at: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, root, "reviewed_at")
+            return -1 if reviewed_at < 0
 
             mapping: i64 = PilotReview::rh_pilot_obj(nodes, texts, root, "mapping_review")
             corrections: i64 = PilotReview::rh_pilot_obj(nodes, texts, root, "corrections")
@@ -84,69 +87,47 @@ module PilotReview:
             costs: i64 = PilotReview::rh_pilot_obj(nodes, texts, root, "costs")
             return -1 if mapping < 0 or corrections < 0 or usefulness < 0 or outage < 0 or costs < 0
 
-            mapping_ok: mutable i64 = 0
-            mapping_accepted_ok: mutable i64 = 0
-            mapping_open_ok: mutable i64 = 0
-            mapping_sampled: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, mapping, "sampled", &mapping_ok)
-            mapping_accepted: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, mapping, "accepted", &mapping_accepted_ok)
-            mapping_open: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, mapping, "needs_review", &mapping_open_ok)
-            return -1 if not PilotReview::rh_pilot_nonnegative(mapping_sampled, mapping_ok) or not PilotReview::rh_pilot_nonnegative(mapping_accepted, mapping_accepted_ok) or not PilotReview::rh_pilot_nonnegative(mapping_open, mapping_open_ok) or mapping_accepted + mapping_open > mapping_sampled
+            mapping_sampled: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, mapping, "sampled")
+            mapping_accepted: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, mapping, "accepted")
+            mapping_open: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, mapping, "needs_review")
+            return -1 if mapping_sampled < 0 or mapping_accepted < 0 or mapping_open < 0
+            return -1 if mapping_accepted > mapping_sampled
+            return -1 if mapping_open > mapping_sampled - mapping_accepted
 
-            requested_ok: mutable i64 = 0
-            resolved_ok: mutable i64 = 0
-            turnaround_ok: mutable i64 = 0
-            corrections_requested: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, corrections, "requested", &requested_ok)
-            corrections_resolved: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, corrections, "resolved", &resolved_ok)
-            median_turnaround: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, corrections, "median_turnaround_seconds", &turnaround_ok)
-            return -1 if not PilotReview::rh_pilot_nonnegative(corrections_requested, requested_ok) or not PilotReview::rh_pilot_nonnegative(corrections_resolved, resolved_ok) or not PilotReview::rh_pilot_nonnegative(median_turnaround, turnaround_ok) or corrections_resolved > corrections_requested
-            maintainer_effort: mutable i64 = 0
-            effort_present: mutable i64 = 0
-            return -1 if not PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, corrections, "maintainer_effort_seconds", &maintainer_effort, &effort_present)
+            corrections_requested: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, corrections, "requested")
+            corrections_resolved: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, corrections, "resolved")
+            median_turnaround: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, corrections, "median_turnaround_seconds")
+            return -1 if corrections_requested < 0 or corrections_resolved < 0 or median_turnaround < 0 or corrections_resolved > corrections_requested
+            maintainer_effort: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, corrections, "maintainer_effort_seconds")
+            return -1 if maintainer_effort == RH_PILOT_INVALID
 
-            understood_ok: mutable i64 = 0
-            false_positive_ok: mutable i64 = 0
-            false_negative_ok: mutable i64 = 0
-            understood: bool = PilotReview::rh_pilot_bool(nodes, raw, texts, usefulness, "understood", &understood_ok)
-            false_positive: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, usefulness, "false_positive_count", &false_positive_ok)
-            false_negative: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, usefulness, "false_negative_count", &false_negative_ok)
-            return -1 if understood_ok == 0 or not PilotReview::rh_pilot_nonnegative(false_positive, false_positive_ok) or not PilotReview::rh_pilot_nonnegative(false_negative, false_negative_ok)
-            reviewed_findings: mutable i64 = 0
-            reviewed_findings_present: mutable i64 = 0
-            changed_decisions: mutable i64 = 0
-            changed_decisions_present: mutable i64 = 0
-            correct_findings: mutable i64 = 0
-            correct_findings_present: mutable i64 = 0
-            actionable_findings: mutable i64 = 0
-            actionable_findings_present: mutable i64 = 0
-            resolved_unknowns: mutable i64 = 0
-            resolved_unknowns_present: mutable i64 = 0
-            return -1 if not PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "reviewed_findings", &reviewed_findings, &reviewed_findings_present)
-            return -1 if not PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "decision_changed_count", &changed_decisions, &changed_decisions_present)
-            return -1 if not PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "correct_findings_count", &correct_findings, &correct_findings_present)
-            return -1 if not PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "actionable_findings_count", &actionable_findings, &actionable_findings_present)
-            return -1 if not PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "unknowns_resolved_by_evidence_count", &resolved_unknowns, &resolved_unknowns_present)
-            detail_fields_present: i64 = reviewed_findings_present + changed_decisions_present + correct_findings_present + actionable_findings_present + resolved_unknowns_present
-            if detail_fields_present > 0:
-                return -1 if detail_fields_present != 5
-                return -1 if changed_decisions > reviewed_findings or correct_findings > reviewed_findings or actionable_findings > reviewed_findings or resolved_unknowns > reviewed_findings or false_positive > reviewed_findings or false_negative > reviewed_findings
-                return -1 if false_positive > reviewed_findings - false_negative
+            understood: i64 = PilotReview::rh_pilot_bool(nodes, raw, texts, usefulness, "understood")
+            false_positive: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "false_positive_count")
+            false_negative: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "false_negative_count")
+            return -1 if understood == RH_PILOT_INVALID or false_positive < 0 or false_negative < 0
+            reviewed_findings: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "reviewed_findings")
+            changed_decisions: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "decision_changed_count")
+            correct_findings: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "correct_findings_count")
+            actionable_findings: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "actionable_findings_count")
+            resolved_unknowns: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, usefulness, "unknowns_resolved_by_evidence_count")
+            return -1 if reviewed_findings == RH_PILOT_INVALID or changed_decisions == RH_PILOT_INVALID or correct_findings == RH_PILOT_INVALID or actionable_findings == RH_PILOT_INVALID or resolved_unknowns == RH_PILOT_INVALID
+            detail_valid: bool =
+                detail_fields_present: i64 = (1 if reviewed_findings != RH_PILOT_ABSENT else 0) + (1 if changed_decisions != RH_PILOT_ABSENT else 0) + (1 if correct_findings != RH_PILOT_ABSENT else 0) + (1 if actionable_findings != RH_PILOT_ABSENT else 0) + (1 if resolved_unknowns != RH_PILOT_ABSENT else 0)
+                detail_fields_present == 0 or (detail_fields_present == 5 and changed_decisions <= reviewed_findings and correct_findings <= reviewed_findings and actionable_findings <= reviewed_findings and resolved_unknowns <= reviewed_findings and false_positive <= reviewed_findings and false_negative <= reviewed_findings and false_positive <= reviewed_findings - false_negative)
+            return -1 if not detail_valid
 
             outage_cap_s: mutable i64 = -1
             outage_cap_e: mutable i64 = -1
             outage_status_s: mutable i64 = -1
             outage_status_e: mutable i64 = -1
-            outage_usable_ok: mutable i64 = 0
             return -1 if not PilotReview::rh_pilot_span(nodes, texts, outage, "capability", &outage_cap_s, &outage_cap_e) or not PilotReview::rh_pilot_span(nodes, texts, outage, "status", &outage_status_s, &outage_status_e)
-            other_capabilities_usable: bool = PilotReview::rh_pilot_bool(nodes, raw, texts, outage, "other_capabilities_usable", &outage_usable_ok)
-            return -1 if outage_usable_ok == 0 or not PilotReview::rh_pilot_eq(texts, outage_status_s, outage_status_e, "stale_unknown") and not PilotReview::rh_pilot_eq(texts, outage_status_s, outage_status_e, "recovered") and not PilotReview::rh_pilot_eq(texts, outage_status_s, outage_status_e, "unsupported")
+            other_capabilities_usable: i64 = PilotReview::rh_pilot_bool(nodes, raw, texts, outage, "other_capabilities_usable")
+            return -1 if other_capabilities_usable == RH_PILOT_INVALID or not PilotReview::rh_pilot_eq(texts, outage_status_s, outage_status_e, "stale_unknown") and not PilotReview::rh_pilot_eq(texts, outage_status_s, outage_status_e, "recovered") and not PilotReview::rh_pilot_eq(texts, outage_status_s, outage_status_e, "unsupported")
 
-            events_ok: mutable i64 = 0
-            bytes_ok: mutable i64 = 0
-            elapsed_ok: mutable i64 = 0
-            cost_events: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, costs, "events", &events_ok)
-            cost_bytes: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, costs, "bytes", &bytes_ok)
-            elapsed_ms: i64 = PilotReview::rh_pilot_int(nodes, raw, texts, costs, "elapsed_ms", &elapsed_ok)
-            return -1 if not PilotReview::rh_pilot_nonnegative(cost_events, events_ok) or not PilotReview::rh_pilot_nonnegative(cost_bytes, bytes_ok) or not PilotReview::rh_pilot_nonnegative(elapsed_ms, elapsed_ok)
+            cost_events: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, costs, "events")
+            cost_bytes: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, costs, "bytes")
+            elapsed_ms: i64 = PilotReview::rh_pilot_optional_nonnegative(nodes, raw, texts, costs, "elapsed_ms")
+            return -1 if cost_events < 0 or cost_bytes < 0 or elapsed_ms < 0
 
             Base::rh_push_text(out, "{\"schema\":\"rh-pilot-review-result/1\",\"review\":{\"id\":")
             PilotReview::rh_pilot_emit_span(out, texts, review_s, review_e)
@@ -169,35 +150,35 @@ module PilotReview:
             Base::rh_push_text(out, ",\"median_turnaround_seconds\":")
             Base::rh_push_decimal_i64(out, median_turnaround)
             Base::rh_push_text(out, ",\"maintainer_effort_seconds\":")
-            Base::rh_push_decimal_i64(out, maintainer_effort) if effort_present != 0
-            Base::rh_push_text(out, "null") if effort_present == 0
+            Base::rh_push_decimal_i64(out, maintainer_effort) if maintainer_effort >= 0
+            Base::rh_push_text(out, "null") if maintainer_effort == RH_PILOT_ABSENT
             Base::rh_push_text(out, "},\"decision_usefulness\":{\"understood\":")
-            Base::rh_push_text(out, "true" if understood else "false")
+            Base::rh_push_text(out, "true" if understood == 1 else "false")
             Base::rh_push_text(out, ",\"false_positive_count\":")
             Base::rh_push_decimal_i64(out, false_positive)
             Base::rh_push_text(out, ",\"false_negative_count\":")
             Base::rh_push_decimal_i64(out, false_negative)
             Base::rh_push_text(out, ",\"reviewed_findings\":")
-            Base::rh_push_decimal_i64(out, reviewed_findings) if reviewed_findings_present != 0
-            Base::rh_push_text(out, "null") if reviewed_findings_present == 0
+            Base::rh_push_decimal_i64(out, reviewed_findings) if reviewed_findings >= 0
+            Base::rh_push_text(out, "null") if reviewed_findings == RH_PILOT_ABSENT
             Base::rh_push_text(out, ",\"decision_changed_count\":")
-            Base::rh_push_decimal_i64(out, changed_decisions) if changed_decisions_present != 0
-            Base::rh_push_text(out, "null") if changed_decisions_present == 0
+            Base::rh_push_decimal_i64(out, changed_decisions) if changed_decisions >= 0
+            Base::rh_push_text(out, "null") if changed_decisions == RH_PILOT_ABSENT
             Base::rh_push_text(out, ",\"correct_findings_count\":")
-            Base::rh_push_decimal_i64(out, correct_findings) if correct_findings_present != 0
-            Base::rh_push_text(out, "null") if correct_findings_present == 0
+            Base::rh_push_decimal_i64(out, correct_findings) if correct_findings >= 0
+            Base::rh_push_text(out, "null") if correct_findings == RH_PILOT_ABSENT
             Base::rh_push_text(out, ",\"actionable_findings_count\":")
-            Base::rh_push_decimal_i64(out, actionable_findings) if actionable_findings_present != 0
-            Base::rh_push_text(out, "null") if actionable_findings_present == 0
+            Base::rh_push_decimal_i64(out, actionable_findings) if actionable_findings >= 0
+            Base::rh_push_text(out, "null") if actionable_findings == RH_PILOT_ABSENT
             Base::rh_push_text(out, ",\"unknowns_resolved_by_evidence_count\":")
-            Base::rh_push_decimal_i64(out, resolved_unknowns) if resolved_unknowns_present != 0
-            Base::rh_push_text(out, "null") if resolved_unknowns_present == 0
+            Base::rh_push_decimal_i64(out, resolved_unknowns) if resolved_unknowns >= 0
+            Base::rh_push_text(out, "null") if resolved_unknowns == RH_PILOT_ABSENT
             Base::rh_push_text(out, "},\"provider_outage\":{\"capability\":")
             PilotReview::rh_pilot_emit_span(out, texts, outage_cap_s, outage_cap_e)
             Base::rh_push_text(out, ",\"status\":")
             PilotReview::rh_pilot_emit_span(out, texts, outage_status_s, outage_status_e)
             Base::rh_push_text(out, ",\"other_capabilities_usable\":")
-            Base::rh_push_text(out, "true" if other_capabilities_usable else "false")
+            Base::rh_push_text(out, "true" if other_capabilities_usable == 1 else "false")
             Base::rh_push_text(out, "},\"costs\":{\"events\":")
             Base::rh_push_decimal_i64(out, cost_events)
             Base::rh_push_text(out, ",\"bytes\":")

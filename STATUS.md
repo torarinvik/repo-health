@@ -1167,7 +1167,11 @@ appear in the artifact and each contract cites a test token that must exist.
 turnaround, denominator-bound decision/correctness/actionability/evidence
 counts, provider-outage, and measured-cost inputs as
 `rh-pilot-review-result/1`; it does not turn supplied observations into an
-independent audit or release verdict. `docs/operations/PILOT.md` defines the
+independent audit or release verdict. Its Elisa parser scopes schema and
+lookup scratch in block expressions, keeps parsed validity/presence in
+allocation-free scalar states, and checks mapping denominators without signed
+addition overflow; the CLI regression covers the `i64` maximum boundary.
+`docs/operations/PILOT.md` defines the
 consent-based stages, private case ledger, aggregate record, and closeout gate;
 the external maintainer pilot and governance sign-off remain open.
 `tests/test_contracts.sh` enforces this,
