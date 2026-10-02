@@ -548,6 +548,48 @@ for case, contract in expected.items():
 print("[identity] all 1,024 five-edge chain lifecycle combinations match independent cluster/revision oracle")
 PY
 
+echo "[identity] exhaustive six-edge chain lifecycle cross-product"
+python3 - "$ROOT/build/rh_cli" "$T" <<'PY'
+import itertools, json, pathlib, subprocess, sys
+binary, root = sys.argv[1], pathlib.Path(sys.argv[2])
+states = ("accepted", "proposed", "rejected", "revoked")
+edges = tuple((actor, actor + 1) for actor in range(6))
+for case, lifecycle in enumerate(itertools.product(states, repeat=len(edges))):
+    links = [
+        {"a": left, "b": right, "state": state, "revision_added": index + 1}
+        for index, ((left, right), state) in enumerate(zip(edges, lifecycle))
+    ]
+    source = {"schema": "rh-identity-input/1", "actor_count": 7, "links": links}
+    input_path = root / f"chain6-{case:04d}.json"
+    output_path = root / f"chain6-{case:04d}.out"
+    input_path.write_text(json.dumps(source, separators=(",", ":")) + "\n")
+    subprocess.run([binary, "identity", "--input", str(input_path), "--out", str(output_path)],
+                   check=True, stdout=subprocess.DEVNULL)
+
+    # Independent oracle: accepted links alone define the partition; only
+    # accepted or revoked ledger entries advance the identity revision.
+    parent = list(range(7))
+
+    def find(actor):
+        while parent[actor] != actor:
+            actor = parent[actor]
+        return actor
+
+    for link in links:
+        if link["state"] == "accepted":
+            left, right = find(link["a"]), find(link["b"])
+            parent[max(left, right)] = min(left, right)
+    clusters = {}
+    for actor in range(7):
+        clusters.setdefault(find(actor), []).append(actor)
+    revision = max((link["revision_added"] for link in links
+                    if link["state"] in ("accepted", "revoked")), default=0)
+    actual = json.loads(output_path.read_text())
+    assert actual["clusters"] == list(clusters.values()), (case, actual, clusters)
+    assert actual["identity_revision"] == revision, (case, actual, revision)
+print("[identity] all 4,096 six-edge chain lifecycle combinations match independent cluster/revision oracle")
+PY
+
 echo "[identity] exhaustive triangle-with-tail lifecycle cross-product"
 python3 - "$T" <<'PY'
 import itertools, json, pathlib, sys
