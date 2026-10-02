@@ -44,7 +44,8 @@ Prefer the standard library when its contract fits:
   for bounded byte comparisons. Reject invalid input ranges before slicing;
   standard slices clamp their bounds.
 - `sview_starts_with` and `sview_find_byte` for prefix and byte searches.
-- `.extend(bytes_view(source))` for complete byte-buffer copies.
+- `.extend(bytes_view(source))` for complete byte-buffer copies and
+  `Base::rh_absorb_span` for validated bounded copies into owned buffers.
 - `hash_sview` for the existing FNV-1a evidence digest and `sort` for numeric
   count ordering.
 - `read_entire_file` and `write_entire_file` for file contents, retaining the
