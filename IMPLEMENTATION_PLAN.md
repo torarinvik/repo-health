@@ -1117,7 +1117,9 @@ result is `rh-archive-result/1` with explicit `history_supported`,
 bytes are never fetched, expanded, or executed, and malformed or duplicate
 metadata fails closed. Schema-validation spans now live inside a bool-valued
 block expression, and the archive array node is read directly by its bound
-check and scoped loop instead of being copied into a longer-lived local.
+check and scoped loop instead of being copied into a longer-lived local. The
+archive record type and parser bounds stay private; the report function is the
+module's public entry point.
 
 The distribution ecosystem slice also includes a bounded Homebrew formula
 adapter: `src/rh_homebrew.elisa` and `rh_cli homebrew` consume
