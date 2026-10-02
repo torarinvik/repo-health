@@ -41,7 +41,7 @@ for want in ("dep-graph", "canonical-repo", "backup-binding", "adapter-transform
              "corrections-result", "inventory-observation",
              "vcs-observation", "vcs-page-chain-result", "patch-report", "notify-result",
              "query-result", "identity-result", "release-feed-result", "artifact-observation-result", "go-mod-observation-result", "go-zip-observation-result",
-             "identity-publication-result", "role-publication-result", "distribution-result", "rpm-spec-result", "archive-result", "homebrew-result",
+             "identity-publication-result", "role-publication-result", "distribution-result", "freebsd-catalog-result", "rpm-spec-result", "archive-result", "homebrew-result",
              "registry-meta-result", "depsdev-enrichment", "findings-input", "findings-result", "resolution-instance", "parser-diff", "pep440-result",
              "monitor-result", "quota-result", "privacy-input", "privacy-result",
              "privacy-history",

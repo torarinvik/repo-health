@@ -1176,6 +1176,20 @@ or resolve dependencies. `rh-alpine-apkindex-result/1` is covered by
 `schemas/alpine-apkindex-result.schema.json` and
 `tests/test_alpine_apkindex_cli.sh`.
 
+The FreeBSD pkg distribution path is `src/rh_freebsd_catalog.elisa` with
+`rh_cli freebsd-catalog --input <decoded-data.pkg-JSON> --out <file>`. It
+accepts the decoded `data.pkg` JSON payload and retains bounded package name,
+origin, version, ABI, architecture, checksum, size, license, dependency,
+provide, and require declarations. The documented `packages`, `groups`, and
+`expired_packages` top-level arrays are handled explicitly; unknown root keys
+and duplicate object keys fail closed, while unknown package fields and
+selected omitted fields are counted. Dependencies retain their package name,
+origin, and optional version without graph resolution. The adapter does not
+unpack repository archives, verify signatures, or inspect package bytes. Its
+public result is `rh-freebsd-catalog-result/1`, covered by
+`schemas/freebsd-catalog-result.schema.json` and
+`tests/test_freebsd_catalog_cli.sh` ([P35], [P36]).
+
 ### 13.3 Connector admission checklist
 
 Every new connector needs a source documentation review, capability manifest, authentication model, URL/transport security review, pagination tests, incremental/reconciliation design, source-to-canonical mapping table, fixture corpus, resource budgets, rights review, and operator documentation.
@@ -2109,7 +2123,7 @@ The product's own growth metrics—downloads, stars, or number of indexed reposi
 
 ## 28. Primary implementation references
 
-These primary sources were checked while preparing the design and the current implementation changes on 2026-09-20. Revalidate provider behavior and pin supported interfaces during each connector implementation. The companion architecture contains the broader reference list and source-specific support boundaries.
+These primary sources were checked while preparing the design and the current implementation changes on 2026-10-02. Revalidate provider behavior and pin supported interfaces during each connector implementation. The companion architecture contains the broader reference list and source-specific support boundaries.
 
 [P01]: https://docs.github.com/en/rest/metrics/traffic "GitHub traffic API and authorization/reporting limitations"
 [P02]: https://docs.deps.dev/api/v3/ "deps.dev package/dependency API and coverage"
@@ -2145,6 +2159,8 @@ These primary sources were checked while preparing the design and the current im
 [P32]: https://classic.yarnpkg.com/en/docs/yarn-lock "Yarn Classic v1 lockfile selectors and resolved dependency records"
 [P33]: https://github.com/pnpm/spec/blob/master/lockfile/9.0.md "pnpm lockfile v9 packages, snapshots, peer paths, and importer resolutions"
 [P34]: https://docs.github.com/en/rest/about-the-rest-api/api-versions "GitHub REST API supported versions and version header"
+[P35]: https://man.freebsd.org/cgi/man.cgi?query=pkg-repository&sektion=5 "FreeBSD pkg repository catalog files and data.pkg layout"
+[P36]: https://github.com/freebsd/pkg/blob/main/libpkg/pkg_manifest.c "FreeBSD pkg manifest field types and dependency declarations"
 
 | Reference | Implementation use |
 |---|---|
@@ -2171,6 +2187,7 @@ These primary sources were checked while preparing the design and the current im
 | [P28] / [P29] / [P30] / [P31] | Constrain ecosyste.ms to its documented one-package GET route; retain source attribution, the CC BY-SA 4.0 licence link, modification notice, and shared-quota failure semantics. |
 | [P32] | Pin Yarn support to Classic lockfile v1, resolve exact selectors, and keep other Yarn revisions outside this parser. |
 | [P33] | Pin pnpm support to lockfile v9.0; join exact importer and snapshot versions while preserving peer-suffixed paths as distinct resolution nodes. |
+| [P35] / [P36] | Pin the FreeBSD adapter to decoded `data.pkg` JSON and its documented package/dependency manifest fields; keep archive decompression and signature checks outside the parser. |
 
 ## 29. Final implementation rule
 

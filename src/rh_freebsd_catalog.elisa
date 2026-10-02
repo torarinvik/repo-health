@@ -1,0 +1,379 @@
+# rh_freebsd_catalog.elisa — bounded FreeBSD pkg repository catalog (M08).
+#
+# Accepts decoded data.pkg JSON only. It retains bounded package declarations
+# without unpacking the repository archive or claiming signatures were checked.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+
+module FreeBsdCatalog:
+    private:
+        const RH_FREEBSD_CATALOG_MAX_BYTES: usize = 8388608
+        const RH_FREEBSD_CATALOG_MAX_PACKAGES: i64 = 25000
+        const RH_FREEBSD_CATALOG_MAX_RELATIONS: i64 = 100000
+        const RH_FREEBSD_CATALOG_MAX_PACKAGE_KEYS: i64 = 128
+        const RH_FREEBSD_CATALOG_MAX_DEPENDENCIES: i64 = 256
+        const RH_FREEBSD_CATALOG_MAX_LIST_ITEMS: i64 = 64
+
+        def rh_freebsd_span_equal(texts: darray[u8]&, a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> bool:
+            return false if a_end < a_start or b_end < b_start or a_end - a_start != b_end - b_start
+            while offset < a_end - a_start |offset: i64 = 0, texts, a_start, b_start|:
+                return false if texts[(a_start + offset).usize()] != texts[(b_start + offset).usize()]
+                offset <- offset + 1
+            true
+
+        def rh_freebsd_key_is(texts: darray[u8]&, key: Json::RhJsonNode, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, key.text_start, key.text_end, literal)
+
+        def rh_freebsd_object_keys_unique(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key_limit: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if obj < 0
+            object: Json::RhJsonNode = nodes[obj.usize()]
+            return false if object.kind != Json::RH_JSON_OBJ or object.child_count > key_limit * 2
+            while key >= 0 |key: i64 = object.first_child, nodes, texts|:
+                key_node: Json::RhJsonNode = nodes[key.usize()]
+                return false if key_node.kind != Json::RH_JSON_STR or key_node.next_sibling < 0
+                return false if key_node.text_start < 0 or key_node.text_end <= key_node.text_start
+                next_key: i64 = nodes[key_node.next_sibling.usize()].next_sibling
+                while prior >= 0 and prior != key |prior: i64 = object.first_child, nodes, texts, key, key_node|:
+                    prior_node: Json::RhJsonNode = nodes[prior.usize()]
+                    return false if prior_node.kind != Json::RH_JSON_STR or prior_node.text_start < 0 or prior_node.text_end <= prior_node.text_start
+                    return false if FreeBsdCatalog::rh_freebsd_span_equal(texts, prior_node.text_start, prior_node.text_end, key_node.text_start, key_node.text_end)
+                    return false if prior_node.next_sibling < 0
+                    prior <- nodes[prior_node.next_sibling.usize()].next_sibling
+                key <- next_key
+            true
+
+        def rh_freebsd_package_key_known(texts: darray[u8]&, key: Json::RhJsonNode) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if key.kind != Json::RH_JSON_STR
+            # The manifest fields retained or intentionally omitted below.
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "abi")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "arch")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "name")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "origin")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "version")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "sum")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "pkgsize")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "flatsize")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "licenselogic")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "licenses")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "deps")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "provides")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "requires")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "comment")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "desc")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "maintainer")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "www")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "prefix")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "path")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "repopath")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "categories")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "files")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "directories")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "dirs")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "scripts")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "options")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "annotations")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "groups")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "conflicts")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "config")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "shlibs")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "shlibs_required")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "shlibs_provided")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "shlibs_provided_ignore")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "shlibs_required_ignore")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "users")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "vital")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "dep_formula")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "lua_scripts")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "messages")
+            return true if FreeBsdCatalog::rh_freebsd_key_is(texts, key, "message")
+            false
+
+        def rh_freebsd_omitted_free_text_key(texts: darray[u8]&, key: Json::RhJsonNode) -> bool can[Memory.Allocate, Abort.Panic]:
+            FreeBsdCatalog::rh_freebsd_key_is(texts, key, "comment") or FreeBsdCatalog::rh_freebsd_key_is(texts, key, "desc") or FreeBsdCatalog::rh_freebsd_key_is(texts, key, "maintainer") or FreeBsdCatalog::rh_freebsd_key_is(texts, key, "www") or FreeBsdCatalog::rh_freebsd_key_is(texts, key, "prefix") or FreeBsdCatalog::rh_freebsd_key_is(texts, key, "path") or FreeBsdCatalog::rh_freebsd_key_is(texts, key, "repopath")
+
+        def rh_freebsd_emit_string(out: mutable darray[u8]&, texts: darray[u8]&, nodes: darray[Json::RhJsonNode]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if idx < 0
+            node: Json::RhJsonNode = nodes[idx.usize()]
+            return false if node.kind != Json::RH_JSON_STR or node.text_start < 0 or node.text_end <= node.text_start
+            out.push(34)
+            Base::rh_json_escape(out, texts, node.text_start.usize(), node.text_end.usize())
+            out.push(34)
+            true
+
+        def rh_freebsd_emit_identity(out: mutable darray[u8]&, raw: darray[u8]&, texts: darray[u8]&, nodes: darray[Json::RhJsonNode]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if idx < 0
+            node: Json::RhJsonNode = nodes[idx.usize()]
+            if node.kind == Json::RH_JSON_STR:
+                return FreeBsdCatalog::rh_freebsd_emit_string(out, texts, nodes, idx)
+            if node.kind == Json::RH_JSON_NUM:
+                ok: mutable i64 = 0
+                value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
+                return false if ok == 0
+                Base::rh_push_decimal_i64(out, value)
+                return true
+            false
+
+        def rh_freebsd_emit_nullable_identity(out: mutable darray[u8]&, raw: darray[u8]&, texts: darray[u8]&, nodes: darray[Json::RhJsonNode]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            if idx < 0:
+                Base::rh_push_text(out, "null")
+                return true
+            if idx >= 0 and nodes[idx.usize()].kind == Json::RH_JSON_NULL:
+                Base::rh_push_text(out, "null")
+                return true
+            FreeBsdCatalog::rh_freebsd_emit_identity(out, raw, texts, nodes, idx)
+
+        def rh_freebsd_emit_optional_string(out: mutable darray[u8]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
+            if idx < 0:
+                Base::rh_push_text(out, "null")
+                return true
+            FreeBsdCatalog::rh_freebsd_emit_string(out, texts, nodes, idx)
+
+        def rh_freebsd_emit_optional_int(out: mutable darray[u8]&, raw: darray[u8]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
+            if idx < 0:
+                Base::rh_push_text(out, "null")
+                return true
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
+            return false if ok == 0 or value < 0
+            Base::rh_push_decimal_i64(out, value)
+            true
+
+        def rh_freebsd_array_strings_valid(nodes: darray[Json::RhJsonNode]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if idx < 0
+            array: Json::RhJsonNode = nodes[idx.usize()]
+            return false if array.kind != Json::RH_JSON_ARR or array.child_count > RH_FREEBSD_CATALOG_MAX_LIST_ITEMS
+            while child >= 0 |child: i64 = array.first_child, nodes|:
+                item: Json::RhJsonNode = nodes[child.usize()]
+                return false if item.kind != Json::RH_JSON_STR or item.text_end <= item.text_start
+                child <- item.next_sibling
+            true
+
+        def rh_freebsd_emit_string_array(out: mutable darray[u8]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not FreeBsdCatalog::rh_freebsd_array_strings_valid(nodes, idx)
+            array: Json::RhJsonNode = nodes[idx.usize()]
+            while child >= 0 |child: i64 = array.first_child, nodes, texts, out|:
+                item: Json::RhJsonNode = nodes[child.usize()]
+                out.push(44) if child != array.first_child
+                return false if not FreeBsdCatalog::rh_freebsd_emit_string(out, texts, nodes, child)
+                child <- item.next_sibling
+            true
+
+        def rh_freebsd_relation_count(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, packages: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            count: mutable i64 = 0
+            while package_idx >= 0 |package_idx: i64 = nodes[packages.usize()].first_child, nodes, texts, count|:
+                deps: i64 = Json::rh_json_obj_get(nodes, texts, package_idx, "deps")
+                if deps >= 0:
+                    dep_object: Json::RhJsonNode = nodes[deps.usize()]
+                    return -1 if dep_object.kind != Json::RH_JSON_OBJ or dep_object.child_count / 2 > RH_FREEBSD_CATALOG_MAX_DEPENDENCIES
+                    count <- count + dep_object.child_count / 2
+                provides: i64 = Json::rh_json_obj_get(nodes, texts, package_idx, "provides")
+                if provides >= 0:
+                    provides_node: Json::RhJsonNode = nodes[provides.usize()]
+                    return -1 if provides_node.kind != Json::RH_JSON_ARR
+                    count <- count + provides_node.child_count
+                requires: i64 = Json::rh_json_obj_get(nodes, texts, package_idx, "requires")
+                if requires >= 0:
+                    requires_node: Json::RhJsonNode = nodes[requires.usize()]
+                    return -1 if requires_node.kind != Json::RH_JSON_ARR
+                    count <- count + requires_node.child_count
+                return -1 if count > RH_FREEBSD_CATALOG_MAX_RELATIONS
+                package_idx <- nodes[package_idx.usize()].next_sibling
+            count
+
+        def rh_freebsd_dep_keys_supported(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, dep: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while key >= 0 |key: i64 = nodes[dep.usize()].first_child, nodes, texts, dep|:
+                key_node: Json::RhJsonNode = nodes[key.usize()]
+                return false if key_node.next_sibling < 0
+                return false if not FreeBsdCatalog::rh_freebsd_key_is(texts, key_node, "origin") and not FreeBsdCatalog::rh_freebsd_key_is(texts, key_node, "version")
+                key <- nodes[key_node.next_sibling.usize()].next_sibling
+            true
+
+        def rh_freebsd_emit_relations(out: mutable darray[u8]&, raw: darray[u8]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, package: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            first: mutable bool = true
+            deps: i64 = Json::rh_json_obj_get(nodes, texts, package, "deps")
+            if deps >= 0:
+                dep_object: Json::RhJsonNode = nodes[deps.usize()]
+                return false if dep_object.kind != Json::RH_JSON_OBJ or dep_object.child_count / 2 > RH_FREEBSD_CATALOG_MAX_DEPENDENCIES
+                return false if not FreeBsdCatalog::rh_freebsd_object_keys_unique(nodes, texts, deps, RH_FREEBSD_CATALOG_MAX_DEPENDENCIES)
+                while key >= 0 |key: i64 = dep_object.first_child, nodes, texts, out, raw, first, deps|:
+                    key_node: Json::RhJsonNode = nodes[key.usize()]
+                    dep_idx: i64 = key_node.next_sibling
+                    return false if dep_idx < 0 or key_node.kind != Json::RH_JSON_STR or key_node.text_end <= key_node.text_start
+                    dep: Json::RhJsonNode = nodes[dep_idx.usize()]
+                    return false if dep.kind != Json::RH_JSON_OBJ or not FreeBsdCatalog::rh_freebsd_object_keys_unique(nodes, texts, dep_idx, 4) or not FreeBsdCatalog::rh_freebsd_dep_keys_supported(nodes, texts, dep_idx)
+                    origin_idx: i64 = Json::rh_json_obj_get(nodes, texts, dep_idx, "origin")
+                    version_idx: i64 = Json::rh_json_obj_get(nodes, texts, dep_idx, "version")
+                    return false if origin_idx < 0
+                    out.push(44) if not first
+                    first <- false
+                    Base::rh_push_text(out, "{\"kind\":\"depends\",\"name\":")
+                    out.push(34)
+                    Base::rh_json_escape(out, texts, key_node.text_start.usize(), key_node.text_end.usize())
+                    Base::rh_push_text(out, "\",\"origin\":")
+                    return false if not FreeBsdCatalog::rh_freebsd_emit_string(out, texts, nodes, origin_idx)
+                    Base::rh_push_text(out, ",\"version\":")
+                    if version_idx < 0:
+                        Base::rh_push_text(out, "null")
+                    else:
+                        return false if not FreeBsdCatalog::rh_freebsd_emit_nullable_identity(out, raw, texts, nodes, version_idx)
+                    out.push(125)
+                    key <- nodes[dep_idx.usize()].next_sibling
+            while relation_group < 2 |relation_group: i64 = 0, nodes, texts, out, first, package|:
+                key: u8& = "provides" if relation_group == 0 else "requires"
+                kind: u8& = "provides" if relation_group == 0 else "requires"
+                array_idx: i64 = Json::rh_json_obj_get(nodes, texts, package, key)
+                if array_idx >= 0:
+                    return false if not FreeBsdCatalog::rh_freebsd_array_strings_valid(nodes, array_idx)
+                    array: Json::RhJsonNode = nodes[array_idx.usize()]
+                    while item_idx >= 0 |item_idx: i64 = array.first_child, nodes, texts, out, first, kind|:
+                        item: Json::RhJsonNode = nodes[item_idx.usize()]
+                        out.push(44) if not first
+                        first <- false
+                        Base::rh_push_text(out, "{\"kind\":\"")
+                        Base::rh_push_text(out, kind)
+                        Base::rh_push_text(out, "\",\"expression\":")
+                        return false if not FreeBsdCatalog::rh_freebsd_emit_string(out, texts, nodes, item_idx)
+                        out.push(125)
+                        item_idx <- item.next_sibling
+                relation_group <- relation_group + 1
+            true
+
+        def rh_freebsd_validate_package(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, package: i64, unknown_out: mutable i64&, omitted_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if package < 0 or not FreeBsdCatalog::rh_freebsd_object_keys_unique(nodes, texts, package, RH_FREEBSD_CATALOG_MAX_PACKAGE_KEYS)
+            name: i64 = Json::rh_json_obj_get(nodes, texts, package, "name")
+            version: i64 = Json::rh_json_obj_get(nodes, texts, package, "version")
+            origin: i64 = Json::rh_json_obj_get(nodes, texts, package, "origin")
+            return false if name < 0 or version < 0 or origin < 0
+            return false if not FreeBsdCatalog::rh_freebsd_emit_identity_check(nodes, raw, name) or not FreeBsdCatalog::rh_freebsd_emit_identity_check(nodes, raw, version)
+            return false if not FreeBsdCatalog::rh_freebsd_string_check(nodes, origin)
+            while key >= 0 |key: i64 = nodes[package.usize()].first_child, nodes, texts, package, unknown_out, omitted_out|:
+                key_node: Json::RhJsonNode = nodes[key.usize()]
+                value_idx: i64 = key_node.next_sibling
+                return false if value_idx < 0
+                unknown_out <- unknown_out + 1 if not FreeBsdCatalog::rh_freebsd_package_key_known(texts, key_node)
+                omitted_out <- omitted_out + 1 if FreeBsdCatalog::rh_freebsd_omitted_free_text_key(texts, key_node)
+                key <- nodes[value_idx.usize()].next_sibling
+            abi: i64 = Json::rh_json_obj_get(nodes, texts, package, "abi")
+            arch: i64 = Json::rh_json_obj_get(nodes, texts, package, "arch")
+            sum: i64 = Json::rh_json_obj_get(nodes, texts, package, "sum")
+            logic: i64 = Json::rh_json_obj_get(nodes, texts, package, "licenselogic")
+            return false if not FreeBsdCatalog::rh_freebsd_optional_string_check(nodes, abi) or not FreeBsdCatalog::rh_freebsd_optional_string_check(nodes, arch) or not FreeBsdCatalog::rh_freebsd_optional_string_check(nodes, sum) or not FreeBsdCatalog::rh_freebsd_optional_string_check(nodes, logic)
+            pkgsize: i64 = Json::rh_json_obj_get(nodes, texts, package, "pkgsize")
+            flatsize: i64 = Json::rh_json_obj_get(nodes, texts, package, "flatsize")
+            return false if not FreeBsdCatalog::rh_freebsd_optional_nonnegative_int(nodes, raw, pkgsize) or not FreeBsdCatalog::rh_freebsd_optional_nonnegative_int(nodes, raw, flatsize)
+            licenses: i64 = Json::rh_json_obj_get(nodes, texts, package, "licenses")
+            return false if licenses >= 0 and not FreeBsdCatalog::rh_freebsd_array_strings_valid(nodes, licenses)
+            true
+
+        def rh_freebsd_emit_identity_check(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if idx < 0
+            node: Json::RhJsonNode = nodes[idx.usize()]
+            if node.kind == Json::RH_JSON_STR:
+                return node.text_end > node.text_start
+            if node.kind == Json::RH_JSON_NUM:
+                ok: mutable i64 = 0
+                Json::rh_json_int(nodes, raw, idx, &ok)
+                return ok != 0
+            false
+
+        def rh_freebsd_string_check(nodes: darray[Json::RhJsonNode]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if idx < 0
+            node: Json::RhJsonNode = nodes[idx.usize()]
+            node.kind == Json::RH_JSON_STR and node.text_end > node.text_start
+
+        def rh_freebsd_optional_string_check(nodes: darray[Json::RhJsonNode]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if idx < 0
+            FreeBsdCatalog::rh_freebsd_string_check(nodes, idx)
+
+        def rh_freebsd_optional_nonnegative_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, idx: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if idx < 0
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
+            ok != 0 and value >= 0
+
+        def rh_freebsd_root_key_supported(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, key: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            key_node: Json::RhJsonNode = nodes[key.usize()]
+            FreeBsdCatalog::rh_freebsd_key_is(texts, key_node, "packages") or FreeBsdCatalog::rh_freebsd_key_is(texts, key_node, "groups") or FreeBsdCatalog::rh_freebsd_key_is(texts, key_node, "expired_packages")
+        def rh_freebsd_root_valid(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            while key >= 0 |key: i64 = nodes[root.usize()].first_child, nodes, texts, root|:
+                key_node: Json::RhJsonNode = nodes[key.usize()]
+                return false if key_node.next_sibling < 0 or not FreeBsdCatalog::rh_freebsd_root_key_supported(nodes, texts, key)
+                key <- nodes[key_node.next_sibling.usize()].next_sibling
+            true
+
+        def rh_freebsd_optional_array_count(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, root: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            idx: i64 = Json::rh_json_obj_get(nodes, texts, root, key)
+            return 0 if idx < 0
+            array: Json::RhJsonNode = nodes[idx.usize()]
+            return -1 if array.kind != Json::RH_JSON_ARR or array.child_count > RH_FREEBSD_CATALOG_MAX_PACKAGES
+            array.child_count
+
+    public:
+        def rh_freebsd_catalog_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if raw.count == 0 or raw.count > RH_FREEBSD_CATALOG_MAX_BYTES
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0
+            root_node: Json::RhJsonNode = nodes[root.usize()]
+            return -1 if root_node.kind != Json::RH_JSON_OBJ or not FreeBsdCatalog::rh_freebsd_object_keys_unique(nodes, texts, root, 8) or not FreeBsdCatalog::rh_freebsd_root_valid(nodes, texts, root)
+            packages: i64 = Json::rh_json_obj_get(nodes, texts, root, "packages")
+            return -1 if packages < 0
+            package_array: Json::RhJsonNode = nodes[packages.usize()]
+            return -1 if package_array.kind != Json::RH_JSON_ARR or package_array.child_count <= 0 or package_array.child_count > RH_FREEBSD_CATALOG_MAX_PACKAGES
+            groups_count: i64 = FreeBsdCatalog::rh_freebsd_optional_array_count(nodes, texts, root, "groups")
+            expired_count: i64 = FreeBsdCatalog::rh_freebsd_optional_array_count(nodes, texts, root, "expired_packages")
+            return -1 if groups_count < 0 or expired_count < 0
+            unknown_fields: mutable i64 = 0
+            omitted_free_text: mutable i64 = 0
+            while package >= 0 |package: i64 = package_array.first_child, nodes, raw, texts, unknown_fields, omitted_free_text|:
+                return -1 if not FreeBsdCatalog::rh_freebsd_validate_package(nodes, raw, texts, package, &unknown_fields, &omitted_free_text)
+                package <- nodes[package.usize()].next_sibling
+            relations: i64 = FreeBsdCatalog::rh_freebsd_relation_count(nodes, texts, packages)
+            return -1 if relations < 0
+            Base::rh_push_text(out, "{\"schema\":\"rh-freebsd-catalog-result/1\",\"format\":\"freebsd-pkg-data-json\",\"packages\":[")
+            while package >= 0 |package: i64 = package_array.first_child, nodes, raw, texts, out|:
+                node: Json::RhJsonNode = nodes[package.usize()]
+                out.push(44) if package != package_array.first_child
+                Base::rh_push_text(out, "{\"name\":")
+                name: i64 = Json::rh_json_obj_get(nodes, texts, package, "name")
+                return -1 if not FreeBsdCatalog::rh_freebsd_emit_identity(out, raw, texts, nodes, name)
+                Base::rh_push_text(out, ",\"origin\":")
+                origin: i64 = Json::rh_json_obj_get(nodes, texts, package, "origin")
+                return -1 if not FreeBsdCatalog::rh_freebsd_emit_string(out, texts, nodes, origin)
+                Base::rh_push_text(out, ",\"version\":")
+                version: i64 = Json::rh_json_obj_get(nodes, texts, package, "version")
+                return -1 if not FreeBsdCatalog::rh_freebsd_emit_identity(out, raw, texts, nodes, version)
+                Base::rh_push_text(out, ",\"abi\":")
+                return -1 if not FreeBsdCatalog::rh_freebsd_emit_optional_string(out, nodes, texts, package, "abi")
+                Base::rh_push_text(out, ",\"architecture\":")
+                return -1 if not FreeBsdCatalog::rh_freebsd_emit_optional_string(out, nodes, texts, package, "arch")
+                Base::rh_push_text(out, ",\"checksum_claim\":")
+                return -1 if not FreeBsdCatalog::rh_freebsd_emit_optional_string(out, nodes, texts, package, "sum")
+                Base::rh_push_text(out, ",\"package_size\":")
+                return -1 if not FreeBsdCatalog::rh_freebsd_emit_optional_int(out, raw, nodes, texts, package, "pkgsize")
+                Base::rh_push_text(out, ",\"installed_size\":")
+                return -1 if not FreeBsdCatalog::rh_freebsd_emit_optional_int(out, raw, nodes, texts, package, "flatsize")
+                Base::rh_push_text(out, ",\"license_logic\":")
+                return -1 if not FreeBsdCatalog::rh_freebsd_emit_optional_string(out, nodes, texts, package, "licenselogic")
+                Base::rh_push_text(out, ",\"licenses\":[")
+                licenses: i64 = Json::rh_json_obj_get(nodes, texts, package, "licenses")
+                if licenses >= 0:
+                    return -1 if not FreeBsdCatalog::rh_freebsd_emit_string_array(out, nodes, texts, licenses)
+                Base::rh_push_text(out, "],\"relations\":[")
+                return -1 if not FreeBsdCatalog::rh_freebsd_emit_relations(out, raw, nodes, texts, package)
+                Base::rh_push_text(out, "]}")
+                package <- node.next_sibling
+            Base::rh_push_text(out, "],\"unknown_package_fields\":")
+            Base::rh_push_decimal_i64(out, unknown_fields)
+            Base::rh_push_text(out, ",\"omitted_free_text_fields\":")
+            Base::rh_push_decimal_i64(out, omitted_free_text)
+            Base::rh_push_text(out, ",\"omitted_group_count\":")
+            Base::rh_push_decimal_i64(out, groups_count)
+            Base::rh_push_text(out, ",\"omitted_expired_package_count\":")
+            Base::rh_push_decimal_i64(out, expired_count)
+            Base::rh_push_text(out, ",\"note\":\"Input is decoded FreeBSD pkg repository data.pkg JSON. Package metadata and dependency declarations are preserved as claims; repository archive signatures, package bytes, and dependency resolution are not verified\"}")
+            0

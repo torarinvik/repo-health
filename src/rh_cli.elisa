@@ -87,6 +87,7 @@ include "./rh_identity_evidence.elisa"
 include "./rh_identity_publication.elisa"
 include "./rh_distribution.elisa"
 include "./rh_alpine_index.elisa"
+include "./rh_freebsd_catalog.elisa"
 include "./rh_rpm.elisa"
 include "./rh_archive.elisa"
 include "./rh_homebrew.elisa"
@@ -225,6 +226,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli assessment-dedup --input <rh-assessment-dedup-input/1> --out <file>")
     rh_cli_err("       rh_cli distribution --input <debian/control> --out <file>")
     rh_cli_err("       rh_cli apkindex --input <decoded-APKINDEX-text> --out <file>")
+    rh_cli_err("       rh_cli freebsd-catalog --input <decoded-data.pkg-JSON> --out <file>")
     rh_cli_err("       rh_cli rpm-spec --input <file.spec> --out <file>")
     rh_cli_err("       rh_cli archive --input <file> --out <file>")
     rh_cli_err("       rh_cli homebrew --input <file> --out <file>")
@@ -2728,6 +2730,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 aq <- aq + 1
         return rh_cli_usage(2) if ai_idx < 0 or ao_idx < 0
         return rh_do_apkindex(slots[ai_idx], slots[ao_idx])
+    if Base::rh_streq(cmd, "freebsd-catalog"):
+        fci_idx, fco_idx =
+            while fcq < argc |fci_idx: i64 = -1, fco_idx: i64 = -1, fcq: i64 = 2, slots| -> fci_idx, fco_idx:
+                fca: u8& = slots[fcq].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(fca, "--input"):
+                    if fcq + 1 < argc:
+                        fcq <- fcq + 1
+                        fci_idx <- fcq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(fca, "--out"):
+                    if fcq + 1 < argc:
+                        fcq <- fcq + 1
+                        fco_idx <- fcq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                fcq <- fcq + 1
+        return rh_cli_usage(2) if fci_idx < 0 or fco_idx < 0
+        return rh_do_freebsd_catalog(slots[fci_idx], slots[fco_idx])
     if Base::rh_streq(cmd, "rpm-spec"):
         rsi_idx, rso_idx =
             while rsq < argc |rsi_idx: i64 = -1, rso_idx: i64 = -1, rsq: i64 = 2, slots| -> rsi_idx, rso_idx:
@@ -10118,6 +10141,43 @@ def rh_do_apkindex(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate,
         rh_cli_err("apkindex: cannot write transformation report")
         return 4
     rh_cli_out("apkindex: ok")
+    0
+
+# --- M08 bounded FreeBSD pkg repository catalog path. ---
+# This consumes the decoded JSON payload from data.pkg. Repository archive
+# decompression and signature verification remain separate capabilities.
+def rh_do_freebsd_catalog(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected freebsd-catalog argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        Base::rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if Base::rh_io_read(ipp, raw) < 0:
+        rh_cli_err("freebsd-catalog: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if FreeBsdCatalog::rh_freebsd_catalog_report(raw, body) != 0:
+        rh_cli_err("freebsd-catalog: malformed or unsupported decoded data.pkg JSON (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] =
+        op: mutable darray[u8] = []
+        Base::rh_push_cstr(op, out_path)
+        op.push(0)
+        op
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not Base::rh_io_write(opp, body):
+        rh_cli_err("freebsd-catalog: cannot write --out")
+        return 4
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "freebsd-pkg-data-json", "rh-freebsd-catalog-result/1", "repo-health/freebsd-pkg-data-json/1", "[{\"source\":\"package name, origin, version, ABI, architecture, sizes, checksums, and licenses\",\"target\":\"normalized package observations\",\"state\":\"preserved\"},{\"source\":\"dependency, provide, and require declarations\",\"target\":\"package relations\",\"state\":\"transformed\"},{\"source\":\"omitted optional package fields\",\"target\":\"unknown or null metadata\",\"state\":\"unknown\"},{\"source\":\"repository archive signatures, package bytes, and dependency resolution\",\"target\":\"normalized result\",\"state\":\"unsupported\"},{\"source\":\"maintainer, description, paths, and unrelated package metadata\",\"target\":\"public result\",\"state\":\"discarded\"}]", out_path):
+        rh_cli_err("freebsd-catalog: cannot write transformation report")
+        return 4
+    rh_cli_out("freebsd-catalog: ok")
     0
 
 # --- M08 bounded RPM spec metadata path. ---
