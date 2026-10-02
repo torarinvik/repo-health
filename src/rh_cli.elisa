@@ -7546,8 +7546,8 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
         rh_cli_err("correct: evidence reference is malformed, missing, or corrupt")
         return 4
     access_report: mutable darray[u8] = []
+    policy_raw: mutable darray[u8] = []
     if has_evidence_policy:
-        policy_raw: mutable darray[u8] = []
         if Base::rh_io_read(evidence_policy_path, policy_raw) < 0:
             rh_cli_err("correct: cannot read --evidence-policy file")
             return 4
@@ -7572,28 +7572,27 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
     p_rev: mutable i64 = 0
     p_wm: mutable i64 = 0
     prior_sup: mutable darray[i64] = []
+    prior_state: mutable darray[u8] = []
     if has_state:
         Base::rh_push_cstr(spath, state_path)
         spath.push(0)
         spp <- (&spath[0]).cast[cstr] can Unsafe.PointerCast
-        sraw: mutable darray[u8] = []
         if file_exists(spp):
-            if Base::rh_io_read(spp, sraw) < 0:
+            if Base::rh_io_read(spp, prior_state) < 0:
                 rh_cli_err("correct: cannot read --state file")
                 return 4
-        if CorrectionReport::rh_correction_state_parse(sraw, &p_rev, &p_wm, prior_sup) != 0:
+        if CorrectionReport::rh_correction_state_parse(prior_state, &p_rev, &p_wm, prior_sup) != 0:
             rh_cli_err("correct: not a valid rh-corrections-state/1 document (fail closed)")
             return 4
     elif has_state_root:
         if Git::rh_ensure_dir(state_root) != 0:
             rh_cli_err("correct: cannot create --state-store")
             return 4
-        sraw: mutable darray[u8] = []
-        loaded: i64 = StateStore::rh_state_store_load(state_root, sraw)
+        loaded: i64 = StateStore::rh_state_store_load(state_root, prior_state)
         if loaded < 0:
             rh_cli_err("correct: corrupt --state-store (fail closed)")
             return 4
-        if CorrectionReport::rh_correction_state_parse(sraw, &p_rev, &p_wm, prior_sup) != 0:
+        if CorrectionReport::rh_correction_state_parse(prior_state, &p_rev, &p_wm, prior_sup) != 0:
             rh_cli_err("correct: not a valid rh-corrections-state/1 document (fail closed)")
             return 4
     body: mutable darray[u8] = []
@@ -7676,6 +7675,38 @@ def rh_do_correct_state(corrections_path: cstr, out: cstr, state_path: cstr, has
             if StateStore::rh_state_store_publish(state_root, sb, sid) != 0:
                 rh_cli_err("correct: cannot publish --state-store")
                 return 4
+    source_binding: mutable darray[u8] =
+        corrections_sha: mutable darray[u8] = []
+        state_sha: mutable darray[u8] = []
+        policy_sha: mutable darray[u8] = []
+        Sha256::rh_sha256(raw, corrections_sha)
+        Sha256::rh_sha256(prior_state, state_sha)
+        Sha256::rh_sha256(policy_raw, policy_sha)
+        binding: mutable darray[u8] = []
+        Base::rh_push_text(binding, "repo-health/correction-result-input/1\ncorrections_sha256:")
+        binding.extend(bytes_view(corrections_sha))
+        Base::rh_push_text(binding, "\nstate_mode:")
+        Base::rh_push_text(binding, "file") if has_state
+        Base::rh_push_text(binding, "store") if has_state_root
+        Base::rh_push_text(binding, "none") if not has_state and not has_state_root
+        Base::rh_push_text(binding, "\nprior_state_sha256:")
+        binding.extend(bytes_view(state_sha))
+        Base::rh_push_text(binding, "\nevidence_mode:")
+        Base::rh_push_text(binding, "content-address-verified") if has_evidence_root
+        Base::rh_push_text(binding, "reference-only") if not has_evidence_root
+        Base::rh_push_text(binding, "\npolicy_mode:")
+        Base::rh_push_text(binding, "verified") if has_evidence_policy
+        Base::rh_push_text(binding, "unconfigured") if not has_evidence_policy
+        Base::rh_push_text(binding, "\npolicy_sha256:")
+        binding.extend(bytes_view(policy_sha))
+        Base::rh_push_text(binding, "\nevidence_now:")
+        Base::rh_push_cstr(binding, evidence_now_text) if has_evidence_now
+        Base::rh_push_text(binding, "none") if not has_evidence_now
+        binding.push(10)
+        binding
+    if not AdapterTransformationCli::rh_write_sidecar(source_binding, body, "reviewed-correction-application", "rh-corrections-result/1", "repo-health/correction-application/1;accepted=advance-and-replay;rejected-open=no-op;supersession=derived-revision", "[{\"source\":\"exact correction document and prior-state digest bindings\",\"target\":\"revision-scoped correction result\",\"state\":\"preserved\"},{\"source\":\"accepted corrections and raw replay expressions\",\"target\":\"revision transitions and corrected results\",\"state\":\"transformed\"},{\"source\":\"rejected or open corrections\",\"target\":\"no-op ledger entries\",\"state\":\"preserved\"},{\"source\":\"independent evidence truth and unlisted derived outputs\",\"target\":\"correction result\",\"state\":\"unsupported\"}]", opp):
+        rh_cli_err("correct: cannot write transformation report")
+        return 4
     rh_cli_out("correct: ok")
     0
 

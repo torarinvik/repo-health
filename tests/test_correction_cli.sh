@@ -13,6 +13,34 @@ T="/tmp/rh-correct"
 
 fail() { echo "[correct] FAIL: $1" >&2; exit 1; }
 
+check_transformation() {
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" <<'PY'
+import hashlib, json, sys
+result_path, corrections_path, prior_state_path, state_mode, evidence_mode, policy_path, evidence_now = sys.argv[1:]
+corrections = open(corrections_path, "rb").read()
+prior_state = b"" if prior_state_path == "-" else open(prior_state_path, "rb").read()
+policy = b"" if policy_path == "-" else open(policy_path, "rb").read()
+digest = lambda value: hashlib.sha256(value).hexdigest().encode()
+binding = (b"repo-health/correction-result-input/1\ncorrections_sha256:" + digest(corrections)
+           + b"\nstate_mode:" + state_mode.encode()
+           + b"\nprior_state_sha256:" + digest(prior_state)
+           + b"\nevidence_mode:" + evidence_mode.encode()
+           + b"\npolicy_mode:" + (b"verified" if policy_path != "-" else b"unconfigured")
+           + b"\npolicy_sha256:" + digest(policy)
+           + b"\nevidence_now:" + evidence_now.encode() + b"\n")
+result = open(result_path, "rb").read()
+report = json.load(open(result_path + ".transformations.json"))
+configuration = b"repo-health/correction-application/1;accepted=advance-and-replay;rejected-open=no-op;supersession=derived-revision"
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "reviewed-correction-application" and report["output_schema"] == "rh-corrections-result/1", report
+assert report["source_input_sha256"] == hashlib.sha256(binding).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(result).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), report
+assert [field["state"] for field in report["fields"]] == ["preserved", "transformed", "preserved", "unsupported"], report
+print("[correct] transformation report binds exact correction, prior state, policy, result, and configuration")
+PY
+}
+
 echo "[correct] build"
 bash "$ROOT/tools/build.sh" >/dev/null
 [[ -x "$ROOT/build/rh_cli" ]] || fail "rh_cli not built"
@@ -38,6 +66,7 @@ assert d["input_sha256"] == hashlib.sha256(open(source, "rb").read()).hexdigest(
 assert d["policy_sha256"] == hashlib.sha256(open(policy, "rb").read()).hexdigest(), d
 print("[correct] digest-bound evidence authorization record OK")
 PY
+check_transformation "$T/policy-allowed/corrections-result.json" "$T/verified.json" - none content-address-verified "$T/evidence-policy.json" 1700000100
 python3 - "$T/evidence-policy.json" "$T/evidence-expired.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1])); d["grants"][0]["retain_until"] = 1700000100
@@ -102,6 +131,7 @@ assert d["replay"] == [{"subject_id": 7, "value": 5},
 assert "raw inputs are never rewritten" in d["note"], d["note"]
 print("[correct] applied/superseded/replay OK")
 PY
+check_transformation "$T/o/corrections-result.json" "$T/corr.json" - none reference-only - none
 python3 - "$T/o/corrections-notices.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -182,6 +212,7 @@ assert d["revision"] == 2 and d["watermark"] == 2, d
 assert d["superseded_subjects"] == [7], d
 print("[correct] state after run 1 OK")
 PY
+check_transformation "$T/d1/corrections-result.json" "$T/dur.json" - file reference-only - none
 cp "$T/state.json" "$T/state.snap"
 # Replaying the *same* document must not advance or re-supersede (idempotent).
 "$ROOT/build/rh_cli" correct --corrections "$T/dur.json" --out "$T/d2" --state "$T/state.json" >/dev/null || fail "second durable run"
@@ -192,6 +223,7 @@ import json, sys
 assert json.load(open(sys.argv[1]))["notices"] == []
 print("[correct] replay emits no duplicate notices")
 PY
+check_transformation "$T/d2/corrections-result.json" "$T/dur.json" "$T/state.snap" file reference-only - none
 cmp -s "$T/state.json" "$T/state.snap" || fail "state write-back must be deterministic"
 # A persisted revision floor with a watermark covering the document lifts the
 # result even with no new corrections folded in.
@@ -216,6 +248,8 @@ rev_store="$(python3 -c "import json;print(json.load(open('$T/cs2/corrections-re
 [[ "$rev_store" == "2" ]] || fail "state-store replay must stay at rev 2 (got $rev_store)"
 cs_id="$(tr -d '\n' < "$CS/current")"
 "$ROOT/build/rh_cli" store verify --root "$CS" --name "$cs_id" >/dev/null || fail "correction state-store blob verification"
+check_transformation "$T/cs1/corrections-result.json" "$T/dur.json" - store reference-only - none
+check_transformation "$T/cs2/corrections-result.json" "$T/dur.json" "$CS/$cs_id" store reference-only - none
 echo "[correct] state-store OK"
 
 echo "test_correction_cli OK"
