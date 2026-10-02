@@ -362,6 +362,108 @@ assert metrics["contributor.known_human_accounts"] == expected["known_human_acco
 print("[identity] all 4,096 triangle lifecycle/metadata pairings match independent graph and classification oracles")
 PY
 
+echo "[identity] pairwise actor metadata under all link lifecycle states"
+python3 - "$T/metadata-pairs.json" "$T/metadata-pairs-expected.json" <<'PY'
+import itertools, json, pathlib, sys
+
+input_path, expected_path = map(pathlib.Path, sys.argv[1:])
+states = ("accepted", "proposed", "rejected", "revoked")
+kinds = ("human", "bot_known", "service_known", "unresolved")
+sources = ("provider", "project", "operator", "unknown")
+metadata = tuple(itertools.product(kinds, sources, (False, True), (False, True)))
+actor_count = len(metadata) ** 2 * 2
+links = []
+actor_kinds = []
+actor_kind_sources = []
+actor_kind_observed_at = []
+actor_kind_evidence_refs = []
+classifications = []
+kind_counts = {kind: 0 for kind in kinds}
+source_counts = {source: 0 for source in sources}
+time_counts = {"observed": 0, "unknown": 0}
+evidence_counts = {"present": 0, "unknown": 0}
+parent = list(range(actor_count))
+
+def find(actor):
+    while parent[actor] != actor:
+        actor = parent[actor]
+    return actor
+
+for pair_index, (left_metadata, right_metadata) in enumerate(itertools.product(metadata, repeat=2)):
+    first_actor = pair_index * 2
+    state = states[pair_index % len(states)]
+    links.append({
+        "a": first_actor,
+        "b": first_actor + 1,
+        "state": state,
+        "revision_added": 1,
+    })
+    if state == "accepted":
+        parent[first_actor + 1] = first_actor
+    for actor_id, declaration in ((first_actor, left_metadata), (first_actor + 1, right_metadata)):
+        kind, source, has_time, has_evidence = declaration
+        observed_at = 1900000000 + actor_id if has_time else None
+        evidence_ref = f"evidence:pair-actor-{actor_id}" if has_evidence else None
+        actor_kinds.append(kind)
+        actor_kind_sources.append(source)
+        actor_kind_observed_at.append(observed_at)
+        actor_kind_evidence_refs.append(evidence_ref)
+        classifications.append({
+            "actor_id": actor_id,
+            "kind": kind,
+            "source": source,
+            "observed_at": observed_at,
+            "evidence_ref": evidence_ref,
+        })
+        kind_counts[kind] += 1
+        source_counts[source] += 1
+        time_counts["observed" if has_time else "unknown"] += 1
+        evidence_counts["present" if has_evidence else "unknown"] += 1
+
+clusters = {}
+for actor in range(actor_count):
+    clusters.setdefault(find(actor), []).append(actor)
+cluster_id_by_actor = [find(actor) for actor in range(actor_count)]
+document = {
+    "schema": "rh-identity-input/1",
+    "actor_count": actor_count,
+    "links": links,
+    "actor_kinds": actor_kinds,
+    "actor_kind_sources": actor_kind_sources,
+    "actor_kind_observed_at": actor_kind_observed_at,
+    "actor_kind_evidence_refs": actor_kind_evidence_refs,
+}
+expected = {
+    "actor_count": actor_count,
+    "clusters": list(clusters.values()),
+    "cluster_id_by_actor": cluster_id_by_actor,
+    "identity_revision": max((link["revision_added"] for link in links
+                               if link["state"] in ("accepted", "revoked")), default=0),
+    "actor_kinds": kind_counts,
+    "actor_kind_sources": source_counts,
+    "actor_kind_observation_times": time_counts,
+    "actor_kind_evidence_references": evidence_counts,
+    "actor_classifications": classifications,
+    "accepted_actor_clusters": len(clusters),
+    "known_human_accounts": kind_counts["human"],
+}
+input_path.write_text(json.dumps(document, separators=(",", ":")) + "\n")
+expected_path.write_text(json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+"$ROOT/build/rh_cli" identity --input "$T/metadata-pairs.json" --out "$T/metadata-pairs.out" >/dev/null || fail "pairwise actor metadata lifecycle product"
+python3 - "$T/metadata-pairs-expected.json" "$T/metadata-pairs.out" <<'PY'
+import json, sys
+expected, actual = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
+for field, value in expected.items():
+    if field in ("accepted_actor_clusters", "known_human_accounts"):
+        continue
+    assert actual[field] == value, (field, actual.get(field), value)
+metrics = {metric["key"]: metric["value"] for metric in actual["metrics"]}
+assert metrics["contributor.accepted_actor_clusters"] == expected["accepted_actor_clusters"], metrics
+assert metrics["contributor.known_human_accounts"] == expected["known_human_accounts"], metrics
+print("[identity] all 4,096 ordered metadata pairs preserve both actors under accepted/proposed/rejected/revoked links")
+PY
+
 echo "[identity] rejecting a link changes nothing; revoking recomputes"
 "$ROOT/build/rh_cli" identity --input "$T/b.json" --out "$T/b.out" >/dev/null || fail "B run"
 python3 - "$T/a.out" "$T/b.out" <<'PY'
