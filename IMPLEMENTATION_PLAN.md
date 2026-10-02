@@ -1127,7 +1127,9 @@ adapter: `src/rh_homebrew.elisa` and `rh_cli homebrew` consume
 `rh-homebrew-formula/1`, retain stable version/link/digest assertions and
 runtime/build/optional/test dependency declarations, and emit
 `rh-homebrew-result/1`. Formula descriptions, install outcomes, package
-manager execution, and dependency resolution remain outside the adapter.
+manager execution, and dependency resolution remain outside the adapter. Its
+schema spans are confined to a bool-valued block expression, and dependency
+array heads are read directly in scoped loops.
 
 The RPM distribution path is `src/rh_rpm.elisa` with `rh_cli rpm-spec
 --input <file.spec> --out <file>`. It reads only the spec preamble, preserves
