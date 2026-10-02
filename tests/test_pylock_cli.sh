@@ -614,6 +614,22 @@ name = 'x'
 name = 'x.tar.gz'
 url = 'https://example.invalid/x.tar.gz'
 EOF
+cat > "$T/missing-artifact-locator-table.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+[[packages.wheels]]
+name = 'x.whl'
+hashes = {sha256 = 'aa'}
+EOF
+cat > "$T/missing-artifact-locator-inline.toml" <<'EOF'
+lock-version = '1.0'
+created-by = 'uv'
+[[packages]]
+name = 'x'
+wheels = [{name = 'x.whl', hashes = {sha256 = 'aa'}}]
+EOF
 cat > "$T/duplicate-artifact-hash.toml" <<'EOF'
 lock-version = '1.0'
 created-by = 'uv'
@@ -654,7 +670,7 @@ import sys
 claims = ", ".join("claim_%d = 'value'" % index for index in range(257))
 open(sys.argv[1], "w").write("lock-version = '1.0'\ncreated-by = 'uv'\n[[packages]]\nname = 'x'\n[[packages.attestation-identities]]\nkind = 'GitHub'\nclaims = {" + claims + "}\n")
 PY
-for input in "$T/missing-artifact-hash.toml" "$T/duplicate-artifact-hash.toml" "$T/missing-attestation-kind.toml" "$T/duplicate-attestation-field.toml" "$T/non-string-attestation-claim.toml" "$T/too-many-attestation-claims.toml"; do
+for input in "$T/missing-artifact-hash.toml" "$T/missing-artifact-locator-table.toml" "$T/missing-artifact-locator-inline.toml" "$T/duplicate-artifact-hash.toml" "$T/missing-attestation-kind.toml" "$T/duplicate-attestation-field.toml" "$T/non-string-attestation-claim.toml" "$T/too-many-attestation-claims.toml"; do
   set +e
   "$ROOT/build/rh_cli" pylock --input "$input" --out "$T/bad-artifact.json" >/dev/null 2>&1
   rc=$?
