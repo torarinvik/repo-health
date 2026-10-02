@@ -36,6 +36,20 @@ assert d["next_due_at"] == 186400, d
 assert "never silently skips reconciles" in d["note"], d
 print("[reconcile] due OK")
 PY
+python3 - "$T/due.json" "$T/due.out" <<'PY'
+import hashlib, json, sys
+source = open(sys.argv[1], "rb").read()
+output = open(sys.argv[2], "rb").read()
+report = json.load(open(sys.argv[2] + ".transformations.json"))
+configuration = b"repo-health/reconcile-schedule/1;interval=positive-required;overlap-default=3600;full-completion=external"
+assert report["schema"] == "rh-adapter-transformation-report/1", report
+assert report["adapter"] == "reconcile-schedule-planner" and report["output_schema"] == "rh-reconcile-result/1", report
+assert report["source_input_sha256"] == hashlib.sha256(source).hexdigest(), report
+assert report["normalized_output_sha256"] == hashlib.sha256(output).hexdigest(), report
+assert report["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), report
+assert [field["state"] for field in report["fields"]] == ["preserved", "transformed", "unsupported"], report
+print("[reconcile] transformation report binds exact schedule input, result, and fixed rules")
+PY
 
 echo "[reconcile] on-schedule tick is incremental and carries no debt"
 cat > "$T/inc.json" <<'JSON'
@@ -68,6 +82,7 @@ echo "[reconcile] determinism"
 a="$("$ROOT/build/rh_cli" reconcile --input "$T/due.json" --out "$T/d1" >/dev/null; cat "$T/d1")"
 b="$("$ROOT/build/rh_cli" reconcile --input "$T/due.json" --out "$T/d2" >/dev/null; cat "$T/d2")"
 [[ "$a" == "$b" ]] || fail "reconcile must be deterministic"
+cmp -s "$T/d1.transformations.json" "$T/d2.transformations.json" || fail "reconcile transformation report must be deterministic"
 
 echo "[reconcile] malformed input fails closed"
 check_rc() {

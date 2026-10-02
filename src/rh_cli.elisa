@@ -9044,79 +9044,99 @@ def rh_do_reconcile(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate
     if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ:
         rh_cli_err("reconcile: not a valid rh-reconcile-input/1 document (fail closed)")
         return 4
-    ss: mutable i64 = 0
-    se: mutable i64 = 0
-    sidx: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
-    if sidx < 0 or not Json::rh_json_str_span(nodes, sidx, &ss, &se):
+    schema_valid: bool =
+        ss: mutable i64 = 0
+        se: mutable i64 = 0
+        sidx: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
+        if sidx < 0:
+            false
+        elif not Json::rh_json_str_span(nodes, sidx, &ss, &se):
+            false
+        else:
+            Job::rh_job_lit_eq(texts, ss, se, "rh-reconcile-input/1")
+    if not schema_valid:
         rh_cli_err("reconcile: not a valid rh-reconcile-input/1 document (fail closed)")
         return 4
-    if not Job::rh_job_lit_eq(texts, ss, se, "rh-reconcile-input/1"):
-        rh_cli_err("reconcile: not a valid rh-reconcile-input/1 document (fail closed)")
-        return 4
-    ok_iv: mutable i64 = 0
-    interval: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, root, "interval_secs"), &ok_iv)
-    if ok_iv == 0 or interval <= 0:
-        rh_cli_err("reconcile: missing/invalid interval_secs (fail closed)")
-        return 4
-    ok_now: mutable i64 = 0
-    now: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, root, "now"), &ok_now)
-    if ok_now == 0 or now < 0:
-        rh_cli_err("reconcile: missing/invalid now (fail closed)")
-        return 4
-    last_full: mutable i64 = -1
-    lf: i64 = Json::rh_json_obj_get(nodes, texts, root, "last_full_reconcile")
-    if lf >= 0:
-        ok_lf: mutable i64 = 0
-        v: i64 = Json::rh_json_int(nodes, raw, lf, &ok_lf)
-        if ok_lf == 0 or v < -1:
-            rh_cli_err("reconcile: invalid last_full_reconcile (fail closed)")
+    interval: i64 =
+        ok: mutable i64 = 0
+        value: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, root, "interval_secs"), &ok)
+        if ok == 0 or value <= 0:
+            rh_cli_err("reconcile: missing/invalid interval_secs (fail closed)")
             return 4
-        last_full <- v
-    cursor: mutable i64 = -1
-    ci: i64 = Json::rh_json_obj_get(nodes, texts, root, "cursor_time")
-    if ci >= 0:
-        ok_c: mutable i64 = 0
-        cv: i64 = Json::rh_json_int(nodes, raw, ci, &ok_c)
-        if ok_c == 0 or cv < -1:
-            rh_cli_err("reconcile: invalid cursor_time (fail closed)")
+        value
+    now: i64 =
+        ok: mutable i64 = 0
+        value: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, root, "now"), &ok)
+        if ok == 0 or value < 0:
+            rh_cli_err("reconcile: missing/invalid now (fail closed)")
             return 4
-        cursor <- cv
-    overlap: mutable i64 = 3600
-    oi: i64 = Json::rh_json_obj_get(nodes, texts, root, "overlap_secs")
-    if oi >= 0:
-        ok_o: mutable i64 = 0
-        ov: i64 = Json::rh_json_int(nodes, raw, oi, &ok_o)
-        if ok_o == 0 or ov < 0:
-            rh_cli_err("reconcile: invalid overlap_secs (fail closed)")
-            return 4
-        overlap <- ov
+        value
+    last_full: i64 =
+        idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "last_full_reconcile")
+        if idx < 0:
+            -1
+        else:
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
+            if ok == 0 or value < -1:
+                rh_cli_err("reconcile: invalid last_full_reconcile (fail closed)")
+                return 4
+            value
+    cursor: i64 =
+        idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "cursor_time")
+        if idx < 0:
+            -1
+        else:
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
+            if ok == 0 or value < -1:
+                rh_cli_err("reconcile: invalid cursor_time (fail closed)")
+                return 4
+            value
+    overlap: i64 =
+        idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "overlap_secs")
+        if idx < 0:
+            3600
+        else:
+            ok: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
+            if ok == 0 or value < 0:
+                rh_cli_err("reconcile: invalid overlap_secs (fail closed)")
+                return 4
+            value
     mode: u8 = Reconcile::rh_reconcile_mode(last_full, interval, now)
     horizon: i64 = Reconcile::rh_reconcile_horizon(last_full, now)
     debt: i64 = Reconcile::rh_reconcile_debt(last_full, interval, now)
     next_due: i64 = Reconcile::rh_reconcile_next_due(last_full, interval)
     ovl_start: i64 = Reconcile::rh_cursor_overlap_start(cursor, overlap)
-    body: mutable darray[u8] = []
-    Base::rh_push_text(body, "{\"schema\":\"rh-reconcile-result/1\",\"mode\":\"")
-    if mode == Reconcile::RH_RECON_DUE:
-        Base::rh_push_text(body, "full")
-    else:
-        Base::rh_push_text(body, "incremental")
-    Base::rh_push_text(body, "\",\"interval_secs\":")
-    Base::rh_push_decimal_i64(body, interval)
-    Base::rh_push_text(body, ",\"last_full_reconcile\":")
-    Base::rh_push_decimal_i64(body, last_full)
-    Base::rh_push_text(body, ",\"next_due_at\":")
-    Base::rh_push_decimal_i64(body, next_due)
-    Base::rh_push_text(body, ",\"horizon_secs\":")
-    Base::rh_push_decimal_i64(body, horizon)
-    Base::rh_push_text(body, ",\"schedule_debt\":")
-    Base::rh_push_decimal_i64(body, debt)
-    Base::rh_push_text(body, ",\"cursor_time\":")
-    Base::rh_push_decimal_i64(body, cursor)
-    Base::rh_push_text(body, ",\"overlap_start\":")
-    Base::rh_push_decimal_i64(body, ovl_start)
-    Base::rh_push_text(body, ",\"note\":\"only a completed full reconcile advances the full-reconcile clock; incremental cursors never do; a due full reconcile covers the whole interval since the last full reconcile because a cursor proves which updates were seen, not what was deleted; schedule debt raises a service-health signal and never silently skips reconciles\"}")
-    body.push(10)
+    mode_text: mutable darray[u8] =
+        mode_text: mutable darray[u8] = []
+        if mode == Reconcile::RH_RECON_DUE:
+            Base::rh_push_text(mode_text, "full")
+        else:
+            Base::rh_push_text(mode_text, "incremental")
+        mode_text
+    body: mutable darray[u8] =
+        body: mutable darray[u8] = []
+        Base::rh_push_text(body, "{\"schema\":\"rh-reconcile-result/1\",\"mode\":\"")
+        body.extend(bytes_view(mode_text))
+        Base::rh_push_text(body, "\",\"interval_secs\":")
+        Base::rh_push_decimal_i64(body, interval)
+        Base::rh_push_text(body, ",\"last_full_reconcile\":")
+        Base::rh_push_decimal_i64(body, last_full)
+        Base::rh_push_text(body, ",\"next_due_at\":")
+        Base::rh_push_decimal_i64(body, next_due)
+        Base::rh_push_text(body, ",\"horizon_secs\":")
+        Base::rh_push_decimal_i64(body, horizon)
+        Base::rh_push_text(body, ",\"schedule_debt\":")
+        Base::rh_push_decimal_i64(body, debt)
+        Base::rh_push_text(body, ",\"cursor_time\":")
+        Base::rh_push_decimal_i64(body, cursor)
+        Base::rh_push_text(body, ",\"overlap_start\":")
+        Base::rh_push_decimal_i64(body, ovl_start)
+        Base::rh_push_text(body, ",\"note\":\"only a completed full reconcile advances the full-reconcile clock; incremental cursors never do; a due full reconcile covers the whole interval since the last full reconcile because a cursor proves which updates were seen, not what was deleted; schedule debt raises a service-health signal and never silently skips reconciles\"}")
+        body.push(10)
+        body
     op: mutable darray[u8] =
         op: mutable darray[u8] = []
         Base::rh_push_cstr(op, out_path)
@@ -9126,15 +9146,17 @@ def rh_do_reconcile(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate
     if not Base::rh_io_write(opp, body):
         rh_cli_err("reconcile: cannot write --out")
         return 4
-    done: mutable darray[u8] = []
-    Base::rh_push_text(done, "reconcile: mode=")
-    if mode == Reconcile::RH_RECON_DUE:
-        Base::rh_push_text(done, "full")
-    else:
-        Base::rh_push_text(done, "incremental")
-    Base::rh_push_text(done, " debt=")
-    Base::rh_push_decimal_i64(done, debt)
-    done.push(10)
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "reconcile-schedule-planner", "rh-reconcile-result/1", "repo-health/reconcile-schedule/1;interval=positive-required;overlap-default=3600;full-completion=external", "[{\"source\":\"exact reconcile input and scheduling parameters\",\"target\":\"validated schedule decision inputs\",\"state\":\"preserved\"},{\"source\":\"interval, full-reconcile time, cursor, overlap, and now\",\"target\":\"mode, horizon, debt, due time, and overlap start\",\"state\":\"transformed\"},{\"source\":\"provider acquisition and completed full reconciliation\",\"target\":\"schedule projection\",\"state\":\"unsupported\"}]", out_path):
+        rh_cli_err("reconcile: cannot write transformation report")
+        return 4
+    done: mutable darray[u8] =
+        done: mutable darray[u8] = []
+        Base::rh_push_text(done, "reconcile: mode=")
+        done.extend(bytes_view(mode_text))
+        Base::rh_push_text(done, " debt=")
+        Base::rh_push_decimal_i64(done, debt)
+        done.push(10)
+        done
     Base::rh_write_stdout(done)
     0
 
