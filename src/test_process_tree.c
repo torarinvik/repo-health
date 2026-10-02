@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <time.h>
@@ -43,6 +44,20 @@ int main(int argc, char **argv) {
             pause_millis(2);
         }
         for (size_t index = 0; index < count; ++index) (void)waitpid(children[index], NULL, 0);
+        return 42;
+    }
+    if (argv[1][0] == 'e') {
+        pid_t child = fork();
+        if (child < 0) return 5;
+        if (child == 0) {
+            if (setsid() < 0) _exit(6);
+            pause_millis(250);
+            int marker = open("/tmp/rh-process-escaped-descendant-survived",
+                              O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (marker >= 0) close(marker);
+            _exit(0);
+        }
+        pause_millis(10000);
         return 42;
     }
     return 2;

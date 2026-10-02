@@ -35,11 +35,11 @@ BASE_LINK_FLAGS="${BASE_LINK_FLAGS:+$BASE_LINK_FLAGS }build/rh_process.o"
 compile() {
   local src="$1" name="$2"
   local out="$ROOT/build/$name"
-  # Incremental: skip when the binary is newer than every source module and
-  # than this script. Keeps the single local suite fast; delete build/ to
-  # force a clean rebuild.
+  # Incremental: skip when the binary is newer than every Elisa source,
+  # the linked process bridge, and this script. Keeps local suites fast;
+  # delete build/ to force a clean rebuild.
   if [[ -x "$out" && -z "$(find "$ROOT/src" -name '*.elisa' -newer "$out" -print -quit 2>/dev/null)" \
-     && "$out" -nt "${BASH_SOURCE[0]}" ]]; then
+     && "$out" -nt "$PROCESS_OBJECT" && "$out" -nt "${BASH_SOURCE[0]}" ]]; then
     return 0
   fi
   echo "compile $src -> build/$name"

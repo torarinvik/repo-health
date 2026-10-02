@@ -166,6 +166,176 @@ static int rh_process_nonblocking(int descriptor) {
     return flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) < 0 ? -1 : 0;
 }
 
+typedef struct {
+    pid_t pid;
+    pid_t parent;
+    uint64_t start_time;
+    int descendant;
+} rh_process_identity;
+
+static int rh_process_identity_compare(const void *left, const void *right) {
+    const rh_process_identity *a = left;
+    const rh_process_identity *b = right;
+    return (a->pid > b->pid) - (a->pid < b->pid);
+}
+
+static rh_process_identity *rh_process_identity_find(rh_process_identity *items,
+                                                      size_t count, pid_t pid) {
+    size_t low = 0;
+    size_t high = count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (items[middle].pid < pid) low = middle + 1;
+        else high = middle;
+    }
+    return low < count && items[low].pid == pid ? &items[low] : NULL;
+}
+
+#if defined(__APPLE__)
+static int rh_process_read_identity(pid_t pid, rh_process_identity *identity) {
+    struct proc_bsdinfo info;
+    int bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (bytes != sizeof(info)) return bytes == 0 ? ESRCH : EIO;
+    identity->pid = pid;
+    identity->parent = (pid_t)info.pbi_ppid;
+    identity->start_time = (uint64_t)info.pbi_start_tvsec * 1000000 +
+                           (uint64_t)info.pbi_start_tvusec;
+    return 0;
+}
+
+static int rh_process_snapshot(rh_process_identity **items_out,
+                               size_t *count_out) {
+    enum { MAX_SYSTEM_PROCESSES = 65536 };
+    pid_t *pids = malloc((size_t)MAX_SYSTEM_PROCESSES * sizeof(*pids));
+    if (pids == NULL) return ENOMEM;
+    int bytes = proc_listpids(PROC_ALL_PIDS, 0, pids,
+                              MAX_SYSTEM_PROCESSES * (int)sizeof(*pids));
+    if (bytes < 0) { int error = errno == 0 ? EIO : errno; free(pids); return error; }
+    if (bytes >= MAX_SYSTEM_PROCESSES * (int)sizeof(*pids) ||
+        bytes % (int)sizeof(*pids) != 0) { free(pids); return E2BIG; }
+    size_t capacity = (size_t)bytes / sizeof(*pids);
+    rh_process_identity *items = calloc(capacity == 0 ? 1 : capacity, sizeof(*items));
+    if (items == NULL) { free(pids); return ENOMEM; }
+    size_t count = 0;
+    for (size_t index = 0; index < capacity; ++index) {
+        if (pids[index] <= 0) continue;
+        rh_process_identity identity = {0};
+        if (rh_process_read_identity(pids[index], &identity) != 0) continue;
+        items[count++] = identity;
+    }
+    free(pids);
+    qsort(items, count, sizeof(*items), rh_process_identity_compare);
+    *items_out = items;
+    *count_out = count;
+    return 0;
+}
+#elif defined(__linux__)
+static int rh_process_read_identity(pid_t pid, rh_process_identity *identity) {
+    char path[64];
+    int length = snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+    if (length < 0 || (size_t)length >= sizeof(path)) return EIO;
+    FILE *file = fopen(path, "r");
+    if (file == NULL) return errno == 0 ? EIO : errno;
+    char line[4096];
+    if (fgets(line, sizeof(line), file) == NULL) { fclose(file); return EIO; }
+    fclose(file);
+    char *command_end = strrchr(line, ')');
+    if (command_end == NULL || command_end[1] != ' ') return EIO;
+    char *cursor = command_end + 2;
+    if (*cursor == '\0') return EIO;
+    cursor += 1;
+    char *end = NULL;
+    long long parent = strtoll(cursor, &end, 10);
+    if (end == cursor || parent < 0 || parent > INT_MAX) return EIO;
+    long long start_time = 0;
+    for (int field = 5; field <= 22; ++field) {
+        cursor = end;
+        long long value = strtoll(cursor, &end, 10);
+        if (end == cursor) return EIO;
+        if (field == 22) start_time = value;
+    }
+    if (start_time < 0) return EIO;
+    identity->pid = pid;
+    identity->parent = (pid_t)parent;
+    identity->start_time = (uint64_t)start_time;
+    return 0;
+}
+
+static int rh_process_snapshot(rh_process_identity **items_out,
+                               size_t *count_out) {
+    enum { MAX_SYSTEM_PROCESSES = 65536 };
+    DIR *directory = opendir("/proc");
+    if (directory == NULL) return errno == 0 ? EIO : errno;
+    size_t capacity = 256;
+    size_t count = 0;
+    rh_process_identity *items = malloc(capacity * sizeof(*items));
+    if (items == NULL) { closedir(directory); return ENOMEM; }
+    struct dirent *entry;
+    int result = 0;
+    while ((entry = readdir(directory)) != NULL) {
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
+        char *pid_end = NULL;
+        long raw_pid = strtol(entry->d_name, &pid_end, 10);
+        if (pid_end == entry->d_name || *pid_end != '\0' || raw_pid <= 0 || raw_pid > INT_MAX) continue;
+        rh_process_identity identity = {0};
+        int error = rh_process_read_identity((pid_t)raw_pid, &identity);
+        if (error == ESRCH || error == ENOENT) continue;
+        if (error != 0) { result = error; break; }
+        if (count == MAX_SYSTEM_PROCESSES) { result = E2BIG; break; }
+        if (count == capacity) {
+            size_t next_capacity = capacity * 2;
+            rh_process_identity *next = realloc(items, next_capacity * sizeof(*items));
+            if (next == NULL) { result = ENOMEM; break; }
+            items = next;
+            capacity = next_capacity;
+        }
+        items[count++] = identity;
+    }
+    closedir(directory);
+    if (result != 0) { free(items); return result; }
+    qsort(items, count, sizeof(*items), rh_process_identity_compare);
+    *items_out = items;
+    *count_out = count;
+    return 0;
+}
+#endif
+
+/* Best-effort cleanup for live descendants that deliberately leave the group. */
+static void rh_process_kill_descendants(pid_t root) {
+    rh_process_identity *items = NULL;
+    size_t count = 0;
+    if (rh_process_snapshot(&items, &count) != 0) return;
+    rh_process_identity *root_identity = rh_process_identity_find(items, count, root);
+    if (root_identity == NULL) { free(items); return; }
+    root_identity->descendant = 1;
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (size_t index = 0; index < count; ++index) {
+            if (items[index].descendant || items[index].parent <= 0) continue;
+            rh_process_identity *parent = rh_process_identity_find(items, count,
+                                                                    items[index].parent);
+            if (parent != NULL && parent->descendant) {
+                items[index].descendant = 1;
+                changed = 1;
+            }
+        }
+    }
+    for (size_t index = 0; index < count; ++index) {
+        if (!items[index].descendant || items[index].pid == root) continue;
+        rh_process_identity current = {0};
+        if (rh_process_read_identity(items[index].pid, &current) == 0 &&
+            current.start_time == items[index].start_time)
+            (void)kill(items[index].pid, SIGKILL);
+    }
+    free(items);
+}
+
+static void rh_process_cancel(pid_t child, int child_reaped) {
+    if (!child_reaped) rh_process_kill_descendants(child);
+    (void)kill(-child, SIGKILL);
+}
+
 /* Account for the complete spawned process group, including descendants. */
 static int rh_process_group_usage(pid_t group, size_t *processes_out,
                                   uint64_t *memory_out) {
@@ -382,8 +552,8 @@ static int rh_process_run_inner(const char *executable, const char *argv_flat,
     int result_code = 0;
     while (stdout_open || stderr_open || !child_reaped) {
         int64_t now = rh_process_millis();
-        if (now < 0) { result_kind = RH_PROCESS_IO_ERROR; result_code = EIO; (void)kill(-child, SIGKILL); break; }
-        if (now - started >= timeout_ms) { result_kind = RH_PROCESS_TIMEOUT; result_code = timeout_ms; (void)kill(-child, SIGKILL); break; }
+        if (now < 0) { result_kind = RH_PROCESS_IO_ERROR; result_code = EIO; rh_process_cancel(child, child_reaped); break; }
+        if (now - started >= timeout_ms) { result_kind = RH_PROCESS_TIMEOUT; result_code = timeout_ms; rh_process_cancel(child, child_reaped); break; }
         if (now - last_resource_sample >= RH_PROCESS_RESOURCE_SAMPLE_MS) {
             size_t group_processes = 0;
             uint64_t group_memory = 0;
@@ -401,7 +571,7 @@ static int rh_process_run_inner(const char *executable, const char *argv_flat,
                 result_code = usage_error != 0 ? usage_error :
                     group_processes > RH_PROCESS_MAX_GROUP_PROCESSES ?
                     RH_PROCESS_MAX_GROUP_PROCESSES : RH_PROCESS_MAX_GROUP_MEMORY_MIB;
-                (void)kill(-child, SIGKILL);
+                rh_process_cancel(child, child_reaped);
                 break;
             }
         }
@@ -415,13 +585,13 @@ static int rh_process_run_inner(const char *executable, const char *argv_flat,
         int remaining = timeout_ms - (int)(now - started);
         int wait_ms = remaining < 10 ? remaining : 10;
         int polled = poll(fds, count, wait_ms);
-        if (polled < 0 && errno != EINTR) { result_kind = RH_PROCESS_IO_ERROR; result_code = errno; (void)kill(-child, SIGKILL); break; }
+        if (polled < 0 && errno != EINTR) { result_kind = RH_PROCESS_IO_ERROR; result_code = errno; rh_process_cancel(child, child_reaped); break; }
 
         if (input_slot >= 0 && polled > 0 && (fds[input_slot].revents & (POLLOUT | POLLERR | POLLHUP))) {
             ssize_t written = write(input_pipe[1], input_data + input_written, input_length - input_written);
             if (written > 0) input_written += (size_t)written;
             else if (written < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-                result_kind = RH_PROCESS_IO_ERROR; result_code = EIO; (void)kill(-child, SIGKILL); break;
+                result_kind = RH_PROCESS_IO_ERROR; result_code = EIO; rh_process_cancel(child, child_reaped); break;
             }
             if (input_written == input_length) rh_process_close(&input_pipe[1]);
         }
@@ -442,23 +612,23 @@ static int rh_process_run_inner(const char *executable, const char *argv_flat,
                         else *stream_bytes += (size_t)bytes;
                     }
                     if ((size_t)bytes > max_output_bytes - output_bytes) {
-                        result_kind = RH_PROCESS_OUTPUT_LIMIT; result_code = (int)max_output_bytes; (void)kill(-child, SIGKILL); goto finished;
+                        result_kind = RH_PROCESS_OUTPUT_LIMIT; result_code = (int)max_output_bytes; rh_process_cancel(child, child_reaped); goto finished;
                     }
                     output_bytes += (size_t)bytes;
                     if (output_fds[stream] >= 0 && rh_process_write_all(output_fds[stream], buffer, (size_t)bytes) != 0) {
-                        result_kind = RH_PROCESS_IO_ERROR; result_code = EIO; (void)kill(-child, SIGKILL); goto finished;
+                        result_kind = RH_PROCESS_IO_ERROR; result_code = EIO; rh_process_cancel(child, child_reaped); goto finished;
                     }
                 } else if (bytes == 0) {
                     *open_flags[stream] = 0; rh_process_close(read_fds[stream]); break;
                 } else if (errno == EINTR) continue;
                 else if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                else { result_kind = RH_PROCESS_IO_ERROR; result_code = errno; (void)kill(-child, SIGKILL); goto finished; }
+                else { result_kind = RH_PROCESS_IO_ERROR; result_code = errno; rh_process_cancel(child, child_reaped); goto finished; }
             }
         }
         if (!child_reaped) {
             pid_t waited = waitpid(child, &status, WNOHANG);
             if (waited == child) child_reaped = 1;
-            else if (waited < 0 && errno != EINTR) { result_kind = RH_PROCESS_IO_ERROR; result_code = errno; (void)kill(-child, SIGKILL); break; }
+            else if (waited < 0 && errno != EINTR) { result_kind = RH_PROCESS_IO_ERROR; result_code = errno; rh_process_cancel(child, child_reaped); break; }
         }
     }
 finished:
