@@ -34,8 +34,23 @@ assert d["records"] == [
 ], d
 print("[snapshot-reconcile] complete scope OK")
 PY
+python3 - "$T/complete.json" "$T/complete.out" <<'PY'
+import hashlib, json, sys
+raw = open(sys.argv[1], "rb").read()
+normalized = open(sys.argv[2], "rb").read()
+sidecar = json.load(open(sys.argv[2] + ".transformations.json"))
+configuration = b"repo-health/snapshot-reconcile/1;scope=source,capability,scope;clear=complete-or-empty"
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "scoped-snapshot-reconciliation" and sidecar["output_schema"] == "rh-snapshot-reconcile-result/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["preserved", "transformed", "transformed", "unknown", "unsupported"], sidecar
+print("[snapshot-reconcile] exact input/output binding and replacement semantics retained")
+PY
 run "$T/complete.json" "$T/complete-again.out" || fail "repeat complete snapshot"
 cmp -s "$T/complete.out" "$T/complete-again.out" || fail "snapshot replay not deterministic"
+cmp -s "$T/complete.out.transformations.json" "$T/complete-again.out.transformations.json" || fail "snapshot reconciliation sidecar not deterministic"
 
 echo "[snapshot-reconcile] successful empty snapshot clears covered scope"
 cat > "$T/empty.json" <<'JSON'
