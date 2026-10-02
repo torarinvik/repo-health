@@ -30,10 +30,25 @@ assert d["degree_summary"] == {"max_out": 2, "max_out_node": 0, "max_in": 2, "ma
 assert d["rebuildable"] is True and "canonical edge order" in d["note"], d
 print("[index] digest + incoming/outgoing CSR layout OK")
 PY
+python3 - "$T/graph.json" "$T/out.json" <<'PY'
+import hashlib, json, sys
+raw = open(sys.argv[1], "rb").read()
+normalized = open(sys.argv[2], "rb").read()
+sidecar = json.load(open(sys.argv[2] + ".transformations.json"))
+configuration = b"repo-health/query-csr-index/1;edge-order=canonical;directions=incoming,outgoing"
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "canonical-graph-csr-index" and sidecar["output_schema"] == "rh-index-manifest/1", sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["transformed", "preserved", "transformed", "discarded", "unsupported"], sidecar
+print("[index] transformation sidecar binds CSR construction and discarded graph fields")
+PY
 
 echo "[index] determinism + malformed input fails closed"
 "$ROOT/build/rh_cli" index --input "$T/graph.json" --out "$T/out2.json" >/dev/null || fail "rerun"
 cmp -s "$T/out.json" "$T/out2.json" || fail "index output not deterministic"
+cmp -s "$T/out.json.transformations.json" "$T/out2.json.transformations.json" || fail "index transformation report not deterministic"
 sed 's/"to":3/"to":9/' "$T/graph.json" > "$T/bad-edge.json"
 printf 'not json\n' > "$T/notjson"
 set +e
