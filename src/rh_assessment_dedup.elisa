@@ -93,25 +93,25 @@ module AssessmentDedup:
             return false if left.original_time != right.original_time
             Base::rh_bytes_equal_span(texts, left.result_digest_s, left.result_digest_e, texts, right.result_digest_s, right.result_digest_e)
 
-        def rh_dedup_append_key_part(material: mutable darray[u8]&, texts: darray[u8]&, start: i64, stop: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_dedup_append_key_part(material: mutable darray[u8]&, texts: darray[u8]&, start: i64, stop: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_push_decimal_i64(material, stop - start)
             material.push(58)
-            while index < stop.usize() |index: usize = start.usize(), stop, texts, material|:
-                material.push(texts[index])
-                index <- index + 1
+            return false if Base::rh_absorb_span(texts, start, stop, material) < 0
             material.push(10)
+            true
 
-        def rh_dedup_origin_key(record: RhAssessmentDelivery, texts: darray[u8]&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+        def rh_dedup_origin_key(record: RhAssessmentDelivery, texts: darray[u8]&, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
             material: mutable darray[u8] = []
-            AssessmentDedup::rh_dedup_append_key_part(material, texts, record.tool_s, record.tool_e)
-            AssessmentDedup::rh_dedup_append_key_part(material, texts, record.version_s, record.version_e)
+            return false if not AssessmentDedup::rh_dedup_append_key_part(material, texts, record.tool_s, record.tool_e)
+            return false if not AssessmentDedup::rh_dedup_append_key_part(material, texts, record.version_s, record.version_e)
             Base::rh_push_decimal_i64(material, record.subject_revision)
             material.push(10)
-            AssessmentDedup::rh_dedup_append_key_part(material, texts, record.original_run_s, record.original_run_e)
+            return false if not AssessmentDedup::rh_dedup_append_key_part(material, texts, record.original_run_s, record.original_run_e)
             Base::rh_push_decimal_i64(material, record.original_time)
             material.push(10)
-            AssessmentDedup::rh_dedup_append_key_part(material, texts, record.result_digest_s, record.result_digest_e)
+            return false if not AssessmentDedup::rh_dedup_append_key_part(material, texts, record.result_digest_s, record.result_digest_e)
             Sha256::rh_sha256(material, out)
+            true
 
         def rh_dedup_emit_span(out: mutable darray[u8]&, texts: darray[u8]&, start: i64, stop: i64) -> void can[Memory.Allocate, Abort.Panic]:
             out.push(34)
@@ -184,10 +184,9 @@ module AssessmentDedup:
                         item.group_id <- complete_groups
                         complete_groups <- complete_groups + 1
                         key: mutable darray[u8] = []
-                        AssessmentDedup::rh_dedup_origin_key(item, texts, key)
+                        return -1 if not AssessmentDedup::rh_dedup_origin_key(item, texts, key)
                         item.key_offset <- digests.count.i64()
-                        for i in 0..<key.count |i, key, digests|:
-                            digests.push(key[i])
+                        digests.extend(bytes_view(key))
                 else:
                     possible_duplicates <- possible_duplicates + 1
                 rows.push(item)
