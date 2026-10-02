@@ -1163,8 +1163,9 @@ population, ingestion, drill-down, role-grain, adapter-manifest, and
 conformance-ledger contracts, each with its version token, a stability class
 (frozen/additive), and a compatibility rule; the version token must literally
 appear in the artifact and each contract cites a test token that must exist.
-`rh_cli pilot-review` records mapping-review, correction-turnaround,
-decision-usefulness, provider-outage, and measured-cost inputs as
+`rh_cli pilot-review` records mapping review, separate correction effort and
+turnaround, denominator-bound decision/correctness/actionability/evidence
+counts, provider-outage, and measured-cost inputs as
 `rh-pilot-review-result/1`; it does not turn supplied observations into an
 independent audit or release verdict. `docs/operations/PILOT.md` defines the
 consent-based stages, private case ledger, aggregate record, and closeout gate;

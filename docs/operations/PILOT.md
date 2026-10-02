@@ -55,15 +55,20 @@ mapping from pseudonyms to projects separately with access limited to the
 review team.
 
 The `rh_cli pilot-review` record is the bounded aggregate, not the case ledger.
-It accepts mapping counts, requested/resolved corrections and median
-turnaround, usefulness and false-positive/false-negative counts, one outage
-observation, and measured event/byte/time costs. Keep the detailed case ledger
-under the pilot's restricted retention policy. Do not infer missing counts as
-zero. Record the review scope as a pilot sample and keep the operator-provided
-observations distinct from independent verification.
+It accepts mapping counts, requested/resolved corrections, median turnaround,
+and active maintainer effort in seconds. Decision usefulness can include a
+reviewed-finding denominator plus counts for decisions changed, correct and
+actionable findings, and unknowns resolved by evidence. These counts must fit
+within that denominator; partial detail groups fail closed. Older inputs may
+omit the new fields, which serialize as `null` rather than zero. Keep the
+detailed case ledger under the pilot's restricted retention policy. Record the
+review scope as a pilot sample and keep the operator-provided observations
+distinct from independent verification.
 
 For each completed review, prepare an input with schema
-`rh-pilot-review-input/1` and run:
+`rh-pilot-review-input/1`; its input and result shapes are checked by
+`schemas/pilot-review-input.schema.json` and
+`schemas/pilot-review-result.schema.json`. Run:
 
 ```sh
 build/rh_cli pilot-review --input pilot-review-input.json --out pilot-review-result.json
