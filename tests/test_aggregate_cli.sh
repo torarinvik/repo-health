@@ -17,9 +17,9 @@ cat > "$T/in.json" <<'JSON'
 {"schema":"rh-aggregate-input/1","events":[{"id":"e1","actor":"a","kind":"commit","role":"author","at":1700000000},{"id":"e2","actor":"b","kind":"review","role":"reviewer","at":1700000100},{"id":"e3","actor":"a","kind":"release","role":"author","at":1700600000}],"corrections":[{"id":"e1","action":"replace","reason":"actor correction"},{"id":"e3","action":"retract","reason":"duplicate release"}]}
 JSON
 "$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/out.json" >/dev/null || fail "aggregate run"
-python3 - "$T/out.json" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
+python3 - "$T/in.json" "$T/out.json" <<'PY'
+import hashlib, json, sys
+d = json.load(open(sys.argv[2]))
 assert d["schema"] == "rh-aggregate-result/1", d
 assert d["windowing"] == {"daily_seconds": 86400, "weekly_seconds": 604800, "timezone": "utc_epoch"}, d
 assert d["daily"] == [
@@ -33,7 +33,18 @@ assert d["weekly"] == [
 assert d["corrections"] == {"count": 2, "invalidated_daily": [19675, 19682], "invalidated_weekly": [2810, 2811]}, d["corrections"]
 assert d["validation"]["full_recompute_equivalent"] is True, d
 assert "never rewrite raw events" in d["note"], d
+raw = open(sys.argv[1], "rb").read()
+normalized = open(sys.argv[2], "rb").read()
+sidecar = json.load(open(sys.argv[2] + ".transformations.json"))
+configuration = b"repo-health/event-aggregate/2;daily=86400;weekly=604800;timezone=utc_epoch;corrections=invalidation-only;roles=distinct-actors"
+assert sidecar["schema"] == "rh-adapter-transformation-report/1", sidecar
+assert sidecar["adapter"] == "validated-event-aggregate" and sidecar["output_schema"] == d["schema"], sidecar
+assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
+assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(configuration).hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["transformed", "transformed", "discarded", "unsupported"], sidecar
 print("[aggregate] daily/weekly counts + correction invalidation OK")
+print("[aggregate] transformation report binds exact event input, output, and bucket rules")
 PY
 
 python3 - "$T/oracle-in.json" "$T/oracle-expected.json" <<'PY'
@@ -124,6 +135,7 @@ echo "[aggregate] durable exact-snapshot cache reuses a verified projection"
 "$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/state-first.json" --state-store "$T/state-store" > "$T/state-first.out" || fail "cache first projection"
 "$ROOT/build/rh_cli" aggregate --input "$T/in.json" --out "$T/state-second.json" --state-store "$T/state-store" > "$T/state-second.out" || fail "cache replay projection"
 cmp -s "$T/state-first.json" "$T/state-second.json" || fail "cached projection differs"
+cmp -s "$T/state-first.json.transformations.json" "$T/state-second.json.transformations.json" || fail "cached transformation report differs"
 grep -q 'cache=miss' "$T/state-first.out" || fail "first state-store run should compute"
 grep -q 'cache=hit' "$T/state-second.out" || fail "identical state-store run should reuse"
 python3 - "$T/in.json" "$T/in-permuted.json" <<'PY'
