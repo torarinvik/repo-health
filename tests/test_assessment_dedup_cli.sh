@@ -108,7 +108,7 @@ assert report["deliveries"][0]["assessment_key"] == report["deliveries"][1]["ass
 print("[assessment-dedup] delivery source is preserved but excluded from the origin key")
 PY
 
-python3 - "$ROOT/fixtures/lineage/assessment-dedup-input.json" "$T/bad-digest.json" "$T/duplicate-delivery.json" "$T/negative-revision.json" "$T/too-many.json" <<'PY'
+python3 - "$ROOT/fixtures/lineage/assessment-dedup-input.json" "$T/bad-digest.json" "$T/duplicate-delivery.json" "$T/negative-revision.json" "$T/too-many.json" "$T/bad-source.json" "$T/long-source.json" <<'PY'
 import json, sys
 source = json.load(open(sys.argv[1]))
 bad = json.loads(json.dumps(source)); bad["deliveries"][1]["result_digest"] = "bad"
@@ -123,10 +123,16 @@ large["deliveries"] = large["deliveries"][:4097]
 for index, row in enumerate(large["deliveries"]):
     row["delivery_id"] = f"delivery-{index}"
 json.dump(large, open(sys.argv[5], "w"), separators=(",", ":"))
+bad_source = json.loads(json.dumps(source)); bad_source["deliveries"][1]["delivery_source"] = "deps.dev/index"
+json.dump(bad_source, open(sys.argv[6], "w"))
+long_source = json.loads(json.dumps(source)); long_source["deliveries"][1]["delivery_source"] = "s" * 129
+json.dump(long_source, open(sys.argv[7], "w"))
 PY
 expect 4 "$CLI" assessment-dedup --input "$T/bad-digest.json" --out "$T/rejected.json"
 expect 4 "$CLI" assessment-dedup --input "$T/duplicate-delivery.json" --out "$T/rejected.json"
 expect 4 "$CLI" assessment-dedup --input "$T/negative-revision.json" --out "$T/rejected.json"
 expect 4 "$CLI" assessment-dedup --input "$T/too-many.json" --out "$T/rejected.json"
-echo "[assessment-dedup] malformed identities, duplicate delivery IDs, and row bound fail closed"
+expect 4 "$CLI" assessment-dedup --input "$T/bad-source.json" --out "$T/rejected.json"
+expect 4 "$CLI" assessment-dedup --input "$T/long-source.json" --out "$T/rejected.json"
+echo "[assessment-dedup] malformed identities, delivery IDs, source identifiers, and row bounds fail closed"
 echo "test_assessment_dedup_cli OK"
