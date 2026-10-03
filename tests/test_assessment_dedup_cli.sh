@@ -34,15 +34,21 @@ assert report["normalized_output_sha256"] == hashlib.sha256(open(output_path, "r
 assert {field["state"] for field in report["fields"]} == {"preserved", "transformed", "unknown", "unsupported"}, report
 rows = result["deliveries"]
 assert result["counts"] == {
-    "delivery_count": 5,
+    "delivery_count": 6,
     "unique_complete_origin_assessments": 2,
-    "additional_deliveries_of_same_assessment": 1,
+    "additional_deliveries_of_same_assessment": 2,
     "possible_duplicate_deliveries": 2,
 }, result
-assert [row["group_id"] for row in rows] == [0, 0, 1, None, None], rows
-assert rows[0]["assessment_key"] == rows[1]["assessment_key"]
-assert rows[0]["assessment_key"] != rows[2]["assessment_key"]
-assert all(row["deduplication_state"] == "possible_duplicate" for row in rows[3:])
+assert [row["group_id"] for row in rows] == [0, 0, 0, 1, None, None], rows
+assert [row["delivery_source"] for row in rows] == [
+    "scorecard-direct", "depsdev-index", "mirror-service",
+    "scorecard-direct", "scorecard-direct", "aggregator-feed",
+], rows
+assert len({row["delivery_id"] for row in rows[:3]}) == 1
+assert len({row["delivery_source"] for row in rows[:3]}) == 3
+assert rows[0]["assessment_key"] == rows[1]["assessment_key"] == rows[2]["assessment_key"]
+assert rows[0]["assessment_key"] != rows[3]["assessment_key"]
+assert all(row["deduplication_state"] == "possible_duplicate" for row in rows[4:])
 origin = source["deliveries"][0]
 material = bytearray()
 for key in ("tool", "tool_version"):
@@ -57,6 +63,7 @@ material.extend(str(len(value)).encode() + b":" + value + b"\n")
 assert rows[0]["assessment_key"] == hashlib.sha256(material).hexdigest()
 print("[assessment-dedup] exact origin keys, repeated deliveries, and uncertain rows OK")
 PY
+echo "[assessment-dedup] three services share one origin key while retaining source-namespaced delivery identity"
 python3 - "$T/input.json" "$CLI" "$T" <<'PY'
 import json, pathlib, subprocess, sys
 source_path, cli, temp = sys.argv[1:]
@@ -77,8 +84,28 @@ for field, value in cases.items():
     subprocess.run([cli, "assessment-dedup", "--input", str(variant), "--out", str(result)], check=True, stdout=subprocess.DEVNULL)
     report = json.load(open(result))
     assert report["counts"]["unique_complete_origin_assessments"] == 3, (field, report)
-    assert report["counts"]["additional_deliveries_of_same_assessment"] == 0, (field, report)
+    assert report["counts"]["additional_deliveries_of_same_assessment"] == 1, (field, report)
+    rows = report["deliveries"]
+    assert rows[0]["assessment_key"] == rows[2]["assessment_key"], (field, rows)
+    assert rows[1]["assessment_key"] != rows[0]["assessment_key"], (field, rows)
 print("[assessment-dedup] each origin-identity component independently separates groups")
+PY
+
+python3 - "$T/input.json" "$CLI" "$T" <<'PY'
+import json, pathlib, subprocess, sys
+source_path, cli, temp = sys.argv[1:]
+payload = json.load(open(source_path))
+payload["deliveries"][1]["delivery_source"] = "new-relay"
+variant = pathlib.Path(temp) / "source-only.json"
+result = pathlib.Path(temp) / "source-only-result.json"
+json.dump(payload, open(variant, "w"), separators=(",", ":"))
+subprocess.run([cli, "assessment-dedup", "--input", str(variant), "--out", str(result)], check=True, stdout=subprocess.DEVNULL)
+report = json.load(open(result))
+assert report["counts"]["unique_complete_origin_assessments"] == 2, report
+assert report["counts"]["additional_deliveries_of_same_assessment"] == 2, report
+assert report["deliveries"][1]["delivery_source"] == "new-relay", report
+assert report["deliveries"][0]["assessment_key"] == report["deliveries"][1]["assessment_key"], report
+print("[assessment-dedup] delivery source is preserved but excluded from the origin key")
 PY
 
 python3 - "$ROOT/fixtures/lineage/assessment-dedup-input.json" "$T/bad-digest.json" "$T/duplicate-delivery.json" "$T/negative-revision.json" "$T/too-many.json" <<'PY'
@@ -87,6 +114,7 @@ source = json.load(open(sys.argv[1]))
 bad = json.loads(json.dumps(source)); bad["deliveries"][1]["result_digest"] = "bad"
 json.dump(bad, open(sys.argv[2], "w"))
 duplicate = json.loads(json.dumps(source)); duplicate["deliveries"][1]["delivery_id"] = duplicate["deliveries"][0]["delivery_id"]
+duplicate["deliveries"][1]["delivery_source"] = duplicate["deliveries"][0]["delivery_source"]
 json.dump(duplicate, open(sys.argv[3], "w"))
 negative = json.loads(json.dumps(source)); negative["deliveries"][0]["subject_revision"] = -1
 json.dump(negative, open(sys.argv[4], "w"))

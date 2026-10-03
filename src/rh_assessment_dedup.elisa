@@ -7,11 +7,15 @@ include "./rh_sha256.elisa"
 module AssessmentDedup:
     private:
         const RH_ASSESSMENT_DEDUP_MAX_ROWS: i64 = 4096
+        const RH_ASSESSMENT_DEDUP_MAX_SOURCE_ID: i64 = 128
 
         struct RhAssessmentDelivery:
             delivery_s: mutable i64
             delivery_e: mutable i64
             delivery_time: mutable i64
+            delivery_source_s: mutable i64
+            delivery_source_e: mutable i64
+            delivery_source_present: mutable i64
             tool_s: mutable i64
             tool_e: mutable i64
             tool_present: mutable i64
@@ -84,6 +88,14 @@ module AssessmentDedup:
                 index <- index + 1
             true
 
+        def rh_dedup_source_id_valid(texts: darray[u8]&, start: i64, stop: i64) -> bool:
+            return false if start < 0 or stop <= start or stop - start > RH_ASSESSMENT_DEDUP_MAX_SOURCE_ID
+            for index in start..<stop |index, texts|:
+                c: u8 = texts[index.usize()]
+                valid: bool = (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 45 or c == 46 or c == 58 or c == 95
+                return false if not valid
+            true
+
         def rh_dedup_same_origin(texts: darray[u8]&, left: RhAssessmentDelivery, right: RhAssessmentDelivery) -> bool:
             return false if left.identity_complete == 0 or right.identity_complete == 0
             return false if not Base::rh_bytes_equal_span(texts, left.tool_s, left.tool_e, texts, right.tool_s, right.tool_e)
@@ -146,8 +158,17 @@ module AssessmentDedup:
                 delivery_time_ok: mutable i64 = 0
                 delivery_time: i64 = AssessmentDedup::rh_dedup_int(nodes, raw, texts, row, "delivery_time", &delivery_time_ok)
                 return -1 if delivery_time_ok == 0 or delivery_time < 0
+                delivery_source_s: mutable i64 = 0
+                delivery_source_e: mutable i64 = 0
+                delivery_source_present: mutable i64 = 0
+                return -1 if not AssessmentDedup::rh_dedup_optional_string(nodes, texts, row, "delivery_source", &delivery_source_s, &delivery_source_e, &delivery_source_present)
+                return -1 if delivery_source_present != 0 and not AssessmentDedup::rh_dedup_source_id_valid(texts, delivery_source_s, delivery_source_e)
                 for prior in 0..<rows.count |prior, rows, texts, delivery_s, delivery_e|:
-                    return -1 if Base::rh_bytes_equal_span(texts, rows[prior].delivery_s, rows[prior].delivery_e, texts, delivery_s, delivery_e)
+                    prior_delivery: RhAssessmentDelivery = rows[prior]
+                    same_delivery_id: bool = Base::rh_bytes_equal_span(texts, prior_delivery.delivery_s, prior_delivery.delivery_e, texts, delivery_s, delivery_e)
+                    same_source_presence: bool = prior_delivery.delivery_source_present == delivery_source_present
+                    same_source: bool = delivery_source_present == 0 or Base::rh_bytes_equal_span(texts, prior_delivery.delivery_source_s, prior_delivery.delivery_source_e, texts, delivery_source_s, delivery_source_e)
+                    return -1 if same_delivery_id and same_source_presence and same_source
                 tool_s: mutable i64 = 0
                 tool_e: mutable i64 = 0
                 tool_present: mutable i64 = 0
@@ -167,7 +188,7 @@ module AssessmentDedup:
                 return -1 if not AssessmentDedup::rh_dedup_optional_string(nodes, texts, row, "tool", &tool_s, &tool_e, &tool_present) or not AssessmentDedup::rh_dedup_optional_string(nodes, texts, row, "tool_version", &version_s, &version_e, &version_present) or not AssessmentDedup::rh_dedup_optional_int(nodes, raw, texts, row, "subject_revision", &revision, &revision_present) or not AssessmentDedup::rh_dedup_optional_string(nodes, texts, row, "original_run", &original_run_s, &original_run_e, &original_run_present) or not AssessmentDedup::rh_dedup_optional_int(nodes, raw, texts, row, "original_time", &original_time, &original_time_present) or not AssessmentDedup::rh_dedup_optional_string(nodes, texts, row, "result_digest", &result_digest_s, &result_digest_e, &result_digest_present)
                 return -1 if result_digest_present != 0 and not AssessmentDedup::rh_dedup_hex64(texts, result_digest_s, result_digest_e)
                 complete: bool = tool_present != 0 and version_present != 0 and revision_present != 0 and original_run_present != 0 and original_time_present != 0 and result_digest_present != 0
-                item: mutable RhAssessmentDelivery = RhAssessmentDelivery{delivery_s: delivery_s, delivery_e: delivery_e, delivery_time: delivery_time, tool_s: tool_s, tool_e: tool_e, tool_present: tool_present, version_s: version_s, version_e: version_e, version_present: version_present, subject_revision: revision, revision_present: revision_present, original_run_s: original_run_s, original_run_e: original_run_e, original_run_present: original_run_present, original_time: original_time, original_time_present: original_time_present, result_digest_s: result_digest_s, result_digest_e: result_digest_e, result_digest_present: result_digest_present, identity_complete: 1 if complete else 0, group_id: -1, key_offset: -1}
+                item: mutable RhAssessmentDelivery = RhAssessmentDelivery{delivery_s: delivery_s, delivery_e: delivery_e, delivery_time: delivery_time, delivery_source_s: delivery_source_s, delivery_source_e: delivery_source_e, delivery_source_present: delivery_source_present, tool_s: tool_s, tool_e: tool_e, tool_present: tool_present, version_s: version_s, version_e: version_e, version_present: version_present, subject_revision: revision, revision_present: revision_present, original_run_s: original_run_s, original_run_e: original_run_e, original_run_present: original_run_present, original_time: original_time, original_time_present: original_time_present, result_digest_s: result_digest_s, result_digest_e: result_digest_e, result_digest_present: result_digest_present, identity_complete: 1 if complete else 0, group_id: -1, key_offset: -1}
                 if complete:
                     matched_group: mutable i64 = -1
                     matched_key_offset: mutable i64 = -1
@@ -198,6 +219,9 @@ module AssessmentDedup:
                 item: RhAssessmentDelivery = rows[index]
                 Base::rh_push_text(out, "{\"delivery_id\":")
                 AssessmentDedup::rh_dedup_emit_span(out, texts, item.delivery_s, item.delivery_e)
+                if item.delivery_source_present != 0:
+                    Base::rh_push_text(out, ",\"delivery_source\":")
+                    AssessmentDedup::rh_dedup_emit_span(out, texts, item.delivery_source_s, item.delivery_source_e)
                 Base::rh_push_text(out, ",\"delivery_time\":")
                 Base::rh_push_decimal_i64(out, item.delivery_time)
                 Base::rh_push_text(out, ",\"identity_complete\":")
