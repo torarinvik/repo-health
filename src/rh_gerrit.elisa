@@ -21,6 +21,10 @@ include "./rh_json.elisa"
 # counted. Returns -1 when not an object.
 module Gerrit:
     private:
+        struct RhGerritTime:
+            valid: bool
+            value: i64
+
         def rh_gerrit_obj_count(nodes: darray[Json::RhJsonNode]&, idx: i64) -> i64:
             return -1 if idx < 0 or nodes[idx.usize()].kind != Json::RH_JSON_OBJ
             while child >= 0 |n: i64 = 0, child: i64 = nodes[idx.usize()].first_child| -> n:
@@ -30,12 +34,11 @@ module Gerrit:
                 n <- n + 1
                 child <- nodes[child.usize()].next_sibling
 
-        # Parse a Gerrit timestamp at text span [s,e). Returns epoch seconds; ok_out
-        # is set to 1 only on success. The space separator is replaced by `T` and the
-        # fractional part is dropped before strict ISO parsing.
-        def rh_gerrit_time(texts: darray[u8]&, s: i64, e: i64, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            ok_out[0] <- 0
-            return 0 if e <= s
+        # Parse a Gerrit timestamp at text span [s,e). The space separator is
+        # replaced by `T` and the fractional part is dropped before strict ISO parsing.
+        def rh_gerrit_time(texts: darray[u8]&, s: i64, e: i64) -> RhGerritTime can[Memory.Allocate, Abort.Panic]:
+            invalid: RhGerritTime = RhGerritTime{valid: false, value: 0}
+            return invalid if e <= s
             buf: mutable darray[u8] = []
             while k < e |k: i64 = s, e, texts, buf|:
                 b: u8 = texts[k.usize()]
@@ -54,7 +57,7 @@ module Gerrit:
                     buf.push(b)
                 k <- k + 1
             if buf.count == 0:
-                return 0
+                return invalid
             # A Gerrit bare timestamp has no timezone; append Z so the ISO parser
             # reads it as UTC rather than failing on the missing tz marker.
             has_tz: bool =
@@ -65,7 +68,11 @@ module Gerrit:
                     m <- m + 1
             if not has_tz:
                 buf.push(90)
-            Forge::rh_parse_iso8601(buf, 0, buf.count, ok_out)
+            value, valid =
+                ok: mutable i64 = 0
+                epoch: i64 = Forge::rh_parse_iso8601(buf, 0, buf.count, &ok)
+                epoch, ok == 1
+            RhGerritTime{valid: valid, value: value}
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
         def rh_gerrit_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -111,12 +118,12 @@ module Gerrit:
                 us: mutable i64 = 0
                 ue: mutable i64 = 0
                 return -1 if not rh_gerrit_str(nodes, texts, child, "updated", &us, &ue)
-                cok: mutable i64 = 0
-                created: i64 = rh_gerrit_time(texts, cs, ce, &cok)
-                return -1 if cok == 0
-                uok: mutable i64 = 0
-                updated: i64 = rh_gerrit_time(texts, us, ue, &uok)
-                return -1 if uok == 0
+                created_time: RhGerritTime = rh_gerrit_time(texts, cs, ce)
+                return -1 if not created_time.valid
+                updated_time: RhGerritTime = rh_gerrit_time(texts, us, ue)
+                return -1 if not updated_time.valid
+                created: i64 = created_time.value
+                updated: i64 = updated_time.value
                 revs: mutable i64 =
                     ridx: i64 = Json::rh_json_obj_get(nodes, texts, child, "revisions")
                     block_result: i64 = rh_gerrit_obj_count(nodes, ridx)
