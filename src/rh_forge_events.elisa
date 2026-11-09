@@ -61,7 +61,7 @@ module ForgeEvents:
             merged_at: i64
             has_merged_at: bool
 
-        struct RhForgeTime:
+        struct RhForgeValue:
             valid: bool
             present: bool
             value: i64
@@ -110,15 +110,13 @@ module ForgeEvents:
             present_out[0] <- 1
             true
 
-        def rh_fe_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-            present_out[0] <- 0
+        def rh_fe_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> RhForgeValue can[Memory.Allocate, Abort.Panic]:
+            invalid: RhForgeValue = RhForgeValue{valid: false, present: false, value: 0}
             idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
-            return true if idx < 0 or nodes[idx.usize()].kind == Json::RH_JSON_NULL
+            return RhForgeValue{valid: true, present: false, value: 0} if idx < 0 or nodes[idx.usize()].kind == Json::RH_JSON_NULL
             ok: mutable i64 = 0
-            value_out[0] <- Json::rh_json_int(nodes, raw, idx, &ok)
-            return false if ok == 0
-            present_out[0] <- 1
-            true
+            value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
+            RhForgeValue{valid: ok == 1, present: ok == 1, value: value} if ok == 1 else invalid
 
         def rh_fe_uuid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if end - start != 36
@@ -140,15 +138,15 @@ module ForgeEvents:
                 index <- index + 1
             true
 
-        def rh_fe_time(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> RhForgeTime can[Memory.Allocate, Abort.Panic]:
-            invalid: RhForgeTime = RhForgeTime{valid: false, present: false, value: 0}
+        def rh_fe_time(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> RhForgeValue can[Memory.Allocate, Abort.Panic]:
+            invalid: RhForgeValue = RhForgeValue{valid: false, present: false, value: 0}
             idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
-            return RhForgeTime{valid: true, present: false, value: 0} if idx < 0 or nodes[idx.usize()].kind == Json::RH_JSON_NULL
+            return RhForgeValue{valid: true, present: false, value: 0} if idx < 0 or nodes[idx.usize()].kind == Json::RH_JSON_NULL
             node: Json::RhJsonNode = nodes[idx.usize()]
             if node.kind == Json::RH_JSON_NUM:
                 ok: mutable i64 = 0
                 value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
-                RhForgeTime{valid: ok == 1, present: ok == 1, value: value}
+                RhForgeValue{valid: ok == 1, present: ok == 1, value: value}
             elif node.kind == Json::RH_JSON_STR:
                 start, end, has_span =
                     start: mutable i64 = 0
@@ -158,7 +156,7 @@ module ForgeEvents:
                 return invalid if not has_span
                 ok: mutable i64 = 0
                 value: i64 = Forge::rh_parse_iso8601(texts, start.usize(), end.usize(), &ok)
-                RhForgeTime{valid: ok == 1, present: ok == 1, value: value}
+                RhForgeValue{valid: ok == 1, present: ok == 1, value: value}
             else:
                 invalid
 
@@ -272,10 +270,12 @@ module ForgeEvents:
                 has_staged_evidence: mutable bool = false
                 if current_origin >= 0:
                     return -1 if nodes[current_origin.usize()].kind != Json::RH_JSON_OBJ
-                    page_ok: mutable i64 = 0
-                    record_ok: mutable i64 = 0
-                    return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, current_origin, "page_number", &staged_page_number, &page_ok) or page_ok == 0 or staged_page_number < 0
-                    return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, current_origin, "record_ordinal", &staged_record_ordinal, &record_ok) or record_ok == 0 or staged_record_ordinal < 0
+                    page_number: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, current_origin, "page_number")
+                    return -1 if not page_number.valid or not page_number.present or page_number.value < 0
+                    staged_page_number <- page_number.value
+                    record_ordinal: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, current_origin, "record_ordinal")
+                    return -1 if not record_ordinal.valid or not record_ordinal.present or record_ordinal.value < 0
+                    staged_record_ordinal <- record_ordinal.value
                     has_staged_origin <- true
                     evidence: i64 = Json::rh_json_obj_get(nodes, texts, current_origin, "evidence_id")
                     if evidence >= 0 and nodes[evidence.usize()].kind != Json::RH_JSON_NULL:
@@ -303,30 +303,31 @@ module ForgeEvents:
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
-                id_ok: mutable i64 = 0
-                native_id: mutable i64 = 0
                 id_key: u8& = ForgeEvents::rh_fe_kind_id_key(kind, githubish, bitbucket)
-                if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, id_key, &native_id, &id_ok) or id_ok == 0 or native_id < 0:
-                    # GitLab payloads may expose both iid and id; iid is the
-                    # project-local workflow identity, with id as fallback.
-                    if not githubish and not bitbucket and (kind == 0 or kind == 1):
-                        if not ForgeEvents::rh_fe_int(nodes, raw, texts, child, "id", &native_id, &id_ok) or id_ok == 0 or native_id < 0:
-                            counts.rejected <- counts.rejected + 1
-                            child <- nodes[child.usize()].next_sibling
-                            continue
+                primary_id: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, child, id_key)
+                native_id_value: RhForgeValue =
+                    if primary_id.valid and primary_id.present and primary_id.value >= 0:
+                        primary_id
+                    elif not githubish and not bitbucket and (kind == 0 or kind == 1):
+                        # GitLab payloads may expose both iid and id; iid is the
+                        # project-local workflow identity, with id as fallback.
+                        ForgeEvents::rh_fe_int(nodes, raw, texts, child, "id")
                     else:
-                        counts.rejected <- counts.rejected + 1
-                        child <- nodes[child.usize()].next_sibling
-                        continue
+                        RhForgeValue{valid: false, present: false, value: 0}
+                if not native_id_value.valid or not native_id_value.present or native_id_value.value < 0:
+                    counts.rejected <- counts.rejected + 1
+                    child <- nodes[child.usize()].next_sibling
+                    continue
+                native_id: i64 = native_id_value.value
                 event_time_key: u8& = "released_at" if kind == 3 and not githubish and not bitbucket else ForgeEvents::rh_fe_kind_time_key(kind)
-                primary_time: RhForgeTime = ForgeEvents::rh_fe_time(nodes, raw, texts, child, event_time_key)
-                created: RhForgeTime =
+                primary_time: RhForgeValue = ForgeEvents::rh_fe_time(nodes, raw, texts, child, event_time_key)
+                created: RhForgeValue =
                     if primary_time.valid and primary_time.present and primary_time.value >= 0:
                         primary_time
                     elif kind == 3:
                         ForgeEvents::rh_fe_time(nodes, raw, texts, child, "created_at")
                     else:
-                        RhForgeTime{valid: false, present: false, value: 0}
+                        RhForgeValue{valid: false, present: false, value: 0}
                 if not created.valid or not created.present or created.value < 0:
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
@@ -344,7 +345,7 @@ module ForgeEvents:
                         continue
                 else:
                     status_ok <- 1
-                updated: RhForgeTime = ForgeEvents::rh_fe_time(nodes, raw, texts, child, "updated_at")
+                updated: RhForgeValue = ForgeEvents::rh_fe_time(nodes, raw, texts, child, "updated_at")
                 if not updated.valid:
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
@@ -353,8 +354,8 @@ module ForgeEvents:
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
-                closed: RhForgeTime =
-                    ForgeEvents::rh_fe_time(nodes, raw, texts, child, "closed_at") if kind == 0 or kind == 1 else RhForgeTime{valid: true, present: false, value: 0}
+                closed: RhForgeValue =
+                    ForgeEvents::rh_fe_time(nodes, raw, texts, child, "closed_at") if kind == 0 or kind == 1 else RhForgeValue{valid: true, present: false, value: 0}
                 if not closed.valid or (closed.present and closed.value < 0):
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
@@ -527,9 +528,9 @@ module ForgeEvents:
             bitbucket: bool = Base::rh_bytes_equal_literal(texts, provider_s, provider_e, "bitbucket")
             githubish: bool = github or gitea or forgejo
             return -1 if not githubish and not gitlab and not bitbucket
-            captured_at: mutable i64 = 0
-            captured_ok: mutable i64 = 0
-            return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, root, "captured_at", &captured_at, &captured_ok) or captured_ok == 0 or captured_at < 0
+            captured: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, root, "captured_at")
+            return -1 if not captured.valid or not captured.present or captured.value < 0
+            captured_at: i64 = captured.value
             auth_state: mutable i64 = 4
             auth: i64 = Json::rh_json_obj_get(nodes, texts, root, "authorization")
             if auth >= 0:
@@ -599,12 +600,12 @@ module ForgeEvents:
                 return -1 if pending_idx < 0 or nodes[pending_idx.usize()].kind != Json::RH_JSON_ARR
                 while pending_node >= 0 |pending_node: i64 = nodes[pending_idx.usize()].first_child, nodes, raw, review_cursors|:
                     return -1 if review_cursors.count >= 10 or nodes[pending_node.usize()].kind != Json::RH_JSON_OBJ
-                    pull_ok: mutable i64 = 0
-                    pull_number: mutable i64 = 0
-                    return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, pending_node, "number", &pull_number, &pull_ok) or pull_ok == 0 or pull_number < 1
-                    page_ok: mutable i64 = 0
-                    next_review_page: mutable i64 = 0
-                    return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, pending_node, "next_review_page", &next_review_page, &page_ok) or page_ok == 0 or next_review_page < 1 or next_review_page > 2147483640
+                    pull: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, pending_node, "number")
+                    return -1 if not pull.valid or not pull.present or pull.value < 1
+                    pull_number: i64 = pull.value
+                    page: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, pending_node, "next_review_page")
+                    return -1 if not page.valid or not page.present or page.value < 1 or page.value > 2147483640
+                    next_review_page: i64 = page.value
                     while prior_cursor_idx < review_cursors.count.i64() |prior_cursor_idx: i64 = 0, review_cursors, pull_number|:
                         return -1 if review_cursors[prior_cursor_idx.usize()].pull_number == pull_number
                         prior_cursor_idx <- prior_cursor_idx + 1
@@ -615,9 +616,9 @@ module ForgeEvents:
                     return -1 if nodes[pull_batch_idx.usize()].kind != Json::RH_JSON_ARR or nodes[pull_batch_idx.usize()].child_count > 10
                     while pull_node >= 0 |pull_node: i64 = nodes[pull_batch_idx.usize()].first_child, nodes, raw, texts, pull_batch|:
                         return -1 if nodes[pull_node.usize()].kind != Json::RH_JSON_OBJ
-                        pull_ok: mutable i64 = 0
-                        pull_number: mutable i64 = 0
-                        return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, pull_node, "number", &pull_number, &pull_ok) or pull_ok == 0 or pull_number < 1
+                        pull: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, pull_node, "number")
+                        return -1 if not pull.valid or not pull.present or pull.value < 1
+                        pull_number: i64 = pull.value
                         while prior_pull_idx < pull_batch.count.i64() |prior_pull_idx: i64 = 0, pull_batch, pull_number|:
                             return -1 if pull_batch[prior_pull_idx.usize()].pull_number == pull_number
                             prior_pull_idx <- prior_pull_idx + 1
@@ -651,12 +652,12 @@ module ForgeEvents:
                     return -1 if requested_reviews_idx < 0 or nodes[requested_reviews_idx.usize()].kind != Json::RH_JSON_ARR or nodes[requested_reviews_idx.usize()].child_count > 10
                     while request_node >= 0 |request_node: i64 = nodes[requested_reviews_idx.usize()].first_child, nodes, raw, texts, requested_review_cursors|:
                         return -1 if nodes[request_node.usize()].kind != Json::RH_JSON_OBJ
-                        number_ok: mutable i64 = 0
-                        pull_number: mutable i64 = 0
-                        return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, request_node, "number", &pull_number, &number_ok) or number_ok == 0 or pull_number < 1
-                        page_ok: mutable i64 = 0
-                        next_review_page: mutable i64 = 0
-                        return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, request_node, "next_review_page", &next_review_page, &page_ok) or page_ok == 0 or next_review_page < 1 or next_review_page > 2147483640
+                        pull: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, request_node, "number")
+                        return -1 if not pull.valid or not pull.present or pull.value < 1
+                        pull_number: i64 = pull.value
+                        page: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, request_node, "next_review_page")
+                        return -1 if not page.valid or not page.present or page.value < 1 or page.value > 2147483640
+                        next_review_page: i64 = page.value
                         while prior_request_idx < requested_review_cursors.count.i64() |prior_request_idx: i64 = 0, requested_review_cursors, pull_number|:
                             return -1 if requested_review_cursors[prior_request_idx.usize()].pull_number == pull_number
                             prior_request_idx <- prior_request_idx + 1
@@ -687,9 +688,9 @@ module ForgeEvents:
                 while review_group >= 0 |review_group: i64 = nodes[reviews_by_pull_idx.usize()].first_child, review_group_count: mutable i64 = 0, seen_pull_numbers: mutable darray[i64] = [], nodes, raw, texts, events, event_slots, reviews_counts, total_attempts|:
                     return -1 if review_group_count >= 10
                     return -1 if nodes[review_group.usize()].kind != Json::RH_JSON_OBJ
-                    pull_ok: mutable i64 = 0
-                    grouped_pull: mutable i64 = 0
-                    return -1 if not ForgeEvents::rh_fe_int(nodes, raw, texts, review_group, "pull_number", &grouped_pull, &pull_ok) or pull_ok == 0 or grouped_pull < 1
+                    pull: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, review_group, "pull_number")
+                    return -1 if not pull.valid or not pull.present or pull.value < 1
+                    grouped_pull: i64 = pull.value
                     while prior_group_idx < seen_pull_numbers.count.i64() |prior_group_idx: i64 = 0, seen_pull_numbers, grouped_pull|:
                         return -1 if seen_pull_numbers[prior_group_idx.usize()] == grouped_pull
                         prior_group_idx <- prior_group_idx + 1
