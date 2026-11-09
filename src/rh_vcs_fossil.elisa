@@ -69,27 +69,31 @@ module Fossil:
                 break false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
                 i <- i + 1
 
-        def rh_fossil_parse(raw: darray[u8]&, max_entries: i64, pool: mutable darray[u8]&, out: mutable darray[RhFossilEntry]&, reject_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            reject_out[0] <- 0
-            cap: mutable i64 = max_entries
-            if cap <= 0:
-                cap <- RH_FOSSIL_MAX_ENTRIES_DEFAULT
-            return -1 if raw.count == 0
-            while true |pos: i64 = 0, raw, pool, out, reject_out, cap|:
-                break if pos >= raw.count.i64()
-                le: i64 =
-                    while le < raw.count.i64() and raw[le.usize()] != 10 |le: i64 = pos| -> le:
-                        le <- le + 1
-                if le > pos:
-                    if raw[pos.usize()] != 35:
-                        return -1 if out.count.i64() >= cap
-                        parsed: RhFossilLine = rh_fossil_line(raw, pos, le, pool)
-                        if parsed.usable:
-                            out.push(parsed.entry)
-                        else:
-                            reject_out[0] <- reject_out[0] + 1
-                pos <- le + 1
-            0
+        def rh_fossil_parse(raw: darray[u8]&, max_entries: i64) -> RhFossilTimeline can[Memory.Allocate, Abort.Panic]:
+            cap: i64 = RH_FOSSIL_MAX_ENTRIES_DEFAULT if max_entries <= 0 else max_entries
+            entries: mutable darray[RhFossilEntry] = []
+            pool: mutable darray[u8] = []
+            return RhFossilTimeline{ok: 0, entries: entries, pool: pool, rejected: 0} if raw.count == 0
+            over, rejected =
+                while true |over: bool = false, rejected: i64 = 0, pos: i64 = 0, raw, entries, pool, cap| -> over, rejected:
+                    break if over
+                    break if pos >= raw.count.i64()
+                    le: i64 =
+                        while le < raw.count.i64() and raw[le.usize()] != 10 |le: i64 = pos| -> le:
+                            le <- le + 1
+                    if le > pos:
+                        if raw[pos.usize()] != 35:
+                            if entries.count.i64() >= cap:
+                                over <- true
+                            else:
+                                parsed: RhFossilLine = rh_fossil_line(raw, pos, le, pool)
+                                if parsed.usable:
+                                    entries.push(parsed.entry)
+                                else:
+                                    rejected <- rejected + 1
+                    pos <- le + 1
+            return RhFossilTimeline{ok: 0, entries: entries, pool: pool, rejected: rejected} if over
+            RhFossilTimeline{ok: 1, entries: entries, pool: pool, rejected: rejected}
 
     private:
         # Parse one pipe-delimited line [s,e), returning its usability and entry.

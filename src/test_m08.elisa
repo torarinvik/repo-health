@@ -650,25 +650,22 @@ def fossil_fixture() -> darray[u8] can[Memory.Allocate, Abort.Panic]:
 
 def check_fossil_parse(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     raw: darray[u8] = fossil_fixture()
-    pool: mutable darray[u8] = []
-    out: mutable darray[Fossil::RhFossilEntry] = []
-    rej: mutable i64 = 0
-    rc: i64 = Fossil::rh_fossil_parse(raw, 0, pool, out, &rej)
-    t8check(rc == 0, "fossil-parse-ok", fails)
-    t8check(out.count == 3 and rej == 0, "fossil-three-entries", fails)
-    e0: Fossil::RhFossilEntry = out[0]
-    t8check(Base::rh_bytes_equal_literal(pool, e0.hash_s, e0.hash_e, "aa3f1e2d4c5b6a79887766554433221100ffee11"), "fossil-hash-preserved", fails)
-    t8check(Base::rh_bytes_equal_literal(pool, e0.author_s, e0.author_e, "alice"), "fossil-author-raw", fails)
+    log: Fossil::RhFossilTimeline = Fossil::rh_fossil_parse(raw, 0)
+    t8check(log.ok == 1, "fossil-parse-ok", fails)
+    t8check(log.entries.count == 3 and log.rejected == 0, "fossil-three-entries", fails)
+    e0: Fossil::RhFossilEntry = log.entries[0]
+    t8check(Base::rh_bytes_equal_literal(log.pool, e0.hash_s, e0.hash_e, "aa3f1e2d4c5b6a79887766554433221100ffee11"), "fossil-hash-preserved", fails)
+    t8check(Base::rh_bytes_equal_literal(log.pool, e0.author_s, e0.author_e, "alice"), "fossil-author-raw", fails)
     t8check(e0.utc == 1748766600 and e0.has_date == 1, "fossil-date-utc", fails)
-    t8check(Base::rh_bytes_equal_literal(pool, e0.branch_s, e0.branch_e, "trunk"), "fossil-branch", fails)
+    t8check(Base::rh_bytes_equal_literal(log.pool, e0.branch_s, e0.branch_e, "trunk"), "fossil-branch", fails)
     t8check(e0.tag_count == 2, "fossil-tag-count", fails)
     t8check(e0.phase_count == 1, "fossil-phase-count", fails)
-    t8check(Base::rh_bytes_equal_literal(pool, e0.comment_s, e0.comment_e, "fix the parser"), "fossil-comment", fails)
-    e1: Fossil::RhFossilEntry = out[1]
+    t8check(Base::rh_bytes_equal_literal(log.pool, e0.comment_s, e0.comment_e, "fix the parser"), "fossil-comment", fails)
+    e1: Fossil::RhFossilEntry = log.entries[1]
     t8check(e1.tag_count == 0 and e1.phase_count == 1, "fossil-tag-phase-2", fails)
     t8check(e1.utc == 1748700000, "fossil-date-2", fails)
-    e2: Fossil::RhFossilEntry = out[2]
-    t8check(Base::rh_bytes_equal_literal(pool, e2.branch_s, e2.branch_e, "feature-x"), "fossil-branch-2", fails)
+    e2: Fossil::RhFossilEntry = log.entries[2]
+    t8check(Base::rh_bytes_equal_literal(log.pool, e2.branch_s, e2.branch_e, "feature-x"), "fossil-branch-2", fails)
     t8check(e2.tag_count == 1, "fossil-tag-count-2", fails)
     return
 
@@ -691,54 +688,35 @@ def check_fossil_reject(fails: mutable i64&) -> void can[Memory.Allocate, Abort.
         Base::rh_push_text(raw, "not-a-hash|alice|2025-06-01T08:30:00|trunk|*LEAF*||x\n")
         Base::rh_push_text(raw, "aa3f1e2d4c5b6a79887766554433221100ffee11|bob|2025-06-01T08:30:00|trunk|*LEAF*||y")
         raw
-    pool: mutable darray[u8] = []
-    out: mutable darray[Fossil::RhFossilEntry] = []
-    rej: mutable i64 = 0
-    rc: i64 = Fossil::rh_fossil_parse(raw, 0, pool, out, &rej)
-    t8check(rc == 0 and out.count == 1 and rej == 1, "fossil-bad-hash-rejected", fails)
+    log: Fossil::RhFossilTimeline = Fossil::rh_fossil_parse(raw, 0)
+    t8check(log.ok == 1 and log.entries.count == 1 and log.rejected == 1, "fossil-bad-hash-rejected", fails)
     only2: mutable darray[u8] = []
     Base::rh_push_text(only2, "aa3f1e2d4c5b6a79887766554433221100ffee11|bob|2025-06-01T08:30:00|trunk|*LEAF*||y")
-    p2: mutable darray[u8] = []
-    o2: mutable darray[Fossil::RhFossilEntry] = []
-    r2: mutable i64 = 0
-    t8check(Fossil::rh_fossil_parse(only2, 1, p2, o2, &r2) == 0 and o2.count == 1, "fossil-cap-one", fails)
-    p3: mutable darray[u8] = []
-    o3: mutable darray[Fossil::RhFossilEntry] = []
-    r3: mutable i64 = 0
-    t8check(Fossil::rh_fossil_parse(only2, 1, p3, o3, &r3) == 0, "fossil-cap-exact-ok", fails)
+    capped_log: Fossil::RhFossilTimeline = Fossil::rh_fossil_parse(only2, 1)
+    t8check(capped_log.ok == 1 and capped_log.entries.count == 1, "fossil-cap-one", fails)
     # bad date does not fabricate: has_date stays false, utc -1
     badd: mutable darray[u8] = []
     Base::rh_push_text(badd, "aa3f1e2d4c5b6a79887766554433221100ffee11|bob|not-a-date|trunk|*LEAF*||y")
-    p4: mutable darray[u8] = []
-    o4: mutable darray[Fossil::RhFossilEntry] = []
-    rc4: i64 = |badd, p4, o4|
-        r4: mutable i64 = 0
-        block_result: i64 = Fossil::rh_fossil_parse(badd, 0, p4, o4, &r4)
-        block_result
-    t8check(rc4 == 0 and o4.count == 1, "fossil-bad-date-entry-kept", fails)
-    t8check(o4[0].has_date == 0 and o4[0].utc == -1, "fossil-bad-date-not-guessed", fails)
+    bad_date_log: Fossil::RhFossilTimeline = Fossil::rh_fossil_parse(badd, 0)
+    t8check(bad_date_log.ok == 1 and bad_date_log.entries.count == 1, "fossil-bad-date-entry-kept", fails)
+    t8check(bad_date_log.entries[0].has_date == 0 and bad_date_log.entries[0].utc == -1, "fossil-bad-date-not-guessed", fails)
     empty: mutable darray[u8] = []
-    p5: mutable darray[u8] = []
-    o5: mutable darray[Fossil::RhFossilEntry] = []
-    r5: mutable i64 = 0
-    t8check(Fossil::rh_fossil_parse(empty, 0, p5, o5, &r5) == -1, "fossil-empty-fails", fails)
+    empty_log: Fossil::RhFossilTimeline = Fossil::rh_fossil_parse(empty, 0)
+    t8check(empty_log.ok == 0, "fossil-empty-fails", fails)
     return
 
 def check_fossil_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
-    pool: mutable darray[u8] = []
-    entries: mutable darray[Fossil::RhFossilEntry] = []
-    rejected: mutable i64 = 0
-    status: i64 = Fossil::rh_fossil_parse(raw, 0, pool, entries, &rejected)
+    log: Fossil::RhFossilTimeline = Fossil::rh_fossil_parse(raw, 0)
     spans_valid: bool =
-        while i < entries.count |valid: bool = true, i: usize = 0, pool, entries| -> valid:
-            entry: Fossil::RhFossilEntry = entries[i]
-            valid <- false if entry.hash_s < 0 or entry.hash_e < entry.hash_s or entry.hash_e > pool.count.i64()
-            valid <- false if entry.author_s >= 0 and (entry.author_e < entry.author_s or entry.author_e > pool.count.i64())
-            valid <- false if entry.date_s >= 0 and (entry.date_e < entry.date_s or entry.date_e > pool.count.i64())
-            valid <- false if entry.branch_s >= 0 and (entry.branch_e < entry.branch_s or entry.branch_e > pool.count.i64())
-            valid <- false if entry.comment_s >= 0 and (entry.comment_e < entry.comment_s or entry.comment_e > pool.count.i64())
+        while i < log.entries.count |valid: bool = true, i: usize = 0, log| -> valid:
+            entry: Fossil::RhFossilEntry = log.entries[i]
+            valid <- false if entry.hash_s < 0 or entry.hash_e < entry.hash_s or entry.hash_e > log.pool.count.i64()
+            valid <- false if entry.author_s >= 0 and (entry.author_e < entry.author_s or entry.author_e > log.pool.count.i64())
+            valid <- false if entry.date_s >= 0 and (entry.date_e < entry.date_s or entry.date_e > log.pool.count.i64())
+            valid <- false if entry.branch_s >= 0 and (entry.branch_e < entry.branch_s or entry.branch_e > log.pool.count.i64())
+            valid <- false if entry.comment_s >= 0 and (entry.comment_e < entry.comment_s or entry.comment_e > log.pool.count.i64())
             i <- i + 1
-    bounded_result: bool = (status == -1 or status == 0) and entries.count <= raw.count and pool.count <= raw.count and rejected >= 0 and rejected <= raw.count.i64()
+    bounded_result: bool = (log.ok == 0 or log.ok == 1) and log.entries.count <= raw.count and log.pool.count <= raw.count and log.rejected >= 0 and log.rejected <= raw.count.i64()
     t8check(spans_valid and bounded_result, "fossil-fuzz-bounds-and-spans", fails)
     return
 
