@@ -43,6 +43,12 @@ module Mercurial:
             tag_count: i64
             phase: u8
 
+    private:
+        struct RhHgRow:
+            usable: bool
+            change: RhHgChange
+
+    public:
         def rh_hg_phase_label(phase: u8) -> u8&:
             return "public" if phase == RH_HG_PHASE_PUBLIC
             return "draft" if phase == RH_HG_PHASE_DRAFT
@@ -59,9 +65,7 @@ module Mercurial:
         # Parse hg log -Tjson, appending valid native changes and counting rejected rows.
         def rh_hg_parse(raw: darray[u8]&, max_changes: i64, pool: mutable darray[u8]&, out: mutable darray[RhHgChange]&, reject_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             reject_out[0] <- 0
-            cap: mutable i64 = max_changes
-            if cap <= 0:
-                cap <- RH_HG_MAX_CHANGES_DEFAULT
+            cap: i64 = RH_HG_MAX_CHANGES_DEFAULT if max_changes <= 0 else max_changes
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -71,29 +75,22 @@ module Mercurial:
             while child >= 0 |child: i64 = rn.first_child, nodes, texts, pool, out, reject_out, cap|:
                 nxt: i64 = nodes[child.usize()].next_sibling
                 return -1 if out.count.i64() >= cap
-                ok: mutable i64 = 0
-                chg: RhHgChange = rh_hg_one(raw, nodes, texts, pool, child, &ok)
-                if ok == 1:
-                    out.push(chg)
+                parsed: RhHgRow = rh_hg_one(raw, nodes, texts, pool, child)
+                if parsed.usable:
+                    out.push(parsed.change)
                 else:
                     reject_out[0] <- reject_out[0] + 1
                 child <- nxt
             0
 
     private:
-        # Extract one change object. ok_out 1 = usable, 0 = rejected (no/invalid node).
-        # (private to this file)
         def rh_hg_phase_of(texts: darray[u8]&, s: i64, e: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
             return RH_HG_PHASE_UNKNOWN if s < 0 or e < s
             n: i64 = e - s
-            return RH_HG_PHASE_PUBLIC if n == 6 and rh_hg_span_eq(texts, s, e, "public")
-            return RH_HG_PHASE_DRAFT if n == 5 and rh_hg_span_eq(texts, s, e, "draft")
-            return RH_HG_PHASE_SECRET if n == 6 and rh_hg_span_eq(texts, s, e, "secret")
+            return RH_HG_PHASE_PUBLIC if n == 6 and Base::rh_bytes_equal_literal(texts, s, e, "public")
+            return RH_HG_PHASE_DRAFT if n == 5 and Base::rh_bytes_equal_literal(texts, s, e, "draft")
+            return RH_HG_PHASE_SECRET if n == 6 and Base::rh_bytes_equal_literal(texts, s, e, "secret")
             RH_HG_PHASE_UNKNOWN
-
-        # (private to this file)
-        def rh_hg_span_eq(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-            Base::rh_bytes_equal_literal(data, s, e, lit)
 
         # 40 lowercase hex characters only; a Mercurial node is not a Git hash and
         # this function only validates the native form.
@@ -111,13 +108,13 @@ module Mercurial:
         # not a JSON array or the change cap is exceeded. Entries with a missing or
         # malformed node are skipped and counted in reject_out (they cannot be
         # identified and must not be guessed). max_changes <= 0 means default.
-        def rh_hg_one(raw: darray[u8]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, pool: mutable darray[u8]&, obj: i64, ok_out: mutable i64&) -> RhHgChange can[Memory.Allocate, Abort.Panic]:
-            ok_out[0] <- 0
+        # Extract one change object, returning usability with the parsed value.
+        def rh_hg_one(raw: darray[u8]&, nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, pool: mutable darray[u8]&, obj: i64) -> RhHgRow can[Memory.Allocate, Abort.Panic]:
             ns: mutable i64 = -1
             ne: mutable i64 = -1
             _ = Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, obj, "node"), &ns, &ne)
-            return RhHgChange{node_s: -1, node_e: -1, rev: -1, author_s: -1, author_e: -1, desc_s: -1, desc_e: -1, utc: -1, tz_offset: -1, has_date: 0, branch_s: -1, branch_e: -1, tag_count: 0, phase: RH_HG_PHASE_UNKNOWN} if not rh_hg_is_node_hex(texts, ns, ne)
-            ok_out[0] <- 1
+            empty: RhHgChange = RhHgChange{node_s: -1, node_e: -1, rev: -1, author_s: -1, author_e: -1, desc_s: -1, desc_e: -1, utc: -1, tz_offset: -1, has_date: 0, branch_s: -1, branch_e: -1, tag_count: 0, phase: RH_HG_PHASE_UNKNOWN}
+            return RhHgRow{usable: false, change: empty} if not rh_hg_is_node_hex(texts, ns, ne)
             node_s: i64 = rh_hg_copy(pool, texts, ns, ne)
             node_e: i64 = node_s + (ne - ns)
             rev: mutable i64 = -1
@@ -165,4 +162,4 @@ module Mercurial:
                 value: u8 = rh_hg_phase_of(texts, ps, pe)
                 value
             tags: i64 = rh_hg_arr_count(nodes, Json::rh_json_obj_get(nodes, texts, obj, "tags"))
-            RhHgChange{node_s: node_s, node_e: node_e, rev: rev, author_s: author_s, author_e: author_e, desc_s: desc_s, desc_e: desc_e, utc: utc, tz_offset: tz, has_date: has_date, branch_s: branch_s, branch_e: branch_e, tag_count: tags, phase: phase}
+            RhHgRow{usable: true, change: RhHgChange{node_s: node_s, node_e: node_e, rev: rev, author_s: author_s, author_e: author_e, desc_s: desc_s, desc_e: desc_e, utc: utc, tz_offset: tz, has_date: has_date, branch_s: branch_s, branch_e: branch_e, tag_count: tags, phase: phase}}
