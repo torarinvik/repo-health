@@ -127,6 +127,11 @@ module Subversion:
             replace_n: mutable i64
             other_n: mutable i64
 
+        struct RhSvnTextSpan:
+            present: bool
+            start: i64
+            end: i64
+
         def rh_svn_path_counts_empty() -> RhSvnPathCounts:
             RhSvnPathCounts{path_count: 0, add_n: 0, modify_n: 0, delete_n: 0, replace_n: 0, other_n: 0}
 
@@ -316,10 +321,10 @@ module Subversion:
                     counts.other_n <- counts.other_n + 1
                 pos <- gt + 1
 
-        # Extract the text of the first element `name` inside [from, to_pos): copies the
-        # decoded text into pool and returns start via out_s (end via out_e), or
-        # false when the element is absent. `<name/>` yields an empty span.
-        def rh_svn_elem_text(data: darray[u8]&, from: i64, to_pos: i64, name: u8&, pool: mutable darray[u8]&, out_s: mutable i64&, out_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+        # Extract the first element `name` inside [from, to_pos), copying decoded
+        # text into pool and returning an absent span when the element is missing.
+        # `<name/>` yields a present empty span.
+        def rh_svn_elem_text(data: darray[u8]&, from: i64, to_pos: i64, name: u8&, pool: mutable darray[u8]&) -> RhSvnTextSpan can[Memory.Allocate, Abort.Panic]:
             osp: i64 =
                 open_tag: mutable darray[u8] = []
                 open_tag.push(60)
@@ -329,15 +334,14 @@ module Subversion:
                     k <- k + 1
                 block_result: i64 = rh_svn_find(data, from, (&open_tag[0]).cast[u8&] can Unsafe.PointerCast)
                 block_result
-            return false if osp < 0 or osp >= to_pos
+            return RhSvnTextSpan{present: false, start: -1, end: -1} if osp < 0 or osp >= to_pos
             gt: i64 = rh_svn_find_byte(data, osp, 62)
             if gt < 0 or gt > to_pos:
-                return false
+                return RhSvnTextSpan{present: false, start: -1, end: -1}
             # self-closing "<name .../>"
             if gt > osp and data[(gt - 1).usize()] == 47:
-                out_s[0] <- pool.count.i64()
-                out_e[0] <- pool.count.i64()
-                return true
+                span: i64 = pool.count.i64()
+                return RhSvnTextSpan{present: true, start: span, end: span}
             csp: i64 =
                 close_tag: mutable darray[u8] =
                     close_tag: mutable darray[u8] = []
@@ -349,33 +353,21 @@ module Subversion:
                     k2 <- k2 + 1
                 block_result: i64 = rh_svn_find(data, gt + 1, (&close_tag[0]).cast[u8&] can Unsafe.PointerCast)
                 block_result
-            return false if csp < 0 or csp > to_pos
-            value: i64 = rh_svn_copy_text(data, gt + 1, csp, pool)
-            start: i64 = value
-            out_s[0] <- start
-            out_e[0] <- pool.count.i64()
-            true
+            return RhSvnTextSpan{present: false, start: -1, end: -1} if csp < 0 or csp > to_pos
+            start: i64 = rh_svn_copy_text(data, gt + 1, csp, pool)
+            return RhSvnTextSpan{present: false, start: -1, end: -1} if start < 0
+            RhSvnTextSpan{present: true, start: start, end: pool.count.i64()}
 
         # Parse `svn log --xml -v` bytes. ok=0 when the payload is not a <log>
         # document or the entry cap is exceeded. Entries with a missing/malformed
         # revision are skipped and counted.
         def rh_svn_entry(raw: darray[u8]&, from: i64, to_pos: i64, rev: i64, pool: mutable darray[u8]&) -> RhSvnEntry can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-            author_s: mutable i64 = -1
-            author_e: mutable i64 = -1
-            msg_s: mutable i64 = -1
-            msg_e: mutable i64 = -1
-            date_s: mutable i64 = -1
-            date_e: mutable i64 = -1
-            has_date: mutable i64 = 0
-            has_author: mutable i64 = 0
-            if rh_svn_elem_text(raw, from, to_pos, "author", pool, &author_s, &author_e):
-                has_author <- 1
-            if rh_svn_elem_text(raw, from, to_pos, "date", pool, &date_s, &date_e):
-                has_date <- 1
-            _ = rh_svn_elem_text(raw, from, to_pos, "msg", pool, &msg_s, &msg_e)
+            author: RhSvnTextSpan = rh_svn_elem_text(raw, from, to_pos, "author", pool)
+            date: RhSvnTextSpan = rh_svn_elem_text(raw, from, to_pos, "date", pool)
+            message: RhSvnTextSpan = rh_svn_elem_text(raw, from, to_pos, "msg", pool)
             path_counts: RhSvnPathCounts =
                 paths_open: i64 = rh_svn_find(raw, from, "<paths")
                 pgt: i64 = rh_svn_find_byte(raw, paths_open, 62)
                 pclose: i64 = rh_svn_find(raw, paths_open, "</paths>")
                 rh_svn_count_paths(raw, pgt + 1, pclose) if paths_open >= 0 and paths_open < to_pos and pgt >= 0 and pclose >= 0 and pgt < pclose and pclose <= to_pos else rh_svn_path_counts_empty()
-            RhSvnEntry{rev: rev, author_s: author_s, author_e: author_e, msg_s: msg_s, msg_e: msg_e, date_s: date_s, date_e: date_e, has_date: has_date, has_author: has_author, path_count: path_counts.path_count, add_n: path_counts.add_n, modify_n: path_counts.modify_n, delete_n: path_counts.delete_n, replace_n: path_counts.replace_n, other_n: path_counts.other_n}
+            RhSvnEntry{rev: rev, author_s: author.start, author_e: author.end, msg_s: message.start, msg_e: message.end, date_s: date.start, date_e: date.end, has_date: 1 if date.present else 0, has_author: 1 if author.present else 0, path_count: path_counts.path_count, add_n: path_counts.add_n, modify_n: path_counts.modify_n, delete_n: path_counts.delete_n, replace_n: path_counts.replace_n, other_n: path_counts.other_n}
