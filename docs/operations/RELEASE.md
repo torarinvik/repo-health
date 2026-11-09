@@ -67,6 +67,9 @@ Keep keys out of the tree (`.gitignore` excludes `*.rhkey` and `ops/keys/`).
 7. If the release is published, sign the packet with a key held outside the
    tree and attach `release-packet.sig`; record the algorithm and that
    verification means integrity + key possession, not safety (M07-04).
+8. Include the current maintenance record and unresolved review or
+   operator-coverage gaps in [`MAINTENANCE.md`](MAINTENANCE.md) and
+   `ops/maintenance/`.
 
 ## Recovery
 

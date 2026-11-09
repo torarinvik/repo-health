@@ -1170,7 +1170,7 @@ scans a real repo, asserts the output is clean, and injects verdict
 language into a copy to prove the reviewer rejects it (negative control).
 
 **M12 public-contract stability:** `ops/public-contracts.json` registers
-144 public machine-readable contracts, including the research lineage,
+150 public machine-readable contracts, including the research lineage,
 population, ingestion, drill-down, role-grain, adapter-manifest, and
 conformance-ledger contracts, each with its version token, a stability class
 (frozen/additive), and a compatibility rule; the version token must literally
@@ -1191,6 +1191,13 @@ checks that an unknown registry
 version has no fallback, and that schema tests are independent of generated
 code. This is the machine-checkable half of the release packet's stability
 guarantee.
+
+`docs/operations/MAINTENANCE.md` defines release-candidate, monthly,
+quarterly, and event-triggered reviews for provider compatibility, dependencies,
+source rights, schema/migration recovery, metric validity, correction feedback,
+and user research; `ops/maintenance/README.md` defines the evidence record.
+Missed work and two-operator coverage gaps remain open, and no recurring
+review or operator coverage has been claimed as completed.
 
 **Threat-model & dependency review (M07-01/M07-05):**
 `ops/threat-model-review.json` records seven boundaries (url-argument,
