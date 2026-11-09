@@ -28,24 +28,24 @@ module Fossil:
     private:
         const RH_FOSSIL_MAX_ENTRIES_DEFAULT: i64 = 20000
 
-        # One normalized entry. Spans index into the caller-owned timeline pool.
+        # One normalized entry. Spans index into the returned timeline pool.
     public:
         struct RhFossilEntry:
-            hash_s: mutable i64
-            hash_e: mutable i64
-            author_s: mutable i64
-            author_e: mutable i64
-            has_author: mutable i64
-            date_s: mutable i64
-            date_e: mutable i64
-            utc: mutable i64
-            has_date: mutable i64
-            branch_s: mutable i64
-            branch_e: mutable i64
-            tag_count: mutable i64
-            phase_count: mutable i64
-            comment_s: mutable i64
-            comment_e: mutable i64
+            hash_s: i64
+            hash_e: i64
+            author_s: i64
+            author_e: i64
+            has_author: bool
+            date_s: i64
+            date_e: i64
+            utc: i64
+            has_date: bool
+            branch_s: i64
+            branch_e: i64
+            tag_count: i64
+            phase_count: i64
+            comment_s: i64
+            comment_e: i64
 
     private:
         struct RhFossilLine:
@@ -96,10 +96,6 @@ module Fossil:
             RhFossilTimeline{ok: true, entries: entries, pool: pool, rejected: rejected}
 
     private:
-        # Parse one pipe-delimited line [s,e), returning its usability and entry.
-        def rh_fossil_copy(pool: mutable darray[u8]&, data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            Base::rh_absorb_span(data, s, e, pool)
-
         # Count comma-separated non-empty items in [s,e).
         def rh_fossil_count_items(data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             return 0 if s < 0 or e <= s or e > data.count.i64()
@@ -183,69 +179,68 @@ module Fossil:
         # empty or begin with '#' (comments/headers) are skipped. Records with an
         # invalid hash are skipped and counted in rejected.
         def rh_fossil_line(raw: darray[u8]&, s: i64, e: i64, pool: mutable darray[u8]&) -> RhFossilLine can[Memory.Allocate, Abort.Panic]:
-            empty: RhFossilEntry = RhFossilEntry{hash_s: -1, hash_e: -1, author_s: -1, author_e: -1, has_author: 0, date_s: -1, date_e: -1, utc: -1, has_date: 0, branch_s: -1, branch_e: -1, tag_count: 0, phase_count: 0, comment_s: -1, comment_e: -1}
+            empty: RhFossilEntry = RhFossilEntry{hash_s: -1, hash_e: -1, author_s: -1, author_e: -1, has_author: false, date_s: -1, date_e: -1, utc: -1, has_date: false, branch_s: -1, branch_e: -1, tag_count: 0, phase_count: 0, comment_s: -1, comment_e: -1}
             f0: i64 = s
             f1: i64 = rh_fossil_pipe(raw, f0, e)
             return RhFossilLine{usable: false, entry: empty} if f1 < 0
             return RhFossilLine{usable: false, entry: empty} if not rh_fossil_is_hash(raw, f0, f1)
-            hash_s: i64 = rh_fossil_copy(pool, raw, f0, f1)
+            hash_s: i64 = Base::rh_absorb_span(raw, f0, f1, pool)
             hash_e: i64 = hash_s + (f1 - f0)
             # author
             a0: i64 = f1 + 1
-            a1: mutable i64 = rh_fossil_pipe(raw, a0, e)
-            if a1 < 0:
-                a1 <- e
+            a1: i64 =
+                found: i64 = rh_fossil_pipe(raw, a0, e)
+                e if found < 0 else found
             author_s: mutable i64 = -1
             author_e: mutable i64 = -1
-            has_author: mutable i64 = 0
+            has_author: bool = a1 > a0
             if a1 > a0:
-                author_s <- rh_fossil_copy(pool, raw, a0, a1)
+                author_s <- Base::rh_absorb_span(raw, a0, a1, pool)
                 author_e <- author_s + (a1 - a0)
-                has_author <- 1
             # date
             d0: i64 = a1 + 1
-            d1: mutable i64 = rh_fossil_pipe(raw, d0, e)
-            if d1 < 0:
-                d1 <- e
+            d1: i64 =
+                found: i64 = rh_fossil_pipe(raw, d0, e)
+                e if found < 0 else found
             date_s: mutable i64 = -1
             date_e: mutable i64 = -1
             utc: mutable i64 = -1
-            has_date: mutable i64 = 0
+            has_date: mutable bool = false
             if d1 > d0:
-                date_s <- rh_fossil_copy(pool, raw, d0, d1)
+                date_s <- Base::rh_absorb_span(raw, d0, d1, pool)
                 date_e <- date_s + (d1 - d0)
                 parsed: i64 = rh_fossil_iso(raw, d0, d1)
                 if parsed >= 0:
                     utc <- parsed
-                    has_date <- 1
+                    has_date <- true
             # branch
             b0: i64 = d1 + 1
-            b1: mutable i64 = rh_fossil_pipe(raw, b0, e)
-            if b1 < 0:
-                b1 <- e
+            b1: i64 =
+                found: i64 = rh_fossil_pipe(raw, b0, e)
+                e if found < 0 else found
             branch_s: mutable i64 = -1
             branch_e: mutable i64 = -1
             if b1 > b0:
-                branch_s <- rh_fossil_copy(pool, raw, b0, b1)
+                branch_s <- Base::rh_absorb_span(raw, b0, b1, pool)
                 branch_e <- branch_s + (b1 - b0)
             # phase
             p0: i64 = b1 + 1
-            p1: mutable i64 = rh_fossil_pipe(raw, p0, e)
-            if p1 < 0:
-                p1 <- e
+            p1: i64 =
+                found: i64 = rh_fossil_pipe(raw, p0, e)
+                e if found < 0 else found
             phase_count: i64 = rh_fossil_count_phases(raw, p0, p1)
             # tags
             t0: i64 = p1 + 1
-            t1: mutable i64 = rh_fossil_pipe(raw, t0, e)
-            if t1 < 0:
-                t1 <- e
+            t1: i64 =
+                found: i64 = rh_fossil_pipe(raw, t0, e)
+                e if found < 0 else found
             tag_count: i64 = rh_fossil_count_items(raw, t0, t1)
             # comment (rest of line, may contain '|')
             c0: i64 = t1 + 1
             comment_s: mutable i64 = -1
             comment_e: mutable i64 = -1
             if c0 <= e:
-                comment_s <- rh_fossil_copy(pool, raw, c0, e)
+                comment_s <- Base::rh_absorb_span(raw, c0, e, pool)
                 comment_e <- comment_s + (e - c0)
             RhFossilLine{usable: true, entry: RhFossilEntry{hash_s: hash_s, hash_e: hash_e, author_s: author_s, author_e: author_e, has_author: has_author, date_s: date_s, date_e: date_e, utc: utc, has_date: has_date, branch_s: branch_s, branch_e: branch_e, tag_count: tag_count, phase_count: phase_count, comment_s: comment_s, comment_e: comment_e}}
 
