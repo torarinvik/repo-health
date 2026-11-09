@@ -51,7 +51,7 @@ module Job:
         def rh_job_lit_eq(texts: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             rh_job_eq(texts, s, e, lit)
 
-        # private to this file (modules retried after re-seed; see CHANGELOG).
+        # Stable public failure-kind label used by persisted records and CLI output.
         def rh_job_kind_label(k: i64) -> u8&:
             return "transient" if k == 0
             return "rate_limit" if k == 1
@@ -81,19 +81,14 @@ module Job:
         # only: no float rounding drift.
         def rh_job_backoff(kind: i64, attempt: i64, cap_secs: i64) -> i64:
             return 0 if attempt < 1
-            base: mutable i64 = 30 if kind == 1 else 2
-            if kind == 5:
-                base <- 60
+            base: i64 = 60 if kind == 5 else 30 if kind == 1 else 2
             # base * 2^(attempt-1), saturating at cap.
-            v: mutable i64 =
-                while i < attempt |v: i64 = base, i: i64 = 1| -> v:
-                    if v > 1073741824:
-                        v <- 1073741824
-                    v <- v * 2
+            delay: i64 =
+                while i < attempt |delay: i64 = base, i: i64 = 1| -> delay:
+                    delay <- 1073741824 if delay > 1073741824
+                    delay <- delay * 2
                     i <- i + 1
-            if cap_secs > 0 and v > cap_secs:
-                v <- cap_secs
-            v
+            cap_secs if cap_secs > 0 and delay > cap_secs else delay
 
         # Next state after a failure. Returns the phase code and, for retry, the
         # wake time. Phase codes mirror the blueprint:
@@ -160,13 +155,11 @@ module Job:
             RhHost{capacity: capacity, refill_per_second: refill, base_backoff_seconds: base_backoff, max_backoff_seconds: max_backoff, tokens: capacity, last_refill: 0, backoff_until: 0, consecutive_failures: 0, stopped: 0}
 
         def rh_sched_slots(n: i64) -> darray[RhSlot] can[Memory.Allocate, Abort.Panic]:
-            out: mutable darray[RhSlot] = []
-            while i < n |i: i64 = 0, out|:
-                out.push(RhSlot{used: false, phase: RH_SLOT_EMPTY, attempt: 0, wake_at: 0, token: 0, owner: -1, lease_expires: 0})
+            while i < n |i: i64 = 0, slots: darray[RhSlot] = []| -> slots:
+                slots.push(RhSlot{used: false, phase: RH_SLOT_EMPTY, attempt: 0, wake_at: 0, token: 0, owner: -1, lease_expires: 0})
                 i <- i + 1
-            out
 
-        # private to this file (modules retried after re-seed; see CHANGELOG).
+        # Shared worker/claim admission check for host quota and retry backoff.
         def rh_sched_host_allow(h: mutable RhHost&, now: i64) -> bool:
             return false if h.stopped != 0
             return false if h.backoff_until > now
