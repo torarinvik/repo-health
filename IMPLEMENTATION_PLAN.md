@@ -511,6 +511,8 @@ Evidence lists use Elisa `InlineVec` with two compact stored-link entries before
 
 **M00-02 identity-order oracle increment:** four representative cyclic lifecycle patterns now run through every edge permutation and all 16 endpoint-direction masks. The test independently derives undirected accepted components and accepted/revoked revision watermarks, then checks all 1,536 production CLI outputs. This verifies order and endpoint-orientation invariance for the cycle patterns; other graph shapes, longer histories, and graph-linked actor-metadata cross-products remain open.
 
+**M00-02 generated graph/metadata regression (execution pending):** tests/test_identity_cli.sh now creates 32 deterministic disconnected components spanning paths, cycles, stars, cycle-with-tail shapes, complete bipartite graphs, bridged cliques, and seeded sparse/dense graphs. Across 256 independently classified actors, a separate union-find/revision oracle checks canonical clusters, link-state watermarks, kind/source totals, observation/evidence coverage, classification rows, and both emitted metrics. The regression is added but remains unverified until the current Stage1 CLI build gate is resolved.
+
 ### 5.3 Essential invariants
 
 ```text

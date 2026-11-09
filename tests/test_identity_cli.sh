@@ -1125,4 +1125,107 @@ rc_corrupt=$?
 set -e
 [[ "$rc_corrupt" -eq 4 && ! -f "$T/corrupt.out" ]] || fail "corrupt evidence must fail before identity publication"
 
+echo "[identity] generated arbitrary multi-actor graph and metadata oracle"
+python3 - "$ROOT/build/rh_cli" "$T/generated-multi.json" "$T/generated-multi.out" <<'PY'
+import itertools, json, random, subprocess, sys
+
+binary, input_path, output_path = sys.argv[1:]
+rng = random.Random(20261109)
+states = ("accepted", "proposed", "rejected", "revoked")
+kinds = ("human", "bot_known", "unresolved", "service_known")
+sources = ("provider", "project", "operator", "unknown")
+component_count = 32
+component_size = 8
+actor_count = component_count * component_size
+links = []
+
+for component in range(component_count):
+    base = component * component_size
+    actors = range(base, base + component_size)
+    pairs = list(itertools.combinations(actors, 2))
+    shape = component % 8
+    if shape == 0:  # path
+        edges = [(base + index, base + index + 1) for index in range(component_size - 1)]
+    elif shape == 1:  # cycle
+        edges = [(base + index, base + (index + 1) % component_size) for index in range(component_size)]
+    elif shape == 2:  # star
+        edges = [(base, base + index) for index in range(1, component_size)]
+    elif shape == 3:  # cycle with a tail
+        edges = [(base + index, base + (index + 1) % 5) for index in range(5)]
+        edges.extend((base + index, base + index + 1) for index in range(4, component_size - 1))
+    elif shape == 4:  # complete bipartite
+        edges = [(base + left, base + right) for left in range(4) for right in range(4, 8)]
+    elif shape == 5:  # two cliques joined by a bridge
+        edges = [(base + left, base + right) for left, right in itertools.combinations(range(4), 2)]
+        edges.extend((base + left, base + right) for left, right in itertools.combinations(range(4, 8), 2))
+        edges.append((base + 3, base + 4))
+    elif shape == 6:  # random sparse
+        edges = rng.sample(pairs, 7 + rng.randrange(7))
+    else:  # random dense
+        edges = rng.sample(pairs, 17 + rng.randrange(8))
+    rng.shuffle(edges)
+    for left, right in edges:
+        links.append({"a": left, "b": right, "state": rng.choice(states), "revision_added": len(links) + 1})
+
+actor_kinds = [rng.choice(kinds) for _ in range(actor_count)]
+actor_sources = [rng.choice(sources) for _ in range(actor_count)]
+actor_times = [None if rng.randrange(3) == 0 else rng.randrange(1_800_000_001) for _ in range(actor_count)]
+actor_evidence = [None if rng.randrange(2) == 0 else f"evidence:generated-{actor:03d}" for actor in range(actor_count)]
+source = {
+    "schema": "rh-identity-input/1",
+    "actor_count": actor_count,
+    "links": links,
+    "actor_kinds": actor_kinds,
+    "actor_kind_sources": actor_sources,
+    "actor_kind_observed_at": actor_times,
+    "actor_kind_evidence_refs": actor_evidence,
+}
+with open(input_path, "w", encoding="utf-8") as stream:
+    json.dump(source, stream, separators=(",", ":"))
+    stream.write("\n")
+
+# Independent union-find oracle over arbitrary disconnected graph shapes.
+parent = list(range(actor_count))
+def find(actor):
+    while parent[actor] != actor:
+        actor = parent[actor]
+    return actor
+
+for link in links:
+    if link["state"] == "accepted":
+        left, right = find(link["a"]), find(link["b"])
+        if left != right:
+            parent[max(left, right)] = min(left, right)
+cluster_map = {}
+for actor in range(actor_count):
+    cluster_map.setdefault(find(actor), []).append(actor)
+clusters = list(cluster_map.values())
+cluster_ids = [find(actor) for actor in range(actor_count)]
+revision = max((link["revision_added"] for link in links if link["state"] in ("accepted", "revoked")), default=0)
+expected_kinds = {kind: actor_kinds.count(kind) for kind in kinds}
+expected_sources = {source: actor_sources.count(source) for source in sources}
+expected_times = {"observed": sum(value is not None for value in actor_times), "unknown": sum(value is None for value in actor_times)}
+expected_evidence = {"present": sum(value is not None for value in actor_evidence), "unknown": sum(value is None for value in actor_evidence)}
+expected_classifications = [
+    {"actor_id": actor, "kind": actor_kinds[actor], "source": actor_sources[actor],
+     "observed_at": actor_times[actor], "evidence_ref": actor_evidence[actor]}
+    for actor in range(actor_count)
+]
+
+subprocess.run([binary, "identity", "--input", input_path, "--out", output_path], check=True, stdout=subprocess.DEVNULL)
+actual = json.load(open(output_path, encoding="utf-8"))
+assert actual["actor_count"] == actor_count, actual["actor_count"]
+assert actual["identity_revision"] == revision, (actual["identity_revision"], revision)
+assert actual["cluster_count"] == len(clusters), (actual["cluster_count"], len(clusters))
+assert actual["clusters"] == clusters, actual["clusters"]
+assert actual["cluster_id_by_actor"] == cluster_ids, actual["cluster_id_by_actor"]
+assert actual["actor_kinds"] == expected_kinds, actual["actor_kinds"]
+assert actual["actor_kind_sources"] == expected_sources, actual["actor_kind_sources"]
+assert actual["actor_kind_observation_times"] == expected_times, actual["actor_kind_observation_times"]
+assert actual["actor_kind_evidence_references"] == expected_evidence, actual["actor_kind_evidence_references"]
+assert actual["actor_classifications"] == expected_classifications
+assert [row["value"] for row in actual["metrics"]] == [len(clusters), expected_kinds["human"]], actual["metrics"]
+print(f"[identity] {component_count} seeded graph shapes, {actor_count} independent metadata assignments")
+PY
+
 echo "test_identity_cli OK"
