@@ -592,7 +592,7 @@ module ForgeEvents:
             resumed_digest_e: mutable i64 = -1
             resumed_digest_present: mutable bool = false
             next_pull_page: mutable i64 = 0
-            next_pull_page_present: mutable i64 = 0
+            next_pull_page_present: mutable bool = false
             pulls_complete: mutable bool = false
             if review_collection_present:
                 return -1 if not github or not scope_repository_present or reviews_by_pull_idx < 0 or nodes[review_collection_idx.usize()].kind != Json::RH_JSON_OBJ
@@ -624,14 +624,10 @@ module ForgeEvents:
                             prior_pull_idx <- prior_pull_idx + 1
                         merged_idx: i64 = Json::rh_json_obj_get(nodes, texts, pull_node, "merged_at")
                         return -1 if merged_idx < 0
-                        merged_at: mutable i64 = 0
-                        has_merged_at: mutable bool = false
-                        if nodes[merged_idx.usize()].kind != Json::RH_JSON_NULL:
-                            merged_ok: mutable i64 = 0
-                            merged_at <- Json::rh_json_int(nodes, raw, merged_idx, &merged_ok)
-                            return -1 if merged_ok == 0 or merged_at < 0
-                            has_merged_at <- true
-                        pull_batch.push(RhForgePullBatch{pull_number: pull_number, merged_at: merged_at, has_merged_at: has_merged_at})
+                        merged_at: RhForgeValue =
+                            ForgeEvents::rh_fe_int(nodes, raw, texts, pull_node, "merged_at") if nodes[merged_idx.usize()].kind != Json::RH_JSON_NULL else RhForgeValue{valid: true, present: false, value: 0}
+                        return -1 if not merged_at.valid or (merged_at.present and merged_at.value < 0)
+                        pull_batch.push(RhForgePullBatch{pull_number: pull_number, merged_at: merged_at.value, has_merged_at: merged_at.present})
                         pull_node <- nodes[pull_node.usize()].next_sibling
                 batch_request_idx: i64 = Json::rh_json_obj_get(nodes, texts, review_collection_idx, "batch_request")
                 if batch_request_idx >= 0:
@@ -644,9 +640,9 @@ module ForgeEvents:
                     requested_page_idx: i64 = Json::rh_json_obj_get(nodes, texts, batch_request_idx, "pull_page")
                     return -1 if requested_page_idx < 0
                     if nodes[requested_page_idx.usize()].kind != Json::RH_JSON_NULL:
-                        page_ok: mutable i64 = 0
-                        requested_pull_page <- Json::rh_json_int(nodes, raw, requested_page_idx, &page_ok)
-                        return -1 if page_ok == 0 or requested_pull_page < 1 or requested_pull_page > 2147483640
+                        page: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, batch_request_idx, "pull_page")
+                        return -1 if not page.valid or not page.present or page.value < 1 or page.value > 2147483640
+                        requested_pull_page <- page.value
                         requested_pull_page_present <- true
                     requested_reviews_idx: i64 = Json::rh_json_obj_get(nodes, texts, batch_request_idx, "review_pages")
                     return -1 if requested_reviews_idx < 0 or nodes[requested_reviews_idx.usize()].kind != Json::RH_JSON_ARR or nodes[requested_reviews_idx.usize()].child_count > 10
@@ -670,8 +666,10 @@ module ForgeEvents:
                 next_pull_idx: i64 = Json::rh_json_obj_get(nodes, texts, review_collection_idx, "next_pull_page")
                 return -1 if next_pull_idx < 0
                 if nodes[next_pull_idx.usize()].kind != Json::RH_JSON_NULL:
-                    next_pull_page <- Json::rh_json_int(nodes, raw, next_pull_idx, &next_pull_page_present)
-                    return -1 if next_pull_page_present == 0 or next_pull_page < 1 or next_pull_page > 2147483640
+                    page: RhForgeValue = ForgeEvents::rh_fe_int(nodes, raw, texts, review_collection_idx, "next_pull_page")
+                    return -1 if not page.valid or not page.present or page.value < 1 or page.value > 2147483640
+                    next_pull_page <- page.value
+                    next_pull_page_present <- true
                 pulls_complete_idx: i64 = Json::rh_json_obj_get(nodes, texts, review_collection_idx, "pulls_complete")
                 return -1 if pulls_complete_idx < 0 or nodes[pulls_complete_idx.usize()].kind != Json::RH_JSON_BOOL
                 pulls_complete <- Json::rh_json_is_true(nodes, raw, pulls_complete_idx)
@@ -793,7 +791,7 @@ module ForgeEvents:
                     out.push(125)
                     pull_idx <- pull_idx + 1
                 Base::rh_push_text(out, "],\"next_pull_page\":")
-                if next_pull_page_present > 0:
+                if next_pull_page_present:
                     Base::rh_push_decimal_i64(out, next_pull_page)
                 else:
                     Base::rh_push_text(out, "null")
