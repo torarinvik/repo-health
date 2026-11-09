@@ -32,13 +32,13 @@ observations = {row["key"]: row for row in d["observations"]}
 assert set(observations) == {"discontinuity.no_qualifying_release_in_horizon", "anomaly.cadence_deviation_windows"}, observations
 assert observations["discontinuity.no_qualifying_release_in_horizon"] == {
     "key": "discontinuity.no_qualifying_release_in_horizon", "version": "0.1.0", "status": "observed",
-    "value": {"num": 1, "den": 2}, "evidence": [],
-    "quality_dimensions": {"completeness": "complete", "freshness": "unknown", "validity": "valid", "provenance": "derived"},
+    "value": {"num": 1, "den": 2}, "evidence": ["experimental-input"],
+    "quality_dimensions": {"completeness": "complete", "freshness": "unknown", "validity": "valid", "provenance": "evidence_backed"},
 }, observations
 assert observations["anomaly.cadence_deviation_windows"] == {
     "key": "anomaly.cadence_deviation_windows", "version": "0.1.0", "status": "observed",
-    "value": 2, "evidence": [],
-    "quality_dimensions": {"completeness": "complete", "freshness": "unknown", "validity": "valid", "provenance": "derived"},
+    "value": 2, "evidence": ["experimental-input"],
+    "quality_dimensions": {"completeness": "complete", "freshness": "unknown", "validity": "valid", "provenance": "evidence_backed"},
 }, observations
 assert observations["discontinuity.no_qualifying_release_in_horizon"]["value"] == d["metric"]["value"]["rate"], observations
 assert observations["anomaly.cadence_deviation_windows"]["value"] == len(d["anomaly"]["value"]["finding_window_indices"]), observations
@@ -66,8 +66,13 @@ assert sidecar["adapter"] == "experimental-metric-evaluation", sidecar
 assert sidecar["output_schema"] == "rh-experimental-result/1", sidecar
 assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
 assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
-assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/experimental-metric-evaluation/2").hexdigest(), sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/experimental-metric-evaluation/3").hexdigest(), sidecar
 assert [field["state"] for field in sidecar["fields"]] == ["transformed", "transformed", "preserved", "transformed", "transformed"], sidecar
+assert sidecar["fields"][-1] == {
+    "source": "typed experimental metric statuses, values, quality, and input evidence reference",
+    "target": "shared observation envelope linked to digest-bound source input",
+    "state": "transformed",
+}, sidecar
 print("[experimental] admissibility + outcome OK")
 PY
 
@@ -82,10 +87,12 @@ c = json.load(open(sys.argv[1]))
 i = json.load(open(sys.argv[2]))
 assert c["metric"]["status"] == "not_applicable" and c["metric"]["value"] is None, c["metric"]
 assert c["observations"][0]["status"] == "not_applicable" and c["observations"][0]["value"] is None, c["observations"]
-assert c["observations"][0]["reason"] == "no-observable-subject" and c["observations"][0]["quality_dimensions"]["provenance"] == "unknown", c["observations"]
+assert c["observations"][0]["reason"] == "no-observable-subject" and c["observations"][0]["quality_dimensions"]["provenance"] == "evidence_backed", c["observations"]
+assert c["observations"][0]["evidence"] == ["experimental-input"], c["observations"]
 assert i["metric"]["status"] == "unsupported" and i["metric"]["reason"] == "no-admissible-experimental-spec", i["metric"]
 assert i["observations"][0]["status"] == "unsupported" and i["observations"][0]["value"] is None, i["observations"]
-assert i["observations"][0]["reason"] == "no-admissible-experimental-spec" and i["observations"][0]["quality_dimensions"]["provenance"] == "unknown", i["observations"]
+assert i["observations"][0]["reason"] == "no-admissible-experimental-spec" and i["observations"][0]["quality_dimensions"]["provenance"] == "evidence_backed", i["observations"]
+assert i["observations"][0]["evidence"] == ["experimental-input"], i["observations"]
 print("[experimental] not_applicable/unsupported OK")
 PY
 
