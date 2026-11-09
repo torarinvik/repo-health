@@ -64,6 +64,37 @@ assert rows[0]["assessment_key"] == hashlib.sha256(material).hexdigest()
 print("[assessment-dedup] exact origin keys, repeated deliveries, and uncertain rows OK")
 PY
 echo "[assessment-dedup] three services share one origin key while retaining source-namespaced delivery identity"
+STATE="$T/state-store"
+mkdir -p "$STATE"
+"$CLI" assessment-dedup --input "$T/input.json" --out "$T/state-first-result.json" --state-store "$STATE" >/dev/null || fail "first persistent state batch"
+"$CLI" assessment-dedup --input "$T/input.json" --out "$T/state-second-result.json" --state-store "$STATE" >/dev/null || fail "second persistent state batch"
+python3 - "$T" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+state_root = root / "state-store"
+pointer = (state_root / "current").read_text().strip()
+assert len(pointer) == 16 and all(ch in "0123456789abcdef" for ch in pointer), pointer
+state_bytes = (state_root / pointer).read_bytes()
+state = json.loads(state_bytes)
+assert state["schema"] == "rh-assessment-dedup-state/1", state
+assert len(state["origin_keys"]) == 2 and state["origin_keys"] == sorted(set(state["origin_keys"])), state
+first = json.loads((root / "state-first-result.json").read_bytes())
+second = json.loads((root / "state-second-result.json").read_bytes())
+assert first["counts"]["origin_assessments_seen_before_batch"] == 0, first
+assert second["counts"]["origin_assessments_seen_before_batch"] == 2, second
+assert [row["seen_before_batch"] for row in first["deliveries"]] == [False] * 6, first
+assert [row["seen_before_batch"] for row in second["deliveries"]] == [True, True, True, True, False, False], second
+for report, prior in (("state-first-result.json", b""), ("state-second-result.json", state_bytes)):
+    sidecar = json.loads((root / (report + ".transformations.json")).read_bytes())
+    configuration = "repo-health/origin-assessment-dedup/2;prior-state-sha256=" + hashlib.sha256(prior).hexdigest()
+    assert sidecar["configuration_sha256"] == hashlib.sha256(configuration.encode()).hexdigest(), sidecar
+print("[assessment-dedup] persistent state distinguishes previously seen complete origins and binds prior-state configuration")
+PY
+expect 2 "$CLI" assessment-dedup --input "$T/input.json" --out "$STATE/current" --state-store "$STATE"
+printf 'not-a-state-digest\n' > "$STATE/current"
+expect 4 "$CLI" assessment-dedup --input "$T/input.json" --out "$T/state-corrupt-result.json" --state-store "$STATE"
+[[ ! -e "$T/state-corrupt-result.json" ]] || fail "corrupt persistent state emitted a report"
+echo "[assessment-dedup] state-store path collisions and corrupt state fail closed"
 python3 - "$T/input.json" "$CLI" "$T" <<'PY'
 import json, pathlib, subprocess, sys
 source_path, cli, temp = sys.argv[1:]

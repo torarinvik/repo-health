@@ -224,7 +224,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli query --input <file> --out <file>")
     rh_cli_err("       rh_cli identity --input <file> --out <file> [--evidence-store <root/evidence-dir>]")
     rh_cli_err("       rh_cli identity-publish --input <file> --out <file>")
-    rh_cli_err("       rh_cli assessment-dedup --input <rh-assessment-dedup-input/1> --out <file>")
+    rh_cli_err("       rh_cli assessment-dedup --input <rh-assessment-dedup-input/1> --out <file> [--state-store <dir>]")
     rh_cli_err("       rh_cli distribution --input <debian/control> --out <file>")
     rh_cli_err("       rh_cli debian-index --input <decoded-Packages-Deb822> --out <file>")
     rh_cli_err("       rh_cli apkindex --input <decoded-APKINDEX-text> --out <file>")
@@ -3566,8 +3566,8 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
         return rh_cli_usage(2) if li_idx < 0 or lo_idx < 0
         return rh_do_lineage(slots[li_idx], slots[lo_idx], false)
     if Base::rh_streq(cmd, "assessment-dedup"):
-        adi_idx, ado_idx =
-            while adq < argc |adi_idx: i64 = -1, ado_idx: i64 = -1, adq: i64 = 2, slots| -> adi_idx, ado_idx:
+        adi_idx, ado_idx, ads_idx =
+            while adq < argc |adi_idx: i64 = -1, ado_idx: i64 = -1, ads_idx: i64 = -1, adq: i64 = 2, slots| -> adi_idx, ado_idx, ads_idx:
                 arg: u8& = slots[adq].cast[u8&] can Unsafe.PointerCast
                 if Base::rh_streq(arg, "--input"):
                     if adq + 1 < argc:
@@ -3581,10 +3581,17 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                         ado_idx <- adq
                     else:
                         return rh_cli_usage(2)
+                elif Base::rh_streq(arg, "--state-store"):
+                    if adq + 1 < argc:
+                        adq <- adq + 1
+                        ads_idx <- adq
+                    else:
+                        return rh_cli_usage(2)
                 else:
                     return rh_cli_usage(2)
                 adq <- adq + 1
         return rh_cli_usage(2) if adi_idx < 0 or ado_idx < 0
+        return rh_do_assessment_dedup_state(slots[adi_idx], slots[ado_idx], slots[ads_idx]) if ads_idx >= 0
         return rh_do_lineage(slots[adi_idx], slots[ado_idx], true)
     if Base::rh_streq(cmd, "population"):
         pi_idx, po_idx, downstream_idx =
@@ -11682,7 +11689,7 @@ def rh_do_adoption(input_path: cstr, out_path: cstr, store_root: cstr, has_store
 # --- M00 lineage and transformation-contract execution path. ---
 # Validates the shared source/object/assessment envelope and preserves explicit
 # field-level transformation losses for downstream evidence drill-down.
-def rh_do_lineage(input_path: cstr, out_path: cstr, assessment_dedup: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_lineage_report(input_path: cstr, out_path: cstr, assessment_dedup: bool, prior_keys: darray[u8]&, prior_state: darray[u8]&, state_enabled: bool, state_out: mutable darray[u8]&) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected lineage argument (allowlist)")
         return 3
@@ -11701,7 +11708,14 @@ def rh_do_lineage(input_path: cstr, out_path: cstr, assessment_dedup: bool) -> i
         rh_cli_err("lineage: cannot read --input")
         return 4
     body: mutable darray[u8] = []
-    report_status: i64 = AssessmentDedup::rh_assessment_dedup_report(raw, body) if assessment_dedup else Lineage::rh_lineage_report(raw, body)
+    report_status: i64 =
+        if assessment_dedup:
+            if state_enabled:
+                AssessmentDedup::rh_assessment_dedup_report_state(raw, prior_keys, body, state_out)
+            else:
+                AssessmentDedup::rh_assessment_dedup_report(raw, body)
+        else:
+            Lineage::rh_lineage_report(raw, body)
     if report_status != 0:
         rh_cli_err("lineage: unsupported or malformed lineage envelope (fail closed)")
         return 4
@@ -11719,22 +11733,94 @@ def rh_do_lineage(input_path: cstr, out_path: cstr, assessment_dedup: bool) -> i
             "rh-assessment-dedup-result/1"
         else:
             "rh-lineage-result/1"
+    configuration_storage: mutable darray[u8] =
+        if assessment_dedup and state_enabled:
+            state_digest: mutable darray[u8] = []
+            Sha256::rh_sha256(prior_state, state_digest)
+            configuration: mutable darray[u8] = []
+            Base::rh_push_text(configuration, "repo-health/origin-assessment-dedup/2;prior-state-sha256=")
+            configuration.extend(bytes_view(state_digest))
+            configuration.push(0)
+            configuration
+        else:
+            []
     transformation_configuration: cstr =
-        if assessment_dedup:
+        if assessment_dedup and state_enabled:
+            (&configuration_storage[0]).cast[cstr] can Unsafe.PointerCast
+        elif assessment_dedup:
             "repo-health/origin-assessment-dedup/1"
         else:
             "repo-health/evidence-lineage/1"
     transformation_fields: cstr =
-        if assessment_dedup:
-            "[{\"source\":\"delivery identifiers and delivery times\",\"target\":\"retained delivery rows\",\"state\":\"preserved\"},{\"source\":\"optional delivery source identifiers\",\"target\":\"source-namespaced delivery attribution; excluded from origin identity\",\"state\":\"preserved\"},{\"source\":\"complete tool/version/revision/run/time/result-digest tuples\",\"target\":\"length-framed assessment keys and cross-service batch groups\",\"state\":\"transformed\"},{\"source\":\"incomplete origin identity tuples\",\"target\":\"possible_duplicate deliveries\",\"state\":\"unknown\"},{\"source\":\"cross-batch global identity state\",\"target\":\"assessment grouping\",\"state\":\"unsupported\"}]"
+        if assessment_dedup and state_enabled:
+            "[{\"source\":\"delivery identifiers and delivery times\",\"target\":\"retained delivery rows\",\"state\":\"preserved\"},{\"source\":\"optional delivery source identifiers\",\"target\":\"source-namespaced delivery attribution; excluded from origin identity\",\"state\":\"preserved\"},{\"source\":\"complete tool/version/revision/run/time/result-digest tuples\",\"target\":\"length-framed assessment keys and cross-service batch groups\",\"state\":\"transformed\"},{\"source\":\"prior-batch origin key ledger\",\"target\":\"seen_before_batch flags and updated content-addressed state\",\"state\":\"transformed\"},{\"source\":\"incomplete origin identity tuples\",\"target\":\"possible_duplicate deliveries\",\"state\":\"unknown\"}]"
+        elif assessment_dedup:
+            "[{\"source\":\"delivery identifiers and delivery times\",\"target\":\"retained delivery rows\",\"state\":\"preserved\"},{\"source\":\"optional delivery source identifiers\",\"target\":\"source-namespaced delivery attribution; excluded from origin identity\",\"state\":\"preserved\"},{\"source\":\"complete tool/version/revision/run/time/result-digest tuples\",\"target\":\"length-framed assessment keys and cross-service batch groups\",\"state\":\"transformed\"},{\"source\":\"incomplete origin identity tuples\",\"target\":\"possible_duplicate deliveries\",\"state\":\"unknown\"},{\"source\":\"persistent state not supplied\",\"target\":\"cross-batch identity comparison\",\"state\":\"unsupported\"}]"
         else:
             "[{\"source\":\"subject, source-native object, collection, payload, collector, and rights fields\",\"target\":\"canonical nested lineage envelope\",\"state\":\"transformed\"},{\"source\":\"delivery identity and complete origin-assessment fields\",\"target\":\"separate delivery and origin identities\",\"state\":\"preserved\"},{\"source\":\"absent optional provenance or incomplete origin identity\",\"target\":\"null fields and possible_duplicate state\",\"state\":\"unknown\"},{\"source\":\"caller-declared field losses and metric classifications\",\"target\":\"validated loss counts and typed metric observations\",\"state\":\"transformed\"}]"
     if not AdapterTransformationCli::rh_write_sidecar(raw, body, transformation_adapter, transformation_schema, transformation_configuration, transformation_fields, out_path):
         rh_cli_err("lineage: cannot write transformation report")
         return 4
-    rh_cli_out("assessment-dedup: complete origin identities grouped") if assessment_dedup
-    rh_cli_out("lineage: evidence contract validated") if not assessment_dedup
     0
+
+def rh_do_lineage(input_path: cstr, out_path: cstr, assessment_dedup: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    prior_keys: mutable darray[u8] = []
+    prior_state: mutable darray[u8] = []
+    state_out: mutable darray[u8] = []
+    status: i32 = rh_do_lineage_report(input_path, out_path, assessment_dedup, prior_keys, prior_state, false, state_out)
+    rh_cli_out("assessment-dedup: complete origin identities grouped") if status == 0 and assessment_dedup
+    rh_cli_out("lineage: evidence contract validated") if status == 0 and not assessment_dedup
+    status
+
+def rh_do_assessment_dedup_state(input_path: cstr, out_path: cstr, state_root: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path) or not Git::rh_arg_safe(state_root):
+        rh_cli_err("rejected assessment-dedup state argument (allowlist)")
+        return 3
+    if Base::rh_streq(input_path, out_path) or Git::rh_ensure_dir(state_root) != 0:
+        rh_cli_err("assessment-dedup: invalid output or state-store directory")
+        return 4
+    pointer_path: mutable darray[u8] = []
+    Base::rh_push_cstr(pointer_path, state_root)
+    Base::rh_push_text(pointer_path, "/current")
+    pointer_path.push(0)
+    pointer: cstr = (&pointer_path[0]).cast[cstr] can Unsafe.PointerCast
+    if Base::rh_streq(out_path, pointer):
+        rh_cli_err("assessment-dedup: --out cannot replace the state-store current pointer")
+        return 2
+    lock_path: mutable darray[u8] = []
+    Base::rh_push_cstr(lock_path, state_root)
+    Base::rh_push_text(lock_path, "/current.lock")
+    lock_path.push(0)
+    lock: cstr = (&lock_path[0]).cast[cstr] can Unsafe.PointerCast
+    if Base::rh_streq(out_path, lock):
+        rh_cli_err("assessment-dedup: --out cannot replace the state-store lock")
+        return 2
+    guard_fd: mutable i32 = -1
+    if Store::rh_store_path_guard_acquire(pointer, &guard_fd) != 0:
+        rh_cli_err("assessment-dedup: cannot lock state store")
+        return 4
+    state_raw: mutable darray[u8] = []
+    loaded: i64 = StateStore::rh_state_store_load_bounded(state_root, AssessmentDedup::RH_ASSESSMENT_DEDUP_MAX_STATE_BYTES, state_raw)
+    prior_keys: mutable darray[u8] = []
+    operation: mutable i64 = 0
+    if loaded < 0 or AssessmentDedup::rh_assessment_dedup_state_keys(state_raw, prior_keys) != 0:
+        rh_cli_err("assessment-dedup: corrupt state store (fail closed)")
+        operation <- 4
+    else:
+        state_out: mutable darray[u8] = []
+        operation <- rh_do_lineage_report(input_path, out_path, true, prior_keys, state_raw, true, state_out)
+        if operation == 0:
+            state_out.push(10)
+            state_id: mutable darray[u8] = []
+            if StateStore::rh_state_store_publish(state_root, state_out, state_id) != 0:
+                rh_cli_err("assessment-dedup: cannot publish state store")
+                operation <- 4
+    released: i64 = Store::rh_store_guard_release(guard_fd)
+    if released != 0:
+        rh_cli_err("assessment-dedup: cannot release state-store lock")
+        operation <- 4
+    rh_cli_out("assessment-dedup: complete origin identities grouped") if operation == 0
+    operation
 
 # --- M05 focal-library population execution path. ---
 # Keeps the selected discovery population, family deduplication, path

@@ -53,6 +53,38 @@ module StateStore:
             return -1 if Base::rh_io_read(pp2, out) < 0
             0
 
+        # Preflight the pointed-to object size before content verification reads
+        # it. Missing state is fresh (1); malformed pointers, oversized blobs,
+        # and corrupt content fail closed (-1).
+        def rh_state_store_load_bounded(root: cstr, maximum_bytes: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+            return -1 if maximum_bytes <= 0 or maximum_bytes > 67108864
+            pointer: mutable darray[u8] = []
+            pp: cstr = StateStore::rh_state_pointer_path(root, pointer)
+            return 1 if not file_exists(pp)
+            pointer_size: i64 = Base::rh_file_size(pp)
+            return -1 if pointer_size < 16 or pointer_size > 17
+            raw: mutable darray[u8] = []
+            return -1 if Base::rh_io_read(pp, raw) != pointer_size
+            line_end: mutable i64 = Base::rh_find_byte(raw, 0, 10)
+            line_end <- raw.count.i64() if line_end < 0
+            return -1 if not StateStore::rh_state_digest_valid(raw, line_end)
+            name: mutable darray[u8] =
+                while index < line_end |index: i64 = 0, name: mutable darray[u8] = []| -> name:
+                    name.push(raw[index.usize()])
+                    index <- index + 1
+            name.push(0)
+            np: u8& = (&name[0]).cast[u8&] can Unsafe.PointerCast
+            blob_path: mutable darray[u8] =
+                path: mutable darray[u8] = []
+                Base::rh_push_cstr(path, root)
+                path.push(47)
+                path.extend(bytes_view(name))
+                path
+            blob: cstr = (&blob_path[0]).cast[cstr] can Unsafe.PointerCast
+            blob_size: i64 = Base::rh_file_size(blob)
+            return -1 if blob_size <= 0 or blob_size > maximum_bytes
+            StateStore::rh_state_store_load(root, out)
+
         # Publish one state document and advance the current pointer only
         # after the immutable blob has been accepted. id_out receives its ID.
         def rh_state_store_publish(root: cstr, state: mutable darray[u8]&, id_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
