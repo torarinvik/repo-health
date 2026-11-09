@@ -101,14 +101,8 @@ module Subversion:
                     if entries.count.i64() >= cap:
                         over <- true
                     else:
-                        rs: mutable i64 = -1
-                        re2: mutable i64 = -1
-                        rev: mutable i64 = -1
-                        if rh_svn_attr_span(raw, le, gt, "revision", &rs, &re2):
-                            err: mutable i64 = 0
-                            rev <- rh_svn_parse_i64(raw, rs, re2, &err)
-                            if err != 0:
-                                rev <- -1
+                        revision: RhSvnTextSpan = rh_svn_attr_span(raw, le, gt, "revision")
+                        rev: i64 = rh_svn_parse_i64(raw, revision.start, revision.end) if revision.present else -1
                         if rev < 0:
                             rej <- rej + 1
                         else:
@@ -244,29 +238,21 @@ module Subversion:
                 pool.push((128 + (v / 64) % 64).u8())
                 pool.push((128 + v % 64).u8())
 
-        # Strict non-negative decimal integer over a raw span; err 1 and -1 when
-        # missing/empty/non-digit (never guessed). err is i64 because the stage1
-        # backend does not lower a `mutable bool&` out-parameter.
-        def rh_svn_parse_i64(data: darray[u8]&, s: i64, e: i64, err: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            err[0] <- 1
+        # Strict non-negative decimal integer over a raw span; -1 when missing,
+        # empty, non-digit, or above the supported revision bound.
+        def rh_svn_parse_i64(data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if s < 0 or e <= s or e > data.count.i64()
-            value: i64 =
-                while i < e |value: i64 = 0, i: i64 = s| -> value:
-                    b: u8 = data[i.usize()]
-                    return -1 if b < 48 or b > 57
-                    value <- value * 10 + (b.i64() - 48)
-                    return -1 if value > 1000000000000000
-                    i <- i + 1
-            err[0] <- 0
-            value
+            while i < e |value: i64 = 0, i: i64 = s, e, data| -> value:
+                b: u8 = data[i.usize()]
+                break -1 if b < 48 or b > 57
+                value <- value * 10 + (b.i64() - 48)
+                break -1 if value > 1000000000000000
+                i <- i + 1
 
         # Read an attribute value span in the start tag [tag_s, tag_e): looks for
-        # ` name="..."` / ` name='...'`. Returns value start via out_s/out_e (raw
-        # offsets into data), or false when absent.
-        def rh_svn_attr_span(data: darray[u8]&, tag_s: i64, tag_e: i64, name: u8&, out_s: mutable i64&, out_e: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-            out_s[0] <- -1
-            out_e[0] <- -1
-            while true |pos: i64 = tag_s, tag_s, tag_e, data, name, out_s, out_e|:
+        # ` name="..."` / ` name='...'`, returning an absent span when missing.
+        def rh_svn_attr_span(data: darray[u8]&, tag_s: i64, tag_e: i64, name: u8&) -> RhSvnTextSpan can[Memory.Allocate, Abort.Panic]:
+            while true |span: RhSvnTextSpan = RhSvnTextSpan{present: false, start: -1, end: -1}, pos: i64 = tag_s, tag_e, data, name| -> span:
                 break if pos >= tag_e
                 hit: i64 = rh_svn_find(data, pos, name)
                 if hit < 0 or hit + strlen(name).i64() > tag_e:
@@ -287,11 +273,8 @@ module Subversion:
                             vs: i64 = eq + 1
                             ve: i64 = rh_svn_find_byte(data, vs, q)
                             if ve >= 0 and ve <= tag_e:
-                                out_s[0] <- vs
-                                out_e[0] <- ve
-                                return true
+                                break RhSvnTextSpan{present: true, start: vs, end: ve}
                 pos <- hit + 1
-            false
 
         # Count <path action="X"> children in the <paths>...</paths> block
         # [block_s, block_e).
@@ -302,12 +285,8 @@ module Subversion:
                 break if ptag < 0 or ptag >= block_e
                 gt: i64 = rh_svn_find_byte(data, ptag, 62)
                 break if gt < 0 or gt > block_e
-                vs: mutable i64 = -1
-                ve: mutable i64 = -1
-                act: mutable u8 = RH_SVN_ACT_UNKNOWN
-                if rh_svn_attr_span(data, ptag, gt, "action", &vs, &ve):
-                    if ve > vs:
-                        act <- rh_svn_action_of(data[vs.usize()])
+                action: RhSvnTextSpan = rh_svn_attr_span(data, ptag, gt, "action")
+                act: u8 = rh_svn_action_of(data[action.start.usize()]) if action.present and action.end > action.start else RH_SVN_ACT_UNKNOWN
                 counts.path_count <- counts.path_count + 1
                 if act == RH_SVN_ACT_ADD:
                     counts.add_n <- counts.add_n + 1
