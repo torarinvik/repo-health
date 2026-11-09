@@ -25,6 +25,11 @@ module Gerrit:
             valid: bool
             value: i64
 
+        struct RhGerritSpan:
+            valid: bool
+            start: i64
+            end: i64
+
         def rh_gerrit_obj_count(nodes: darray[Json::RhJsonNode]&, idx: i64) -> i64:
             return -1 if idx < 0 or nodes[idx.usize()].kind != Json::RH_JSON_OBJ
             while child >= 0 |n: i64 = 0, child: i64 = nodes[idx.usize()].first_child| -> n:
@@ -75,10 +80,17 @@ module Gerrit:
             RhGerritTime{valid: valid, value: value}
 
         # private to this file (modules retried after re-seed; see CHANGELOG).
-        def rh_gerrit_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&, s_out: mutable i64&, e_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_gerrit_str(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> RhGerritSpan can[Memory.Allocate, Abort.Panic]:
+            invalid: RhGerritSpan = RhGerritSpan{valid: false, start: -1, end: -1}
             idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
-            return false if idx < 0
-            Json::rh_json_str_span(nodes, idx, s_out, e_out)
+            return invalid if idx < 0
+            start, end, present =
+                start: mutable i64 = -1
+                end: mutable i64 = -1
+                present: bool = Json::rh_json_str_span(nodes, idx, &start, &end)
+                start, end, present
+            return invalid if not present
+            RhGerritSpan{valid: true, start: start, end: end}
 
         # Parse a Gerrit `QueryChanges` JSON document and write `rh-gerrit/1`. Returns
         # 0 ok, -1 malformed. An empty list is valid (zero changes). Each change
@@ -97,41 +109,33 @@ module Gerrit:
             body: mutable darray[u8] = []
             while child >= 0 |child: i64 = arr.first_child, first: bool = true, nodes, texts, raw, out, body, total, revisions_total|:
                 return -1 if nodes[child.usize()].kind != Json::RH_JSON_OBJ
-                oknum: mutable i64 = 0
-                num: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, child, "_number"), &oknum)
-                return -1 if oknum == 0
-                ps: mutable i64 = 0
-                pe: mutable i64 = 0
-                return -1 if not rh_gerrit_str(nodes, texts, child, "project", &ps, &pe)
-                bs: mutable i64 = 0
-                be: mutable i64 = 0
-                return -1 if not rh_gerrit_str(nodes, texts, child, "branch", &bs, &be)
-                ss: mutable i64 = 0
-                se: mutable i64 = 0
-                return -1 if not rh_gerrit_str(nodes, texts, child, "subject", &ss, &se)
-                sts: mutable i64 = 0
-                ste: mutable i64 = 0
-                return -1 if not rh_gerrit_str(nodes, texts, child, "status", &sts, &ste)
-                cs: mutable i64 = 0
-                ce: mutable i64 = 0
-                return -1 if not rh_gerrit_str(nodes, texts, child, "created", &cs, &ce)
-                us: mutable i64 = 0
-                ue: mutable i64 = 0
-                return -1 if not rh_gerrit_str(nodes, texts, child, "updated", &us, &ue)
-                created_time: RhGerritTime = rh_gerrit_time(texts, cs, ce)
+                num: i64 =
+                    ok: mutable i64 = 0
+                    value: i64 = Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, child, "_number"), &ok)
+                    return -1 if ok == 0
+                    value
+                project: RhGerritSpan = rh_gerrit_str(nodes, texts, child, "project")
+                return -1 if not project.valid
+                branch: RhGerritSpan = rh_gerrit_str(nodes, texts, child, "branch")
+                return -1 if not branch.valid
+                subject: RhGerritSpan = rh_gerrit_str(nodes, texts, child, "subject")
+                return -1 if not subject.valid
+                status: RhGerritSpan = rh_gerrit_str(nodes, texts, child, "status")
+                return -1 if not status.valid
+                created_span: RhGerritSpan = rh_gerrit_str(nodes, texts, child, "created")
+                return -1 if not created_span.valid
+                updated_span: RhGerritSpan = rh_gerrit_str(nodes, texts, child, "updated")
+                return -1 if not updated_span.valid
+                created_time: RhGerritTime = rh_gerrit_time(texts, created_span.start, created_span.end)
                 return -1 if not created_time.valid
-                updated_time: RhGerritTime = rh_gerrit_time(texts, us, ue)
+                updated_time: RhGerritTime = rh_gerrit_time(texts, updated_span.start, updated_span.end)
                 return -1 if not updated_time.valid
                 created: i64 = created_time.value
                 updated: i64 = updated_time.value
-                revs: mutable i64 =
+                revs: i64 =
                     ridx: i64 = Json::rh_json_obj_get(nodes, texts, child, "revisions")
-                    block_result: i64 = rh_gerrit_obj_count(nodes, ridx)
-                    block_result
-                if revs < 0:
-                    revs <- 1
-                if revs < 1:
-                    revs <- 1
+                    count: i64 = rh_gerrit_obj_count(nodes, ridx)
+                    1 if count < 1 else count
                 revisions_total <- revisions_total + revs
                 total <- total + 1
                 if not first:
@@ -140,13 +144,13 @@ module Gerrit:
                 Base::rh_push_text(body, "{\"change_number\":")
                 Base::rh_push_decimal_i64(body, num)
                 Base::rh_push_text(body, ",\"project\":\"")
-                Base::rh_json_escape(body, texts, ps.usize(), pe.usize())
+                Base::rh_json_escape(body, texts, project.start.usize(), project.end.usize())
                 Base::rh_push_text(body, "\",\"branch\":\"")
-                Base::rh_json_escape(body, texts, bs.usize(), be.usize())
+                Base::rh_json_escape(body, texts, branch.start.usize(), branch.end.usize())
                 Base::rh_push_text(body, "\",\"subject\":\"")
-                Base::rh_json_escape(body, texts, ss.usize(), se.usize())
+                Base::rh_json_escape(body, texts, subject.start.usize(), subject.end.usize())
                 Base::rh_push_text(body, "\",\"status\":\"")
-                Base::rh_json_escape(body, texts, sts.usize(), ste.usize())
+                Base::rh_json_escape(body, texts, status.start.usize(), status.end.usize())
                 Base::rh_push_text(body, "\",\"created_at\":")
                 Base::rh_push_decimal_i64(body, created)
                 Base::rh_push_text(body, ",\"updated_at\":")
