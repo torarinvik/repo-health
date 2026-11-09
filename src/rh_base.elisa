@@ -37,11 +37,13 @@ module Base:
         def rh_cstr_len(text: u8&?) -> i64:
             return 0 if text == null
             src: u8& = text
-            strlen(src).i64()
+            arena_strlen(src).i64()
 
-        # C-string equality via strcmp.
+        # C-string equality; cast at the libc boundary because raw u8 references are
+        # the established API type here, while the standard declaration accepts cstr.
         def rh_streq(a: u8&, b: u8&) -> bool:
-            strcmp(a, b) == 0
+            trusted Unsafe.PointerCast:
+                return strcmp(a.cast[cstr], b.cast[cstr]) == 0
 
         # Byte helpers on NUL-terminated cstr.
         def rh_cstr_starts_with(s: cstr, prefix: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -221,12 +223,14 @@ module Base:
         # on any failure or when the file exceeds RH_MAX_READ.
         def rh_io_read(path: cstr, buffer: mutable darray[u8]&) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic]:
             return -1 if rh_file_size(path) > RH_MAX_READ
-            got: i64 = catch read_entire_file(&perm_arena, path):
-                value: rh_absorb_bytes(value, buffer)
-                FileIoError.OpenFailed: -1
-                FileIoError.ReadFailed: -1
-                FileIoError.SeekFailed: -1
-                FileIoError.WriteFailed: -1
+            got: mutable i64 = -1
+            can Global{Read, Write}:
+                got <- catch read_entire_file(&perm_arena, path):
+                    value: rh_absorb_bytes(value, buffer)
+                    FileIoError.OpenFailed: -1
+                    FileIoError.ReadFailed: -1
+                    FileIoError.SeekFailed: -1
+                    FileIoError.WriteFailed: -1
             got
 
         # Write buffer bytes to path (truncate). True only on a full write.
@@ -292,7 +296,9 @@ module Base:
         # rejected before std's slicing helper (which intentionally clamps ranges).
         def rh_bytes_equal_literal(data: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if start < 0 or end < start or end > data.count.i64()
-            string_view_eq(string_view_slice(bytes_view(data), start, end), literal) == 1
+            # `literal` is NUL-terminated; the observed data range stays length-bounded.
+            trusted Unsafe.PointerCast:
+                return string_view_eq(string_view_slice(bytes_view(data), start, end), literal.cast[cstr]) == 1
 
         def rh_bytes_equal_span(a: darray[u8]&, a_start: i64, a_end: i64, b: darray[u8]&, b_start: i64, b_end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if a_start < 0 or a_end < a_start or a_end > a.count.i64()
