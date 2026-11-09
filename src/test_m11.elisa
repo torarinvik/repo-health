@@ -3,6 +3,7 @@
 # not_applicable rule when nothing is observable.
 include "./rh_base.elisa"
 include "./rh_experimental.elisa"
+include "./rh_artifact_anomaly.elisa"
 
 def xcheck(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     return if cond
@@ -14,6 +15,13 @@ def xcheck(cond: bool, label: u8&, fails: mutable i64&) -> void can[Memory.Alloc
         b.push(10)
         b
     Base::rh_write_stdout(b)
+
+def m11_contains(haystack: mutable darray[u8]&, needle: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
+    needle_view: mutable sview = sview(needle, 0, -1)
+    needle_length: mutable usize = string_view_len(needle_view).usize()
+    return false if needle_length == 0 or haystack.count < needle_length
+    for start in 0..<(haystack.count - needle_length + 1) |found: mutable bool = false, start, haystack, needle_view, needle_length| -> found:
+        found <- true if string_views_eq(string_view_slice(bytes_view(haystack), start.i64(), (start + needle_length).i64()), needle_view) == 1
 
 def spec(wave: u8, cost: u8, limits: i64, opt: i64) -> Experimental::RhExperimentalSpec:
     Experimental::RhExperimentalSpec{key_s: 0, key_e: 0, wave: wave, cost: cost, limit_count: limits, opt_in: opt}
@@ -78,12 +86,73 @@ def check_label(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, C
     xcheck(has_exp, "exp-label-present", fails)
     return
 
-def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def check_artifact_anomaly(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Global{Read,Write}]:
+    raw: mutable darray[u8] =
+        raw: mutable darray[u8] = []
+        Base::rh_push_text(raw, "{\"schema\":\"rh-artifact-digest-anomaly-input/1\",\"opt_in\":true,\"scope_complete\":true,\"history_complete\":true,\"observations\":[{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"observed_at\":100},{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"observed_at\":200},{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"observed_at\":300}]}")
+        raw
+    observed: mutable darray[u8] = []
+    status: i64 = ArtifactAnomaly::rh_artifact_anomaly_report(raw, observed) can Global{Read,Write}
+    xcheck(status == 0, "artifact-anomaly-valid-input", fails)
+    xcheck(m11_contains(observed, "\"status\":\"observed\""), "artifact-anomaly-observed", fails)
+    xcheck(m11_contains(observed, "\"value\":1"), "artifact-anomaly-changed-count", fails)
+    xcheck(m11_contains(observed, "\"observed_at\":200"), "artifact-anomaly-earliest-change", fails)
+    xcheck(m11_contains(observed, "\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""), "artifact-anomaly-after-digest", fails)
+
+    incomplete: mutable darray[u8] =
+        incomplete: mutable darray[u8] = []
+        Base::rh_push_text(incomplete, "{\"schema\":\"rh-artifact-digest-anomaly-input/1\",\"opt_in\":true,\"scope_complete\":false,\"history_complete\":false,\"observations\":[{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"observed_at\":100}]}")
+        incomplete
+    unknown: mutable darray[u8] = []
+    unknown_status: i64 = ArtifactAnomaly::rh_artifact_anomaly_report(incomplete, unknown) can Global{Read,Write}
+    xcheck(unknown_status == 0 and m11_contains(unknown, "\"status\":\"unknown\""), "artifact-anomaly-incomplete-top-status", fails)
+    xcheck(m11_contains(unknown, "\"status\":\"unavailable\""), "artifact-anomaly-incomplete-no-zero", fails)
+    xcheck(m11_contains(unknown, "\"value\":null"), "artifact-anomaly-incomplete-null-value", fails)
+
+    stable: mutable darray[u8] =
+        stable: mutable darray[u8] = []
+        Base::rh_push_text(stable, "{\"schema\":\"rh-artifact-digest-anomaly-input/1\",\"opt_in\":true,\"scope_complete\":true,\"history_complete\":true,\"observations\":[{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"observed_at\":100},{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"observed_at\":200}]}")
+        stable
+    no_change: mutable darray[u8] = []
+    stable_status: i64 = ArtifactAnomaly::rh_artifact_anomaly_report(stable, no_change) can Global{Read,Write}
+    xcheck(stable_status == 0 and m11_contains(no_change, "\"status\":\"no_change_observed\""), "artifact-anomaly-complete-no-change", fails)
+    xcheck(m11_contains(no_change, "\"status\":\"observed\""), "artifact-anomaly-zero-is-an-observed-count", fails)
+    xcheck(m11_contains(no_change, "\"value\":0"), "artifact-anomaly-zero-only-with-complete-history", fails)
+
+    conflict: mutable darray[u8] =
+        conflict: mutable darray[u8] = []
+        Base::rh_push_text(conflict, "{\"schema\":\"rh-artifact-digest-anomaly-input/1\",\"opt_in\":true,\"scope_complete\":true,\"history_complete\":true,\"observations\":[{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"observed_at\":100},{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"observed_at\":100}]}")
+        conflict
+    conflict_result: mutable darray[u8] = []
+    conflict_status: i64 = ArtifactAnomaly::rh_artifact_anomaly_report(conflict, conflict_result) can Global{Read,Write}
+    xcheck(conflict_status == 0 and m11_contains(conflict_result, "\"status\":\"conflicted\""), "artifact-anomaly-same-time-conflict", fails)
+    xcheck(m11_contains(conflict_result, "\"input_observation_indices\":[0,1]"), "artifact-anomaly-conflict-input-lineage", fails)
+
+    partial: mutable darray[u8] =
+        partial: mutable darray[u8] = []
+        Base::rh_push_text(partial, "{\"schema\":\"rh-artifact-digest-anomaly-input/1\",\"opt_in\":true,\"scope_complete\":true,\"history_complete\":false,\"observations\":[{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"observed_at\":100},{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"observed_at\":200}]}")
+        partial
+    partial_result: mutable darray[u8] = []
+    partial_status: i64 = ArtifactAnomaly::rh_artifact_anomaly_report(partial, partial_result) can Global{Read,Write}
+    xcheck(partial_status == 0 and m11_contains(partial_result, "\"status\":\"partial\""), "artifact-anomaly-change-with-incomplete-history", fails)
+    xcheck(m11_contains(partial_result, "\"value\":1"), "artifact-anomaly-partial-count-preserved", fails)
+
+    malformed: mutable darray[u8] =
+        malformed: mutable darray[u8] = []
+        Base::rh_push_text(malformed, "{\"schema\":\"rh-artifact-digest-anomaly-input/1\",\"opt_in\":true,\"scope_complete\":true,\"history_complete\":true,\"observations\":[{\"package\":\"acme/widget\",\"version\":\"1.0.0\",\"artifact\":\"widget.tar.gz\",\"sha256\":\"not-a-sha256\",\"observed_at\":100}]}")
+        malformed
+    rejected: mutable darray[u8] = []
+    malformed_status: i64 = ArtifactAnomaly::rh_artifact_anomaly_report(malformed, rejected) can Global{Read,Write}
+    xcheck(malformed_status != 0, "artifact-anomaly-malformed-digest", fails)
+    return
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
     fails: mutable i64 = 0
     check_admissible(&fails)
     check_outcome(&fails)
     check_aggregate(&fails)
     check_label(&fails)
+    check_artifact_anomaly(&fails) can Global{Read,Write}
     if fails == 0:
         b: mutable darray[u8] =
             b: mutable darray[u8] = []

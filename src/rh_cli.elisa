@@ -107,6 +107,7 @@ include "./rh_roles_report.elisa"
 include "./rh_roles_provider.elisa"
 include "./rh_role_publication.elisa"
 include "./rh_experimental_report.elisa"
+include "./rh_artifact_anomaly.elisa"
 include "./rh_proof.elisa"
 include "./rh_forecast.elisa"
 include "./rh_intervention.elisa"
@@ -241,6 +242,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli roles-import (--input <provider-permissions.json> | --github-repo <owner/repo> | --gitlab-project <group/path> [--resume-from <partial-roles-input>]) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli roles-publish --input <file> --out <file>")
     rh_cli_err("       rh_cli experimental --input <file> --out <file>")
+    rh_cli_err("       rh_cli artifact-anomaly --input <file> --out <file>")
     rh_cli_err("       rh_cli render --report <report.json> --out <file.html>")
     rh_cli_err("       rh_cli explain --input <report.json> --out <file.md>")
     rh_cli_err("       rh_cli proof --input <file> --out <file>")
@@ -299,7 +301,7 @@ def rh_cli_registry() -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.P
         line: mutable darray[u8] = []
         Base::rh_push_text(line, "registry: ")
         Base::rh_push_decimal_i64(line, Registry::rh_reg_implemented_count())
-        Base::rh_push_text(line, " implemented, 2 prototype of 360 architecture candidates (remainder planned)\n")
+        Base::rh_push_text(line, " implemented, 3 prototype of 360 architecture candidates (remainder planned)\n")
         line
     Base::rh_write_stdout(summary)
     while i < Registry::rh_reg_count() |i: i64 = 0|:
@@ -3215,6 +3217,27 @@ def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic
                 exq <- exq + 1
         return rh_cli_usage(2) if ex_idx < 0 or exo_idx < 0
         return rh_do_experimental(slots[ex_idx], slots[exo_idx]) can Global{Read,Write}
+    if Base::rh_streq(cmd, "artifact-anomaly"):
+        aa_input_idx, aa_output_idx =
+            while aaq < argc |aa_input_idx: i64 = -1, aa_output_idx: i64 = -1, aaq: i64 = 2, slots| -> aa_input_idx, aa_output_idx:
+                aa_arg: u8& = slots[aaq].cast[u8&] can Unsafe.PointerCast
+                if Base::rh_streq(aa_arg, "--input"):
+                    if aaq + 1 < argc:
+                        aaq <- aaq + 1
+                        aa_input_idx <- aaq
+                    else:
+                        return rh_cli_usage(2)
+                elif Base::rh_streq(aa_arg, "--out"):
+                    if aaq + 1 < argc:
+                        aaq <- aaq + 1
+                        aa_output_idx <- aaq
+                    else:
+                        return rh_cli_usage(2)
+                else:
+                    return rh_cli_usage(2)
+                aaq <- aaq + 1
+        return rh_cli_usage(2) if aa_input_idx < 0 or aa_output_idx < 0
+        return rh_do_artifact_anomaly(slots[aa_input_idx], slots[aa_output_idx]) can Global{Read,Write}
     if Base::rh_streq(cmd, "render"):
         rr_idx, ro_idx =
             while rrq < argc |rr_idx: i64 = -1, ro_idx: i64 = -1, rrq: i64 = 2, slots| -> rr_idx, ro_idx:
@@ -11126,6 +11149,45 @@ def rh_do_experimental(input_path: cstr, out_path: cstr) -> i32 can[Memory.Alloc
         rh_cli_err("experimental: cannot write transformation report")
         return 4
     rh_cli_out("experimental: ok")
+    0
+
+# --- M11 artifact digest change review path. ---
+# Compares exact package/version/artifact identities across captured times.
+# A changed digest is a review finding; incomplete history stays unknown and
+# same-time conflicts stay conflicted. This adapter makes no trust or safety
+# claim and remains an opt-in experimental capability.
+def rh_do_artifact_anomaly(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected artifact-anomaly argument (allowlist)")
+        return 3
+    ip: mutable darray[u8] =
+        ip: mutable darray[u8] = []
+        Base::rh_push_cstr(ip, input_path)
+        ip.push(0)
+        ip
+    ipp: cstr = (&ip[0]).cast[cstr] can Unsafe.PointerCast
+    raw: mutable darray[u8] = []
+    if (Base::rh_io_read(ipp, raw) can Global{Read,Write}) < 0:
+        rh_cli_err("artifact-anomaly: cannot read --input")
+        return 4
+    body: mutable darray[u8] = []
+    if (ArtifactAnomaly::rh_artifact_anomaly_report(raw, body) can Global{Read,Write}) != 0:
+        rh_cli_err("artifact-anomaly: malformed or unsupported input (fail closed)")
+        return 4
+    body.push(10)
+    op: mutable darray[u8] =
+        op: mutable darray[u8] = []
+        Base::rh_push_cstr(op, out_path)
+        op.push(0)
+        op
+    opp: cstr = (&op[0]).cast[cstr] can Unsafe.PointerCast
+    if not (Base::rh_io_write(opp, body) can Global{Read,Write}):
+        rh_cli_err("artifact-anomaly: cannot write --out")
+        return 4
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "artifact-digest-anomaly", "rh-artifact-digest-anomaly-result/1", "repo-health/artifact-digest-anomaly/1;max-observations=256;identity=package+version+artifact;digest=lowercase-sha256;time=unix-seconds", "[{\"source\":\"package coordinate, version label, artifact identity, digest, and capture time\",\"target\":\"ordered digest-change findings and same-time conflicts\",\"state\":\"transformed\"},{\"source\":\"scope and history completeness declarations\",\"target\":\"observed, partial, unknown, or not-applicable status\",\"state\":\"preserved\"},{\"source\":\"input observation positions\",\"target\":\"digest-bound evidence indices\",\"state\":\"preserved\"},{\"source\":\"intent, cause, maliciousness, or artifact safety\",\"target\":\"anomaly result\",\"state\":\"unsupported\"}]", out_path):
+        rh_cli_err("artifact-anomaly: cannot write transformation report")
+        return 4
+    rh_cli_out("artifact-anomaly: ok")
     0
 
 # --- M06-03 accessible server-rendered report page. ---

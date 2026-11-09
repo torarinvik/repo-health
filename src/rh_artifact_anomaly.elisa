@@ -1,0 +1,246 @@
+# rh_artifact_anomaly.elisa — evidence-bound artifact digest drift (M11).
+#
+# Compares a fixed artifact identity (package, version label, artifact name)
+# across captured times. A later digest change is a concrete review finding;
+# conflicting values at one timestamp remain a separate conflicted state.
+# Complete history and source scope are explicit inputs. This adapter emits no
+# all-clear when either is incomplete and never infers maliciousness or safety.
+
+include "./rh_base.elisa"
+include "./rh_json.elisa"
+include "./rh_observation.elisa"
+
+module ArtifactAnomaly:
+    private:
+        const RH_AA_MAX_INPUT_BYTES: i64 = 1048576
+        const RH_AA_MAX_OBSERVATIONS: i64 = 256
+        const RH_AA_KEY: cstr = "anomaly.artifact_digest_changed_under_version_label"
+        const RH_AA_LABEL: u8& = "experimental: artifact digest changed for the same package, version label, and artifact identity; review required, not evidence of maliciousness"
+
+        struct RhArtifactObservation:
+            package_s: i64
+            package_e: i64
+            version_s: i64
+            version_e: i64
+            artifact_s: i64
+            artifact_e: i64
+            digest_s: i64
+            digest_e: i64
+            observed_at: i64
+
+        def rh_aa_same_identity(left: RhArtifactObservation, right: RhArtifactObservation, texts: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not Base::rh_bytes_equal_span(texts, left.package_s, left.package_e, texts, right.package_s, right.package_e)
+            return false if not Base::rh_bytes_equal_span(texts, left.version_s, left.version_e, texts, right.version_s, right.version_e)
+            Base::rh_bytes_equal_span(texts, left.artifact_s, left.artifact_e, texts, right.artifact_s, right.artifact_e)
+
+        def rh_aa_same_digest(left: RhArtifactObservation, right: RhArtifactObservation, texts: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_span(texts, left.digest_s, left.digest_e, texts, right.digest_s, right.digest_e)
+
+        def rh_aa_digest_valid(texts: darray[u8]&, start: i64, end: i64) -> bool:
+            return false if end - start != 64
+            for offset in 0..<64 |offset, texts, start|:
+                byte: u8 = texts[(start + offset).usize()]
+                return false if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
+            true
+
+        def rh_aa_status_label(status: i64) -> u8&:
+            return "unsupported" if status == 0
+            return "conflicted" if status == 1
+            return "observed" if status == 2
+            return "partial" if status == 3
+            return "no_change_observed" if status == 4
+            return "unknown" if status == 5
+            "not_applicable"
+
+        def rh_aa_observation(status: u8, finding_count: i64) -> Observation::RhObservation can[Memory.Allocate, Abort.Panic, Global{Read,Write}]:
+            value: Observation::RhMetricValue = Observation::RhMetricValue.Count(finding_count) if status == Observation::RH_ST_OBSERVED or status == Observation::RH_ST_PARTIAL else Observation::RhMetricValue.Absent
+            evidence: mutable Observation::RhEvidenceLinks = Observation::rh_evidence_links_empty() can Global{Read,Write}
+            Observation::rh_evidence_links_push_external(&evidence, string_view_slice(bytes_view("artifact-anomaly-input"), 0, 22))
+            complete: bool = status == Observation::RH_ST_OBSERVED or status == Observation::RH_ST_NOT_OBSERVED
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Partial if status == Observation::RH_ST_PARTIAL else Observation::RhCompleteness.Complete if complete else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if complete or status == Observation::RH_ST_PARTIAL else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.EvidenceBacked
+            }
+            Observation::RhObservation{status: status, value: value, has_incompleteness: status == Observation::RH_ST_PARTIAL, quality: quality, evidence: evidence}
+
+        def rh_aa_emit_observation(out: mutable darray[u8]&, status: u8, finding_count: i64, reason: cstr) -> bool can[Memory.Allocate, Abort.Panic, Global{Read,Write}]:
+            observation: Observation::RhObservation = rh_aa_observation(status, finding_count) can Global{Read,Write}
+            return false if not Observation::rh_observation_valid(observation)
+            Observation::rh_observation_emit_metric(out, RH_AA_KEY, "0.1.0", reason, observation)
+
+        def rh_aa_emit_capture(out: mutable darray[u8]&, texts: darray[u8]&, rows: darray[RhArtifactObservation]&, index: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            row: RhArtifactObservation = rows[index.usize()]
+            Base::rh_push_text(out, "{\"observed_at\":")
+            Base::rh_push_decimal_i64(out, row.observed_at)
+            Base::rh_push_text(out, ",\"sha256\":\"")
+            Base::rh_json_escape(out, texts, row.digest_s.usize(), row.digest_e.usize())
+            Base::rh_push_text(out, "\",\"input_observation_index\":")
+            Base::rh_push_decimal_i64(out, index)
+            Base::rh_push_text(out, "}")
+
+    public:
+        def rh_artifact_anomaly_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Global{Read,Write}]:
+            return -1 if raw.count.i64() > RH_AA_MAX_INPUT_BYTES
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(raw, nodes, texts)
+            return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            schema_valid: bool =
+                schema_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "schema")
+                schema_s: mutable i64 = 0
+                schema_e: mutable i64 = 0
+                schema_idx >= 0 and Json::rh_json_str_span(nodes, schema_idx, &schema_s, &schema_e) and Base::rh_bytes_equal_literal(texts, schema_s, schema_e, "rh-artifact-digest-anomaly-input/1")
+            return -1 if not schema_valid
+
+            opt_in_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "opt_in")
+            scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scope_complete")
+            history_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "history_complete")
+            observations_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "observations")
+            return -1 if opt_in_idx < 0 or scope_idx < 0 or history_idx < 0 or observations_idx < 0
+            return -1 if nodes[opt_in_idx.usize()].kind != Json::RH_JSON_BOOL or nodes[scope_idx.usize()].kind != Json::RH_JSON_BOOL or nodes[history_idx.usize()].kind != Json::RH_JSON_BOOL
+            return -1 if nodes[observations_idx.usize()].kind != Json::RH_JSON_ARR
+            opt_in: bool = Json::rh_json_is_true(nodes, raw, opt_in_idx)
+            scope_complete: bool = Json::rh_json_is_true(nodes, raw, scope_idx)
+            history_complete: bool = Json::rh_json_is_true(nodes, raw, history_idx)
+            input_rows: Json::RhJsonNode = nodes[observations_idx.usize()]
+            return -1 if input_rows.child_count < 0 or input_rows.child_count > RH_AA_MAX_OBSERVATIONS
+
+            rows: mutable darray[RhArtifactObservation] = []
+            while row_idx >= 0 |row_idx: i64 = input_rows.first_child, nodes, raw, texts, rows|:
+                return -1 if nodes[row_idx.usize()].kind != Json::RH_JSON_OBJ
+                package_s: mutable i64 = 0
+                package_e: mutable i64 = 0
+                version_s: mutable i64 = 0
+                version_e: mutable i64 = 0
+                artifact_s: mutable i64 = 0
+                artifact_e: mutable i64 = 0
+                digest_s: mutable i64 = 0
+                digest_e: mutable i64 = 0
+                return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, row_idx, "package"), &package_s, &package_e)
+                return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, row_idx, "version"), &version_s, &version_e)
+                return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, row_idx, "artifact"), &artifact_s, &artifact_e)
+                return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, row_idx, "sha256"), &digest_s, &digest_e)
+                return -1 if package_e <= package_s or version_e <= version_s or artifact_e <= artifact_s or not rh_aa_digest_valid(texts, digest_s, digest_e)
+                observed_at_idx: i64 = Json::rh_json_obj_get(nodes, texts, row_idx, "observed_at")
+                observed_at_ok: mutable i64 = 0
+                observed_at: i64 = Json::rh_json_int(nodes, raw, observed_at_idx, &observed_at_ok)
+                return -1 if observed_at_ok == 0 or observed_at < 0
+                rows.push(RhArtifactObservation{package_s: package_s, package_e: package_e, version_s: version_s, version_e: version_e, artifact_s: artifact_s, artifact_e: artifact_e, digest_s: digest_s, digest_e: digest_e, observed_at: observed_at})
+                row_idx <- nodes[row_idx.usize()].next_sibling
+
+            findings_before: mutable darray[i64] = []
+            findings_after: mutable darray[i64] = []
+            conflicts_before: mutable darray[i64] = []
+            conflicts_after: mutable darray[i64] = []
+            comparable_groups: mutable i64 = 0
+            if opt_in:
+                for index in 0..<rows.count |index, rows, texts, findings_before, findings_after, conflicts_before, conflicts_after, comparable_groups|:
+                    identity_index: mutable i64 = index.i64()
+                    first_for_identity: bool =
+                        for prior in 0..<identity_index.usize() |first: mutable bool = true, prior, identity_index, rows, texts| -> first:
+                            first <- false if rh_aa_same_identity(rows[prior], rows[identity_index.usize()], texts)
+                    if first_for_identity:
+                        earliest_index: mutable i64 = identity_index
+                        for candidate in 0..<rows.count |candidate, earliest_index, rows, texts, identity_index|:
+                            if rh_aa_same_identity(rows[identity_index.usize()], rows[candidate], texts) and rows[candidate].observed_at < rows[earliest_index.usize()].observed_at:
+                                earliest_index <- candidate.i64()
+                        earliest: mutable RhArtifactObservation = rows[earliest_index.usize()]
+                        for time_candidate in 0..<rows.count |time_candidate, rows, texts, identity_index, conflicts_before, conflicts_after|:
+                            time_index: mutable i64 = time_candidate.i64()
+                            time_row: mutable RhArtifactObservation = rows[time_index.usize()]
+                            if rh_aa_same_identity(rows[identity_index.usize()], time_row, texts):
+                                first_for_time: bool =
+                                    for prior in 0..<time_index.usize() |first: mutable bool = true, prior, rows, texts, identity_index, time_index, time_row| -> first:
+                                        first <- false if rh_aa_same_identity(rows[identity_index.usize()], rows[prior], texts) and rows[prior].observed_at == time_row.observed_at
+                                if first_for_time:
+                                    conflict_index: i64 =
+                                        for candidate in 0..<rows.count |found: mutable i64 = -1, candidate, rows, texts, identity_index, time_index, time_row| -> found:
+                                            row: RhArtifactObservation = rows[candidate]
+                                            if found < 0 and rh_aa_same_identity(rows[identity_index.usize()], row, texts) and row.observed_at == time_row.observed_at and not rh_aa_same_digest(time_row, row, texts):
+                                                found <- candidate.i64()
+                                    if conflict_index >= 0:
+                                        conflicts_before.push(time_index)
+                                        conflicts_after.push(conflict_index)
+                        changed_index: i64 =
+                            for candidate in 0..<rows.count |found: mutable i64 = -1, candidate, rows, texts, identity_index, earliest_index, earliest| -> found:
+                                row: RhArtifactObservation = rows[candidate]
+                                if rh_aa_same_identity(rows[identity_index.usize()], row, texts) and row.observed_at > earliest.observed_at and not rh_aa_same_digest(earliest, row, texts):
+                                    if found < 0 or row.observed_at < rows[found.usize()].observed_at:
+                                        found <- candidate.i64()
+                        if changed_index >= 0:
+                            findings_before.push(earliest_index)
+                            findings_after.push(changed_index)
+                        else:
+                            has_later_observation: bool =
+                                for candidate in 0..<rows.count |found: mutable bool = false, candidate, rows, texts, identity_index, earliest| -> found:
+                                    found <- true if rh_aa_same_identity(rows[identity_index.usize()], rows[candidate], texts) and rows[candidate].observed_at > earliest.observed_at
+                            comparable_groups <- comparable_groups + 1 if has_later_observation
+
+            feature_status: mutable i64 = 0
+            if opt_in:
+                feature_status <- 1 if conflicts_before.count > 0
+                if conflicts_before.count == 0:
+                    if findings_before.count > 0:
+                        feature_status <- 2 if scope_complete and history_complete else 3
+                    elif comparable_groups > 0:
+                        feature_status <- 4 if scope_complete and history_complete else 5
+                    else:
+                        feature_status <- 6 if scope_complete and history_complete else 5
+            metric_status: u8 = Observation::RH_ST_UNSUPPORTED if feature_status == 0 else Observation::RH_ST_CONFLICTED if feature_status == 1 else Observation::RH_ST_OBSERVED if feature_status == 2 or feature_status == 4 else Observation::RH_ST_PARTIAL if feature_status == 3 else Observation::RH_ST_UNAVAILABLE if feature_status == 5 else Observation::RH_ST_NOT_APPLICABLE
+            reason: cstr = "opt-in-required" if feature_status == 0 else "same-time-digest-conflict" if feature_status == 1 else "" if feature_status == 2 or feature_status == 3 else "no-change-observed-in-complete-history" if feature_status == 4 else "scope-or-history-incomplete" if feature_status == 5 else "no-repeat-artifact-observations"
+
+            Base::rh_push_text(out, "{\"schema\":\"rh-artifact-digest-anomaly-result/1\",\"status\":\"")
+            Base::rh_push_text(out, rh_aa_status_label(feature_status))
+            Base::rh_push_text(out, "\",\"scope_complete\":")
+            Base::rh_push_text(out, "true" if scope_complete else "false")
+            Base::rh_push_text(out, ",\"history_complete\":")
+            Base::rh_push_text(out, "true" if history_complete else "false")
+            Base::rh_push_text(out, ",\"observations\":[")
+            return -1 if not rh_aa_emit_observation(out, metric_status, findings_before.count.i64(), reason) can Global{Read,Write}
+            Base::rh_push_text(out, "],\"findings\":[")
+            for finding_index in 0..<findings_before.count |finding_index, findings_before, findings_after, rows, texts, out|:
+                out.push(44) if finding_index > 0
+                before_index: i64 = findings_before[finding_index]
+                after_index: i64 = findings_after[finding_index]
+                before: RhArtifactObservation = rows[before_index.usize()]
+                Base::rh_push_text(out, "{\"package\":\"")
+                Base::rh_json_escape(out, texts, before.package_s.usize(), before.package_e.usize())
+                Base::rh_push_text(out, "\",\"version\":\"")
+                Base::rh_json_escape(out, texts, before.version_s.usize(), before.version_e.usize())
+                Base::rh_push_text(out, "\",\"artifact\":\"")
+                Base::rh_json_escape(out, texts, before.artifact_s.usize(), before.artifact_e.usize())
+                Base::rh_push_text(out, "\",\"before\":")
+                rh_aa_emit_capture(out, texts, rows, before_index)
+                Base::rh_push_text(out, ",\"after\":")
+                rh_aa_emit_capture(out, texts, rows, after_index)
+                Base::rh_push_text(out, "}")
+            Base::rh_push_text(out, "],\"conflicts\":[")
+            for conflict_index in 0..<conflicts_before.count |conflict_index, conflicts_before, conflicts_after, rows, texts, out|:
+                out.push(44) if conflict_index > 0
+                first_index: i64 = conflicts_before[conflict_index]
+                second_index: i64 = conflicts_after[conflict_index]
+                first: RhArtifactObservation = rows[first_index.usize()]
+                Base::rh_push_text(out, "{\"package\":\"")
+                Base::rh_json_escape(out, texts, first.package_s.usize(), first.package_e.usize())
+                Base::rh_push_text(out, "\",\"version\":\"")
+                Base::rh_json_escape(out, texts, first.version_s.usize(), first.version_e.usize())
+                Base::rh_push_text(out, "\",\"artifact\":\"")
+                Base::rh_json_escape(out, texts, first.artifact_s.usize(), first.artifact_e.usize())
+                Base::rh_push_text(out, "\",\"observed_at\":")
+                Base::rh_push_decimal_i64(out, first.observed_at)
+                Base::rh_push_text(out, ",\"input_observation_indices\":[")
+                Base::rh_push_decimal_i64(out, first_index)
+                Base::rh_push_text(out, ",")
+                Base::rh_push_decimal_i64(out, second_index)
+                Base::rh_push_text(out, "],\"sha256\":[\"")
+                Base::rh_json_escape(out, texts, first.digest_s.usize(), first.digest_e.usize())
+                second: RhArtifactObservation = rows[second_index.usize()]
+                Base::rh_push_text(out, "\",\"")
+                Base::rh_json_escape(out, texts, second.digest_s.usize(), second.digest_e.usize())
+                Base::rh_push_text(out, "\"]}")
+            Base::rh_push_text(out, "],\"label\":\"")
+            Base::rh_push_text(out, RH_AA_LABEL)
+            Base::rh_push_text(out, "\",\"note\":\"a digest change is a review trigger for the exact package, version label, and artifact identity; same-time conflicts are retained separately; results cover only the supplied scope and observation history\"}")
+            0

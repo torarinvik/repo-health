@@ -15,7 +15,7 @@ echo "$out" | tail -n 5
 
 echo "[m00] registry mirror: metrics/definitions/*.json vs rh_registry.elisa"
 keys_count="$(python3 -c "import glob; print(len(glob.glob('$ROOT/metrics/definitions/*.json')))")"
-[[ "$keys_count" == "229" ]] || { echo "[m00] FAIL: expected 229 definitions, got $keys_count"; exit 1; }
+[[ "$keys_count" == "230" ]] || { echo "[m00] FAIL: expected 230 definitions, got $keys_count"; exit 1; }
 # The runtime registry mirrors exactly the PUBLISHED definitions: every
 # implemented/prototype (key, version) must be present, and a planned metric
 # must NOT be in the registry, so the system never implies availability.

@@ -43,6 +43,18 @@ assert "baseline_windows" in d["params"], d
 assert any("score" in l or "score" in l for l in d["limits"]) or any("concrete" in l for l in d["limits"]), d
 print("[m11] anomaly definition OK:", d["key"])
 PY
+
+echo "[m11] artifact digest anomaly remains an isolated prototype"
+python3 - "$ROOT/metrics/definitions/experimental_artifact_digest_changed.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["key"] == "anomaly.artifact_digest_changed_under_version_label", d
+assert d["implementation_status"] == "prototype" and d["group"] == "experimental" and d["wave"] == "G", d
+assert d["subject_kind"] == "artifact" and d["cost_class"] in ("medium", "high"), d
+assert d["limits"] and d["fixture_references"] == ["F042"], d
+assert "not a rate" in d["output"]["denominator"], d
+print("[m11] artifact digest anomaly definition OK:", d["key"])
+PY
 # The anomaly adapter must also carry a name-and-deny caveat and avoid a verdict.
 grep -q "not a maliciousness" "$ROOT/src/rh_experimental.elisa" || fail "anomaly caveat missing"
 

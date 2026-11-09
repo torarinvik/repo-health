@@ -37,10 +37,10 @@ for m in d["metrics"]:
     assert m["fixture_references"], ("metric without fixtures", m["key"])
     assert m["source_requirements"], ("metric without source reqs", m["key"])
 fx = d["fixtures"]
-assert fx["total"] == 41, fx
-assert fx["covered"] + fx["partial"] + fx["planned"] == 41, fx
+assert fx["total"] == 42, fx
+assert fx["covered"] + fx["partial"] + fx["planned"] == 42, fx
 assert len(fx["planned_ids"]) == fx["planned"], fx
-assert d["fixtures"]["note"].startswith("F001-F041")
+assert d["fixtures"]["note"].startswith("F001-F042")
 assert len(d["supported_sources"]) >= 5
 for s in d["supported_sources"]:
     assert s["capabilities"] or s["unauthorized"], ("empty source scope without an explicit restriction", s["id"])
