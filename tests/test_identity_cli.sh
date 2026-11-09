@@ -1171,6 +1171,14 @@ actor_kinds = [rng.choice(kinds) for _ in range(actor_count)]
 actor_sources = [rng.choice(sources) for _ in range(actor_count)]
 actor_times = [None if rng.randrange(3) == 0 else rng.randrange(1_800_000_001) for _ in range(actor_count)]
 actor_evidence = [None if rng.randrange(2) == 0 else f"evidence:generated-{actor:03d}" for actor in range(actor_count)]
+actor_kinds[:len(kinds)] = kinds
+actor_sources[:len(sources)] = sources
+actor_times[:2] = [None, 0]
+actor_evidence[:2] = [None, "evidence:generated-explicit"]
+assert set(actor_kinds) == set(kinds)
+assert set(actor_sources) == set(sources)
+assert any(value is None for value in actor_times) and any(value is not None for value in actor_times)
+assert any(value is None for value in actor_evidence) and any(value is not None for value in actor_evidence)
 source = {
     "schema": "rh-identity-input/1",
     "actor_count": actor_count,
@@ -1203,7 +1211,7 @@ clusters = list(cluster_map.values())
 cluster_ids = [find(actor) for actor in range(actor_count)]
 revision = max((link["revision_added"] for link in links if link["state"] in ("accepted", "revoked")), default=0)
 expected_kinds = {kind: actor_kinds.count(kind) for kind in kinds}
-expected_sources = {source: actor_sources.count(source) for source in sources}
+expected_sources = {source_label: actor_sources.count(source_label) for source_label in sources}
 expected_times = {"observed": sum(value is not None for value in actor_times), "unknown": sum(value is None for value in actor_times)}
 expected_evidence = {"present": sum(value is not None for value in actor_evidence), "unknown": sum(value is None for value in actor_evidence)}
 expected_classifications = [
