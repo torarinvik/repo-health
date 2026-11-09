@@ -36,98 +36,72 @@ def hg_fixture() -> darray[u8] can[Memory.Allocate, Abort.Panic]:
 
 def check_hg_parse(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     raw: darray[u8] = hg_fixture()
-    pool: mutable darray[u8] = []
-    out: mutable darray[Mercurial::RhHgChange] = []
-    rej: mutable i64 = 0
-    rc: i64 = Mercurial::rh_hg_parse(raw, 0, pool, out, &rej)
-    t8check(rc == 0, "hg-parse-ok", fails)
-    t8check(out.count == 2, "hg-two-changes", fails)
-    t8check(rej == 0, "hg-no-rejects", fails)
-    c0: Mercurial::RhHgChange = out[0]
+    log: Mercurial::RhHgLog = Mercurial::rh_hg_parse(raw, 0)
+    t8check(log.ok == 1, "hg-parse-ok", fails)
+    t8check(log.changes.count == 2, "hg-two-changes", fails)
+    t8check(log.rejected == 0, "hg-no-rejects", fails)
+    c0: Mercurial::RhHgChange = log.changes[0]
     t8check(c0.node_e - c0.node_s == 40, "hg-node-40hex", fails)
-    t8check(Base::rh_bytes_equal_literal(pool, c0.node_s, c0.node_e, "0123456789abcdef0123456789abcdef01234567"), "hg-node-preserved", fails)
+    t8check(Base::rh_bytes_equal_literal(log.pool, c0.node_s, c0.node_e, "0123456789abcdef0123456789abcdef01234567"), "hg-node-preserved", fails)
     t8check(c0.rev == 0, "hg-local-rev-0", fails)
-    t8check(Base::rh_bytes_equal_literal(pool, c0.author_s, c0.author_e, "Ada Lovelace <ada@example.org>"), "hg-author-raw", fails)
+    t8check(Base::rh_bytes_equal_literal(log.pool, c0.author_s, c0.author_e, "Ada Lovelace <ada@example.org>"), "hg-author-raw", fails)
     t8check(c0.utc == 1609459200 and c0.tz_offset == -3600 and c0.has_date == 1, "hg-date-utc-and-offset", fails)
-    t8check(Base::rh_bytes_equal_literal(pool, c0.branch_s, c0.branch_e, "default"), "hg-branch", fails)
+    t8check(Base::rh_bytes_equal_literal(log.pool, c0.branch_s, c0.branch_e, "default"), "hg-branch", fails)
     t8check(c0.tag_count == 1, "hg-tag-count", fails)
     t8check(c0.phase == Mercurial::RH_HG_PHASE_DRAFT, "hg-phase-draft", fails)
-    c1: Mercurial::RhHgChange = out[1]
+    c1: Mercurial::RhHgChange = log.changes[1]
     t8check(c1.rev == 1, "hg-local-rev-1", fails)
     t8check(c1.utc == 1612137600 and c1.tz_offset == 7200, "hg-date-2", fails)
     t8check(c1.phase == Mercurial::RH_HG_PHASE_PUBLIC, "hg-phase-public", fails)
     t8check(c1.tag_count == 0, "hg-tag-count-0", fails)
-    t8check(Base::rh_bytes_equal_literal(pool, c1.branch_s, c1.branch_e, "stable"), "hg-branch-2", fails)
+    t8check(Base::rh_bytes_equal_literal(log.pool, c1.branch_s, c1.branch_e, "stable"), "hg-branch-2", fails)
     return
 
 def check_hg_reject(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     raw: mutable darray[u8] = []
     Base::rh_push_text(raw, "[{\"node\":\"not-a-node\",\"rev\":0,\"user\":\"x\",\"date\":[1,0],\"desc\":\"d\",\"branch\":\"default\",\"tags\":[],\"phase\":\"draft\"}]")
-    pool: mutable darray[u8] = []
-    out: mutable darray[Mercurial::RhHgChange] = []
-    rej: mutable i64 = 0
-    rc: i64 = Mercurial::rh_hg_parse(raw, 0, pool, out, &rej)
-    t8check(rc == 0, "hg-bad-node-parse-ok", fails)
-    t8check(out.count == 0, "hg-bad-node-not-guessed", fails)
-    t8check(rej == 1, "hg-bad-node-counted", fails)
+    log: Mercurial::RhHgLog = Mercurial::rh_hg_parse(raw, 0)
+    t8check(log.ok == 1, "hg-bad-node-parse-ok", fails)
+    t8check(log.changes.count == 0, "hg-bad-node-not-guessed", fails)
+    t8check(log.rejected == 1, "hg-bad-node-counted", fails)
     missing: mutable darray[u8] = []
     Base::rh_push_text(missing, "[{\"rev\":3,\"user\":\"y\"}]")
-    p2: mutable darray[u8] = []
-    o2: mutable darray[Mercurial::RhHgChange] = []
-    r2: mutable i64 = 0
-    rc2: i64 = Mercurial::rh_hg_parse(missing, 0, p2, o2, &r2)
-    t8check(rc2 == 0 and o2.count == 0 and r2 == 1, "hg-missing-node-rejected", fails)
+    missing_log: Mercurial::RhHgLog = Mercurial::rh_hg_parse(missing, 0)
+    t8check(missing_log.ok == 1 and missing_log.changes.count == 0 and missing_log.rejected == 1, "hg-missing-node-rejected", fails)
     return
 
 def check_hg_bounds(fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
-    rc: i64 =
-        raw: darray[u8] = hg_fixture()
-        pool: mutable darray[u8] = []
-        out: mutable darray[Mercurial::RhHgChange] = []
-        rej: mutable i64 = 0
-        block_result: i64 = Mercurial::rh_hg_parse(raw, 1, pool, out, &rej)
-        block_result
-    t8check(rc == -1, "hg-cap-exceeded-fails", fails)
+    raw: darray[u8] = hg_fixture()
+    capped_log: Mercurial::RhHgLog = Mercurial::rh_hg_parse(raw, 1)
+    t8check(capped_log.ok == 0, "hg-cap-exceeded-fails", fails)
     bad: mutable darray[u8] = []
     Base::rh_push_text(bad, "{\"node\":\"x\"}")
-    p2: mutable darray[u8] = []
-    o2: mutable darray[Mercurial::RhHgChange] = []
-    r2: mutable i64 = 0
-    t8check(Mercurial::rh_hg_parse(bad, 0, p2, o2, &r2) == -1, "hg-not-array-fails", fails)
+    bad_log: Mercurial::RhHgLog = Mercurial::rh_hg_parse(bad, 0)
+    t8check(bad_log.ok == 0, "hg-not-array-fails", fails)
     malformed: mutable darray[u8] = []
     Base::rh_push_text(malformed, "[{\"node\":")
-    p3: mutable darray[u8] = []
-    o3: mutable darray[Mercurial::RhHgChange] = []
-    r3: mutable i64 = 0
-    t8check(Mercurial::rh_hg_parse(malformed, 0, p3, o3, &r3) == -1, "hg-malformed-json-fails", fails)
+    malformed_log: Mercurial::RhHgLog = Mercurial::rh_hg_parse(malformed, 0)
+    t8check(malformed_log.ok == 0, "hg-malformed-json-fails", fails)
     trunc: mutable darray[u8] = []
     Base::rh_push_text(trunc, "[{\"node\":\"0123456789abcdef0123456789abcdef01234567\",\"user\":42}]")
-    p4: mutable darray[u8] = []
-    o4: mutable darray[Mercurial::RhHgChange] = []
-    rc4: i64 = |trunc, p4, o4|
-        r4: mutable i64 = 0
-        block_result: i64 = Mercurial::rh_hg_parse(trunc, 0, p4, o4, &r4)
-        block_result
-    t8check(rc4 == 0, "hg-wrong-type-user-not-crash", fails)
-    c4: Mercurial::RhHgChange = o4[0]
+    wrong_type_log: Mercurial::RhHgLog = Mercurial::rh_hg_parse(trunc, 0)
+    t8check(wrong_type_log.ok == 1, "hg-wrong-type-user-not-crash", fails)
+    c4: Mercurial::RhHgChange = wrong_type_log.changes[0]
     t8check(c4.author_s == -1, "hg-wrong-type-author-unknown", fails)
     return
 
 def check_hg_fuzz_case(raw: darray[u8]&, fails: mutable i64&) -> void can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast]:
     result_valid: bool =
-        pool: mutable darray[u8] = []
-        changes: mutable darray[Mercurial::RhHgChange] = []
-        rejected: mutable i64 = 0
-        status: i64 = Mercurial::rh_hg_parse(raw, 0, pool, changes, &rejected)
+        log: Mercurial::RhHgLog = Mercurial::rh_hg_parse(raw, 0)
         all_spans_valid: bool =
-            while i < changes.count |valid: bool = true, i: usize = 0, pool, changes| -> valid:
-                change: Mercurial::RhHgChange = changes[i]
-                valid <- false if change.node_s < 0 or change.node_e < change.node_s or change.node_e > pool.count.i64()
-                valid <- false if change.author_s >= 0 and (change.author_e < change.author_s or change.author_e > pool.count.i64())
-                valid <- false if change.desc_s >= 0 and (change.desc_e < change.desc_s or change.desc_e > pool.count.i64())
-                valid <- false if change.branch_s >= 0 and (change.branch_e < change.branch_s or change.branch_e > pool.count.i64())
+            while i < log.changes.count |valid: bool = true, i: usize = 0, log| -> valid:
+                change: Mercurial::RhHgChange = log.changes[i]
+                valid <- false if change.node_s < 0 or change.node_e < change.node_s or change.node_e > log.pool.count.i64()
+                valid <- false if change.author_s >= 0 and (change.author_e < change.author_s or change.author_e > log.pool.count.i64())
+                valid <- false if change.desc_s >= 0 and (change.desc_e < change.desc_s or change.desc_e > log.pool.count.i64())
+                valid <- false if change.branch_s >= 0 and (change.branch_e < change.branch_s or change.branch_e > log.pool.count.i64())
                 i <- i + 1
-        block_result: bool = (status == -1 or status == 0) and changes.count <= raw.count and pool.count <= raw.count and rejected >= 0 and rejected <= raw.count.i64()
+        block_result: bool = (log.ok == 0 or log.ok == 1) and log.changes.count <= raw.count and log.pool.count <= raw.count and log.rejected >= 0 and log.rejected <= raw.count.i64()
         all_spans_valid and block_result
     t8check(result_valid, "hg-fuzz-bounds-and-spans", fails)
     return

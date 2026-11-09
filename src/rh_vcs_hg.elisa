@@ -49,6 +49,12 @@ module Mercurial:
             change: RhHgChange
 
     public:
+        struct RhHgLog:
+            ok: i64
+            changes: mutable darray[RhHgChange]
+            pool: mutable darray[u8]
+            rejected: i64
+
         def rh_hg_phase_label(phase: u8) -> u8&:
             return "public" if phase == RH_HG_PHASE_PUBLIC
             return "draft" if phase == RH_HG_PHASE_DRAFT
@@ -62,26 +68,32 @@ module Mercurial:
                 break false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
                 i <- i + 1
 
-        # Parse hg log -Tjson, appending valid native changes and counting rejected rows.
-        def rh_hg_parse(raw: darray[u8]&, max_changes: i64, pool: mutable darray[u8]&, out: mutable darray[RhHgChange]&, reject_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            reject_out[0] <- 0
+        # Parse hg log -Tjson into one value. max_changes <= 0 means default.
+        def rh_hg_parse(raw: darray[u8]&, max_changes: i64) -> RhHgLog can[Memory.Allocate, Abort.Panic]:
             cap: i64 = RH_HG_MAX_CHANGES_DEFAULT if max_changes <= 0 else max_changes
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
-            return -1 if root < 0
+            changes: mutable darray[RhHgChange] = []
+            pool: mutable darray[u8] = []
+            return RhHgLog{ok: 0, changes: changes, pool: pool, rejected: 0} if root < 0
             rn: Json::RhJsonNode = nodes[root.usize()]
-            return -1 if rn.kind != Json::RH_JSON_ARR
-            while child >= 0 |child: i64 = rn.first_child, nodes, texts, pool, out, reject_out, cap|:
-                nxt: i64 = nodes[child.usize()].next_sibling
-                return -1 if out.count.i64() >= cap
-                parsed: RhHgRow = rh_hg_one(raw, nodes, texts, pool, child)
-                if parsed.usable:
-                    out.push(parsed.change)
-                else:
-                    reject_out[0] <- reject_out[0] + 1
-                child <- nxt
-            0
+            return RhHgLog{ok: 0, changes: changes, pool: pool, rejected: 0} if rn.kind != Json::RH_JSON_ARR
+            over, rejected =
+                while child >= 0 |over: bool = false, rejected: i64 = 0, child: i64 = rn.first_child, raw, nodes, texts, pool, changes, cap| -> over, rejected:
+                    break if over
+                    nxt: i64 = nodes[child.usize()].next_sibling
+                    if changes.count.i64() >= cap:
+                        over <- true
+                    else:
+                        parsed: RhHgRow = rh_hg_one(raw, nodes, texts, pool, child)
+                        if parsed.usable:
+                            changes.push(parsed.change)
+                        else:
+                            rejected <- rejected + 1
+                    child <- nxt
+            return RhHgLog{ok: 0, changes: changes, pool: pool, rejected: rejected} if over
+            RhHgLog{ok: 1, changes: changes, pool: pool, rejected: rejected}
 
     private:
         def rh_hg_phase_of(texts: darray[u8]&, s: i64, e: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
