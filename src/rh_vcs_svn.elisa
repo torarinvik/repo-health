@@ -119,6 +119,17 @@ module Subversion:
             RhSvnLog{ok: 1, entries: entries, pool: pool, rejected: rej}
 
     private:
+        struct RhSvnPathCounts:
+            path_count: mutable i64
+            add_n: mutable i64
+            modify_n: mutable i64
+            delete_n: mutable i64
+            replace_n: mutable i64
+            other_n: mutable i64
+
+        def rh_svn_path_counts_empty() -> RhSvnPathCounts:
+            RhSvnPathCounts{path_count: 0, add_n: 0, modify_n: 0, delete_n: 0, replace_n: 0, other_n: 0}
+
         def rh_svn_find(data: darray[u8]&, from: i64, lit: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             n: i64 = data.count.i64()
             ln: i64 = strlen(lit).i64()
@@ -291,8 +302,8 @@ module Subversion:
 
         # Count <path action="X"> children in the <paths>...</paths> block
         # [block_s, block_e).
-        def rh_svn_count_paths(data: darray[u8]&, block_s: i64, block_e: i64, pc: mutable i64&, an: mutable i64&, mn: mutable i64&, dn: mutable i64&, rn: mutable i64&, on: mutable i64&) -> void can[Memory.Allocate, Abort.Panic]:
-            while true |pos: i64 = block_s, block_s, block_e, data, pc, an, mn, dn, rn, on|:
+        def rh_svn_count_paths(data: darray[u8]&, block_s: i64, block_e: i64) -> RhSvnPathCounts can[Memory.Allocate, Abort.Panic]:
+            while true |counts: mutable RhSvnPathCounts = rh_svn_path_counts_empty(), pos: i64 = block_s, block_s, block_e, data| -> counts:
                 break if pos >= block_e
                 ptag: i64 = rh_svn_find(data, pos, "<path")
                 break if ptag < 0 or ptag >= block_e
@@ -304,17 +315,17 @@ module Subversion:
                 if rh_svn_attr_span(data, ptag, gt, "action", &vs, &ve):
                     if ve > vs:
                         act <- rh_svn_action_of(data[vs.usize()])
-                pc[0] <- pc[0] + 1
+                counts.path_count <- counts.path_count + 1
                 if act == RH_SVN_ACT_ADD:
-                    an[0] <- an[0] + 1
+                    counts.add_n <- counts.add_n + 1
                 elif act == RH_SVN_ACT_MODIFY:
-                    mn[0] <- mn[0] + 1
+                    counts.modify_n <- counts.modify_n + 1
                 elif act == RH_SVN_ACT_DELETE:
-                    dn[0] <- dn[0] + 1
+                    counts.delete_n <- counts.delete_n + 1
                 elif act == RH_SVN_ACT_REPLACE:
-                    rn[0] <- rn[0] + 1
+                    counts.replace_n <- counts.replace_n + 1
                 else:
-                    on[0] <- on[0] + 1
+                    counts.other_n <- counts.other_n + 1
                 pos <- gt + 1
 
         # Extract the text of the first element `name` inside [from, to_pos): copies the
@@ -374,16 +385,9 @@ module Subversion:
             if rh_svn_elem_text(raw, from, to_pos, "date", pool, &date_s, &date_e):
                 has_date <- 1
             _ = rh_svn_elem_text(raw, from, to_pos, "msg", pool, &msg_s, &msg_e)
-            pc: mutable i64 = 0
-            an: mutable i64 = 0
-            mn: mutable i64 = 0
-            dn: mutable i64 = 0
-            rn: mutable i64 = 0
-            on: mutable i64 = 0
-            paths_open: i64 = rh_svn_find(raw, from, "<paths")
-            if paths_open >= 0 and paths_open < to_pos:
+            path_counts: RhSvnPathCounts =
+                paths_open: i64 = rh_svn_find(raw, from, "<paths")
                 pgt: i64 = rh_svn_find_byte(raw, paths_open, 62)
                 pclose: i64 = rh_svn_find(raw, paths_open, "</paths>")
-                if pgt >= 0 and pclose >= 0 and pgt < pclose and pclose <= to_pos:
-                    rh_svn_count_paths(raw, pgt + 1, pclose, &pc, &an, &mn, &dn, &rn, &on)
-            RhSvnEntry{rev: rev, author_s: author_s, author_e: author_e, msg_s: msg_s, msg_e: msg_e, date_s: date_s, date_e: date_e, has_date: has_date, has_author: has_author, path_count: pc, add_n: an, modify_n: mn, delete_n: dn, replace_n: rn, other_n: on}
+                rh_svn_count_paths(raw, pgt + 1, pclose) if paths_open >= 0 and paths_open < to_pos and pgt >= 0 and pclose >= 0 and pgt < pclose and pclose <= to_pos else rh_svn_path_counts_empty()
+            RhSvnEntry{rev: rev, author_s: author_s, author_e: author_e, msg_s: msg_s, msg_e: msg_e, date_s: date_s, date_e: date_e, has_date: has_date, has_author: has_author, path_count: path_counts.path_count, add_n: path_counts.add_n, modify_n: path_counts.modify_n, delete_n: path_counts.delete_n, replace_n: path_counts.replace_n, other_n: path_counts.other_n}
