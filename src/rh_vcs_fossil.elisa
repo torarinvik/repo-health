@@ -47,6 +47,12 @@ module Fossil:
             comment_s: mutable i64
             comment_e: mutable i64
 
+    private:
+        struct RhFossilLine:
+            usable: bool
+            entry: RhFossilEntry
+
+    public:
         # Parsed timeline: ok, entries, decoded pool, rejected count.
         struct RhFossilTimeline:
             ok: mutable i64
@@ -77,18 +83,16 @@ module Fossil:
                 if le > pos:
                     if raw[pos.usize()] != 35:
                         return -1 if out.count.i64() >= cap
-                        ok: mutable i64 = 0
-                        ent: RhFossilEntry = rh_fossil_line(raw, pos, le, pool, &ok)
-                        if ok == 1:
-                            out.push(ent)
+                        parsed: RhFossilLine = rh_fossil_line(raw, pos, le, pool)
+                        if parsed.usable:
+                            out.push(parsed.entry)
                         else:
                             reject_out[0] <- reject_out[0] + 1
                 pos <- le + 1
             0
 
     private:
-        # Parse one pipe-delimited line [s,e). ok_out 1 = usable.
-        # (private to this file)
+        # Parse one pipe-delimited line [s,e), returning its usability and entry.
         def rh_fossil_copy(pool: mutable darray[u8]&, data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             Base::rh_absorb_span(data, s, e, pool)
 
@@ -174,16 +178,14 @@ module Fossil:
         # payload is not line-based or the entry cap is exceeded. Lines that are
         # empty or begin with '#' (comments/headers) are skipped. Records with an
         # invalid hash are skipped and counted in rejected.
-        def rh_fossil_line(raw: darray[u8]&, s: i64, e: i64, pool: mutable darray[u8]&, ok_out: mutable i64&) -> RhFossilEntry can[Memory.Allocate, Abort.Panic]:
-            ok_out[0] <- 0
+        def rh_fossil_line(raw: darray[u8]&, s: i64, e: i64, pool: mutable darray[u8]&) -> RhFossilLine can[Memory.Allocate, Abort.Panic]:
             empty: RhFossilEntry = RhFossilEntry{hash_s: -1, hash_e: -1, author_s: -1, author_e: -1, has_author: 0, date_s: -1, date_e: -1, utc: -1, has_date: 0, branch_s: -1, branch_e: -1, tag_count: 0, phase_count: 0, comment_s: -1, comment_e: -1}
             f0: i64 = s
             f1: i64 = rh_fossil_pipe(raw, f0, e)
-            return empty if f1 < 0
-            return empty if not rh_fossil_is_hash(raw, f0, f1)
+            return RhFossilLine{usable: false, entry: empty} if f1 < 0
+            return RhFossilLine{usable: false, entry: empty} if not rh_fossil_is_hash(raw, f0, f1)
             hash_s: i64 = rh_fossil_copy(pool, raw, f0, f1)
             hash_e: i64 = hash_s + (f1 - f0)
-            ok_out[0] <- 1
             # author
             a0: i64 = f1 + 1
             a1: mutable i64 = rh_fossil_pipe(raw, a0, e)
@@ -241,7 +243,7 @@ module Fossil:
             if c0 <= e:
                 comment_s <- rh_fossil_copy(pool, raw, c0, e)
                 comment_e <- comment_s + (e - c0)
-            RhFossilEntry{hash_s: hash_s, hash_e: hash_e, author_s: author_s, author_e: author_e, has_author: has_author, date_s: date_s, date_e: date_e, utc: utc, has_date: has_date, branch_s: branch_s, branch_e: branch_e, tag_count: tag_count, phase_count: phase_count, comment_s: comment_s, comment_e: comment_e}
+            RhFossilLine{usable: true, entry: RhFossilEntry{hash_s: hash_s, hash_e: hash_e, author_s: author_s, author_e: author_e, has_author: has_author, date_s: date_s, date_e: date_e, utc: utc, has_date: has_date, branch_s: branch_s, branch_e: branch_e, tag_count: tag_count, phase_count: phase_count, comment_s: comment_s, comment_e: comment_e}}
 
         # Index of the next '|' in [from, e), or -1.
         def rh_fossil_pipe(data: darray[u8]&, from: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
