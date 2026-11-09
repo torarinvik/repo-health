@@ -112,23 +112,18 @@ module Fossil:
                     i <- i + 1
             stars / 2
 
-        # Parse two-digit decimal in [s,e) exactly; err 1 and -1 on malformed.
-        def rh_fossil_num2(data: darray[u8]&, s: i64, err: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            if s < 0 or s + 2 > data.count.i64():
-                err[0] <- 1
-                return -1
+        # Parse exactly two decimal digits beginning at s; -1 when malformed.
+        def rh_fossil_num2(data: darray[u8]&, s: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+            return -1 if s < 0 or s + 2 > data.count.i64()
             a: u8 = data[s.usize()]
             b: u8 = data[(s + 1).usize()]
-            if a < 48 or a > 57 or b < 48 or b > 57:
-                err[0] <- 1
-                return -1
+            return -1 if a < 48 or a > 57 or b < 48 or b > 57
             (a.i64() - 48) * 10 + (b.i64() - 48)
 
         # Parse YYYY-MM-DDTHH:MM:SS[.frac][Z|±HH:MM] into UTC seconds. Returns -1
-        # and sets err on any shape we do not accept (never guessed). Seconds
-        # precision is kept; fractional seconds are ignored.
-        def rh_fossil_iso(data: darray[u8]&, s: i64, e: i64, err: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            err[0] <- 1
+        # on any shape we do not accept (never guessed). Seconds precision is
+        # kept; fractional seconds are ignored.
+        def rh_fossil_iso(data: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if s < 0 or e - s < 19 or e > data.count.i64()
             return -1 if data[(s + 4).usize()] != 45 or data[(s + 7).usize()] != 45
             return -1 if data[(s + 10).usize()] != 84
@@ -139,20 +134,18 @@ module Fossil:
                     return -1 if c < 48 or c > 57
                     y <- y * 10 + (c.i64() - 48)
                     i <- i + 1
-            e1: mutable i64 = 0
-            mo: i64 = rh_fossil_num2(data, s + 5, &e1)
-            return -1 if e1 != 0
-            dy: i64 = rh_fossil_num2(data, s + 8, &e1)
-            return -1 if e1 != 0
-            hh: i64 = rh_fossil_num2(data, s + 11, &e1)
-            return -1 if e1 != 0
-            mi: i64 = rh_fossil_num2(data, s + 14, &e1)
-            return -1 if e1 != 0
-            ss: i64 = rh_fossil_num2(data, s + 17, &e1)
-            return -1 if e1 != 0
+            mo: i64 = rh_fossil_num2(data, s + 5)
+            return -1 if mo < 0
+            dy: i64 = rh_fossil_num2(data, s + 8)
+            return -1 if dy < 0
+            hh: i64 = rh_fossil_num2(data, s + 11)
+            return -1 if hh < 0
+            mi: i64 = rh_fossil_num2(data, s + 14)
+            return -1 if mi < 0
+            ss: i64 = rh_fossil_num2(data, s + 17)
+            return -1 if ss < 0
             return -1 if not Temporal::rh_civil_date_valid(y, mo, dy) or hh > 23 or mi > 59 or ss > 60
             tzoff: mutable i64 = 0
-            tz_ok: mutable i64 = 1
             rest: mutable i64 = s + 19
             if rest < e:
                 c2: u8 = data[rest.usize()]
@@ -166,20 +159,15 @@ module Fossil:
                         rest <- rest + 1
                 elif c2 == 43 or c2 == 45:
                     sign: i64 = 1 if c2 == 43 else -1
-                    oh: i64 = rh_fossil_num2(data, rest + 1, &tz_ok)
-                    if tz_ok != 0 or rest + 4 > e or data[(rest + 3).usize()] != 58:
-                        tz_ok <- 1
-                        tzoff <- 0
-                    else:
-                        om: i64 = rh_fossil_num2(data, rest + 4, &tz_ok)
-                        if tz_ok == 0:
-                            tzoff <- sign * (oh * 3600 + om * 60)
-                            rest <- rest + 6
-                return -1 if tz_ok != 0
+                    oh: i64 = rh_fossil_num2(data, rest + 1)
+                    return -1 if oh < 0 or rest + 4 > e or data[(rest + 3).usize()] != 58
+                    om: i64 = rh_fossil_num2(data, rest + 4)
+                    return -1 if om < 0
+                    tzoff <- sign * (oh * 3600 + om * 60)
+                    rest <- rest + 6
             return -1 if rest != e
             base: mutable i64 = 0
             return -1 if not Temporal::rh_unix_from_civil_time_checked(y, mo, dy, hh, mi, ss, tzoff, &base)
-            err[0] <- 0
             base
 
         # Parse a `fossil timeline -F` payload. Returns 0 on success; -1 when the
@@ -220,9 +208,8 @@ module Fossil:
             if d1 > d0:
                 date_s <- rh_fossil_copy(pool, raw, d0, d1)
                 date_e <- date_s + (d1 - d0)
-                derr: mutable i64 = 0
-                parsed: i64 = rh_fossil_iso(raw, d0, d1, &derr)
-                if derr == 0:
+                parsed: i64 = rh_fossil_iso(raw, d0, d1)
+                if parsed >= 0:
                     utc <- parsed
                     has_date <- 1
             # branch
