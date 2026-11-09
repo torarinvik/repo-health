@@ -61,6 +61,11 @@ module ForgeEvents:
             merged_at: i64
             has_merged_at: bool
 
+        struct RhForgeTime:
+            valid: bool
+            present: bool
+            value: i64
+
         struct RhForgeReviewRequestCursor:
             pull_number: i64
             next_review_page: i64
@@ -138,26 +143,27 @@ module ForgeEvents:
                 index <- index + 1
             true
 
-        def rh_fe_time(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, value_out: mutable i64&, present_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
-            present_out[0] <- 0
+        def rh_fe_time(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> RhForgeTime can[Memory.Allocate, Abort.Panic]:
+            invalid: RhForgeTime = RhForgeTime{valid: false, present: false, value: 0}
             idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
-            return true if idx < 0 or nodes[idx.usize()].kind == Json::RH_JSON_NULL
+            return RhForgeTime{valid: true, present: false, value: 0} if idx < 0 or nodes[idx.usize()].kind == Json::RH_JSON_NULL
             node: Json::RhJsonNode = nodes[idx.usize()]
             if node.kind == Json::RH_JSON_NUM:
                 ok: mutable i64 = 0
-                value_out[0] <- Json::rh_json_int(nodes, raw, idx, &ok)
-                return false if ok == 0
+                value: i64 = Json::rh_json_int(nodes, raw, idx, &ok)
+                RhForgeTime{valid: ok == 1, present: ok == 1, value: value}
             elif node.kind == Json::RH_JSON_STR:
-                start: mutable i64 = 0
-                end: mutable i64 = 0
-                return false if not Json::rh_json_str_span(nodes, idx, &start, &end)
+                start, end, has_span =
+                    start: mutable i64 = 0
+                    end: mutable i64 = 0
+                    present: bool = Json::rh_json_str_span(nodes, idx, &start, &end)
+                    start, end, present
+                return invalid if not has_span
                 ok: mutable i64 = 0
-                value_out[0] <- Forge::rh_parse_iso8601(texts, start.usize(), end.usize(), &ok)
-                return false if ok == 0
+                value: i64 = Forge::rh_parse_iso8601(texts, start.usize(), end.usize(), &ok)
+                RhForgeTime{valid: ok == 1, present: ok == 1, value: value}
             else:
-                return false
-            present_out[0] <- 1
-            true
+                invalid
 
         def rh_fe_auth(texts: darray[u8]&, s: i64, e: i64) -> i64:
             return 1 if ForgeEvents::rh_fe_eq(texts, s, e, "authorized")
@@ -315,19 +321,19 @@ module ForgeEvents:
                         counts.rejected <- counts.rejected + 1
                         child <- nodes[child.usize()].next_sibling
                         continue
-                time_ok: mutable i64 = 0
-                created_at: mutable i64 = 0
                 event_time_key: u8& = "released_at" if kind == 3 and not githubish and not bitbucket else ForgeEvents::rh_fe_kind_time_key(kind)
-                if not ForgeEvents::rh_fe_time(nodes, raw, texts, child, event_time_key, &created_at, &time_ok) or time_ok == 0 or created_at < 0:
-                    if kind == 3:
-                        if not ForgeEvents::rh_fe_time(nodes, raw, texts, child, "created_at", &created_at, &time_ok) or time_ok == 0 or created_at < 0:
-                            counts.rejected <- counts.rejected + 1
-                            child <- nodes[child.usize()].next_sibling
-                            continue
+                primary_time: RhForgeTime = ForgeEvents::rh_fe_time(nodes, raw, texts, child, event_time_key)
+                created: RhForgeTime =
+                    if primary_time.valid and primary_time.present and primary_time.value >= 0:
+                        primary_time
+                    elif kind == 3:
+                        ForgeEvents::rh_fe_time(nodes, raw, texts, child, "created_at")
                     else:
-                        counts.rejected <- counts.rejected + 1
-                        child <- nodes[child.usize()].next_sibling
-                        continue
+                        RhForgeTime{valid: false, present: false, value: 0}
+                if not created.valid or not created.present or created.value < 0:
+                    counts.rejected <- counts.rejected + 1
+                    child <- nodes[child.usize()].next_sibling
+                    continue
                 status_s: mutable i64 = -1
                 status_e: mutable i64 = -1
                 status_ok: mutable i64 = 0
@@ -341,27 +347,21 @@ module ForgeEvents:
                         continue
                 else:
                     status_ok <- 1
-                updated_at: mutable i64 = 0
-                updated_ok: mutable i64 = 0
-                if not ForgeEvents::rh_fe_time(nodes, raw, texts, child, "updated_at", &updated_at, &updated_ok):
+                updated: RhForgeTime = ForgeEvents::rh_fe_time(nodes, raw, texts, child, "updated_at")
+                if not updated.valid:
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
-                if updated_ok == 1 and updated_at < 0:
+                if updated.present and updated.value < 0:
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
-                closed_at: mutable i64 = 0
-                closed_ok: mutable i64 = 0
-                if kind == 0 or kind == 1:
-                    if not ForgeEvents::rh_fe_time(nodes, raw, texts, child, "closed_at", &closed_at, &closed_ok):
-                        counts.rejected <- counts.rejected + 1
-                        child <- nodes[child.usize()].next_sibling
-                        continue
-                    if closed_ok == 1 and closed_at < 0:
-                        counts.rejected <- counts.rejected + 1
-                        child <- nodes[child.usize()].next_sibling
-                        continue
+                closed: RhForgeTime =
+                    ForgeEvents::rh_fe_time(nodes, raw, texts, child, "closed_at") if kind == 0 or kind == 1 else RhForgeTime{valid: true, present: false, value: 0}
+                if not closed.valid or (closed.present and closed.value < 0):
+                    counts.rejected <- counts.rejected + 1
+                    child <- nodes[child.usize()].next_sibling
+                    continue
                 url_s: mutable i64 = -1
                 url_e: mutable i64 = -1
                 url_ok: mutable i64 = 0
@@ -382,7 +382,7 @@ module ForgeEvents:
                             counts.rejected <- counts.rejected + 1
                             child <- nodes[child.usize()].next_sibling
                             continue
-                normalized: RhForgeEvent = RhForgeEvent{kind: kind, native_id: native_id, status_s: status_s, status_e: status_e, has_status: status_ok == 1, created_at: created_at, has_created_at: true, updated_at: updated_at, has_updated_at: updated_ok == 1, closed_at: closed_at, has_closed_at: closed_ok == 1, url_s: url_s, url_e: url_e, has_url: url_ok == 1, tag_s: tag_s, tag_e: tag_e, has_tag: tag_ok == 1, pull_request: pull_request, has_pull_request: pull_request > 0, staged_page_number: staged_page_number, staged_record_ordinal: staged_record_ordinal, staged_evidence_start: staged_evidence_start, staged_evidence_end: staged_evidence_end, has_staged_origin: has_staged_origin, has_staged_evidence: has_staged_evidence}
+                normalized: RhForgeEvent = RhForgeEvent{kind: kind, native_id: native_id, status_s: status_s, status_e: status_e, has_status: status_ok == 1, created_at: created.value, has_created_at: true, updated_at: updated.value, has_updated_at: updated.present, closed_at: closed.value, has_closed_at: closed.present, url_s: url_s, url_e: url_e, has_url: url_ok == 1, tag_s: tag_s, tag_e: tag_e, has_tag: tag_ok == 1, pull_request: pull_request, has_pull_request: pull_request > 0, staged_page_number: staged_page_number, staged_record_ordinal: staged_record_ordinal, staged_evidence_start: staged_evidence_start, staged_evidence_end: staged_evidence_end, has_staged_origin: has_staged_origin, has_staged_evidence: has_staged_evidence}
                 counts.normalized <- counts.normalized + 1
                 existing: i64 = ForgeEvents::rh_fe_event_index(events, event_slots, kind, native_id, pull_request)
                 if existing >= 0:
