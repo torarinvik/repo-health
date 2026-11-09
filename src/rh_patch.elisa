@@ -18,29 +18,23 @@ include "./rh_base.elisa"
 module Patch:
     public:
         struct RhPatchSubject:
-            ok: i64
+            ok: bool
             version: i64
             index: i64
             total: i64
             base_s: i64
             base_e: i64
 
-        # Case-insensitive ASCII equality against a literal.
-        # (private to this file)
         def rh_patch_parse(data: darray[u8]&, s: i64, e: i64) -> RhPatchSubject can[Memory.Allocate, Abort.Panic]:
-            none: RhPatchSubject = RhPatchSubject{ok: 0, version: 1, index: 0, total: 0, base_s: -1, base_e: -1}
-            open: mutable i64 =
-                while i < e |i: i64 = s, open: i64 = -1| -> open:
-                    if data[i.usize()] == 91 and i + 6 <= e and rh_patch_eq_ci(data, i + 1, i + 6, "PATCH"):
-                        open <- i
-                        break if true
+            none: RhPatchSubject = RhPatchSubject{ok: false, version: 1, index: 0, total: 0, base_s: -1, base_e: -1}
+            open: i64 =
+                while i < e |found: i64 = -1, i: i64 = s, e, data| -> found:
+                    break i if data[i.usize()] == 91 and i + 6 <= e and rh_patch_eq_ci(data, i + 1, i + 6, "PATCH")
                     i <- i + 1
             return none if open < 0
-            close: mutable i64 =
-                while j < e |close: i64 = -1, j: i64 = open + 6| -> close:
-                    if data[j.usize()] == 93:
-                        close <- j
-                        break if true
+            close: i64 =
+                while j < e |found: i64 = -1, j: i64 = open + 6, e, data| -> found:
+                    break j if data[j.usize()] == 93
                     j <- j + 1
             return none if close < 0
             version: mutable i64 = 1
@@ -91,20 +85,20 @@ module Patch:
             be: i64 =
                 while be > bs and rh_patch_sep(data[(be - 1).usize()]) |be: i64 = e, bs| -> be:
                     be <- be - 1
-            RhPatchSubject{ok: 1, version: version, index: index, total: total, base_s: bs, base_e: be}
+            RhPatchSubject{ok: true, version: version, index: index, total: total, base_s: bs, base_e: be}
 
         # Distinct logical-change count: same (base subject, index) collapses
         # across revisions. Non-ok subjects each count once.
         def rh_patch_logical_count(data: darray[u8]&, msgs: darray[RhPatchSubject]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             while i < msgs.count.i64() |total: i64 = 0, i: i64 = 0| -> total:
                 cur: RhPatchSubject = msgs[i.usize()]
-                if cur.ok == 0:
+                if not cur.ok:
                     total <- total + 1
                 else:
                     seen: i64 =
                         while j < i |seen: i64 = 0, j: i64 = 0, i| -> seen:
                             prev: RhPatchSubject = msgs[j.usize()]
-                            if prev.ok == 1 and prev.index == cur.index and rh_patch_base_eq(data, prev, cur):
+                            if prev.ok and prev.index == cur.index and rh_patch_base_eq(data, prev, cur):
                                 seen <- 1
                             j <- j + 1
                     if seen == 0:
@@ -113,10 +107,10 @@ module Patch:
 
         # (private to this file)
         def rh_patch_max_version(data: darray[u8]&, msgs: darray[RhPatchSubject]&, base_s: i64, base_e: i64, index: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            want: RhPatchSubject = RhPatchSubject{ok: 1, version: 1, index: index, total: 0, base_s: base_s, base_e: base_e}
+            want: RhPatchSubject = RhPatchSubject{ok: true, version: 1, index: index, total: 0, base_s: base_s, base_e: base_e}
             while i < msgs.count.i64() |best: i64 = 0, i: i64 = 0| -> best:
                 cur: RhPatchSubject = msgs[i.usize()]
-                if cur.ok == 1 and cur.index == index and rh_patch_base_eq(data, cur, want):
+                if cur.ok and cur.index == index and rh_patch_base_eq(data, cur, want):
                     if cur.version > best:
                         best <- cur.version
                 i <- i + 1
@@ -173,19 +167,17 @@ module Patch:
                 i <- i + 1
 
     private:
+        # Case-insensitive ASCII equality against a literal.
         def rh_patch_eq_ci(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             n: i64 = strlen(lit).i64()
             return false if s < 0 or e - s != n
-            while k < n |k: i64 = 0, data, s, lit|:
-                a: mutable u8 = data[(s + k).usize()]
-                b: mutable u8 = lit[k.usize()]
-                if a >= 65 and a <= 90:
-                    a <- a + 32
-                if b >= 65 and b <= 90:
-                    b <- b + 32
-                return false if a != b
+            while k < n |matches: bool = true, k: i64 = 0, data, s, lit, n| -> matches:
+                a: u8 = data[(s + k).usize()]
+                b: u8 = lit[k.usize()]
+                lower_a: u8 = a + 32 if a >= 65 and a <= 90 else a
+                lower_b: u8 = b + 32 if b >= 65 and b <= 90 else b
+                break false if lower_a != lower_b
                 k <- k + 1
-            true
 
         # (private to this file)
         def rh_patch_is_digit(b: u8) -> bool:
