@@ -123,23 +123,20 @@ module Subversion:
             n: i64 = data.count.i64()
             ln: i64 = strlen(lit).i64()
             return -1 if from < 0 or ln == 0 or ln > n
-            while i + ln <= n |i: i64 = from, n, ln, data, lit|:
-                hit: bool =
-                    while k < ln |hit: bool = true, k: i64 = 0, i| -> hit:
-                        if data[(i + k).usize()] != lit[k.usize()]:
-                            hit <- false
-                        k <- k + 1
-                return i if hit
+            while i + ln <= n |found: i64 = -1, i: i64 = from, n, ln, data, lit| -> found:
+                hit: bool = while k < ln |hit: bool = true, k: i64 = 0, i, ln, data, lit| -> hit:
+                    break false if data[(i + k).usize()] != lit[k.usize()]
+                    k <- k + 1
+                break i if hit
                 i <- i + 1
-            -1
 
         # Index of byte b at or after from, or -1.
         def rh_svn_find_byte(data: darray[u8]&, from: i64, b: u8) -> i64 can[Memory.Allocate, Abort.Panic]:
             n: i64 = data.count.i64()
-            while i < n |i: i64 = from, n, data, b|:
-                return i if data[i.usize()] == b
+            return -1 if from < 0
+            while i < n |found: i64 = -1, i: i64 = from, n, data, b| -> found:
+                break i if data[i.usize()] == b
                 i <- i + 1
-            -1
 
         # Copy raw run [s,e) into pool, decoding predefined + numeric entities.
         # Returns the pool start offset, or -1 when the span is invalid.
@@ -191,26 +188,26 @@ module Subversion:
                     pool.push(39)
                     return true
             if n >= 3 and data[s.usize()] == 35:
-                code: mutable i64 = 0
-                i: mutable i64 = s + 1
-                hex: mutable bool = false
-                if i < e and (data[i.usize()] == 120 or data[i.usize()] == 88):
-                    hex <- true
-                    i <- i + 1
-                return false if i >= e
-                while i < e |i, e, data, code, hex|:
-                    b: u8 = data[i.usize()]
-                    d: mutable i64 = -1
-                    if b >= 48 and b <= 57:
-                        d <- (b - 48).i64()
-                    elif hex and b >= 97 and b <= 102:
-                        d <- (b - 87).i64()
-                    elif hex and b >= 65 and b <= 70:
-                        d <- (b - 55).i64()
-                    return false if d < 0
-                    code <- code * 16 + d
-                    return false if code > 1114111
-                    i <- i + 1
+                hex: bool = s + 1 < e and (data[(s + 1).usize()] == 120 or data[(s + 1).usize()] == 88)
+                start: i64 = s + 2 if hex else s + 1
+                return false if start >= e
+                radix: i64 = 16 if hex else 10
+                code: i64 =
+                    while cursor < e |code: i64 = 0, cursor: i64 = start, e, data, radix| -> code:
+                        b: u8 = data[cursor.usize()]
+                        d: mutable i64 = -1
+                        if b >= 48 and b <= 57:
+                            d <- (b - 48).i64()
+                        elif radix == 16 and b >= 97 and b <= 102:
+                            d <- (b - 87).i64()
+                        elif radix == 16 and b >= 65 and b <= 70:
+                            d <- (b - 55).i64()
+                        break -1 if d < 0
+                        code <- code * radix + d
+                        break -1 if code > 1114111
+                        cursor <- cursor + 1
+                    code
+                return false if code < 0
                 rh_svn_push_cp(pool, code)
                 return true
             false
@@ -218,10 +215,9 @@ module Subversion:
         def rh_svn_lit(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             n: i64 = strlen(lit).i64()
             return false if s < 0 or e - s != n
-            while k < n |k: i64 = 0, data, s, lit|:
-                return false if data[(s + k).usize()] != lit[k.usize()]
+            while k < n |equal: bool = true, k: i64 = 0, data, s, lit| -> equal:
+                break false if data[(s + k).usize()] != lit[k.usize()]
                 k <- k + 1
-            true
 
         def rh_svn_push_cp(pool: mutable darray[u8]&, cp: i64) -> void can[Memory.Allocate, Abort.Panic]:
             v: i64 =
