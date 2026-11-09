@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/test_experimental_cli.sh — M11 experimental isolation execution path
 # (R024): `rh_cli experimental` turns rh-experimental-input/1 into
-# rh-experimental-result/1. A spec is admissible only when opt-in, in wave G,
+# rh-experimental-result/1 with shared typed observations. A spec is admissible only when opt-in, in wave G,
 # costed, and explicitly limited; the sample discontinuity metric is an
 # observable horizon outcome, labelled experimental, with censored subjects
 # excluded from the denominator and zero-observable reported not_applicable.
@@ -28,6 +28,21 @@ raw = Path(sys.argv[1]).read_bytes()
 normalized = Path(sys.argv[2]).read_bytes()
 d = json.loads(normalized)
 assert d["schema"] == "rh-experimental-result/1", d
+observations = {row["key"]: row for row in d["observations"]}
+assert set(observations) == {"discontinuity.no_qualifying_release_in_horizon", "anomaly.cadence_deviation_windows"}, observations
+assert observations["discontinuity.no_qualifying_release_in_horizon"] == {
+    "key": "discontinuity.no_qualifying_release_in_horizon", "version": "0.1.0", "status": "observed",
+    "value": {"num": 1, "den": 2}, "evidence": [],
+    "quality_dimensions": {"completeness": "complete", "freshness": "unknown", "validity": "valid", "provenance": "derived"},
+}, observations
+assert observations["anomaly.cadence_deviation_windows"] == {
+    "key": "anomaly.cadence_deviation_windows", "version": "0.1.0", "status": "observed",
+    "value": 2, "evidence": [],
+    "quality_dimensions": {"completeness": "complete", "freshness": "unknown", "validity": "valid", "provenance": "derived"},
+}, observations
+assert observations["discontinuity.no_qualifying_release_in_horizon"]["value"] == d["metric"]["value"]["rate"], observations
+assert observations["anomaly.cadence_deviation_windows"]["value"] == len(d["anomaly"]["value"]["finding_window_indices"]), observations
+assert d["anomaly"]["value"]["observed_window_count"] > 0, d["anomaly"]
 by = {s["key"]: s for s in d["specs"]}
 assert by["discontinuity.no_qualifying_release_in_horizon"]["admissible"] is True, by
 assert by["x.wrongwave"]["reason"] == "wrong-wave", by
@@ -51,8 +66,8 @@ assert sidecar["adapter"] == "experimental-metric-evaluation", sidecar
 assert sidecar["output_schema"] == "rh-experimental-result/1", sidecar
 assert sidecar["source_input_sha256"] == hashlib.sha256(raw).hexdigest(), sidecar
 assert sidecar["normalized_output_sha256"] == hashlib.sha256(normalized).hexdigest(), sidecar
-assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/experimental-metric-evaluation/1").hexdigest(), sidecar
-assert [field["state"] for field in sidecar["fields"]] == ["transformed", "transformed", "preserved", "transformed"], sidecar
+assert sidecar["configuration_sha256"] == hashlib.sha256(b"repo-health/experimental-metric-evaluation/2").hexdigest(), sidecar
+assert [field["state"] for field in sidecar["fields"]] == ["transformed", "transformed", "preserved", "transformed", "transformed"], sidecar
 print("[experimental] admissibility + outcome OK")
 PY
 
@@ -66,7 +81,11 @@ import json, sys
 c = json.load(open(sys.argv[1]))
 i = json.load(open(sys.argv[2]))
 assert c["metric"]["status"] == "not_applicable" and c["metric"]["value"] is None, c["metric"]
+assert c["observations"][0]["status"] == "not_applicable" and c["observations"][0]["value"] is None, c["observations"]
+assert c["observations"][0]["reason"] == "no-observable-subject" and c["observations"][0]["quality_dimensions"]["provenance"] == "unknown", c["observations"]
 assert i["metric"]["status"] == "unsupported" and i["metric"]["reason"] == "no-admissible-experimental-spec", i["metric"]
+assert i["observations"][0]["status"] == "unsupported" and i["observations"][0]["value"] is None, i["observations"]
+assert i["observations"][0]["reason"] == "no-admissible-experimental-spec" and i["observations"][0]["quality_dimensions"]["provenance"] == "unknown", i["observations"]
 print("[experimental] not_applicable/unsupported OK")
 PY
 
@@ -84,6 +103,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["anomaly"]["status"] == "not_applicable", d["anomaly"]
 assert d["anomaly"]["reason"] == "no-observable-baseline-window", d["anomaly"]
+assert d["observations"][1]["status"] == "not_applicable" and d["observations"][1]["value"] is None, d["observations"]
 PY
 
 echo "[experimental] missing cadence evidence remains unsupported"
@@ -98,6 +118,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["anomaly"]["status"] == "unsupported", d["anomaly"]
 assert d["anomaly"]["reason"] == "missing-cadence-evidence", d["anomaly"]
+assert d["observations"][1]["status"] == "unsupported" and d["observations"][1]["value"] is None, d["observations"]
 PY
 
 echo "[experimental] no observable evaluation windows remain not_applicable"
@@ -112,6 +133,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["anomaly"]["status"] == "not_applicable", d["anomaly"]
 assert d["anomaly"]["reason"] == "no-observable-evaluation-window", d["anomaly"]
+assert d["observations"][1]["status"] == "not_applicable" and d["observations"][1]["value"] is None, d["observations"]
 PY
 
 echo "[experimental] determinism + fail-closed negatives"

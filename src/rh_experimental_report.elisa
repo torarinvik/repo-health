@@ -2,7 +2,8 @@
 # (R024).
 #
 # Turns an `rh-experimental-input/1` document (specs + observations) into
-# `rh-experimental-result/1`. A spec is admissible only when it is opt-in,
+# `rh-experimental-result/1`, retaining detailed fields and adding shared
+# typed observations. A spec is admissible only when it is opt-in,
 # in wave G, costed, and carries at least one explicit limit; the one sample
 # metric `discontinuity.no_qualifying_release_in_horizon` reports an
 # OBSERVABLE horizon outcome among subjects with complete follow-up. It is
@@ -14,6 +15,7 @@
 include "./rh_base.elisa"
 include "./rh_json.elisa"
 include "./rh_experimental.elisa"
+include "./rh_observation.elisa"
 
 module ExperimentalReport:
     private:
@@ -60,8 +62,17 @@ module ExperimentalReport:
             return "no-cost" if spec.cost < 1 or spec.cost > 3
             "no-limits"
 
+        def rh_xr_observation(status: u8, value: Observation::RhMetricValue) -> Observation::RhObservation can[Global{Read,Write}]:
+            quality: Observation::RhQualityDimensions = Observation::RhQualityDimensions{
+                completeness: Observation::RhCompleteness.Complete if status == Observation::RH_ST_OBSERVED else Observation::RhCompleteness.Unknown,
+                freshness: Observation::RhFreshness.Unknown,
+                validity: Observation::RhValidity.Valid if status == Observation::RH_ST_OBSERVED else Observation::RhValidity.Unknown,
+                provenance: Observation::RhProvenanceQuality.Derived if status == Observation::RH_ST_OBSERVED else Observation::RhProvenanceQuality.Unknown
+            }
+            Observation::rh_observation_make_with_quality(status, value, false, quality) can Global{Read,Write}
+
     public:
-        def rh_experimental_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+        def rh_experimental_report(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Global{Read,Write}]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -199,6 +210,18 @@ module ExperimentalReport:
                         cadence_state <- 3
                         Experimental::rh_exp_cadence_findings(cadence_observable, cadence_counts, cadence_floor, cadence_baseline_windows, cadence_findings, &cadence_finding_count, &cadence_denominator, &cadence_censored)
 
+            disc_status: u8 = Observation::RH_ST_UNSUPPORTED if not admissible_disc else Observation::RH_ST_NOT_APPLICABLE if den == 0 else Observation::RH_ST_OBSERVED
+            disc_reason: cstr = "no-admissible-experimental-spec" if disc_status == Observation::RH_ST_UNSUPPORTED else "no-observable-subject" if disc_status == Observation::RH_ST_NOT_APPLICABLE else ""
+            disc_value: Observation::RhMetricValue = Observation::RhMetricValue.Ratio(wo, den) if disc_status == Observation::RH_ST_OBSERVED else Observation::RhMetricValue.Absent
+            disc_observation: Observation::RhObservation = rh_xr_observation(disc_status, disc_value) can Global{Read,Write}
+            return -1 if not Observation::rh_observation_valid(disc_observation)
+
+            cadence_status: u8 = Observation::RH_ST_UNSUPPORTED if not admissible_cadence or cadence_state == 1 else Observation::RH_ST_NOT_APPLICABLE if cadence_state == 2 or cadence_denominator == 0 else Observation::RH_ST_OBSERVED
+            cadence_reason: cstr = "no-admissible-experimental-spec" if not admissible_cadence else "missing-cadence-evidence" if cadence_state == 1 else "no-observable-baseline-window" if cadence_state == 2 else "no-observable-evaluation-window" if cadence_denominator == 0 else ""
+            cadence_value: Observation::RhMetricValue = Observation::RhMetricValue.Count(cadence_finding_count) if cadence_status == Observation::RH_ST_OBSERVED else Observation::RhMetricValue.Absent
+            cadence_observation: Observation::RhObservation = rh_xr_observation(cadence_status, cadence_value) can Global{Read,Write}
+            return -1 if not Observation::rh_observation_valid(cadence_observation)
+
             Base::rh_push_text(out, "{\"schema\":\"rh-experimental-result/1\",\"specs\":[")
             while i < k_starts.count.i64() |i: i64 = 0, k_starts, k_ends, waves, costs, limits, optins, adm, pool, out|:
                 if i > 0:
@@ -228,15 +251,21 @@ module ExperimentalReport:
                     Base::rh_push_text(out, "\"")
                 Base::rh_push_text(out, "}")
                 i <- i + 1
+            Base::rh_push_text(out, "],\"observations\":[")
+            return -1 if not Observation::rh_observation_emit_metric(out, "discontinuity.no_qualifying_release_in_horizon", "0.1.0", disc_reason, disc_observation)
+            out.push(44)
+            return -1 if not Observation::rh_observation_emit_metric(out, "anomaly.cadence_deviation_windows", "0.1.0", cadence_reason, cadence_observation)
             Base::rh_push_text(out, "],\"metric\":{\"key\":\"")
             Base::rh_push_text(out, disc_key)
             Base::rh_push_text(out, "\",\"status\":\"")
-            if not admissible_disc:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"no-admissible-experimental-spec\",\"value\":null")
-            elif den == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-observable-subject\",\"value\":null")
+            Base::rh_push_text(out, Observation::rh_status_label(disc_status))
+            out.push(34)
+            if disc_status != Observation::RH_ST_OBSERVED:
+                Base::rh_push_text(out, ",\"reason\":\"")
+                Base::rh_push_text(out, disc_reason)
+                Base::rh_push_text(out, "\",\"value\":null")
             else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"with_release\":")
+                Base::rh_push_text(out, ",\"value\":{\"with_release\":")
                 Base::rh_push_decimal_i64(out, wr)
                 Base::rh_push_text(out, ",\"without_release\":")
                 Base::rh_push_decimal_i64(out, wo)
@@ -252,16 +281,14 @@ module ExperimentalReport:
             Base::rh_push_text(out, "},\"anomaly\":{\"key\":\"")
             Base::rh_push_text(out, cadence_key)
             Base::rh_push_text(out, "\",\"status\":\"")
-            if not admissible_cadence:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"no-admissible-experimental-spec\",\"value\":null")
-            elif cadence_state == 1:
-                Base::rh_push_text(out, "unsupported\",\"reason\":\"missing-cadence-evidence\",\"value\":null")
-            elif cadence_state == 2:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-observable-baseline-window\",\"value\":null")
-            elif cadence_denominator == 0:
-                Base::rh_push_text(out, "not_applicable\",\"reason\":\"no-observable-evaluation-window\",\"value\":null")
+            Base::rh_push_text(out, Observation::rh_status_label(cadence_status))
+            out.push(34)
+            if cadence_status != Observation::RH_ST_OBSERVED:
+                Base::rh_push_text(out, ",\"reason\":\"")
+                Base::rh_push_text(out, cadence_reason)
+                Base::rh_push_text(out, "\",\"value\":null")
             else:
-                Base::rh_push_text(out, "observed\",\"value\":{\"floor\":")
+                Base::rh_push_text(out, ",\"value\":{\"floor\":")
                 Base::rh_push_decimal_i64(out, cadence_floor)
                 Base::rh_push_text(out, ",\"baseline_mean\":{\"num\":")
                 Base::rh_push_decimal_i64(out, cadence_baseline_sum)
