@@ -48,6 +48,10 @@ module Fossil:
             comment_e: i64
 
     private:
+        struct RhFossilTimezone:
+            valid: bool
+            offset_seconds: i64
+
         struct RhFossilSpan:
             start: i64
             end: i64
@@ -153,30 +157,39 @@ module Fossil:
             ss: i64 = rh_fossil_num2(data, s + 17)
             return -1 if ss < 0
             return -1 if not Temporal::rh_civil_date_valid(y, mo, dy) or hh > 23 or mi > 59 or ss > 60
-            tzoff: mutable i64 = 0
-            rest: mutable i64 = s + 19
-            if rest < e:
-                c2: u8 = data[rest.usize()]
-                if c2 == 90:
-                    rest <- rest + 1
-                elif c2 == 46:
-                    rest <- rest + 1
-                    while rest < e and data[rest.usize()] >= 48 and data[rest.usize()] <= 57 |rest, e, data|:
+            timezone: RhFossilTimezone = rh_fossil_timezone(data, s + 19, e)
+            return -1 if not timezone.valid
+            instant: i64 =
+                value: mutable i64 = 0
+                valid: bool = Temporal::rh_unix_from_civil_time_checked(y, mo, dy, hh, mi, ss, timezone.offset_seconds, &value)
+                value if valid else -1
+            instant
+
+        # Parse the optional ISO-8601 suffix without carrying mutable parser state.
+        def rh_fossil_timezone(data: darray[u8]&, s: i64, e: i64) -> RhFossilTimezone can[Memory.Allocate, Abort.Panic]:
+            invalid: RhFossilTimezone = RhFossilTimezone{valid: false, offset_seconds: 0}
+            return invalid if s < 0 or e < s or e > data.count.i64()
+            return RhFossilTimezone{valid: true, offset_seconds: 0} if s == e
+            zone: u8 = data[s.usize()]
+            if zone == 90:
+                return invalid if s + 1 != e
+                RhFossilTimezone{valid: true, offset_seconds: 0}
+            elif zone == 46:
+                after_fraction: i64 =
+                    while rest < e and data[rest.usize()] >= 48 and data[rest.usize()] <= 57 |rest: i64 = s + 1, e, data| -> rest:
                         rest <- rest + 1
-                    if rest < e and data[rest.usize()] == 90:
-                        rest <- rest + 1
-                elif c2 == 43 or c2 == 45:
-                    sign: i64 = 1 if c2 == 43 else -1
-                    oh: i64 = rh_fossil_num2(data, rest + 1)
-                    return -1 if oh < 0 or rest + 4 > e or data[(rest + 3).usize()] != 58
-                    om: i64 = rh_fossil_num2(data, rest + 4)
-                    return -1 if om < 0
-                    tzoff <- sign * (oh * 3600 + om * 60)
-                    rest <- rest + 6
-            return -1 if rest != e
-            base: mutable i64 = 0
-            return -1 if not Temporal::rh_unix_from_civil_time_checked(y, mo, dy, hh, mi, ss, tzoff, &base)
-            base
+                after_suffix: i64 = after_fraction + 1 if after_fraction < e and data[after_fraction.usize()] == 90 else after_fraction
+                return invalid if after_suffix != e
+                RhFossilTimezone{valid: true, offset_seconds: 0}
+            elif zone == 43 or zone == 45:
+                sign: i64 = 1 if zone == 43 else -1
+                offset_hour: i64 = rh_fossil_num2(data, s + 1)
+                return invalid if offset_hour < 0 or s + 4 > e or data[(s + 3).usize()] != 58
+                offset_minute: i64 = rh_fossil_num2(data, s + 4)
+                return invalid if offset_minute < 0 or s + 6 != e
+                RhFossilTimezone{valid: true, offset_seconds: sign * (offset_hour * 3600 + offset_minute * 60)}
+            else:
+                invalid
 
         # Parse one pipe-delimited timeline record. Invalid native hashes return
         # an unusable result; valid records retain spans into the timeline pool.
