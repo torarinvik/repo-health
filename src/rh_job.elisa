@@ -84,10 +84,9 @@ module Job:
             base: i64 = 60 if kind == 5 else 30 if kind == 1 else 2
             # base * 2^(attempt-1), saturating at cap.
             delay: i64 =
-                while i < attempt |delay: i64 = base, i: i64 = 1| -> delay:
+                for _ in 1..<attempt |delay: i64 = base| -> delay:
                     delay <- 1073741824 if delay > 1073741824
                     delay <- delay * 2
-                    i <- i + 1
             cap_secs if cap_secs > 0 and delay > cap_secs else delay
 
         # Next state after a failure. Returns the phase code and, for retry, the
@@ -155,9 +154,8 @@ module Job:
             RhHost{capacity: capacity, refill_per_second: refill, base_backoff_seconds: base_backoff, max_backoff_seconds: max_backoff, tokens: capacity, last_refill: 0, backoff_until: 0, consecutive_failures: 0, stopped: 0}
 
         def rh_sched_slots(n: i64) -> darray[RhSlot] can[Memory.Allocate, Abort.Panic]:
-            while i < n |i: i64 = 0, slots: darray[RhSlot] = []| -> slots:
+            for _ in 0..<n |slots: darray[RhSlot] = []| -> slots:
                 slots.push(RhSlot{used: false, phase: RH_SLOT_EMPTY, attempt: 0, wake_at: 0, token: 0, owner: -1, lease_expires: 0})
-                i <- i + 1
 
         # Shared worker/claim admission check for host quota and retry backoff.
         def rh_sched_host_allow(h: mutable RhHost&, now: i64) -> bool:
@@ -168,11 +166,10 @@ module Job:
 
         # Enqueue: find the first empty slot. Returns the index or -1 when full.
         def rh_sched_enqueue(slots: mutable darray[RhSlot]&, now: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while i < slots.count |i: usize = 0, slots|:
+            for i in 0..<slots.count |slots, now|:
                 if not slots[i].used:
                     slots[i] <- RhSlot{used: true, phase: RH_JOB_QUEUED_C, attempt: 0, wake_at: now, token: 0, owner: -1, lease_expires: 0}
                     return i.i64()
-                i <- i + 1
             -1
 
         # Claim the earliest ready job (queued, or retry_wait whose wake time has
@@ -182,7 +179,7 @@ module Job:
             return -1 if ttl <= 0
             return -1 if not rh_sched_host_allow(h, now)
             best: i64 =
-                while i < slots.count |best: i64 = -1, best_wake: i64 = 0, i: usize = 0, slots| -> best:
+                for i in 0..<slots.count |best: i64 = -1, best_wake: i64 = 0, slots, now| -> best:
                     s: RhSlot = slots[i]
                     if s.used:
                         ready: bool = (s.phase == RH_JOB_QUEUED_C) or (s.phase == RH_JOB_RETRY_WAIT_C and s.wake_at <= now)
@@ -190,7 +187,6 @@ module Job:
                             if best < 0 or s.wake_at < best_wake:
                                 best <- i.i64()
                                 best_wake <- s.wake_at
-                    i <- i + 1
             return -1 if best < 0
             b: RhSlot = slots[best.usize()]
             h.tokens <- h.tokens - 1
