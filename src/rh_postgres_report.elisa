@@ -31,16 +31,13 @@ module PostgresReport:
             idx: i64 = Json::rh_json_obj_get(nodes, texts, obj, key)
             return false if idx < 0 or not Json::rh_json_str_span(nodes, idx, start_out, end_out)
             return false if end_out[0] < start_out[0] or (not allow_empty and end_out[0] == start_out[0])
-            while i < end_out[0] - start_out[0] |i: i64 = 0, texts, start_out, end_out|:
-                return false if texts[(start_out[0] + i).usize()] == 0
-                i <- i + 1
+            for i in start_out[0]..<end_out[0] |texts|:
+                return false if texts[i.usize()] == 0
             true
 
         def rh_pg_report_text(texts: darray[u8]&, start: i64, end: i64) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
             bytes: mutable darray[u8] = []
-            while i < end |i: i64 = start, bytes, texts, end|:
-                bytes.push(texts[i.usize()])
-                i <- i + 1
+            return bytes if Base::rh_absorb_span(texts, start, end, bytes) < 0
             bytes.push(0)
             bytes
 
@@ -50,9 +47,7 @@ module PostgresReport:
             return bytes if idx < 0 or nodes[idx.usize()].kind != Json::RH_JSON_OBJ
             node: Json::RhJsonNode = nodes[idx.usize()]
             return bytes if node.text_start < 0 or node.text_end <= node.text_start or node.text_end - node.text_start > max_bytes
-            while i < node.text_end |i: i64 = node.text_start, bytes, raw, node|:
-                bytes.push(raw[i.usize()])
-                i <- i + 1
+            return bytes if Base::rh_absorb_span(raw, node.text_start, node.text_end, bytes) < 0
             bytes.push(0)
             bytes
 
@@ -64,11 +59,9 @@ module PostgresReport:
             true
 
         def rh_pg_report_projection_node_index(entity_text: darray[u8]&, entities: darray[RhPgProjectionNode]&, source: darray[u8]&, start: i64, end: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while index < entities.count |index: usize = 0, entity_text, entities, source, start, end|:
+            for index in 0..<entities.count |found: i64 = -1, entity_text, entities, source, start, end| -> found:
                 entity: RhPgProjectionNode = entities[index]
-                return index.i64() if Base::rh_bytes_equal_span(entity_text, entity.start, entity.end, source, start, end)
-                index <- index + 1
-            -1
+                break index.i64() if Base::rh_bytes_equal_span(entity_text, entity.start, entity.end, source, start, end)
 
         # Materialize a bounded, temporal projection neighborhood into the
         # existing in-memory query evaluator's graph input. Each database read
@@ -76,9 +69,7 @@ module PostgresReport:
         def rh_pg_report_projection_query(request_raw: darray[u8]&, conninfo: cstr, query_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if request_raw.count < 2 or request_raw[request_raw.count - 1] != 0
             request: mutable darray[u8] = []
-            while i + 1 < request_raw.count |i: usize = 0, request_raw, request|:
-                request.push(request_raw[i])
-                i <- i + 1
+            return -1 if Base::rh_absorb_span(request_raw, 0, request_raw.count.i64() - 1, request) < 0
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(request, nodes, texts)
@@ -144,9 +135,7 @@ module PostgresReport:
             source_truncated: mutable bool = Json::rh_json_is_true(walk_nodes, walk_raw, walk_truncated_idx)
             entity_text: mutable darray[u8] = []
             entities: mutable darray[RhPgProjectionNode] = []
-            while i < subject_e - subject_s |i: i64 = 0, texts, subject_s, subject_e, entity_text|:
-                entity_text.push(texts[(subject_s + i).usize()])
-                i <- i + 1
+            return -1 if Base::rh_absorb_span(texts, subject_s, subject_e, entity_text) < 0
             entities.push(RhPgProjectionNode{start: 0, end: entity_text.count.i64()})
             graph_edges: mutable darray[RhPgProjectionEdge] = []
             walk_edge_idx: mutable i64 = walk_nodes[walk_edges_idx.usize()].first_child
@@ -160,17 +149,13 @@ module PostgresReport:
                 from_index: mutable i64 = PostgresReport::rh_pg_report_projection_node_index(entity_text, entities, walk_texts, from_s, from_e)
                 if from_index < 0:
                     from_start: i64 = entity_text.count.i64()
-                    while from_offset < from_e - from_s |from_offset: i64 = 0, walk_texts, from_s, from_e, entity_text|:
-                        entity_text.push(walk_texts[(from_s + from_offset).usize()])
-                        from_offset <- from_offset + 1
+                    return -1 if Base::rh_absorb_span(walk_texts, from_s, from_e, entity_text) < 0
                     entities.push(RhPgProjectionNode{start: from_start, end: entity_text.count.i64()})
                     from_index <- entities.count.i64() - 1
                 to_index: mutable i64 = PostgresReport::rh_pg_report_projection_node_index(entity_text, entities, walk_texts, to_s, to_e)
                 if to_index < 0:
                     to_start: i64 = entity_text.count.i64()
-                    while to_offset < to_e - to_s |to_offset: i64 = 0, walk_texts, to_s, to_e, entity_text|:
-                        entity_text.push(walk_texts[(to_s + to_offset).usize()])
-                        to_offset <- to_offset + 1
+                    return -1 if Base::rh_absorb_span(walk_texts, to_s, to_e, entity_text) < 0
                     entities.push(RhPgProjectionNode{start: to_start, end: entity_text.count.i64()})
                     to_index <- entities.count.i64() - 1
                 graph_edges.push(RhPgProjectionEdge{from: from_index, dst: to_index})
@@ -186,52 +171,42 @@ module PostgresReport:
             ids_node: Json::RhJsonNode = nodes[ids_idx.usize()]
             return -1 if ids_node.text_start < 0 or ids_node.text_end <= ids_node.text_start
             Base::rh_push_text(query_out, "\",\"ids\":")
-            while raw_offset < ids_node.text_end |raw_offset: i64 = ids_node.text_start, request, ids_node, query_out|:
-                query_out.push(request[raw_offset.usize()])
-                raw_offset <- raw_offset + 1
+            return -1 if Base::rh_absorb_span(request, ids_node.text_start, ids_node.text_end, query_out) < 0
             cursor_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "cursor")
             if cursor_idx >= 0:
                 cursor_node: Json::RhJsonNode = nodes[cursor_idx.usize()]
                 return -1 if cursor_node.text_start < 0 or cursor_node.text_end <= cursor_node.text_start
                 Base::rh_push_text(query_out, ",\"cursor\":")
-                while raw_offset < cursor_node.text_end |raw_offset: i64 = cursor_node.text_start, request, cursor_node, query_out|:
-                    query_out.push(request[raw_offset.usize()])
-                    raw_offset <- raw_offset + 1
+                return -1 if Base::rh_absorb_span(request, cursor_node.text_start, cursor_node.text_end, query_out) < 0
             limit_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "limit")
             if limit_idx >= 0:
                 limit_node: Json::RhJsonNode = nodes[limit_idx.usize()]
                 return -1 if limit_node.text_start < 0 or limit_node.text_end <= limit_node.text_start
                 Base::rh_push_text(query_out, ",\"limit\":")
-                while raw_offset < limit_node.text_end |raw_offset: i64 = limit_node.text_start, request, limit_node, query_out|:
-                    query_out.push(request[raw_offset.usize()])
-                    raw_offset <- raw_offset + 1
+                return -1 if Base::rh_absorb_span(request, limit_node.text_start, limit_node.text_end, query_out) < 0
             scan_states_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scan_states")
             if scan_states_idx >= 0:
                 scan_states_node: Json::RhJsonNode = nodes[scan_states_idx.usize()]
                 return -1 if scan_states_node.kind != Json::RH_JSON_ARR or scan_states_node.text_start < 0 or scan_states_node.text_end <= scan_states_node.text_start
                 Base::rh_push_text(query_out, ",\"scan_states\":")
-                while raw_offset < scan_states_node.text_end |raw_offset: i64 = scan_states_node.text_start, request, scan_states_node, query_out|:
-                    query_out.push(request[raw_offset.usize()])
-                    raw_offset <- raw_offset + 1
+                return -1 if Base::rh_absorb_span(request, scan_states_node.text_start, scan_states_node.text_end, query_out) < 0
             Base::rh_push_text(query_out, ",\"graph\":{\"direction\":\"")
             Base::rh_json_escape(query_out, texts, direction_s.usize(), direction_e.usize())
             Base::rh_push_text(query_out, "\",\"subject\":1,\"nodes\":[")
-            while i < entities.count.i64() |i: i64 = 0, entities, query_out|:
+            for i in 0..<entities.count.i64() |entities, query_out|:
                 if i > 0:
                     query_out.push(44)
                 Base::rh_push_decimal_i64(query_out, i + 1)
-                i <- i + 1
             Base::rh_push_text(query_out, "],\"entity_ids\":[")
-            while i < entities.count.i64() |i: i64 = 0, entities, entity_text, query_out|:
+            for i in 0..<entities.count.i64() |entities, entity_text, query_out|:
                 if i > 0:
                     query_out.push(44)
                 entity: RhPgProjectionNode = entities[i.usize()]
                 query_out.push(34)
                 Base::rh_json_escape(query_out, entity_text, entity.start.usize(), entity.end.usize())
                 query_out.push(34)
-                i <- i + 1
             Base::rh_push_text(query_out, "],\"edges\":[")
-            while i < graph_edges.count.i64() |i: i64 = 0, graph_edges, query_out|:
+            for i in 0..<graph_edges.count.i64() |graph_edges, query_out|:
                 if i > 0:
                     query_out.push(44)
                 edge: RhPgProjectionEdge = graph_edges[i.usize()]
@@ -240,7 +215,6 @@ module PostgresReport:
                 Base::rh_push_text(query_out, ",\"to\":")
                 Base::rh_push_decimal_i64(query_out, edge.dst + 1)
                 query_out.push(125)
-                i <- i + 1
             Base::rh_push_text(query_out, "],\"max_nodes\":")
             Base::rh_push_decimal_i64(query_out, max_nodes)
             Base::rh_push_text(query_out, ",\"max_depth\":")
@@ -263,9 +237,7 @@ module PostgresReport:
             while chunk_index < chunk_count |chunk_index, remaining_edges, edge_idx, nodes, raw, projection_node, expected_edges, chunk_count, conninfo, status_out|:
                 chunk_json: mutable darray[u8] = []
                 Base::rh_push_text(chunk_json, "{\"schema\":\"rh-postgres-projection-chunk/1\",\"projection\":")
-                while raw_offset < projection_node.text_end |raw_offset: i64 = projection_node.text_start, raw, projection_node, chunk_json|:
-                    chunk_json.push(raw[raw_offset.usize()])
-                    raw_offset <- raw_offset + 1
+                return -1 if Base::rh_absorb_span(raw, projection_node.text_start, projection_node.text_end, chunk_json) < 0
                 Base::rh_push_text(chunk_json, ",\"expected_edge_count\":")
                 Base::rh_push_decimal_i64(chunk_json, expected_edges)
                 Base::rh_push_text(chunk_json, ",\"chunk_index\":")
@@ -308,30 +280,27 @@ module PostgresReport:
 
         def rh_pg_report_hex16(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if end - start != 16
-            while i < end |i: i64 = start, texts|:
+            for i in start..<end |texts|:
                 b: u8 = texts[i.usize()]
                 return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
-                i <- i + 1
             true
 
         def rh_pg_report_hex64(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if end - start != 64
-            while i < end |i: i64 = start, texts|:
+            for i in start..<end |texts|:
                 b: u8 = texts[i.usize()]
                 return false if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102))
-                i <- i + 1
             true
 
         def rh_pg_report_uuid_valid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if end - start != 36
-            while index < 36 |index: i64 = 0, texts, start|:
+            for index in 0..<36 |texts, start|:
                 byte: u8 = texts[(start + index).usize()]
                 if index == 8 or index == 13 or index == 18 or index == 23:
                     return false if byte != 45
                 else:
                     valid_hex: bool = (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 70) or (byte >= 97 and byte <= 102)
                     return false if not valid_hex
-                index <- index + 1
             true
 
         def rh_pg_report_visibility_ok(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -347,12 +316,9 @@ module PostgresReport:
                 PostgresReport::rh_pg_report_eq(texts, start, end, "suppressed")
 
         def rh_pg_report_emit_cstr(out: mutable darray[u8]&, bytes: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-            raw: mutable darray[u8] = []
-            while i + 1 < bytes.count |i: usize = 0, bytes, raw|:
-                raw.push(bytes[i])
-                i <- i + 1
             out.push(34)
-            Base::rh_json_escape(out, raw, 0, raw.count)
+            end: usize = bytes.count - 1 if bytes.count > 0 else 0
+            Base::rh_json_escape(out, bytes, 0, end)
             out.push(34)
 
         def rh_pg_report_reference_has(names: darray[u8]&, name_count: i64, target: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -402,19 +368,15 @@ module PostgresReport:
                 if names_out.count > 0:
                     previous_start: usize = names_out.count - 17
                     order: mutable i64 = 0
-                    while i < 16 |i: usize = 0, names_out, texts, previous_start, key_start, order|:
+                    for i in 0..<16 |names_out, texts, previous_start, key_start, order|:
                         left: u8 = names_out[previous_start + i]
                         right: u8 = texts[(key_start + 8).usize() + i]
                         if left != right:
                             order <- -1 if left < right
                             order <- 1 if left > right
-                            i <- 16
-                        else:
-                            i <- i + 1
+                            break
                     return false if order >= 0
-                while i < key_end |i: i64 = key_start + 8, texts, names_out|:
-                    names_out.push(texts[i.usize()])
-                    i <- i + 1
+                return false if Base::rh_absorb_span(texts, key_start + 8, key_end, names_out) < 0
                 names_out.push(10)
                 child <- nodes[child.usize()].next_sibling
             true
@@ -432,9 +394,7 @@ module PostgresReport:
                 line_end: usize = stop.usize() if stop >= 0 else candidates.count
                 referenced: bool = PostgresReport::rh_pg_report_reference_has(references, reference_count, candidates, start.i64(), line_end.i64())
                 if line_end > start and not referenced:
-                    while i < line_end |i: usize = start, candidates, orphan_candidates|:
-                        orphan_candidates.push(candidates[i])
-                        i <- i + 1
+                    return -1 if Base::rh_absorb_span(candidates, start.i64(), line_end.i64(), orphan_candidates) < 0
                     orphan_candidates.push(10)
                 start <- candidates.count if stop < 0 else stop.usize() + 1
             deleted: mutable i64 = 0
@@ -455,9 +415,7 @@ module PostgresReport:
                 if line_end > start:
                     Base::rh_push_text(out, "," if emitted > 0 else "")
                     out.push(34)
-                    while i < line_end |i: usize = start, orphan_candidates, out|:
-                        out.push(orphan_candidates[i])
-                        i <- i + 1
+                    return -1 if Base::rh_absorb_span(orphan_candidates, start.i64(), line_end.i64(), out) < 0
                     out.push(34)
                     emitted <- emitted + 1
                 start <- orphan_candidates.count if stop < 0 else stop.usize() + 1
@@ -739,9 +697,8 @@ module PostgresReport:
                 Base::rh_push_text(out, "\",\"configuration_sha256\":\"")
                 Base::rh_json_escape(out, texts, config_sha_s.usize(), config_sha_e.usize())
                 Base::rh_push_text(out, "\",\"output_sha256\":\"")
-                while sha_index < 64 |sha_index: usize = 0, output_sha, out|:
+                for sha_index in 0..<64 |output_sha, out|:
                     out.push(output_sha[sha_index])
-                    sha_index <- sha_index + 1
                 Base::rh_push_text(out, "\"}")
                 return 0
 
@@ -751,9 +708,7 @@ module PostgresReport:
                 chunk_node: Json::RhJsonNode = nodes[chunk_idx.usize()]
                 return -1 if chunk_node.text_start < 0 or chunk_node.text_end <= chunk_node.text_start or chunk_node.text_end - chunk_node.text_start > 4194304
                 chunk_json: mutable darray[u8] = []
-                while raw_offset < chunk_node.text_end |raw_offset: i64 = chunk_node.text_start, raw, chunk_node, chunk_json|:
-                    chunk_json.push(raw[raw_offset.usize()])
-                    raw_offset <- raw_offset + 1
+                return -1 if Base::rh_absorb_span(raw, chunk_node.text_start, chunk_node.text_end, chunk_json) < 0
                 chunk_json.push(0)
                 chunk_ptr: cstr = (&chunk_json[0]).cast[cstr] can Unsafe.PointerCast
                 staged_status: mutable darray[u8] = []
@@ -1022,9 +977,7 @@ module PostgresReport:
                 edge_limit: mutable i64 = 0
                 return -1 if not PostgresReport::rh_pg_report_int(nodes, raw, texts, root, "edge_limit", 1, 10000, &edge_limit)
                 entity_ids_json: mutable darray[u8] = []
-                while raw_offset < entity_ids_node.text_end |raw_offset: i64 = entity_ids_node.text_start, raw, entity_ids_node, entity_ids_json|:
-                    entity_ids_json.push(raw[raw_offset.usize()])
-                    raw_offset <- raw_offset + 1
+                return -1 if Base::rh_absorb_span(raw, entity_ids_node.text_start, entity_ids_node.text_end, entity_ids_json) < 0
                 entity_ids_json.push(0)
                 projection_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, projection_s, projection_e)
                 visibility: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, visibility_s, visibility_e)
@@ -1110,9 +1063,7 @@ module PostgresReport:
                 if edges_node.child_count <= 10000:
                     return -1 if root_node.text_end - root_node.text_start > 4194304
                     projection_json: mutable darray[u8] = []
-                    while raw_offset < root_node.text_end |raw_offset: i64 = root_node.text_start, raw, root_node, projection_json|:
-                        projection_json.push(raw[raw_offset.usize()])
-                        raw_offset <- raw_offset + 1
+                    return -1 if Base::rh_absorb_span(raw, root_node.text_start, root_node.text_end, projection_json) < 0
                     projection_json.push(0)
                     projection_ptr: cstr = (&projection_json[0]).cast[cstr] can Unsafe.PointerCast
                     stored <- Postgres::rh_pg_store_graph_projection(conninfo, projection_ptr)
@@ -1177,9 +1128,7 @@ module PostgresReport:
                 request_json: mutable darray[u8] = PostgresReport::rh_pg_report_raw_object(nodes, raw, texts, root, "request", 1048576)
                 return -1 if request_json.count < 2
                 request_validation: mutable darray[u8] = []
-                while i + 1 < request_json.count |i: usize = 0, request_json, request_validation|:
-                    request_validation.push(request_json[i])
-                    i <- i + 1
+                return -1 if Base::rh_absorb_span(request_json, 0, request_json.count.i64() - 1, request_validation) < 0
                 request_validation_out: mutable darray[u8] = []
                 return -1 if QueryReport::rh_query_report(request_validation, request_validation_out) != 0
                 job_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(texts, job_s, job_e)
@@ -1246,14 +1195,10 @@ module PostgresReport:
                 if request_idx >= 0 and claim_nodes[request_idx.usize()].kind == Json::RH_JSON_OBJ:
                     request_node: Json::RhJsonNode = claim_nodes[request_idx.usize()]
                     if request_node.text_start >= 0 and request_node.text_end > request_node.text_start and request_node.text_end - request_node.text_start <= 1048576:
-                        while i < request_node.text_end |i: i64 = request_node.text_start, request_raw, claim_result|:
-                            request_raw.push(claim_result[i.usize()])
-                            i <- i + 1
+                        return -1 if Base::rh_absorb_span(claim_result, request_node.text_start, request_node.text_end, request_raw) < 0
                         request_validation: mutable darray[u8] = []
                         request_raw.push(0)
-                        while i + 1 < request_raw.count |i: usize = 0, request_raw, request_validation|:
-                            request_validation.push(request_raw[i])
-                            i <- i + 1
+                        return -1 if Base::rh_absorb_span(request_raw, 0, request_raw.count.i64() - 1, request_validation) < 0
                         validation_result: mutable darray[u8] = []
                         request_valid <- QueryReport::rh_query_report(request_validation, validation_result) == 0
                 job_id: mutable darray[u8] = PostgresReport::rh_pg_report_text(claim_texts, job_s, job_e)
@@ -1271,9 +1216,7 @@ module PostgresReport:
                 if projection_query_idx >= 0:
                     return -1 if PostgresReport::rh_pg_report_projection_query(request_raw, conninfo, query_input) <= 0
                 else:
-                    while i + 1 < request_raw.count |i: usize = 0, request_raw, query_input|:
-                        query_input.push(request_raw[i])
-                        i <- i + 1
+                    return -1 if Base::rh_absorb_span(request_raw, 0, request_raw.count.i64() - 1, query_input) < 0
                 query_result: mutable darray[u8] = []
                 return -1 if QueryReport::rh_query_report(query_input, query_result) != 0 or query_result.count == 0
                 query_result.push(0)
@@ -1334,15 +1277,11 @@ module PostgresReport:
                     request_end: i64 = request_node.text_end
                     return -1 if request_start < 0 or request_end <= request_start or request_end - request_start > 1048576
                     request_validation: mutable darray[u8] = []
-                    while i < request_end |i: i64 = request_start, request_validation, claim_result|:
-                        request_validation.push(claim_result[i.usize()])
-                        i <- i + 1
+                    return -1 if Base::rh_absorb_span(claim_result, request_start, request_end, request_validation) < 0
                     return -1 if QueryReport::rh_query_report(request_validation, request_validation_out) != 0
                 elif not PostgresReport::rh_pg_report_eq(claim_texts, result_status_s, result_status_e, "empty"):
                     return -1
-                while i < claim_result.count |i: usize = 0, claim_result, out|:
-                    out.push(claim_result[i])
-                    i <- i + 1
+                out.extend(bytes_view(claim_result))
                 return 0
 
             if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "get_graph_query_job"):
@@ -1384,9 +1323,7 @@ module PostgresReport:
                     return -1 if not PostgresReport::rh_pg_report_eq(status_texts, result_kind_s, result_kind_e, "upstream") and not PostgresReport::rh_pg_report_eq(status_texts, result_kind_s, result_kind_e, "downstream")
                 elif not PostgresReport::rh_pg_report_eq(status_texts, status_s, status_e, "queued") and not PostgresReport::rh_pg_report_eq(status_texts, status_s, status_e, "running") and not PostgresReport::rh_pg_report_eq(status_texts, status_s, status_e, "failed") and not PostgresReport::rh_pg_report_eq(status_texts, status_s, status_e, "dead_letter") and not PostgresReport::rh_pg_report_eq(status_texts, status_s, status_e, "canceled") and not PostgresReport::rh_pg_report_eq(status_texts, status_s, status_e, "not_found"):
                     return -1
-                while i < status_result.count |i: usize = 0, status_result, out|:
-                    out.push(status_result[i])
-                    i <- i + 1
+                out.extend(bytes_view(status_result))
                 return 0
 
             if PostgresReport::rh_pg_report_eq(texts, operation_s, operation_e, "publish_graph_query_result"):
