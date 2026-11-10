@@ -835,6 +835,21 @@ module Git:
                 index <- index + 1
             1
 
+        # Bitbucket Cloud OAuth credentials use bearer authentication and are
+        # sent only to the fixed public API host.
+        def rh_bitbucket_api_auth_state(url: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return 0 if not Base::rh_cstr_starts_with(url, "https://api.bitbucket.org/2.0/repositories/")
+            token: u8&? = getenv("RH_BITBUCKET_TOKEN")
+            return 0 if token == null
+            token_ptr: cstr = token.cast[cstr] can Unsafe.PointerCast
+            length: usize = Base::rh_cstr_len_c(token_ptr)
+            return -1 if length == 0 or length > 512
+            while index < length |index: usize = 0, token_ptr|:
+                byte: u8 = token_ptr[index]
+                return -1 if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 95 or byte == 46)
+                index <- index + 1
+            1
+
         # Assemble the fixed transport policy in one private helper so the
         # public operation only validates, prepares the pin, and runs it.
         def rh_https_get_args(args: mutable darray[u8]&, input: mutable darray[u8]&, url: cstr, body_file: cstr, pin: darray[u8]&, max_secs: i64, api_kind: i64, api_auth: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
@@ -853,6 +868,12 @@ module Git:
                     token: u8&? = getenv("RH_GITLAB_TOKEN")
                     return if token == null
                     Base::rh_push_text(input, "header = \"PRIVATE-TOKEN: ")
+                    Base::rh_push_cstr(input, token.cast[cstr] can Unsafe.PointerCast)
+                    Base::rh_push_text(input, "\"\n")
+                elif api_kind == 3:
+                    token: u8&? = getenv("RH_BITBUCKET_TOKEN")
+                    return if token == null
+                    Base::rh_push_text(input, "header = \"Authorization: Bearer ")
                     Base::rh_push_cstr(input, token.cast[cstr] can Unsafe.PointerCast)
                     Base::rh_push_text(input, "\"\n")
             Process::rh_append_arg(args, "-sS")
@@ -896,7 +917,7 @@ module Git:
             return Process::rh_setup_error(22) if not rh_arg_safe(body_file)
             return Process::rh_setup_error(22) if not rh_arg_safe(code_file)
             return Process::rh_setup_error(22) if not rh_arg_safe(err_file)
-            api_auth_state: i64 = rh_github_api_auth_state(url) if api_kind == 1 else (rh_gitlab_api_auth_state(url) if api_kind == 2 else 0)
+            api_auth_state: i64 = rh_github_api_auth_state(url) if api_kind == 1 else (rh_gitlab_api_auth_state(url) if api_kind == 2 else (rh_bitbucket_api_auth_state(url) if api_kind == 3 else 0))
             return Process::rh_setup_error(22) if api_auth_state < 0
             api_auth: bool = api_auth_state == 1
             pin: mutable darray[u8] = []
@@ -992,6 +1013,13 @@ module Git:
         def rh_run_gitlab_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return Process::rh_setup_error(22) if not Base::rh_cstr_starts_with(url, "https://gitlab.com/api/v4/")
             rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 2) can Global{Read, Write}
+
+        # Bitbucket requests are restricted to repository resources on their
+        # documented Cloud REST host; pagination cursors are validated by the
+        # caller against the exact repository and resource before this call.
+        def rh_run_bitbucket_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return Process::rh_setup_error(22) if not Base::rh_cstr_starts_with(url, "https://api.bitbucket.org/2.0/repositories/")
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 3) can Global{Read, Write}
 
         # Run a single bounded JSON package/version query to OSV. The endpoint
         # is fixed here, so this POST cannot be redirected to a caller URL. DNS

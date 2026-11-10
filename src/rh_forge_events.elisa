@@ -332,11 +332,13 @@ module ForgeEvents:
                     child <- nodes[child.usize()].next_sibling
                     continue
                 native_id: i64 = native_id_value.value
-                event_time_key: u8& = "released_at" if kind == 3 and not githubish and not bitbucket else ForgeEvents::rh_fe_kind_time_key(kind)
+                event_time_key: u8& = "created_on" if bitbucket else ("released_at" if kind == 3 and not githubish else ForgeEvents::rh_fe_kind_time_key(kind))
                 primary_time: RhForgeValue = ForgeEvents::rh_fe_time(nodes, raw, texts, child, event_time_key)
                 created: RhForgeValue =
                     if primary_time.valid and primary_time.present and primary_time.value >= 0:
                         primary_time
+                    elif bitbucket and primary_time.valid and not primary_time.present:
+                        ForgeEvents::rh_fe_time(nodes, raw, texts, child, "created_at")
                     elif kind == 3:
                         ForgeEvents::rh_fe_time(nodes, raw, texts, child, "created_at")
                     else:
@@ -351,7 +353,13 @@ module ForgeEvents:
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
-                updated: RhForgeValue = ForgeEvents::rh_fe_time(nodes, raw, texts, child, "updated_at")
+                updated_key: u8& = "updated_on" if bitbucket else "updated_at"
+                primary_updated: RhForgeValue = ForgeEvents::rh_fe_time(nodes, raw, texts, child, updated_key)
+                updated: RhForgeValue =
+                    if bitbucket and primary_updated.valid and not primary_updated.present:
+                        ForgeEvents::rh_fe_time(nodes, raw, texts, child, "updated_at")
+                    else:
+                        primary_updated
                 if not updated.valid:
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
@@ -360,8 +368,13 @@ module ForgeEvents:
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
                     continue
+                closed_key: u8& = "closed_on" if bitbucket else "closed_at"
+                primary_closed: RhForgeValue = ForgeEvents::rh_fe_time(nodes, raw, texts, child, closed_key) if kind == 0 or kind == 1 else RhForgeValue{valid: true, present: false, value: 0}
                 closed: RhForgeValue =
-                    ForgeEvents::rh_fe_time(nodes, raw, texts, child, "closed_at") if kind == 0 or kind == 1 else RhForgeValue{valid: true, present: false, value: 0}
+                    if bitbucket and primary_closed.valid and not primary_closed.present:
+                        ForgeEvents::rh_fe_time(nodes, raw, texts, child, "closed_at")
+                    else:
+                        primary_closed
                 if not closed.valid or (closed.present and closed.value < 0):
                     counts.rejected <- counts.rejected + 1
                     child <- nodes[child.usize()].next_sibling
@@ -546,7 +559,7 @@ module ForgeEvents:
             scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scope")
             if scope_idx >= 0:
                 return -1 if nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
-                if github:
+                if github or bitbucket:
                     scope_repository_idx: i64 = Json::rh_json_obj_get(nodes, texts, scope_idx, "repository")
                     if scope_repository_idx >= 0:
                         return -1 if not Json::rh_json_str_span(nodes, scope_repository_idx, &scope_repository_s, &scope_repository_e) or scope_repository_s == scope_repository_e

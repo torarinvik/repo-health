@@ -11,6 +11,15 @@ the first binary because the installed Stage1 wrapper rejects its
 `llvm_toolchain` provenance. The full CLI build gate remains open until a
 fresh, verified Stage1 product is available.
 
+**Current M02 increment (2026-11-10):** Bitbucket Cloud issue and pull-request
+event acquisition is being added to `rh_cli forge events`, with bounded opaque
+cursor following, request/status/body/error evidence, and optional host-scoped
+OAuth bearer auth. AST parsing passed for the changed Elisa modules. Semantic
+checking remains unverified: the available stale Stage1 reports known errors in
+the existing forge-fetch dependencies, and the full CLI gate remains blocked by
+the toolchain provenance issue. A continuation command and acquisition fixtures
+remain open; no test gate is claimed.
+
 ## Milestones
 
 | Milestone | Stage | Evidence |
