@@ -12,6 +12,7 @@ module ForgeEventsFetch:
         const RH_FEF_PAGE_SIZE: i64 = 100
         const RH_FEF_MAX_CAPTURE_BYTES: i64 = 3145728
         const RH_FEF_MAX_PAGES: i64 = 10
+        const RH_FEF_BITBUCKET_API_PREFIX: u8& = "https://api.bitbucket.org/2.0/repositories/"
 
         struct RhFefReviewCursor:
             pull_number: mutable i64
@@ -106,17 +107,23 @@ module ForgeEventsFetch:
             route
 
         def rh_fef_bitbucket_cursor_valid(cursor: cstr, repository: cstr, capability: cstr) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-            route: mutable darray[u8] = ForgeEventsFetch::rh_fef_bitbucket_route(repository, capability)
-            route_length: usize = route.count
-            return false if Base::rh_cstr_len_c(cursor) < route_length + 2 or not Git::rh_fetch_arg_safe(cursor)
-            while index < route_length |index: usize = 0, route, cursor|:
-                return false if route[index] != cursor[index]
-                index <- index + 1
-            return false if cursor[route_length] != 63
-            while cursor[index] != 0 |index: usize = route_length + 1, cursor|:
-                return false if cursor[index] == 35
-                index <- index + 1
-            true
+            cursor_length: usize = Base::rh_cstr_len_c(cursor)
+            prefix_length: i64 = Base::rh_cstr_len(RH_FEF_BITBUCKET_API_PREFIX)
+            repository_length: usize = Base::rh_cstr_len_c(repository)
+            capability_length: usize = Base::rh_cstr_len_c(capability)
+            return false if cursor_length > 4096 or repository_length < 3 or repository_length > 201 or capability_length == 0 or capability_length > 64
+            route_length: usize = prefix_length.usize() + repository_length + 1 + capability_length
+            return false if cursor_length < route_length + 2 or not Git::rh_fetch_arg_safe(cursor)
+            repository_start: i64 = prefix_length
+            repository_end: i64 = repository_start + repository_length.i64()
+            capability_start: i64 = repository_end + 1
+            capability_end: i64 = capability_start + capability_length.i64()
+            return false if not sview_eq(sview(cursor, 0, prefix_length), sview(RH_FEF_BITBUCKET_API_PREFIX.cast[cstr], 0, -1))
+            return false if not sview_eq(sview(cursor, repository_start, repository_end), sview(repository, 0, -1))
+            return false if cursor[repository_end.usize()] != 47
+            return false if not sview_eq(sview(cursor, capability_start, capability_end), sview(capability, 0, -1))
+            return false if cursor[capability_end.usize()] != 63
+            sview_find_byte(sview(cursor, capability_end + 1, -1), 35) < 0
 
         def rh_fef_bitbucket_first_url(repository: cstr, capability: cstr) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
             url: mutable darray[u8] = ForgeEventsFetch::rh_fef_bitbucket_route(repository, capability)
