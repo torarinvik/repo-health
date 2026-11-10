@@ -75,6 +75,12 @@ module Git:
             Git::rh_append_parent_env(env, "RH_CURL_GITLAB_RELEASES", "RH_CURL_GITLAB_RELEASES")
             Git::rh_append_parent_env(env, "RH_CURL_GITLAB_RELEASES_PAGE2", "RH_CURL_GITLAB_RELEASES_PAGE2")
             Git::rh_append_parent_env(env, "RH_CURL_HTTP_STATUS", "RH_CURL_HTTP_STATUS")
+            Git::rh_append_parent_env(env, "RH_CURL_SELFHOSTED_SETTINGS", "RH_CURL_SELFHOSTED_SETTINGS")
+            Git::rh_append_parent_env(env, "RH_CURL_SELFHOSTED_ISSUES_PAGE1", "RH_CURL_SELFHOSTED_ISSUES_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_SELFHOSTED_ISSUES_PAGE2", "RH_CURL_SELFHOSTED_ISSUES_PAGE2")
+            Git::rh_append_parent_env(env, "RH_CURL_SELFHOSTED_PULLS_PAGE1", "RH_CURL_SELFHOSTED_PULLS_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_SELFHOSTED_RELEASES_PAGE1", "RH_CURL_SELFHOSTED_RELEASES_PAGE1")
+            Git::rh_append_parent_env(env, "RH_CURL_SELFHOSTED_RELEASES_PAGE2", "RH_CURL_SELFHOSTED_RELEASES_PAGE2")
             Git::rh_append_parent_env(env, "RH_CURL_ISSUES_PAGE1", "RH_CURL_ISSUES_PAGE1")
             Git::rh_append_parent_env(env, "RH_CURL_LOG", "RH_CURL_LOG")
             Git::rh_append_parent_env(env, "RH_CURL_PAGE2", "RH_CURL_PAGE2")
@@ -850,6 +856,25 @@ module Git:
                 index <- index + 1
             1
 
+        # Self-hosted forge credentials are valid only below the exact approved
+        # base URL and API prefix passed by the instance collector.
+        def rh_selfhosted_forge_api_auth_state(url: cstr, base_url: cstr, api_kind: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            base_length: usize = Base::rh_cstr_len_c(base_url)
+            url_length: usize = Base::rh_cstr_len_c(url)
+            return -1 if base_length == 0 or base_length > 2048 or url_length <= base_length
+            return -1 if not sview_starts_with(sview(url, 0, -1), sview(base_url, 0, -1)) or url[base_length] != 47
+            return -1 if not sview_starts_with(sview(url, base_length.i64(), -1), sview("/api/v1/", 0, -1))
+            token: u8&? = getenv("RH_GITEA_TOKEN") if api_kind == 4 else getenv("RH_FORGEJO_TOKEN")
+            return 0 if token == null
+            token_ptr: cstr = token.cast[cstr] can Unsafe.PointerCast
+            length: usize = Base::rh_cstr_len_c(token_ptr)
+            return -1 if length == 0 or length > 512
+            while index < length |index: usize = 0, token_ptr|:
+                byte: u8 = token_ptr[index]
+                return -1 if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95)
+                index <- index + 1
+            1
+
         # Assemble the fixed transport policy in one private helper so the
         # public operation only validates, prepares the pin, and runs it.
         def rh_https_get_args(args: mutable darray[u8]&, input: mutable darray[u8]&, url: cstr, body_file: cstr, pin: darray[u8]&, max_secs: i64, api_kind: i64, api_auth: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
@@ -874,6 +899,18 @@ module Git:
                     token: u8&? = getenv("RH_BITBUCKET_TOKEN")
                     return if token == null
                     Base::rh_push_text(input, "header = \"Authorization: Bearer ")
+                    Base::rh_push_cstr(input, token.cast[cstr] can Unsafe.PointerCast)
+                    Base::rh_push_text(input, "\"\n")
+                elif api_kind == 4:
+                    token: u8&? = getenv("RH_GITEA_TOKEN")
+                    return if token == null
+                    Base::rh_push_text(input, "header = \"Authorization: token ")
+                    Base::rh_push_cstr(input, token.cast[cstr] can Unsafe.PointerCast)
+                    Base::rh_push_text(input, "\"\n")
+                elif api_kind == 5:
+                    token: u8&? = getenv("RH_FORGEJO_TOKEN")
+                    return if token == null
+                    Base::rh_push_text(input, "header = \"Authorization: token ")
                     Base::rh_push_cstr(input, token.cast[cstr] can Unsafe.PointerCast)
                     Base::rh_push_text(input, "\"\n")
             Process::rh_append_arg(args, "-sS")
@@ -910,14 +947,14 @@ module Git:
             Process::rh_append_arg(args, "%{http_code}")
             Process::rh_append_arg(args, url.cast[u8&] can Unsafe.PointerCast)
 
-        def rh_run_https_get_with_timeout_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64, api_kind: i64) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_run_https_get_with_timeout_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr, max_secs: i64, api_kind: i64, api_base: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return Process::rh_setup_error(22) if max_secs <= 0 or max_secs > RH_FETCH_MAX_SECS
             return Process::rh_setup_error(22) if not rh_fetch_guard(url)
             return Process::rh_setup_error(22) if not rh_fetch_arg_safe(url)
             return Process::rh_setup_error(22) if not rh_arg_safe(body_file)
             return Process::rh_setup_error(22) if not rh_arg_safe(code_file)
             return Process::rh_setup_error(22) if not rh_arg_safe(err_file)
-            api_auth_state: i64 = rh_github_api_auth_state(url) if api_kind == 1 else (rh_gitlab_api_auth_state(url) if api_kind == 2 else (rh_bitbucket_api_auth_state(url) if api_kind == 3 else 0))
+            api_auth_state: i64 = rh_github_api_auth_state(url) if api_kind == 1 else (rh_gitlab_api_auth_state(url) if api_kind == 2 else (rh_bitbucket_api_auth_state(url) if api_kind == 3 else (rh_selfhosted_forge_api_auth_state(url, api_base, api_kind) if api_kind == 4 or api_kind == 5 else 0)))
             return Process::rh_setup_error(22) if api_auth_state < 0
             api_auth: bool = api_auth_state == 1
             pin: mutable darray[u8] = []
@@ -999,38 +1036,54 @@ module Git:
         const RH_FETCH_MAX_SECS: i64 = 60
         const RH_OSV_VULNERABILITY_GET_MAX_SECS: i64 = 10
 
-        def rh_run_https_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 0) can Global{Read, Write}
+        def rh_run_https_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 0, "") can Global{Read, Write}
 
         # GitHub's REST API requires an explicit supported-version header for
         # stable interpretation. The endpoint remains caller-supplied under the
         # same HTTPS/DNS/redirect/size policy; optional bearer auth is scoped to
         # the exact api.github.com host.
-        def rh_run_github_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 1) can Global{Read, Write}
+        def rh_run_github_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 1, "") can Global{Read, Write}
 
         # GitLab API authentication uses a distinct header and exact host.
-        def rh_run_gitlab_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_run_gitlab_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return Process::rh_setup_error(22) if not Base::rh_cstr_starts_with(url, "https://gitlab.com/api/v4/")
-            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 2) can Global{Read, Write}
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 2, "") can Global{Read, Write}
 
         # Bitbucket requests are restricted to repository resources on their
         # documented Cloud REST host; pagination cursors are validated by the
         # caller against the exact repository and resource before this call.
-        def rh_run_bitbucket_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_run_bitbucket_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return Process::rh_setup_error(22) if not Base::rh_cstr_starts_with(url, "https://api.bitbucket.org/2.0/repositories/")
-            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 3) can Global{Read, Write}
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 3, "") can Global{Read, Write}
+
+        # Read from an operator-approved self-hosted Gitea/Forgejo API base.
+        # Optional token credentials stay in curl's stdin config and are
+        # restricted to this base URL; redirects, proxies, and unpinned DNS are
+        # refused by the shared HTTPS transport.
+        def rh_run_selfhosted_forge_api_get_result(url: cstr, base_url: cstr, provider: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
+            api_kind: i64 = 4 if Base::rh_streq(provider, "gitea") else 5 if Base::rh_streq(provider, "forgejo") else 0
+            base_length: usize = Base::rh_cstr_len_c(base_url)
+            url_length: usize = Base::rh_cstr_len_c(url)
+            return Process::rh_setup_error(22) if api_kind == 0 or base_length == 0 or base_length > 2048 or url_length <= base_length
+            return Process::rh_setup_error(22) if not Git::rh_fetch_arg_safe(base_url) or not Git::rh_fetch_guard(base_url)
+            return Process::rh_setup_error(22) if not Git::rh_fetch_arg_safe(url) or not Git::rh_fetch_guard(url)
+            return Process::rh_setup_error(22) if not sview_starts_with(sview(url, 0, -1), sview(base_url, 0, -1)) or url[base_length] != 47
+            route: sview = sview(url, base_length.i64(), -1)
+            return Process::rh_setup_error(22) if not sview_starts_with(route, sview("/api/v1/settings/api", 0, -1)) and not sview_starts_with(route, sview("/api/v1/repos/", 0, -1))
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, api_kind, base_url) can Global{Read, Write}
 
         # Run a single bounded JSON package/version query to OSV. The endpoint
         # is fixed here, so this POST cannot be redirected to a caller URL. DNS
         # answers are validated as a complete public set and pinned; curl config,
         # proxies, redirects, oversized bodies, and long hangs are rejected.
-        def rh_run_osv_query_result(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_run_osv_query_result(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             rh_run_osv_post_result("https://api.osv.dev/v1/query", request_file, body_file, code_file, err_file) can Global{Read, Write}
 
         # Run a bounded ordered graph batch. Callers cannot choose the endpoint;
         # querybatch is kept separate because its response contains IDs only.
-        def rh_run_osv_query_batch_result(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_run_osv_query_batch_result(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             rh_run_osv_post_result("https://api.osv.dev/v1/querybatch", request_file, body_file, code_file, err_file) can Global{Read, Write}
 
         # Send one bounded JSON webhook request to an operator-configured HTTPS
@@ -1126,7 +1179,7 @@ module Git:
             url.extend(bytes_view(advisory_id))
             url.push(0)
             url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
-            rh_run_https_get_with_timeout_result(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS, 0) can Global{Read, Write}
+            rh_run_https_get_with_timeout_result(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS, 0, "") can Global{Read, Write}
 
         # Run a bounded bare clone for https remotes (M01-03): no worktree, no
         # checkout (so no smudge/clean filters, no hooks execute), blob-less and

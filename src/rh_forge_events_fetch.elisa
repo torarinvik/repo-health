@@ -4,6 +4,7 @@ include "./rh_base.elisa"
 include "./rh_forge_events.elisa"
 include "./rh_git.elisa"
 include "./rh_json.elisa"
+include "./rh_connector.elisa"
 include "./rh_roles_provider.elisa"
 include "./rh_sha256.elisa"
 
@@ -12,6 +13,7 @@ module ForgeEventsFetch:
         const RH_FEF_PAGE_SIZE: i64 = 100
         const RH_FEF_MAX_CAPTURE_BYTES: i64 = 3145728
         const RH_FEF_MAX_PAGES: i64 = 10
+        const RH_FEF_SELFHOSTED_PAGE_SIZE: i64 = 100
         const RH_FEF_BITBUCKET_API_PREFIX: u8& = "https://api.bitbucket.org/2.0/repositories/"
 
         struct RhFefReviewCursor:
@@ -211,7 +213,7 @@ module ForgeEventsFetch:
             return false if not ForgeEventsFetch::rh_fef_bitbucket_resume_cursor(nodes, previous, texts, pagination, "issues", repository, "issues", issue_cursor_out, &issue_complete_out[0])
             ForgeEventsFetch::rh_fef_bitbucket_resume_cursor(nodes, previous, texts, pagination, "proposals", repository, "pullrequests", proposal_cursor_out, &proposal_complete_out[0])
 
-        def rh_fef_fetch_bitbucket_pages(repository: cstr, capability: cstr, max_pages: i64, evidence_base: cstr, start_cursor: darray[u8]&, already_complete: bool, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_cursor_out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_fetch_bitbucket_pages(repository: cstr, capability: cstr, max_pages: i64, evidence_base: cstr, start_cursor: darray[u8]&, already_complete: bool, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_cursor_out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return false if max_pages < 1 or max_pages > RH_FEF_MAX_PAGES
             if already_complete:
                 complete_out[0] <- 1
@@ -236,11 +238,11 @@ module ForgeEventsFetch:
                 Base::rh_push_cstr(url_evidence, url_ptr)
                 url_evidence.push(10)
                 return false if not Base::rh_io_write(url_file_ptr, url_evidence)
-                return false if not Process::rh_succeeded(Git::rh_run_bitbucket_api_get_result(url_ptr, page_ptr, status_ptr, error_ptr))
+                return false if not Process::rh_succeeded(Git::rh_run_bitbucket_api_get_result(url_ptr, page_ptr, status_ptr, error_ptr) can Global{Read,Write})
                 status: mutable darray[u8] = []
-                return false if Base::rh_io_read(status_ptr, status) < 0 or not ForgeEventsFetch::rh_fef_http_200(status)
+                return false if (Base::rh_io_read(status_ptr, status) can Global{Read,Write}) < 0 or not ForgeEventsFetch::rh_fef_http_200(status)
                 raw: mutable darray[u8] = []
-                return false if Base::rh_io_read(page_ptr, raw) < 0
+                return false if (Base::rh_io_read(page_ptr, raw) can Global{Read,Write}) < 0
                 nodes: mutable darray[Json::RhJsonNode] = []
                 texts: mutable darray[u8] = []
                 root: i64 = Json::rh_json_parse(raw, nodes, texts)
@@ -343,6 +345,113 @@ module ForgeEventsFetch:
         def rh_fef_http_200(status: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
             status.count == 3 and status[0] == 50 and status[1] == 48 and status[2] == 48
 
+        def rh_fef_selfhosted_instance(input: darray[u8]&, base_out: mutable darray[u8]&, provider_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return false if input.count == 0 or input.count > 65536
+            provider_out[0] <- 0
+            instance: mutable Connector::RhConnectorInstance = Connector::RhConnectorInstance{id_start: 0, id_end: 0, url_start: 0, url_end: 0, approved: false}
+            parsed: bool =
+                capabilities: mutable darray[i64] = []
+                Connector::rh_connector_instance_parse(input, instance, capabilities) == 0
+            return false if not parsed or not instance.approved
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(input, nodes, texts)
+            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            provider_out[0] <- 1 if Base::rh_bytes_equal_literal(texts, instance.id_start, instance.id_end, "gitea")
+            provider_out[0] <- 2 if Base::rh_bytes_equal_literal(texts, instance.id_start, instance.id_end, "forgejo")
+            return false if provider_out[0] == 0
+            return false if Base::rh_absorb_span(texts, instance.url_start, instance.url_end, base_out) < 0
+            base_out.push(0)
+            base: cstr = (&base_out[0]).cast[cstr] can Unsafe.PointerCast
+            base_length: usize = Base::rh_cstr_len_c(base)
+            return false if base_length < 10 or base_length > 2048 or base[base_length - 1] == 47
+            return false if not Git::rh_fetch_arg_safe(base) or not Git::rh_fetch_guard(base)
+            while index < base_length |index: usize = 0, base|:
+                return false if base[index] == 37 or base[index] == 63 or base[index] == 35
+                index <- index + 1
+            true
+
+        def rh_fef_selfhosted_path(evidence_base: cstr, provider: cstr, capability: cstr, page: i64, suffix: u8&) -> mutable darray[u8] can[Memory.Allocate, Abort.Panic]:
+            path: mutable darray[u8] = []
+            Base::rh_push_cstr(path, evidence_base)
+            Base::rh_push_text(path, ".")
+            Base::rh_push_cstr(path, provider)
+            Base::rh_push_text(path, "-events-")
+            Base::rh_push_cstr(path, capability)
+            Base::rh_push_text(path, "-page-")
+            Base::rh_push_decimal_i64(path, page)
+            Base::rh_push_text(path, suffix)
+            path.push(0)
+            path
+
+        def rh_fef_selfhosted_get(base: cstr, provider: cstr, evidence_base: cstr, capability: cstr, route: cstr, page: i64, page_size: i64, paged: bool, raw_out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
+            url: mutable darray[u8] = []
+            Base::rh_push_cstr(url, base)
+            Base::rh_push_text(url, "/api/v1/")
+            Base::rh_push_cstr(url, route)
+            if paged:
+                separator: u8& = "&" if sview_find_byte(sview(route, 0, -1), 63) >= 0 else "?"
+                Base::rh_push_text(url, separator)
+                Base::rh_push_text(url, "limit=")
+                Base::rh_push_decimal_i64(url, page_size)
+                Base::rh_push_text(url, "&page=")
+                Base::rh_push_decimal_i64(url, page)
+            url.push(0)
+            url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
+            page_path: mutable darray[u8] = ForgeEventsFetch::rh_fef_selfhosted_path(evidence_base, provider, capability, page, ".json")
+            status_path: mutable darray[u8] = ForgeEventsFetch::rh_fef_selfhosted_path(evidence_base, provider, capability, page, ".status")
+            error_path: mutable darray[u8] = ForgeEventsFetch::rh_fef_selfhosted_path(evidence_base, provider, capability, page, ".err")
+            url_path: mutable darray[u8] = ForgeEventsFetch::rh_fef_selfhosted_path(evidence_base, provider, capability, page, ".url")
+            page_ptr: cstr = (&page_path[0]).cast[cstr] can Unsafe.PointerCast
+            status_ptr: cstr = (&status_path[0]).cast[cstr] can Unsafe.PointerCast
+            error_ptr: cstr = (&error_path[0]).cast[cstr] can Unsafe.PointerCast
+            url_file_ptr: cstr = (&url_path[0]).cast[cstr] can Unsafe.PointerCast
+            url_evidence: mutable darray[u8] = []
+            Base::rh_push_cstr(url_evidence, url_ptr)
+            url_evidence.push(10)
+            return false if not Base::rh_io_write(url_file_ptr, url_evidence)
+            transport: Process::RhProcessResult = Git::rh_run_selfhosted_forge_api_get_result(url_ptr, base, provider, page_ptr, status_ptr, error_ptr) can Global{Read,Write}
+            return false if not Process::rh_succeeded(transport)
+            status: mutable darray[u8] = []
+            return false if (Base::rh_io_read(status_ptr, status) can Global{Read,Write}) < 0 or not ForgeEventsFetch::rh_fef_http_200(status)
+            return false if (Base::rh_io_read(page_ptr, raw_out) can Global{Read,Write}) < 0 or raw_out.count > 8388608
+            true
+
+        def rh_fef_selfhosted_page_size(base: cstr, provider: cstr, evidence_base: cstr, byte_total_out: mutable i64&, page_size_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
+            settings: mutable darray[u8] = []
+            return false if not (ForgeEventsFetch::rh_fef_selfhosted_get(base, provider, evidence_base, "settings", "settings/api", 0, 0, false, settings) can Global{Read,Write})
+            return false if settings.count == 0 or settings.count > 65536 or settings.count.i64() > RH_FEF_MAX_CAPTURE_BYTES
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(settings, nodes, texts)
+            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            limit_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "max_response_items")
+            return false if limit_idx < 0
+            valid: mutable i64 = 0
+            server_limit: i64 = Json::rh_json_int(nodes, settings, limit_idx, &valid)
+            return false if valid == 0 or server_limit < 1
+            page_size_out[0] <- RH_FEF_SELFHOSTED_PAGE_SIZE if server_limit > RH_FEF_SELFHOSTED_PAGE_SIZE else server_limit
+            byte_total_out[0] <- byte_total_out[0] + settings.count.i64()
+            true
+
+        def rh_fef_fetch_selfhosted_pages(base: cstr, provider: cstr, capability: cstr, route: cstr, page_size: i64, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
+            return false if page_size < 1 or page_size > RH_FEF_SELFHOSTED_PAGE_SIZE or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES
+            page_number: mutable i64 = 1
+            pages_fetched: mutable i64 = 0
+            complete: mutable bool = false
+            while pages_fetched < max_pages and not complete |page_number, pages_fetched, max_pages, complete, base, provider, capability, route, page_size, evidence_base, records, item_total, byte_total|:
+                raw: mutable darray[u8] = []
+                return false if not (ForgeEventsFetch::rh_fef_selfhosted_get(base, provider, evidence_base, capability, route, page_number, page_size, true, raw) can Global{Read,Write})
+                page_items: mutable i64 = 0
+                return false if not ForgeEventsFetch::rh_fef_append_page(raw, records, &item_total[0], &byte_total[0], &page_items)
+                return false if page_items > page_size
+                pages_fetched <- pages_fetched + 1
+                complete <- page_items < page_size
+                page_number <- page_number + 1 if not complete
+            complete_out[0] <- 1 if complete else 0
+            next_page_out[0] <- page_number
+            pages_fetched > 0
+
         def rh_fef_span_matches_cstr(texts: darray[u8]&, start: i64, end: i64, value: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
             length: usize = Base::rh_cstr_len_c(value)
             return false if end < start or (end - start).usize() != length
@@ -399,7 +508,7 @@ module ForgeEventsFetch:
             return -9 if not ForgeEventsFetch::rh_fef_gitlab_cursor_page(nodes, previous, texts, pagination, "releases", &cursor_out.releases_page)
             0
 
-        def rh_fef_review_resume(previous: darray[u8]&, repository: cstr, pending_out: mutable darray[RhFefReviewCursor]&, next_pull_page_out: mutable i64&, pulls_complete_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_fef_review_resume[@r](previous: darray[u8]&, repository: cstr, pending_out: mutable darray[RhFefReviewCursor]& @r, next_pull_page_out: mutable i64&, pulls_complete_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             nodes: mutable darray[Json::RhJsonNode] = []
             texts: mutable darray[u8] = []
             root: i64 = Json::rh_json_parse(previous, nodes, texts)
@@ -493,7 +602,7 @@ module ForgeEventsFetch:
                 pull <- nodes[pull.usize()].next_sibling
             true
 
-        def rh_fef_fetch_reviews_for_pull(repository: cstr, pull_number: i64, start_page: i64, review_page_limit: i64, evidence_base: cstr, byte_total: mutable i64&, groups: mutable darray[u8]&, group_count: mutable i64&, pending: mutable darray[RhFefReviewCursor]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_fetch_reviews_for_pull(repository: cstr, pull_number: i64, start_page: i64, review_page_limit: i64, evidence_base: cstr, byte_total: mutable i64&, groups: mutable darray[u8]&, group_count: mutable i64&, pending: mutable darray[RhFefReviewCursor]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             endpoint: mutable darray[u8] = []
             Base::rh_push_text(endpoint, "pulls/")
             Base::rh_push_decimal_i64(endpoint, pull_number)
@@ -509,12 +618,12 @@ module ForgeEventsFetch:
             review_next_page: mutable i64 = 1
             endpoint_ptr: cstr = (&endpoint[0]).cast[cstr] can Unsafe.PointerCast
             capability_ptr: cstr = (&capability[0]).cast[cstr] can Unsafe.PointerCast
-            return false if not ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint_ptr, capability_ptr, start_page, review_page_limit, RH_FEF_PAGE_SIZE, evidence_base, reviews, &review_total, &byte_total[0], &review_complete, &review_next_page)
+            return false if not (ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint_ptr, capability_ptr, start_page, review_page_limit, RH_FEF_PAGE_SIZE, evidence_base, reviews, &review_total, &byte_total[0], &review_complete, &review_next_page) can Global{Read,Write})
             ForgeEventsFetch::rh_fef_append_review_group(groups, &group_count[0], pull_number, reviews)
             pending.push(RhFefReviewCursor{pull_number: pull_number, next_page: review_next_page}) if review_complete == 0
             true
 
-        def rh_fef_fetch_pull_page(repository: cstr, pull_limit: i64, pull_page: i64, evidence_base: cstr, byte_total: mutable i64&, pull_requests: mutable darray[RhFefPullRequest]&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_fetch_pull_page(repository: cstr, pull_limit: i64, pull_page: i64, evidence_base: cstr, byte_total: mutable i64&, pull_requests: mutable darray[RhFefPullRequest]&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             pulls: mutable darray[u8] = []
             pull_total: mutable i64 = 0
             endpoint: mutable darray[u8] = []
@@ -523,7 +632,7 @@ module ForgeEventsFetch:
             Base::rh_push_text(endpoint, "&page=")
             endpoint.push(0)
             endpoint_ptr: cstr = (&endpoint[0]).cast[cstr] can Unsafe.PointerCast
-            return false if not ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint_ptr, "review-pulls", pull_page, 1, pull_limit, evidence_base, pulls, &pull_total, &byte_total[0], &complete_out[0], &next_page_out[0])
+            return false if not (ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint_ptr, "review-pulls", pull_page, 1, pull_limit, evidence_base, pulls, &pull_total, &byte_total[0], &complete_out[0], &next_page_out[0]) can Global{Read,Write})
             return true if pull_total == 0
             ForgeEventsFetch::rh_fef_pull_requests(pulls, pull_limit, pull_requests)
 
@@ -595,7 +704,7 @@ module ForgeEventsFetch:
             Base::rh_push_text(capture, "}}")
             ForgeEvents::rh_forge_events_report(capture, out)
 
-        def rh_fef_fetch_repository_reviews(repository: cstr, review_page_limit: i64, pull_limit: i64, evidence_base: cstr, previous: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_fetch_repository_reviews(repository: cstr, review_page_limit: i64, pull_limit: i64, evidence_base: cstr, previous: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or review_page_limit < 1 or review_page_limit > RH_FEF_MAX_PAGES or pull_limit < 1 or pull_limit > 10 or not Git::rh_arg_safe(evidence_base)
             pending: mutable darray[RhFefReviewCursor] = []
             next_pull_page: mutable i64 = 1
@@ -618,21 +727,21 @@ module ForgeEventsFetch:
             if pending.count > 0:
                 while pending_idx < pending.count |pending_idx: usize = 0, pending, next_pending, reviews_by_pull, group_count, byte_total, repository, review_page_limit, evidence_base|:
                     cursor: RhFefReviewCursor = pending[pending_idx]
-                    return -1 if not ForgeEventsFetch::rh_fef_fetch_reviews_for_pull(repository, cursor.pull_number, cursor.next_page, review_page_limit, evidence_base, &byte_total, reviews_by_pull, &group_count, next_pending)
+                    return -1 if not (ForgeEventsFetch::rh_fef_fetch_reviews_for_pull(repository, cursor.pull_number, cursor.next_page, review_page_limit, evidence_base, &byte_total, reviews_by_pull, &group_count, next_pending) can Global{Read,Write})
                     pending_idx <- pending_idx + 1
             else:
                 pull_complete: mutable i64 = 0
                 pull_next_page: mutable i64 = 1
-                return -1 if not ForgeEventsFetch::rh_fef_fetch_pull_page(repository, pull_limit, next_pull_page, evidence_base, &byte_total, pull_batch, &pull_complete, &pull_next_page)
+                return -1 if not (ForgeEventsFetch::rh_fef_fetch_pull_page(repository, pull_limit, next_pull_page, evidence_base, &byte_total, pull_batch, &pull_complete, &pull_next_page) can Global{Read,Write})
                 pulls_complete <- pull_complete == 1
                 next_pull_page <- pull_next_page
                 while pull_idx < pull_batch.count |pull_idx: usize = 0, pull_batch, reviews_by_pull, next_pending, group_count, byte_total, repository, review_page_limit, evidence_base|:
                     pull_number: i64 = pull_batch[pull_idx].number
-                    return -1 if not ForgeEventsFetch::rh_fef_fetch_reviews_for_pull(repository, pull_number, 1, review_page_limit, evidence_base, &byte_total, reviews_by_pull, &group_count, next_pending)
+                    return -1 if not (ForgeEventsFetch::rh_fef_fetch_reviews_for_pull(repository, pull_number, 1, review_page_limit, evidence_base, &byte_total, reviews_by_pull, &group_count, next_pending) can Global{Read,Write})
                     pull_idx <- pull_idx + 1
             ForgeEventsFetch::rh_fef_report_repository_reviews(repository, reviews_by_pull, next_pending, pending, pull_batch, requested_pull_page, resumed_from_sha256, next_pull_page, pulls_complete, out)
 
-        def rh_fef_fetch_pages_from(repository: cstr, endpoint: cstr, capability: cstr, start_page: i64, max_pages: i64, page_size: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_fetch_pages_from(repository: cstr, endpoint: cstr, capability: cstr, start_page: i64, max_pages: i64, page_size: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return false if start_page < 1 or max_pages < 1 or start_page > 2147483640 or max_pages > RH_FEF_MAX_PAGES or page_size < 1 or page_size > RH_FEF_PAGE_SIZE
             last_page: i64 = start_page + max_pages - 1
             return false if last_page < start_page
@@ -660,11 +769,11 @@ module ForgeEventsFetch:
                 Base::rh_push_cstr(url_evidence, url_ptr)
                 url_evidence.push(10)
                 return false if not Base::rh_io_write(url_file_ptr, url_evidence)
-                return false if not Process::rh_succeeded(Git::rh_run_github_api_get_result(url_ptr, page_ptr, status_ptr, error_ptr))
+                return false if not Process::rh_succeeded(Git::rh_run_github_api_get_result(url_ptr, page_ptr, status_ptr, error_ptr) can Global{Read,Write})
                 status: mutable darray[u8] = []
-                return false if Base::rh_io_read(status_ptr, status) < 0 or not ForgeEventsFetch::rh_fef_http_200(status)
+                return false if (Base::rh_io_read(status_ptr, status) can Global{Read,Write}) < 0 or not ForgeEventsFetch::rh_fef_http_200(status)
                 raw: mutable darray[u8] = []
-                return false if Base::rh_io_read(page_ptr, raw) < 0
+                return false if (Base::rh_io_read(page_ptr, raw) can Global{Read,Write}) < 0
                 page_items: mutable i64 = 0
                 return false if not ForgeEventsFetch::rh_fef_append_page(raw, records, &item_total[0], &byte_total[0], &page_items)
                 pages_fetched <- pages_fetched + 1
@@ -676,10 +785,10 @@ module ForgeEventsFetch:
             next_page_out[0] <- page_number
             pages_fetched > 0
 
-        def rh_fef_fetch_pages(repository: cstr, endpoint: cstr, capability: cstr, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint, capability, 1, max_pages, RH_FEF_PAGE_SIZE, evidence_base, records, &item_total[0], &byte_total[0], &complete_out[0], &next_page_out[0])
+        def rh_fef_fetch_pages(repository: cstr, endpoint: cstr, capability: cstr, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
+            ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint, capability, 1, max_pages, RH_FEF_PAGE_SIZE, evidence_base, records, &item_total[0], &byte_total[0], &complete_out[0], &next_page_out[0]) can Global{Read,Write}
 
-        def rh_fef_fetch_gitlab_pages(project_path: darray[u8]&, endpoint: cstr, capability: cstr, start_page: i64, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_fetch_gitlab_pages(project_path: darray[u8]&, endpoint: cstr, capability: cstr, start_page: i64, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_page_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return false if max_pages < 1 or max_pages > RH_FEF_MAX_PAGES
             if start_page == 0:
                 complete_out[0] <- 1
@@ -710,11 +819,11 @@ module ForgeEventsFetch:
                 Base::rh_push_cstr(url_evidence, url_ptr)
                 url_evidence.push(10)
                 return false if not Base::rh_io_write(url_file_ptr, url_evidence)
-                return false if not Process::rh_succeeded(Git::rh_run_gitlab_api_get_result(url_ptr, page_ptr, status_ptr, error_ptr))
+                return false if not Process::rh_succeeded(Git::rh_run_gitlab_api_get_result(url_ptr, page_ptr, status_ptr, error_ptr) can Global{Read,Write})
                 status: mutable darray[u8] = []
-                return false if Base::rh_io_read(status_ptr, status) < 0 or not ForgeEventsFetch::rh_fef_http_200(status)
+                return false if (Base::rh_io_read(status_ptr, status) can Global{Read,Write}) < 0 or not ForgeEventsFetch::rh_fef_http_200(status)
                 raw: mutable darray[u8] = []
-                return false if Base::rh_io_read(page_ptr, raw) < 0
+                return false if (Base::rh_io_read(page_ptr, raw) can Global{Read,Write}) < 0
                 page_items: mutable i64 = 0
                 return false if not ForgeEventsFetch::rh_fef_append_page(raw, records, &item_total[0], &byte_total[0], &page_items)
                 pages_fetched <- pages_fetched + 1
@@ -735,10 +844,84 @@ module ForgeEventsFetch:
                 Base::rh_push_text(out, "\",\"complete\":false}")
 
     public:
+        # Fetch bounded issues, pull requests, and release pages from an
+        # explicitly approved self-hosted Gitea or Forgejo instance. Numeric
+        # pagination is derived from the instance's documented page limit;
+        # response bodies, URL, status, and transport errors remain local.
+        def rh_forge_events_selfhosted_live(instance_input: darray[u8]&, repository: cstr, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
+            return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
+            base_buffer: mutable darray[u8] = []
+            provider_kind: mutable i64 = 0
+            return -1 if not ForgeEventsFetch::rh_fef_selfhosted_instance(instance_input, base_buffer, &provider_kind)
+            base: cstr = (&base_buffer[0]).cast[cstr] can Unsafe.PointerCast
+            provider: u8& = "gitea" if provider_kind == 1 else "forgejo"
+            page_size: mutable i64 = 0
+            byte_total: mutable i64 = 0
+            return -1 if not (ForgeEventsFetch::rh_fef_selfhosted_page_size(base, provider.cast[cstr], evidence_base, &byte_total, &page_size) can Global{Read,Write})
+            issues_route: mutable darray[u8] = []
+            Base::rh_push_text(issues_route, "repos/")
+            Base::rh_push_cstr(issues_route, repository)
+            Base::rh_push_text(issues_route, "/issues?state=all&type=issues")
+            issues_route.push(0)
+            pulls_route: mutable darray[u8] = []
+            Base::rh_push_text(pulls_route, "repos/")
+            Base::rh_push_cstr(pulls_route, repository)
+            Base::rh_push_text(pulls_route, "/pulls?state=all")
+            pulls_route.push(0)
+            releases_route: mutable darray[u8] = []
+            Base::rh_push_text(releases_route, "repos/")
+            Base::rh_push_cstr(releases_route, repository)
+            Base::rh_push_text(releases_route, "/releases")
+            releases_route.push(0)
+            issues_route_ptr: cstr = (&issues_route[0]).cast[cstr] can Unsafe.PointerCast
+            pulls_route_ptr: cstr = (&pulls_route[0]).cast[cstr] can Unsafe.PointerCast
+            releases_route_ptr: cstr = (&releases_route[0]).cast[cstr] can Unsafe.PointerCast
+            issues: mutable darray[u8] = []
+            proposals: mutable darray[u8] = []
+            releases: mutable darray[u8] = []
+            issues_total: mutable i64 = 0
+            proposals_total: mutable i64 = 0
+            releases_total: mutable i64 = 0
+            issues_complete: mutable i64 = 0
+            proposals_complete: mutable i64 = 0
+            releases_complete: mutable i64 = 0
+            issues_next_page: mutable i64 = 1
+            proposals_next_page: mutable i64 = 1
+            releases_next_page: mutable i64 = 1
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_selfhosted_pages(base, provider.cast[cstr], "issues", issues_route_ptr, page_size, max_pages, evidence_base, issues, &issues_total, &byte_total, &issues_complete, &issues_next_page) can Global{Read,Write})
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_selfhosted_pages(base, provider.cast[cstr], "proposals", pulls_route_ptr, page_size, max_pages, evidence_base, proposals, &proposals_total, &byte_total, &proposals_complete, &proposals_next_page) can Global{Read,Write})
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_selfhosted_pages(base, provider.cast[cstr], "releases", releases_route_ptr, page_size, max_pages, evidence_base, releases, &releases_total, &byte_total, &releases_complete, &releases_next_page) can Global{Read,Write})
+            captured_at: i64 = Base::rh_now()
+            return -1 if captured_at < 0
+            token: u8&? = getenv("RH_GITEA_TOKEN") if provider_kind == 1 else getenv("RH_FORGEJO_TOKEN")
+            capture: mutable darray[u8] = []
+            Base::rh_push_text(capture, "{\"schema\":\"rh-forge-events-input/1\",\"provider\":\"")
+            Base::rh_push_text(capture, provider)
+            Base::rh_push_text(capture, "\",\"captured_at\":")
+            Base::rh_push_decimal_i64(capture, captured_at)
+            Base::rh_push_text(capture, ",\"authorization\":{\"state\":\"")
+            Base::rh_push_text(capture, "authorized" if token != null else "not_requested")
+            Base::rh_push_text(capture, "\"},\"scope\":{\"repository\":\"")
+            Base::rh_push_cstr(capture, repository)
+            Base::rh_push_text(capture, "\"},\"capability_states\":{\"reviews\":\"not_attempted\"},\"issues\":[")
+            capture.extend(bytes_view(issues))
+            Base::rh_push_text(capture, "],\"proposals\":[")
+            capture.extend(bytes_view(proposals))
+            Base::rh_push_text(capture, "],\"releases\":[")
+            capture.extend(bytes_view(releases))
+            Base::rh_push_text(capture, "],\"pagination\":{\"issues\":")
+            ForgeEventsFetch::rh_fef_push_pagination(capture, issues_complete == 1, issues_next_page)
+            Base::rh_push_text(capture, ",\"proposals\":")
+            ForgeEventsFetch::rh_fef_push_pagination(capture, proposals_complete == 1, proposals_next_page)
+            Base::rh_push_text(capture, ",\"reviews\":{\"next\":null,\"complete\":false},\"releases\":")
+            ForgeEventsFetch::rh_fef_push_pagination(capture, releases_complete == 1, releases_next_page)
+            Base::rh_push_text(capture, "}}")
+            ForgeEvents::rh_forge_events_report(capture, out)
+
         # Fetch bounded GitLab issue, merge-request, and release pages. Project
         # paths are encoded as one API path component; provider Link headers are
         # never followed. Raw response, URL, status, and stderr stay local.
-        def rh_forge_events_gitlab_live(project: cstr, max_pages: i64, evidence_base: cstr, previous: darray[u8]&, has_resume: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_forge_events_gitlab_live(project: cstr, max_pages: i64, evidence_base: cstr, previous: darray[u8]&, has_resume: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return -1 if not ForgeEventsFetch::rh_fef_gitlab_project_valid(project) or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
             project_path: mutable darray[u8] = ForgeEventsFetch::rh_fef_gitlab_project_path(project)
             cursor: mutable RhFefGitlabCursor = RhFefGitlabCursor{issues_page: 1, proposals_page: 1, releases_page: 1}
@@ -757,9 +940,9 @@ module ForgeEventsFetch:
             issues_next_page: mutable i64 = 1
             proposals_next_page: mutable i64 = 1
             releases_next_page: mutable i64 = 1
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "issues?state=all&per_page=100&page=", "issues", cursor.issues_page, max_pages, evidence_base, issues, &issues_total, &byte_total, &issues_complete, &issues_next_page)
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "merge_requests?state=all&order_by=updated_at&sort=desc&per_page=100&page=", "merge-requests", cursor.proposals_page, max_pages, evidence_base, proposals, &proposals_total, &byte_total, &proposals_complete, &proposals_next_page)
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "releases?per_page=100&page=", "releases", cursor.releases_page, max_pages, evidence_base, releases, &releases_total, &byte_total, &releases_complete, &releases_next_page)
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "issues?state=all&per_page=100&page=", "issues", cursor.issues_page, max_pages, evidence_base, issues, &issues_total, &byte_total, &issues_complete, &issues_next_page) can Global{Read,Write})
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "merge_requests?state=all&order_by=updated_at&sort=desc&per_page=100&page=", "merge-requests", cursor.proposals_page, max_pages, evidence_base, proposals, &proposals_total, &byte_total, &proposals_complete, &proposals_next_page) can Global{Read,Write})
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_gitlab_pages(project_path, "releases?per_page=100&page=", "releases", cursor.releases_page, max_pages, evidence_base, releases, &releases_total, &byte_total, &releases_complete, &releases_next_page) can Global{Read,Write})
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             token: u8&? = getenv("RH_GITLAB_TOKEN")
@@ -798,7 +981,7 @@ module ForgeEventsFetch:
         # resource prefix match the request scope; release and review feeds are
         # left explicitly unattempted. Resume inputs are scope-checked result
         # segments; each output contains only newly fetched records.
-        def rh_forge_events_bitbucket_live(repository: cstr, max_pages: i64, evidence_base: cstr, previous: darray[u8]&, has_resume: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_forge_events_bitbucket_live(repository: cstr, max_pages: i64, evidence_base: cstr, previous: darray[u8]&, has_resume: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
             issues: mutable darray[u8] = []
             proposals: mutable darray[u8] = []
@@ -815,8 +998,8 @@ module ForgeEventsFetch:
                 return -2 if not ForgeEventsFetch::rh_fef_bitbucket_resume(previous, repository, issues_start_cursor, &issues_complete, proposals_start_cursor, &proposals_complete)
             issues_already_complete: bool = has_resume and issues_complete == 1
             proposals_already_complete: bool = has_resume and proposals_complete == 1
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_bitbucket_pages(repository, "issues", max_pages, evidence_base, issues_start_cursor, issues_already_complete, issues, &issues_total, &byte_total, &issues_complete, issues_cursor)
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_bitbucket_pages(repository, "pullrequests", max_pages, evidence_base, proposals_start_cursor, proposals_already_complete, proposals, &proposals_total, &byte_total, &proposals_complete, proposals_cursor)
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_bitbucket_pages(repository, "issues", max_pages, evidence_base, issues_start_cursor, issues_already_complete, issues, &issues_total, &byte_total, &issues_complete, issues_cursor) can Global{Read,Write})
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_bitbucket_pages(repository, "pullrequests", max_pages, evidence_base, proposals_start_cursor, proposals_already_complete, proposals, &proposals_total, &byte_total, &proposals_complete, proposals_cursor) can Global{Read,Write})
             issues_attempted: bool = not issues_already_complete
             proposals_attempted: bool = not proposals_already_complete
             captured_at: i64 = Base::rh_now()
@@ -851,7 +1034,7 @@ module ForgeEventsFetch:
         # Fetch GitHub issues, pulls, and published-release pages from fixed API routes.
         # The numeric page sequence and page cap avoid following arbitrary Link
         # URLs. Raw response, URL, status, and stderr evidence stay beside output.
-        def rh_forge_events_github_live(repository: cstr, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_forge_events_github_live(repository: cstr, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
             issues: mutable darray[u8] = []
             proposals: mutable darray[u8] = []
@@ -866,9 +1049,9 @@ module ForgeEventsFetch:
             issues_next_page: mutable i64 = 1
             proposals_next_page: mutable i64 = 1
             releases_next_page: mutable i64 = 1
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, "issues?state=all&sort=updated&direction=desc&per_page=100&page=", "issues", max_pages, evidence_base, issues, &issues_total, &byte_total, &issues_complete, &issues_next_page)
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, "pulls?state=all&sort=updated&direction=desc&per_page=100&page=", "pulls", max_pages, evidence_base, proposals, &proposals_total, &byte_total, &proposals_complete, &proposals_next_page)
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages(repository, "releases?per_page=100&page=", "releases", max_pages, evidence_base, releases, &releases_total, &byte_total, &releases_complete, &releases_next_page)
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_pages(repository, "issues?state=all&sort=updated&direction=desc&per_page=100&page=", "issues", max_pages, evidence_base, issues, &issues_total, &byte_total, &issues_complete, &issues_next_page) can Global{Read,Write})
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_pages(repository, "pulls?state=all&sort=updated&direction=desc&per_page=100&page=", "pulls", max_pages, evidence_base, proposals, &proposals_total, &byte_total, &proposals_complete, &proposals_next_page) can Global{Read,Write})
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_pages(repository, "releases?per_page=100&page=", "releases", max_pages, evidence_base, releases, &releases_total, &byte_total, &releases_complete, &releases_next_page) can Global{Read,Write})
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             token: u8&? = getenv("RH_GITHUB_TOKEN")
@@ -894,7 +1077,7 @@ module ForgeEventsFetch:
 
         # Reviews are listed under one pull request. Keep the requested scope in
         # the result instead of implying a repository-wide review snapshot.
-        def rh_forge_events_github_reviews_live(repository: cstr, pull_request: i64, start_page: i64, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_forge_events_github_reviews_live(repository: cstr, pull_request: i64, start_page: i64, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or pull_request < 1 or start_page < 1 or start_page > 2147483640 or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
             endpoint: mutable darray[u8] = []
             Base::rh_push_text(endpoint, "pulls/")
@@ -912,7 +1095,7 @@ module ForgeEventsFetch:
             byte_total: mutable i64 = 0
             complete: mutable i64 = 0
             next_page: mutable i64 = 1
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint_ptr, capability_ptr, start_page, max_pages, RH_FEF_PAGE_SIZE, evidence_base, reviews, &review_total, &byte_total, &complete, &next_page)
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_pages_from(repository, endpoint_ptr, capability_ptr, start_page, max_pages, RH_FEF_PAGE_SIZE, evidence_base, reviews, &review_total, &byte_total, &complete, &next_page) can Global{Read,Write})
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             token: u8&? = getenv("RH_GITHUB_TOKEN")
@@ -934,13 +1117,13 @@ module ForgeEventsFetch:
         # The result retains cursors for each unfinished pull and for the next
         # pull-list page so callers can continue the traversal. GitHub's pull
         # list can change between calls, so completeness is not a snapshot claim.
-        def rh_forge_events_github_reviews_repository_live(repository: cstr, review_page_limit: i64, pull_limit: i64, evidence_base: cstr, previous: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            ForgeEventsFetch::rh_fef_fetch_repository_reviews(repository, review_page_limit, pull_limit, evidence_base, previous, out)
+        def rh_forge_events_github_reviews_repository_live(repository: cstr, review_page_limit: i64, pull_limit: i64, evidence_base: cstr, previous: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
+            ForgeEventsFetch::rh_fef_fetch_repository_reviews(repository, review_page_limit, pull_limit, evidence_base, previous, out) can Global{Read,Write}
 
         # The collaborators route is permission-bearing and requires an
         # explicit token. Keep the returned repository scope and page completeness
         # attached to the normalized role input.
-        def rh_roles_github_live(repository: cstr, max_pages: i64, evidence_base: cstr, previous: darray[u8]&, out: mutable darray[u8]&, transformation_input_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_roles_github_live(repository: cstr, max_pages: i64, evidence_base: cstr, previous: darray[u8]&, out: mutable darray[u8]&, transformation_input_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Global{Read,Write}, Unsafe.PointerCast]:
             return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
             token: u8&? = getenv("RH_GITHUB_TOKEN")
             return -1 if token == null
@@ -955,7 +1138,7 @@ module ForgeEventsFetch:
             byte_total: mutable i64 = 0
             complete: mutable i64 = 0
             next_page: mutable i64 = 1
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_pages_from(repository, "collaborators?affiliation=all&per_page=100&page=", "collaborators", start_page, max_pages, RH_FEF_PAGE_SIZE, evidence_base, members, &member_total, &byte_total, &complete, &next_page)
+            return -1 if not (ForgeEventsFetch::rh_fef_fetch_pages_from(repository, "collaborators?affiliation=all&per_page=100&page=", "collaborators", start_page, max_pages, RH_FEF_PAGE_SIZE, evidence_base, members, &member_total, &byte_total, &complete, &next_page) can Global{Read,Write})
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             capture: mutable darray[u8] = []

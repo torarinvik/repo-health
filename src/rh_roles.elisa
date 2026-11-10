@@ -86,10 +86,10 @@ module Roles:
             attributed_review_actions: i64
 
         struct RhLinkedChange:
-            mutable id_start: i64
-            mutable id_end: i64
-            mutable has_merge: bool
-            mutable has_review: bool
+            id_start: mutable i64
+            id_end: mutable i64
+            has_merge: mutable bool
+            has_review: mutable bool
 
         const RH_ACTION_RELEASE: u8 = 1
         const RH_ACTION_MERGE: u8 = 2
@@ -123,11 +123,13 @@ module Roles:
         # Declared role for an actor at a known time. A declaration with no
         # revoked_at is active; a revoked one is not. Returns RH_ROLE_UNKNOWN when
         # there is no active declaration. Declarations do NOT become observed facts.
-        def rh_role_declared(decls: darray[RhRoleDecl]&, actor: i64, as_of: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
-            for i in 0..<decls.count |best: u8 = RH_ROLE_UNKNOWN, decls, actor, as_of| -> best:
+        def rh_role_declared(decls: mutable darray[RhRoleDecl]&, actor: i64, as_of: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
+            actor_value: mutable i64 = actor
+            as_of_value: mutable i64 = as_of
+            for i in 0..<decls.count |best: u8 = RH_ROLE_UNKNOWN, decls, actor_value, as_of_value| -> best:
                 d: RhRoleDecl = decls[i]
-                if d.actor_id == actor and d.declared_at <= as_of:
-                    if d.revoked_at == 0 or d.revoked_at > as_of:
+                if d.actor_id == actor_value and d.declared_at <= as_of_value:
+                    if d.revoked_at == 0 or d.revoked_at > as_of_value:
                         best <- d.role
 
         # Declared permission bit for an actor (0/1), same active rules.
@@ -250,7 +252,7 @@ module Roles:
             left.first_seen < right.first_seen
 
     public:
-        def rh_role_summary(decls: darray[RhRoleDecl]&) -> RhRoleSummary:
+        def rh_role_summary(decls: mutable darray[RhRoleDecl]&) -> RhRoleSummary:
             accumulated: RhRoleSummaryAccumulator =
                 for i in 0..<decls.count |counts: mutable RhRoleSummaryAccumulator = rh_role_summary_accumulator_empty(), decls| -> counts:
                     rh_role_summary_add(&counts, decls[i].role, decls[i].source, decls[i].revoked_at)
@@ -266,14 +268,15 @@ module Roles:
                 unknown_role: accumulated.unknown_role
             }
 
-        def rh_observed_action_tallies(actions: darray[RhObservedAction]&, review_focus_actor: i64) -> RhObservedActionTallies can[Memory.Allocate, Abort.Panic]:
+        def rh_observed_action_tallies(actions: mutable darray[RhObservedAction]&, review_focus_actor: i64) -> RhObservedActionTallies can[Memory.Allocate, Abort.Panic]:
             capacity: usize = actions.count * 2 + 1
             slots: mutable darray[i64] = []
             for _ in 0..<capacity |slots|:
                 slots.push(0)
             contributions: mutable darray[RhActorContribution] = []
+            review_focus_actor_value: mutable i64 = review_focus_actor
             accumulated: RhObservedActionTallyAccumulator =
-                for i in 0..<actions.count |counts: mutable RhObservedActionTallyAccumulator = rh_observed_action_tally_accumulator_empty(), actions, review_focus_actor, slots, contributions| -> counts:
+                for i in 0..<actions.count |counts: mutable RhObservedActionTallyAccumulator = rh_observed_action_tally_accumulator_empty(), actions, review_focus_actor_value, slots, contributions| -> counts:
                     action: RhObservedAction = actions[i]
                     if action.identity_actor_id >= 0:
                         rh_actor_contribution_increment(action.identity_actor_id, action.kind, slots, contributions)
@@ -290,7 +293,7 @@ module Roles:
                         rh_action_actor_type_count_add(&counts.actor_types.review, action.actor_kind)
                         if action.actor_id >= 0:
                             counts.attributed_review_actions <- counts.attributed_review_actions + 1
-                            counts.review_focus_actions <- counts.review_focus_actions + 1 if action.actor_id == review_focus_actor
+                            counts.review_focus_actions <- counts.review_focus_actions + 1 if action.actor_id == review_focus_actor_value
             sort[RhActorContribution](contributions, rh_actor_contribution_less)
             observed_release_actors: mutable i64 = 0
             observed_merge_actors: mutable i64 = 0
@@ -360,7 +363,9 @@ module Roles:
                         while slots[slot] >= 0 |slot, slots, changes, texts, action|:
                             change_index: usize = slots[slot].usize()
                             if Base::rh_bytes_equal_span(texts, changes[change_index].id_start, changes[change_index].id_end, texts, action.change_id_start, action.change_id_end):
-                                changes[change_index].has_merge <- true
+                                change: mutable RhLinkedChange = changes[change_index]
+                                change.has_merge <- true
+                                changes[change_index] <- change
                                 break
                             slot <- (slot + 1) % capacity
                         if slots[slot] < 0:
@@ -372,7 +377,9 @@ module Roles:
                     while slots[slot] >= 0 |slot, slots, changes, texts, action|:
                         change_index: usize = slots[slot].usize()
                         if Base::rh_bytes_equal_span(texts, changes[change_index].id_start, changes[change_index].id_end, texts, action.change_id_start, action.change_id_end):
-                            changes[change_index].has_review <- true
+                            change: mutable RhLinkedChange = changes[change_index]
+                            change.has_review <- true
+                            changes[change_index] <- change
                             break
                         slot <- (slot + 1) % capacity
                     if slots[slot] < 0:
