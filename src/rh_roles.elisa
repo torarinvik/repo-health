@@ -1,4 +1,5 @@
 include "./rh_base.elisa"
+include "./rh_evidence.elisa"
 
 module Roles:
     public:
@@ -109,44 +110,32 @@ module Roles:
         # never guessed into maintainer (a provider adding a role must not silently
         # upgrade anyone).
         def rh_role_parse_role(texts: darray[u8]&, s: i64, e: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
-            return RH_ROLE_OWNER if rh_role_eq(texts, s, e, "owner", 5)
-            return RH_ROLE_MAINTAINER if rh_role_eq(texts, s, e, "maintainer", 10)
-            return RH_ROLE_TRIAGER if rh_role_eq(texts, s, e, "triager", 7)
-            return RH_ROLE_MEMBER if rh_role_eq(texts, s, e, "member", 6)
+            return RH_ROLE_OWNER if rh_role_eq(texts, s, e, "owner")
+            return RH_ROLE_MAINTAINER if rh_role_eq(texts, s, e, "maintainer")
+            return RH_ROLE_TRIAGER if rh_role_eq(texts, s, e, "triager")
+            return RH_ROLE_MEMBER if rh_role_eq(texts, s, e, "member")
             RH_ROLE_UNKNOWN
 
         # (private to this file)
-        def rh_role_eq(data: darray[u8]&, s: i64, e: i64, lit: u8&, n: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            return false if s < 0 or e - s != n
-            while k < n |k: i64 = 0, data, s, lit|:
-                a: mutable u8 = data[(s + k).usize()]
-                b: mutable u8 = lit[k.usize()]
-                if a >= 65 and a <= 90:
-                    a <- a + 32
-                if b >= 65 and b <= 90:
-                    b <- b + 32
-                return false if a != b
-                k <- k + 1
-            true
+        def rh_role_eq(data: darray[u8]&, s: i64, e: i64, lit: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal_ascii_ci(data, s, e, lit)
 
         # Declared role for an actor at a known time. A declaration with no
         # revoked_at is active; a revoked one is not. Returns RH_ROLE_UNKNOWN when
         # there is no active declaration. Declarations do NOT become observed facts.
         def rh_role_declared(decls: darray[RhRoleDecl]&, actor: i64, as_of: i64) -> u8 can[Memory.Allocate, Abort.Panic]:
-            while i < decls.count |best: u8 = RH_ROLE_UNKNOWN, i: usize = 0| -> best:
+            for i in 0..<decls.count |best: u8 = RH_ROLE_UNKNOWN, decls, actor, as_of| -> best:
                 d: RhRoleDecl = decls[i]
                 if d.actor_id == actor and d.declared_at <= as_of:
                     if d.revoked_at == 0 or d.revoked_at > as_of:
                         best <- d.role
-                i <- i + 1
 
         # Declared permission bit for an actor (0/1), same active rules.
         def rh_role_permission_declared(decls: darray[RhRoleDecl]&, actor: i64, perm_bit: u8, as_of: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while i < decls.count |i: usize = 0, decls, actor, perm_bit, as_of|:
+            for i in 0..<decls.count |decls, actor, perm_bit, as_of|:
                 d: RhRoleDecl = decls[i]
                 if d.actor_id == actor and d.declared_at <= as_of and (d.revoked_at == 0 or d.revoked_at > as_of):
                     return 1 if (d.permission & perm_bit) != 0
-                i <- i + 1
             0
 
     private:
@@ -240,14 +229,8 @@ module Roles:
             RhActionActorTypeCounts{human: counts.human, bot: counts.bot, service: counts.service, unknown: counts.unknown}
 
         def rh_actor_contribution_hash(actor_id: i64, kind: u8) -> usize:
-            key: u64 = actor_id.u64()
-            hash: mutable u64 = 0xcbf29ce484222325
-            while byte_index < 8 |hash, key, byte_index: mutable usize = 0|:
-                shift: u64 = byte_index.u64() * 8
-                hash <- (hash ^ ((key >> shift).u8().u64())) * 0x100000001b3
-                byte_index <- byte_index + 1
-            hash <- (hash ^ kind.u64()) * 0x100000001b3
-            hash.usize()
+            hash: u64 = Evidence::rh_fnv_u64(Evidence::rh_fnv_begin(), actor_id.u64())
+            Evidence::rh_fnv_byte(hash, kind).usize()
 
         def rh_actor_contribution_increment(actor_id: i64, kind: u8, slots: mutable darray[i64]&, contributions: mutable darray[RhActorContribution]&) -> void can[Memory.Allocate, Abort.Panic]:
             slot: mutable usize = Roles::rh_actor_contribution_hash(actor_id, kind) % slots.count
@@ -268,11 +251,9 @@ module Roles:
 
     public:
         def rh_role_summary(decls: darray[RhRoleDecl]&) -> RhRoleSummary:
-            decls_loop: mutable darray[RhRoleDecl]& = decls
             accumulated: RhRoleSummaryAccumulator =
-                while i < decls_loop.count |counts: mutable RhRoleSummaryAccumulator = rh_role_summary_accumulator_empty(), i: usize = 0, decls_loop| -> counts:
-                    rh_role_summary_add(&counts, decls_loop[i].role, decls_loop[i].source, decls_loop[i].revoked_at)
-                    i <- i + 1
+                for i in 0..<decls.count |counts: mutable RhRoleSummaryAccumulator = rh_role_summary_accumulator_empty(), decls| -> counts:
+                    rh_role_summary_add(&counts, decls[i].role, decls[i].source, decls[i].revoked_at)
             RhRoleSummary{
                 provider_sources: accumulated.provider_sources,
                 file_sources: accumulated.file_sources,
@@ -286,17 +267,14 @@ module Roles:
             }
 
         def rh_observed_action_tallies(actions: darray[RhObservedAction]&, review_focus_actor: i64) -> RhObservedActionTallies can[Memory.Allocate, Abort.Panic]:
-            actions_loop: mutable darray[RhObservedAction]& = actions
-            review_focus_actor_loop: mutable i64 = review_focus_actor
             capacity: usize = actions.count * 2 + 1
             slots: mutable darray[i64] = []
-            while i < capacity |i: usize = 0, capacity, slots|:
+            for _ in 0..<capacity |slots|:
                 slots.push(0)
-                i <- i + 1
             contributions: mutable darray[RhActorContribution] = []
             accumulated: RhObservedActionTallyAccumulator =
-                while i < actions_loop.count |counts: mutable RhObservedActionTallyAccumulator = rh_observed_action_tally_accumulator_empty(), i: usize = 0, actions_loop, review_focus_actor_loop, slots, contributions| -> counts:
-                    action: RhObservedAction = actions_loop[i]
+                for i in 0..<actions.count |counts: mutable RhObservedActionTallyAccumulator = rh_observed_action_tally_accumulator_empty(), actions, review_focus_actor, slots, contributions| -> counts:
+                    action: RhObservedAction = actions[i]
                     if action.identity_actor_id >= 0:
                         rh_actor_contribution_increment(action.identity_actor_id, action.kind, slots, contributions)
                     if action.kind == RH_ACTION_RELEASE:
@@ -312,8 +290,7 @@ module Roles:
                         rh_action_actor_type_count_add(&counts.actor_types.review, action.actor_kind)
                         if action.actor_id >= 0:
                             counts.attributed_review_actions <- counts.attributed_review_actions + 1
-                            counts.review_focus_actions <- counts.review_focus_actions + 1 if action.actor_id == review_focus_actor_loop
-                    i <- i + 1
+                            counts.review_focus_actions <- counts.review_focus_actions + 1 if action.actor_id == review_focus_actor
             sort[RhActorContribution](contributions, rh_actor_contribution_less)
             observed_release_actors: mutable i64 = 0
             observed_merge_actors: mutable i64 = 0
@@ -369,11 +346,10 @@ module Roles:
             capacity: usize = actions.count * 2 + 1
             return false if capacity < actions.count
             slots: mutable darray[i64] = []
-            while i < capacity |i: usize = 0, slots, capacity|:
+            for _ in 0..<capacity |slots|:
                 slots.push(-1)
-                i <- i + 1
             changes: mutable darray[RhLinkedChange] = []
-            while i < actions.count |i: usize = 0, actions, texts, slots, changes, capacity, unlinked_merges_out|:
+            for i in 0..<actions.count |actions, texts, slots, changes, capacity, unlinked_merges_out|:
                 action: RhObservedAction = actions[i]
                 if action.kind == RH_ACTION_MERGE:
                     if action.change_id_start == action.change_id_end:
@@ -402,11 +378,9 @@ module Roles:
                     if slots[slot] < 0:
                         changes.push(RhLinkedChange{id_start: action.change_id_start, id_end: action.change_id_end, has_merge: false, has_review: true})
                         slots[slot] <- changes.count.i64() - 1
-                i <- i + 1
-            while i < changes.count |i: usize = 0, changes, reviewed_out, linked_merges_out|:
+            for i in 0..<changes.count |changes, reviewed_out, linked_merges_out|:
                 change: RhLinkedChange = changes[i]
                 if change.has_merge:
                     linked_merges_out[0] <- linked_merges_out[0] + 1
                     reviewed_out[0] <- reviewed_out[0] + 1 if change.has_review
-                i <- i + 1
             true

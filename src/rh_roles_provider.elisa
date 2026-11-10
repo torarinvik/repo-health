@@ -7,6 +7,7 @@
 # accidentally retained payload cannot be spent as permission.
 
 include "./rh_base.elisa"
+include "./rh_evidence.elisa"
 include "./rh_json.elisa"
 include "./rh_roles.elisa"
 
@@ -55,7 +56,7 @@ module RolesProvider:
         def rh_rp_repository_valid(texts: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if s < 0 or e <= s or e - s < 3 or e - s > 255
             segment_start: mutable i64 = s
-            while i < e |i: i64 = s, e, texts, segment_start|:
+            for i in s..<e |texts, segment_start|:
                 byte: u8 = texts[i.usize()]
                 if byte == 47:
                     segment_length: i64 = i - segment_start
@@ -63,16 +64,14 @@ module RolesProvider:
                     segment_start <- i + 1
                 else:
                     return false if not RolesProvider::rh_rp_repository_char(byte)
-                i <- i + 1
             segment_length: i64 = e - segment_start
             segment_length > 0 and not (segment_length == 1 and texts[segment_start.usize()] == 46) and not (segment_length == 2 and texts[segment_start.usize()] == 46 and texts[(segment_start + 1).usize()] == 46)
 
         def rh_rp_cstr_eq(texts: darray[u8]&, s: i64, e: i64, value: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
             length: usize = Base::rh_cstr_len_c(value)
             return false if s < 0 or e - s != length.i64()
-            while i < length.i64() |i: i64 = 0, s, length, value, texts|:
+            for i in 0..<length.i64() |s, value, texts|:
                 return false if texts[(s + i).usize()] != value[i.usize()]
-                i <- i + 1
             true
 
         def rh_rp_cursor_page(texts: darray[u8]&, s: i64, e: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -81,13 +80,12 @@ module RolesProvider:
             cursor_start: i64 = s + 5
             return -1 if e <= cursor_start
             page: mutable i64 = 0
-            while i < e |i: i64 = cursor_start, e, texts, page|:
+            for i in cursor_start..<e |texts, page|:
                 byte: u8 = texts[i.usize()]
                 return -1 if byte < 48 or byte > 57
                 digit: i64 = (byte - 48).i64()
                 return -1 if page > (2147483640 - digit) / 10
                 page <- page * 10 + digit
-                i <- i + 1
             return -1 if page < 2
             page
 
@@ -158,7 +156,7 @@ module RolesProvider:
             true
 
         def rh_rp_emit_normalized_declarations(out: mutable darray[u8]&, declarations: darray[RhProviderDeclaration]&) -> void can[Memory.Allocate, Abort.Panic]:
-            while i < declarations.count.i64() |i: i64 = 0, declarations, out|:
+            for i in 0..<declarations.count.i64() |declarations, out|:
                 out.push(44) if i > 0
                 declaration: RhProviderDeclaration = declarations[i.usize()]
                 Base::rh_push_text(out, "{\"actor_id\":")
@@ -170,7 +168,6 @@ module RolesProvider:
                 Base::rh_push_text(out, ",\"source\":\"provider\",\"declared_at\":")
                 Base::rh_push_decimal_i64(out, declaration.declared_at)
                 Base::rh_push_text(out, "}")
-                i <- i + 1
 
         def rh_rp_int(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             Json::rh_json_int(nodes, raw, Json::rh_json_obj_get(nodes, texts, obj, key), &ok_out[0])
@@ -223,19 +220,12 @@ module RolesProvider:
             0
 
         def rh_rp_actor_hash(actor: i64) -> usize:
-            key: mutable u64 = actor.u64()
-            hash: u64 =
-                while byte_index < 8 |hash: mutable u64 = 0xcbf29ce484222325, byte_index: usize = 0, key| -> hash:
-                    shift: u64 = byte_index.u64() * 8
-                    hash <- (hash ^ ((key >> shift).u8().u64())) * 0x100000001b3
-                    byte_index <- byte_index + 1
-            hash.usize()
+            Evidence::rh_fnv_u64(Evidence::rh_fnv_begin(), actor.u64()).usize()
 
         def rh_rp_index_table(capacity: usize) -> mutable darray[i64] can[Memory.Allocate, Abort.Panic]:
             slots: mutable darray[i64] = []
-            while i < capacity |i: usize = 0, capacity, slots|:
+            for _ in 0..<capacity |slots|:
                 slots.push(0)
-                i <- i + 1
             slots
 
         def rh_rp_declaration_upsert(declarations: mutable darray[RhProviderDeclaration]&, slots: mutable darray[i64]&, declaration: RhProviderDeclaration) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -299,9 +289,8 @@ module RolesProvider:
             latest_provider_e: mutable i64 = 0
             return -1 if not RolesProvider::rh_rp_str(previous_nodes, previous_texts, previous_root, "provider", &previous_provider_s, &previous_provider_e) or not RolesProvider::rh_rp_str(latest_nodes, latest_texts, latest_root, "provider", &latest_provider_s, &latest_provider_e)
             return -1 if previous_provider_e - previous_provider_s != latest_provider_e - latest_provider_s
-            while provider_byte < previous_provider_e - previous_provider_s |provider_byte: i64 = 0, previous_provider_s, latest_provider_s, previous_texts, latest_texts|:
+            for provider_byte in 0..<(previous_provider_e - previous_provider_s) |previous_provider_s, latest_provider_s, previous_texts, latest_texts|:
                 return -1 if previous_texts[(previous_provider_s + provider_byte).usize()] != latest_texts[(latest_provider_s + provider_byte).usize()]
-                provider_byte <- provider_byte + 1
             gitlab: bool = RolesProvider::rh_rp_eq(previous_texts, previous_provider_s, previous_provider_e, "gitlab")
             scope_key: u8& = "project_path" if gitlab else "repository"
             latest_pagination: i64 = Json::rh_json_obj_get(latest_nodes, latest_texts, latest_root, "pagination")
@@ -468,7 +457,7 @@ module RolesProvider:
                     normalized: RhProviderDeclaration = RhProviderDeclaration{actor: actor, role: role, permission: permission, declared_at: captured_at}
                     return -1 if not RolesProvider::rh_rp_declaration_upsert(declarations, declaration_slots, normalized)
                 member <- nodes[member.usize()].next_sibling
-            while i < declarations.count.i64() |i: i64 = 0, declarations, out|:
+            for i in 0..<declarations.count.i64() |declarations, out|:
                 out.push(44) if i > 0
                 declaration: RhProviderDeclaration = declarations[i.usize()]
                 Base::rh_push_text(out, "{\"actor_id\":")
@@ -480,6 +469,5 @@ module RolesProvider:
                 Base::rh_push_text(out, ",\"source\":\"provider\",\"declared_at\":")
                 Base::rh_push_decimal_i64(out, declaration.declared_at)
                 Base::rh_push_text(out, "}")
-                i <- i + 1
             Base::rh_push_text(out, "]}")
             0

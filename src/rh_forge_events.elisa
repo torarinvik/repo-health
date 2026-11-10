@@ -9,6 +9,7 @@
 # while an explicitly empty array is an observed empty result.
 
 include "./rh_base.elisa"
+include "./rh_evidence.elisa"
 include "./rh_forge.elisa"
 include "./rh_json.elisa"
 
@@ -140,22 +141,20 @@ module ForgeEvents:
 
         def rh_fe_uuid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if end - start != 36
-            while index < 36 |index: i64 = 0, texts, start|:
+            for index in 0..<36 |texts, start|:
                 byte: u8 = texts[(start + index).usize()]
                 if index == 8 or index == 13 or index == 18 or index == 23:
                     return false if byte != 45
                 else:
                     hex: bool = (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 70) or (byte >= 97 and byte <= 102)
                     return false if not hex
-                index <- index + 1
             true
 
         def rh_fe_sha256(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if end - start != 64
-            while index < 64 |index: i64 = 0, texts, start|:
+            for index in 0..<64 |texts, start|:
                 byte: u8 = texts[(start + index).usize()]
                 return false if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
-                index <- index + 1
             true
 
         def rh_fe_time(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, obj: i64, key: u8&) -> RhForgeValue can[Memory.Allocate, Abort.Panic]:
@@ -215,14 +214,10 @@ module ForgeEvents:
             "status"
 
         def rh_fe_hash_word(start_hash: u64, value: u64) -> u64:
-            key: mutable u64 = value
-            while byte_index < 8 |hash: mutable u64 = start_hash, byte_index: usize = 0, key| -> hash:
-                hash <- (hash ^ key.u8().u64()) * 0x100000001b3
-                key <- key >> 8
-                byte_index <- byte_index + 1
+            Evidence::rh_fnv_u64(start_hash, value)
 
         def rh_fe_event_hash(kind: u8, native_id: i64, pull_request: i64) -> usize:
-            kind_hash: u64 = (0xcbf29ce484222325 ^ kind.u64()) * 0x100000001b3
+            kind_hash: u64 = Evidence::rh_fnv_byte(Evidence::rh_fnv_begin(), kind)
             id_hash: u64 = ForgeEvents::rh_fe_hash_word(kind_hash, native_id.u64())
             ForgeEvents::rh_fe_hash_word(id_hash, pull_request.u64()).usize()
 
@@ -243,16 +238,14 @@ module ForgeEvents:
             capacity: mutable usize = 16 if slots.count == 0 else slots.count * 2
             capacity <- required * 2 + 1 if capacity < required * 2 + 1
             grown_slots: mutable darray[i64] = []
-            while i < capacity |i: usize = 0, capacity, grown_slots|:
+            for _ in 0..<capacity |grown_slots|:
                 grown_slots.push(0)
-                i <- i + 1
-            while event_index < events.count |event_index: usize = 0, events, grown_slots|:
+            for event_index in 0..<events.count |events, grown_slots|:
                 event: RhForgeEvent = events[event_index]
                 slot: mutable usize = ForgeEvents::rh_fe_event_hash(event.kind, event.native_id, event.pull_request) % grown_slots.count
                 while grown_slots[slot] != 0 |slot, grown_slots|:
                     slot <- (slot + 1) % grown_slots.count
                 grown_slots[slot] <- event_index.i64() + 1
-                event_index <- event_index + 1
             slots <- grown_slots
             true
 
@@ -751,14 +744,13 @@ module ForgeEvents:
                 out.push(125)
             if review_collection_present:
                 Base::rh_push_text(out, ",\"review_collection\":{\"pending_pull_requests\":[")
-                while cursor_idx < review_cursors.count.i64() |cursor_idx: i64 = 0, review_cursors, out|:
+                for cursor_idx in 0..<review_cursors.count.i64() |review_cursors, out|:
                     out.push(44) if cursor_idx > 0
                     Base::rh_push_text(out, "{\"number\":")
                     Base::rh_push_decimal_i64(out, review_cursors[cursor_idx.usize()].pull_number)
                     Base::rh_push_text(out, ",\"next_review_page\":")
                     Base::rh_push_decimal_i64(out, review_cursors[cursor_idx.usize()].next_review_page)
                     Base::rh_push_text(out, "}")
-                    cursor_idx <- cursor_idx + 1
                 Base::rh_push_text(out, "],\"batch_request\":{\"resumed_from_sha256\":")
                 if resumed_digest_present:
                     out.push(34)
@@ -772,16 +764,15 @@ module ForgeEvents:
                 else:
                     Base::rh_push_text(out, "null")
                 Base::rh_push_text(out, ",\"review_pages\":[")
-                while request_idx < requested_review_cursors.count.i64() |request_idx: usize = 0, requested_review_cursors, out|:
+                for request_idx in 0..<requested_review_cursors.count |requested_review_cursors, out|:
                     out.push(44) if request_idx > 0
                     Base::rh_push_text(out, "{\"number\":")
                     Base::rh_push_decimal_i64(out, requested_review_cursors[request_idx].pull_number)
                     Base::rh_push_text(out, ",\"next_review_page\":")
                     Base::rh_push_decimal_i64(out, requested_review_cursors[request_idx].next_review_page)
                     out.push(125)
-                    request_idx <- request_idx + 1
                 Base::rh_push_text(out, "]},\"batch_pull_requests\":[")
-                while pull_idx < pull_batch.count.i64() |pull_idx: usize = 0, pull_batch, out|:
+                for pull_idx in 0..<pull_batch.count |pull_batch, out|:
                     out.push(44) if pull_idx > 0
                     Base::rh_push_text(out, "{\"number\":")
                     Base::rh_push_decimal_i64(out, pull_batch[pull_idx].pull_number)
@@ -791,7 +782,6 @@ module ForgeEvents:
                     else:
                         Base::rh_push_text(out, "null")
                     out.push(125)
-                    pull_idx <- pull_idx + 1
                 Base::rh_push_text(out, "],\"next_pull_page\":")
                 if next_pull_page_present:
                     Base::rh_push_decimal_i64(out, next_pull_page)
