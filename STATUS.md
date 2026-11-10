@@ -18,13 +18,13 @@ optional host-scoped OAuth bearer auth. Segment metadata now binds exact
 predecessor bytes and consumed cursors. The new `rh_cli forge events-chain`
 module/route validates ordered same-repository continuation and merges event
 observations with last-observation replacement, retaining final opaque cursors
-without an atomic snapshot claim. Acquisition and chain fixtures plus full CLI
-compilation remain open. Isolated AST parsing passed for the chain, fetch, and
-dispatch modules. Semantic checking found no diagnostic in the new chain module
-but exits on existing stale Stage1 errors in `rh_sha256.elisa`; root CLI AST
-parsing still fails on constructs in unrelated distribution modules. The full
-CLI gate remains blocked by the toolchain provenance issue. No test gate is
-claimed.
+without an atomic snapshot claim. A two-segment fixture and chain CLI test now
+cover merging, partial cursors, lineage failures, and path alias rejection; the
+behavioral test has not run because the full CLI build gate remains open.
+Isolated AST parsing passed for the chain, fetch, and dispatch modules. Semantic
+checking found no diagnostic in the new chain module but exits on existing stale
+Stage1 errors in `rh_sha256.elisa`; root CLI AST parsing still fails on
+constructs in unrelated distribution modules. No test gate is claimed.
 
 ## Milestones
 

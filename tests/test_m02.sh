@@ -61,6 +61,7 @@ EOF
 
 echo "[m02] bounded workflow-event import"
 "$ROOT/tests/test_forge_events_cli.sh" >/dev/null || fail "forge events CLI"
+"$ROOT/tests/test_forge_event_chain_cli.sh" >/dev/null || fail "forge event chain CLI"
 echo "[m02] workflow-event boundary OK"
 
 if [[ "${RH_LIVE_TESTS:-0}" == "1" ]]; then
