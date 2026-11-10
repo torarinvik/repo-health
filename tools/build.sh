@@ -61,7 +61,7 @@ compile() {
 }
 
 BUILD_TARGETS=(
-  test_oracles test_process test_forge test_store test_package
+  test_oracles test_process test_forge test_forge_event_chain test_store test_package
   test_continuity test_continuity_scan test_m05 test_project_map
   test_m06 test_m06b test_m07 test_m07_sha test_m08 test_osv_query
   test_ecosystem_lookup test_properties test_m04_roles test_m11

@@ -6,25 +6,27 @@ true stage. **225 of the 360 Architecture metric keys lack an implemented defini
 135 Architecture keys have at least one implemented definition. The runtime
 catalog below contains 227 implemented definitions across 226 distinct keys.**
 
-**Current toolchain gate (2026-11-10):** `tools/build.sh` stops before compiling
-the first binary because the installed Stage1 wrapper rejects its
-`llvm_toolchain` provenance. The full CLI build gate remains open until a
-fresh, verified Stage1 product is available.
+**Current toolchain gate (2026-11-10):** Default `tools/build.sh` still stops
+before compiling the first binary because the installed Stage1 wrapper rejects
+its `llvm_toolchain` provenance. With the explicit sibling Stage1 wrapper, the
+focused Bitbucket event-chain harness builds successfully. The full `rh_cli`
+product gate remains open: its previous targeted compile was terminated by the
+process resource guard after roughly 13 minutes. Root CLI AST parsing now passes.
 
 **Current M02 increment (2026-11-10):** Bitbucket Cloud issue and pull-request
 event acquisition code supports bounded opaque cursor following and
 `--resume-from` scope validation, request/status/body/error evidence, and
-optional host-scoped OAuth bearer auth. Segment metadata now binds exact
-predecessor bytes and consumed cursors. The new `rh_cli forge events-chain`
-module/route validates ordered same-repository continuation and merges event
-observations with last-observation replacement, retaining final opaque cursors
-without an atomic snapshot claim. A two-segment fixture and chain CLI test now
-cover merging, partial cursors, lineage failures, and path alias rejection; the
-behavioral test has not run because the full CLI build gate remains open.
-Isolated AST parsing passed for the chain, fetch, and dispatch modules. Semantic
-checking found no diagnostic in the new chain module but exits on existing stale
-Stage1 errors in `rh_sha256.elisa`; root CLI AST parsing still fails on
-constructs in unrelated distribution modules. No test gate is claimed.
+optional host-scoped OAuth bearer auth. Segment metadata binds exact predecessor
+bytes and consumed cursors. The `rh_cli forge events-chain` route validates
+ordered same-repository continuation and merges event observations with
+last-observation replacement, retaining final opaque cursors without an atomic
+snapshot claim. `src/test_forge_event_chain.elisa` builds as a focused harness
+for the production chain module, and `tests/test_forge_event_chain_module.sh`
+passes the shared two-segment fixture suite for replacement counts, partial
+cursors, lineage/scope/time/native-ID/count rejection, and input/output alias
+rejection. The harness does not verify CLI dispatch or its transformation
+sidecar; those remain open with the full `rh_cli` product gate. Root CLI AST
+parsing passes, and no full-CLI behavioral gate is claimed.
 
 ## Milestones
 
