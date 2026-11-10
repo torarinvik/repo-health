@@ -6,6 +6,11 @@ true stage. **225 of the 360 Architecture metric keys lack an implemented defini
 135 Architecture keys have at least one implemented definition. The runtime
 catalog below contains 227 implemented definitions across 226 distinct keys.**
 
+**Current toolchain gate (2026-11-10):** `tools/build.sh` stops before compiling
+the first binary because the installed Stage1 wrapper rejects its
+`llvm_toolchain` provenance. The full CLI build gate remains open until a
+fresh, verified Stage1 product is available.
+
 ## Milestones
 
 | Milestone | Stage | Evidence |
