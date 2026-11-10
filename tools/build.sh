@@ -60,36 +60,34 @@ compile() {
   fi
 }
 
-compile "$ROOT/src/test_oracles.elisa" test_oracles
-compile "$ROOT/src/test_process.elisa" test_process
-compile "$ROOT/src/test_forge.elisa" test_forge
-compile "$ROOT/src/test_store.elisa" test_store
-compile "$ROOT/src/test_package.elisa" test_package
-compile "$ROOT/src/test_continuity.elisa" test_continuity
-compile "$ROOT/src/test_continuity_scan.elisa" test_continuity_scan
-compile "$ROOT/src/test_m05.elisa" test_m05
-compile "$ROOT/src/test_project_map.elisa" test_project_map
-compile "$ROOT/src/test_m06.elisa" test_m06
-compile "$ROOT/src/test_m06b.elisa" test_m06b
-compile "$ROOT/src/test_m07.elisa" test_m07
-compile "$ROOT/src/test_m07_sha.elisa" test_m07_sha
-compile "$ROOT/src/test_m08.elisa" test_m08
-compile "$ROOT/src/test_osv_query.elisa" test_osv_query
-compile "$ROOT/src/test_ecosystem_lookup.elisa" test_ecosystem_lookup
-compile "$ROOT/src/test_properties.elisa" test_properties
-compile "$ROOT/src/test_m04_roles.elisa" test_m04_roles
-compile "$ROOT/src/test_m11.elisa" test_m11
-compile "$ROOT/src/test_job.elisa" test_job
-compile "$ROOT/src/test_reconcile.elisa" test_reconcile
-compile "$ROOT/src/test_worker.elisa" test_worker
-compile "$ROOT/src/test_http.elisa" test_http
-compile "$ROOT/src/test_postgres.elisa" test_postgres
-compile "$ROOT/src/test_postgres_live.elisa" test_postgres_live
-# M01 entry point lands here once rh_cli.elisa exists (backlog item 9).
-if [[ -f "$ROOT/src/rh_cli.elisa" ]]; then
-  compile "$ROOT/src/rh_cli.elisa" rh_cli
-fi
-if [[ -f "$ROOT/src/bench_runner.elisa" ]]; then
-  compile "$ROOT/src/bench_runner.elisa" bench_runner
+BUILD_TARGETS=(
+  test_oracles test_process test_forge test_store test_package
+  test_continuity test_continuity_scan test_m05 test_project_map
+  test_m06 test_m06b test_m07 test_m07_sha test_m08 test_osv_query
+  test_ecosystem_lookup test_properties test_m04_roles test_m11
+  test_job test_reconcile test_worker test_http test_postgres
+  test_postgres_live rh_cli bench_runner
+)
+compile_target() {
+  local name="$1"
+  local src="$ROOT/src/$name.elisa"
+  [[ -f "$src" ]] || { echo "unknown build target: $name" >&2; return 2; }
+  compile "$src" "$name"
+}
+
+if [[ "${1:-}" == "--only" ]]; then
+  shift
+  (( $# > 0 )) || { echo "usage: $0 [--only target [target ...]]" >&2; exit 2; }
+  for target in "$@"; do
+    case " ${BUILD_TARGETS[*]} " in
+      *" $target "*) compile_target "$target" ;;
+      *) echo "unknown build target: $target" >&2; exit 2 ;;
+    esac
+  done
+else
+  (( $# == 0 )) || { echo "usage: $0 [--only target [target ...]]" >&2; exit 2; }
+  for target in "${BUILD_TARGETS[@]}"; do
+    [[ -f "$ROOT/src/$target.elisa" ]] && compile_target "$target"
+  done
 fi
 echo "build OK: $(ls "$ROOT/build" | tr '\n' ' ')"

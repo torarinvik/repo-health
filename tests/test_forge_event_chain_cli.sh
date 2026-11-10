@@ -5,7 +5,7 @@ cd "$ROOT"
 T="$(mktemp -d /tmp/rh-forge-event-chain.XXXXXX)"
 trap 'rm -rf "$T"' EXIT
 
-tools/build.sh >/dev/null
+tools/build.sh --only rh_cli >/dev/null
 CLI="$ROOT/build/rh_cli"
 FIXTURE="$ROOT/fixtures/forge-event-chain"
 
