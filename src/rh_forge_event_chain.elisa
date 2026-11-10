@@ -1,0 +1,436 @@
+# rh_forge_event_chain.elisa — ordered Bitbucket event-segment assembly (M02-05).
+
+include "./rh_base.elisa"
+include "./rh_git.elisa"
+include "./rh_json.elisa"
+include "./rh_sha256.elisa"
+
+module ForgeEventChain:
+    private:
+        const RH_FBC_MAX_SEGMENTS: i64 = 128
+        const RH_FBC_MAX_TOTAL_BYTES: i64 = 33554432
+        const RH_FBC_MAX_EVENTS: i64 = 10000
+        const RH_FBC_EVENT_INDEX_SIZE: usize = 20011
+
+        struct RhFbcEvent:
+            kind: u8
+            key_start: i64
+            key_end: i64
+            row_start: i64
+            row_end: i64
+
+        struct RhFbcCapability:
+            present: mutable bool
+            attempted: mutable i64
+            normalized: mutable i64
+            duplicate_replacements: mutable i64
+            rejected: mutable i64
+            declared_count: mutable i64
+
+        def rh_fbc_eq(texts: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_literal(texts, start, end, literal)
+
+        def rh_fbc_hex(texts: darray[u8]&, start: i64, end: i64) -> bool:
+            return false if end - start != 64
+            for index in 0..<64 |texts, start|:
+                byte: u8 = texts[(start + index).usize()]
+                return false if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
+            true
+
+        def rh_fbc_equal_span(left: darray[u8]&, left_start: i64, left_end: i64, right: darray[u8]&, right_start: i64, right_end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            Base::rh_bytes_equal_span(left, left_start, left_end, right, right_start, right_end)
+
+        def rh_fbc_match_bytes(texts: darray[u8]&, start: i64, end: i64, value: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start != value.count.i64()
+            Base::rh_bytes_equal_span(texts, start, end, value, 0, value.count.i64())
+
+        def rh_fbc_span_to_cstr(texts: darray[u8]&, start: i64, end: i64, out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end <= start or Base::rh_absorb_span(texts, start, end, out) < 0
+            for index in start..<end |texts|:
+                return false if texts[index.usize()] == 0
+            out.push(0)
+            true
+
+        def rh_fbc_read_file(path: cstr, out: mutable darray[u8]&) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Global{Read,Write}]:
+            status: mutable i64 = -1
+            can Global{Read,Write}:
+                status <- Base::rh_io_read(path, out)
+            status
+
+        def rh_fbc_bitbucket_cursor(texts: darray[u8]&, start: i64, end: i64, repository: darray[u8]&, capability: u8&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            return false if end - start < 16 or end - start > 4096
+            route: mutable darray[u8] = []
+            Base::rh_push_text(route, "https://api.bitbucket.org/2.0/repositories/")
+            route.extend(bytes_view(repository))
+            Base::rh_push_text(route, "/")
+            Base::rh_push_text(route, capability)
+            return false if end - start <= route.count.i64() or texts[start.usize() + route.count] != 63
+            for index in 0..<route.count |route, texts, start|:
+                return false if route[index] != texts[start.usize() + index]
+            cursor: mutable darray[u8] = []
+            return false if not ForgeEventChain::rh_fbc_span_to_cstr(texts, start, end, cursor)
+            cursor_ptr: cstr = (&cursor[0]).cast[cstr] can Unsafe.PointerCast
+            return false if not Git::rh_fetch_arg_safe(cursor_ptr)
+            for index in (start + route.count.i64() + 1)..<end |texts, start, route|:
+                return false if texts[index.usize()] == 35
+            true
+
+        def rh_fbc_read_page(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, pagination: i64, key: u8&, repository: darray[u8]&, capability: u8&, cursor_out: mutable darray[u8]&, complete_out: mutable bool&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            page: i64 = Json::rh_json_obj_get(nodes, texts, pagination, key)
+            return false if page < 0 or nodes[page.usize()].kind != Json::RH_JSON_OBJ
+            next: i64 = Json::rh_json_obj_get(nodes, texts, page, "next")
+            complete: i64 = Json::rh_json_obj_get(nodes, texts, page, "complete")
+            return false if next < 0 or complete < 0 or nodes[complete.usize()].kind != Json::RH_JSON_BOOL
+            complete_out[0] <- Json::rh_json_is_true(nodes, raw, complete)
+            if nodes[next.usize()].kind != Json::RH_JSON_NULL:
+                start: mutable i64 = 0
+                end: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, next, &start, &end) or not ForgeEventChain::rh_fbc_bitbucket_cursor(texts, start, end, repository, capability)
+                return false if complete_out[0] or Base::rh_absorb_span(texts, start, end, cursor_out) < 0
+            else:
+                return false if not complete_out[0]
+            true
+
+        def rh_fbc_read_capability(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, capabilities: i64, key: u8&, out: mutable RhFbcCapability&) -> bool can[Memory.Allocate, Abort.Panic]:
+            cap: i64 = Json::rh_json_obj_get(nodes, texts, capabilities, key)
+            return false if cap < 0 or nodes[cap.usize()].kind != Json::RH_JSON_OBJ
+            status: i64 = Json::rh_json_obj_get(nodes, texts, cap, "status")
+            status_start: mutable i64 = 0
+            status_end: mutable i64 = 0
+            return false if not Json::rh_json_str_span(nodes, status, &status_start, &status_end)
+            return false if not ForgeEventChain::rh_fbc_eq(texts, status_start, status_end, "observed") and not ForgeEventChain::rh_fbc_eq(texts, status_start, status_end, "not_attempted")
+            attempted_idx: i64 = Json::rh_json_obj_get(nodes, texts, cap, "attempted")
+            normalized_idx: i64 = Json::rh_json_obj_get(nodes, texts, cap, "normalized")
+            duplicates_idx: i64 = Json::rh_json_obj_get(nodes, texts, cap, "duplicate_replacements")
+            count_idx: i64 = Json::rh_json_obj_get(nodes, texts, cap, "count")
+            rejected_idx: i64 = Json::rh_json_obj_get(nodes, texts, cap, "rejected")
+            return false if attempted_idx < 0 or normalized_idx < 0 or duplicates_idx < 0 or count_idx < 0 or rejected_idx < 0
+            rejected_ok: mutable i64 = 0
+            rejected: i64 = Json::rh_json_int(nodes, raw, rejected_idx, &rejected_ok)
+            return false if rejected_ok != 1 or rejected < 0
+            if ForgeEventChain::rh_fbc_eq(texts, status_start, status_end, "observed"):
+                attempted_ok: mutable i64 = 0
+                normalized_ok: mutable i64 = 0
+                duplicates_ok: mutable i64 = 0
+                count_ok: mutable i64 = 0
+                attempted: i64 = Json::rh_json_int(nodes, raw, attempted_idx, &attempted_ok)
+                normalized: i64 = Json::rh_json_int(nodes, raw, normalized_idx, &normalized_ok)
+                duplicates: i64 = Json::rh_json_int(nodes, raw, duplicates_idx, &duplicates_ok)
+                count: i64 = Json::rh_json_int(nodes, raw, count_idx, &count_ok)
+                return false if attempted_ok != 1 or normalized_ok != 1 or duplicates_ok != 1 or count_ok != 1
+                return false if attempted < 0 or normalized < 0 or duplicates < 0 or count < 0 or rejected > attempted or normalized + rejected != attempted or duplicates > normalized
+                out[0] <- RhFbcCapability{present: true, attempted: attempted, normalized: normalized, duplicate_replacements: duplicates, rejected: rejected, declared_count: count}
+                return true
+            return false if nodes[attempted_idx.usize()].kind != Json::RH_JSON_NULL
+            return false if nodes[normalized_idx.usize()].kind != Json::RH_JSON_NULL
+            return false if nodes[duplicates_idx.usize()].kind != Json::RH_JSON_NULL
+            return false if nodes[count_idx.usize()].kind != Json::RH_JSON_NULL or rejected != 0
+            out[0] <- RhFbcCapability{present: false, attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, declared_count: 0}
+            true
+
+        def rh_fbc_optional_time(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, index: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if index < 0
+            return true if nodes[index.usize()].kind == Json::RH_JSON_NULL
+            parsed: mutable i64 = 0
+            value: i64 = Json::rh_json_int(nodes, raw, index, &parsed)
+            parsed == 1 and value >= 0
+
+        def rh_fbc_event_slot(keys: darray[u8]&, events: darray[RhFbcEvent]&, slots: darray[i64]&, kind: u8, key_start: i64, key_end: i64, empty_slot_out: mutable usize&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            hash: mutable usize = hash_sview(string_view_slice(bytes_view(keys), key_start.usize(), key_end.usize())).usize() % slots.count
+            found: mutable i64 = -1
+            empty_slot_out[0] <- slots.count
+            while probe < slots.count and found < 0 |probe: usize = 0, hash, slots, events, keys, kind, key_start, key_end, found, empty_slot_out|:
+                index: i64 = slots[hash]
+                if index < 0:
+                    empty_slot_out[0] <- hash
+                    break
+                prior: RhFbcEvent = events[index.usize()]
+                if prior.kind == kind and ForgeEventChain::rh_fbc_equal_span(keys, prior.key_start, prior.key_end, keys, key_start, key_end):
+                    found <- index
+                    empty_slot_out[0] <- hash
+                    break
+                hash <- (hash + 1) % slots.count
+                probe <- probe + 1
+            found
+
+        def rh_fbc_add_events(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, event_array: i64, keys: mutable darray[u8]&, rows: mutable darray[u8]&, events: mutable darray[RhFbcEvent]&, slots: mutable darray[i64]&, counts: mutable darray[i64]&, duplicate_counts: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Memory.Release]:
+            return false if event_array < 0 or nodes[event_array.usize()].kind != Json::RH_JSON_ARR or nodes[event_array.usize()].child_count > RH_FBC_MAX_EVENTS
+            while child >= 0 |child: i64 = nodes[event_array.usize()].first_child, nodes, raw, texts, keys, rows, events, slots, counts, duplicate_counts|:
+                return false if nodes[child.usize()].kind != Json::RH_JSON_OBJ
+                kind_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "kind")
+                kind_start: mutable i64 = 0
+                kind_end: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, kind_idx, &kind_start, &kind_end)
+                kind: u8 = 0 if ForgeEventChain::rh_fbc_eq(texts, kind_start, kind_end, "issues") else 1 if ForgeEventChain::rh_fbc_eq(texts, kind_start, kind_end, "proposals") else 255
+                return false if kind > 1
+                id_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "native_id")
+                id_start: mutable i64 = 0
+                id_end: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, id_idx, &id_start, &id_end) or id_end <= id_start
+                return false if id_end - id_start <= 10 or not ForgeEventChain::rh_fbc_eq(texts, id_start, id_start + 10, "bitbucket:")
+                status_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "status")
+                status_start: mutable i64 = 0
+                status_end: mutable i64 = 0
+                return false if not Json::rh_json_str_span(nodes, status_idx, &status_start, &status_end) or status_end <= status_start
+                created_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "created_at")
+                created_ok: mutable i64 = 0
+                created_at: i64 = Json::rh_json_int(nodes, raw, created_idx, &created_ok)
+                return false if created_ok != 1 or created_at < 0
+                return false if not ForgeEventChain::rh_fbc_optional_time(nodes, raw, Json::rh_json_obj_get(nodes, texts, child, "updated_at")) or not ForgeEventChain::rh_fbc_optional_time(nodes, raw, Json::rh_json_obj_get(nodes, texts, child, "closed_at"))
+                url_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "url")
+                tag_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "tag")
+                return false if (url_idx >= 0 and nodes[url_idx.usize()].kind != Json::RH_JSON_STR) or (tag_idx >= 0 and nodes[tag_idx.usize()].kind != Json::RH_JSON_STR)
+                row: Json::RhJsonNode = nodes[child.usize()]
+                return false if row.text_start < 0 or row.text_end <= row.text_start or row.text_end > raw.count.i64()
+                key_start: i64 = keys.count.i64()
+                keys.push(kind)
+                return false if Base::rh_absorb_span(texts, id_start, id_end, keys) < 0
+                key_end: i64 = keys.count.i64()
+                empty_slot: mutable usize = slots.count
+                event_slot: mutable i64 = ForgeEventChain::rh_fbc_event_slot(keys, events, slots, kind, key_start, key_end, &empty_slot)
+                return false if empty_slot >= slots.count
+                row_start: i64 = rows.count.i64()
+                return false if Base::rh_absorb_span(raw, row.text_start, row.text_end, rows) < 0
+                event: RhFbcEvent = RhFbcEvent{kind: kind, key_start: key_start, key_end: key_end, row_start: row_start, row_end: rows.count.i64()}
+                if event_slot >= 0:
+                    events[event_slot.usize()] <- event
+                    duplicate_counts[kind.usize()] <- duplicate_counts[kind.usize()] + 1
+                else:
+                    return false if events.count >= RH_FBC_MAX_EVENTS
+                    events.push(event)
+                    slots[empty_slot] <- events.count.i64() - 1
+                counts[kind.usize()] <- counts[kind.usize()] + 1
+                child <- nodes[child.usize()].next_sibling
+            true
+
+        def rh_fbc_push_page(out: mutable darray[u8]&, cursor: darray[u8]&, complete: bool) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "{\"next\":")
+            if cursor.count == 0:
+                Base::rh_push_text(out, "null")
+            else:
+                out.push(34)
+                Base::rh_json_escape(out, cursor, 0, cursor.count)
+                out.push(34)
+            Base::rh_push_text(out, ",\"complete\":true}") if complete
+            Base::rh_push_text(out, ",\"complete\":false}") if not complete
+            return
+
+        def rh_fbc_push_capability(out: mutable darray[u8]&, key: u8&, cap: RhFbcCapability, unique_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
+            Base::rh_push_text(out, "\"")
+            Base::rh_push_text(out, key)
+            Base::rh_push_text(out, "\":{\"status\":\"observed\",\"attempted\":")
+            Base::rh_push_decimal_i64(out, cap.attempted)
+            Base::rh_push_text(out, ",\"normalized\":")
+            Base::rh_push_decimal_i64(out, cap.normalized)
+            Base::rh_push_text(out, ",\"duplicate_replacements\":")
+            Base::rh_push_decimal_i64(out, cap.duplicate_replacements)
+            Base::rh_push_text(out, ",\"count\":")
+            Base::rh_push_decimal_i64(out, unique_count)
+            Base::rh_push_text(out, ",\"rejected\":")
+            Base::rh_push_decimal_i64(out, cap.rejected)
+            Base::rh_push_text(out, "}")
+            return
+
+    public:
+        def rh_forge_bitbucket_event_chain(raw: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+            return -1 if raw.count > 1048576
+            input_nodes: mutable darray[Json::RhJsonNode] = []
+            input_texts: mutable darray[u8] = []
+            input_root: i64 = Json::rh_json_parse(raw, input_nodes, input_texts)
+            return -1 if input_root < 0 or input_nodes[input_root.usize()].kind != Json::RH_JSON_OBJ
+            input_schema_start: mutable i64 = 0
+            input_schema_end: mutable i64 = 0
+            return -1 if not Json::rh_json_str_span(input_nodes, Json::rh_json_obj_get(input_nodes, input_texts, input_root, "schema"), &input_schema_start, &input_schema_end) or not ForgeEventChain::rh_fbc_eq(input_texts, input_schema_start, input_schema_end, "rh-forge-event-chain-input/1")
+            segments: i64 = Json::rh_json_obj_get(input_nodes, input_texts, input_root, "segments")
+            return -1 if segments < 0 or input_nodes[segments.usize()].kind != Json::RH_JSON_ARR or input_nodes[segments.usize()].child_count < 1 or input_nodes[segments.usize()].child_count > RH_FBC_MAX_SEGMENTS
+
+            repository: mutable darray[u8] = []
+            repository_set: mutable bool = false
+            issue_cap: mutable RhFbcCapability = RhFbcCapability{present: false, attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, declared_count: 0}
+            proposal_cap: mutable RhFbcCapability = RhFbcCapability{present: false, attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, declared_count: 0}
+            issue_complete: mutable bool = false
+            proposal_complete: mutable bool = false
+            issue_cursor: mutable darray[u8] = []
+            proposal_cursor: mutable darray[u8] = []
+            previous_digest: mutable darray[u8] = []
+            segment_digests: mutable darray[u8] = []
+            authorization: mutable darray[u8] = []
+            authorization_unknown: mutable bool = false
+            captured_at: mutable i64 = 0
+            segment_count: mutable i64 = 0
+            total_bytes: mutable i64 = 0
+            keys: mutable darray[u8] = []
+            rows: mutable darray[u8] = []
+            events: mutable darray[RhFbcEvent] = []
+            slots: mutable darray[i64] = []
+            duplicate_counts: mutable darray[i64] = [0, 0]
+            for _ in 0..<RH_FBC_EVENT_INDEX_SIZE |slots|:
+                slots.push(-1)
+
+            while segment_node >= 0 |segment_node: i64 = input_nodes[segments.usize()].first_child, input_nodes, input_texts, repository, repository_set, issue_cap, proposal_cap, issue_complete, proposal_complete, issue_cursor, proposal_cursor, previous_digest, segment_digests, authorization, authorization_unknown, captured_at, segment_count, total_bytes, keys, rows, events, slots, duplicate_counts|:
+                return -1 if input_nodes[segment_node.usize()].kind != Json::RH_JSON_STR
+                path_start: mutable i64 = 0
+                path_end: mutable i64 = 0
+                return -1 if not Json::rh_json_str_span(input_nodes, segment_node, &path_start, &path_end) or path_end <= path_start
+                path: mutable darray[u8] = []
+                return -1 if not ForgeEventChain::rh_fbc_span_to_cstr(input_texts, path_start, path_end, path)
+                path_ptr: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
+                return -1 if not Git::rh_arg_safe(path_ptr)
+                segment_raw: mutable darray[u8] = []
+                read_status: mutable i64 = -1
+                can Global{Read,Write}:
+                    read_status <- ForgeEventChain::rh_fbc_read_file(path_ptr, segment_raw)
+                return -1 if read_status < 0 or segment_raw.count > 4194304 or total_bytes > RH_FBC_MAX_TOTAL_BYTES - segment_raw.count.i64()
+                total_bytes <- total_bytes + segment_raw.count.i64()
+                nodes: mutable darray[Json::RhJsonNode] = []
+                texts: mutable darray[u8] = []
+                root: i64 = Json::rh_json_parse(segment_raw, nodes, texts)
+                return -1 if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+                schema_start: mutable i64 = 0
+                schema_end: mutable i64 = 0
+                provider_start: mutable i64 = 0
+                provider_end: mutable i64 = 0
+                return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "schema"), &schema_start, &schema_end) or not ForgeEventChain::rh_fbc_eq(texts, schema_start, schema_end, "rh-forge-events-result/1")
+                return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "provider"), &provider_start, &provider_end) or not ForgeEventChain::rh_fbc_eq(texts, provider_start, provider_end, "bitbucket")
+                scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scope")
+                return -1 if scope_idx < 0 or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
+                repo_start: mutable i64 = 0
+                repo_end: mutable i64 = 0
+                return -1 if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, scope_idx, "repository"), &repo_start, &repo_end) or repo_end <= repo_start
+                if repository_set:
+                    return -1 if not ForgeEventChain::rh_fbc_equal_span(repository, 0, repository.count.i64(), texts, repo_start, repo_end)
+                else:
+                    return -1 if Base::rh_absorb_span(texts, repo_start, repo_end, repository) < 0
+                    repository_set <- true
+
+                segment: i64 = Json::rh_json_obj_get(nodes, texts, root, "segment")
+                return -1 if segment < 0 or nodes[segment.usize()].kind != Json::RH_JSON_OBJ
+                parent: i64 = Json::rh_json_obj_get(nodes, texts, segment, "resumed_from_sha256")
+                return -1 if parent < 0
+                if segment_count == 0:
+                    return -1 if nodes[parent.usize()].kind != Json::RH_JSON_NULL
+                else:
+                    parent_start: mutable i64 = 0
+                    parent_end: mutable i64 = 0
+                    return -1 if not Json::rh_json_str_span(nodes, parent, &parent_start, &parent_end) or not ForgeEventChain::rh_fbc_hex(texts, parent_start, parent_end) or not ForgeEventChain::rh_fbc_match_bytes(texts, parent_start, parent_end, previous_digest)
+                consumed: i64 = Json::rh_json_obj_get(nodes, texts, segment, "consumed")
+                return -1 if consumed < 0 or nodes[consumed.usize()].kind != Json::RH_JSON_OBJ
+                issue_consumed: i64 = Json::rh_json_obj_get(nodes, texts, consumed, "issues")
+                proposal_consumed: i64 = Json::rh_json_obj_get(nodes, texts, consumed, "proposals")
+                return -1 if issue_consumed < 0 or proposal_consumed < 0
+                if segment_count == 0:
+                    return -1 if nodes[issue_consumed.usize()].kind != Json::RH_JSON_NULL or nodes[proposal_consumed.usize()].kind != Json::RH_JSON_NULL
+                else:
+                    if issue_complete:
+                        return -1 if nodes[issue_consumed.usize()].kind != Json::RH_JSON_NULL
+                    else:
+                        consumed_start: mutable i64 = 0
+                        consumed_end: mutable i64 = 0
+                        return -1 if not Json::rh_json_str_span(nodes, issue_consumed, &consumed_start, &consumed_end) or not ForgeEventChain::rh_fbc_match_bytes(texts, consumed_start, consumed_end, issue_cursor)
+                    if proposal_complete:
+                        return -1 if nodes[proposal_consumed.usize()].kind != Json::RH_JSON_NULL
+                    else:
+                        consumed_start: mutable i64 = 0
+                        consumed_end: mutable i64 = 0
+                        return -1 if not Json::rh_json_str_span(nodes, proposal_consumed, &consumed_start, &consumed_end) or not ForgeEventChain::rh_fbc_match_bytes(texts, consumed_start, consumed_end, proposal_cursor)
+
+                capabilities: i64 = Json::rh_json_obj_get(nodes, texts, root, "capabilities")
+                pagination: i64 = Json::rh_json_obj_get(nodes, texts, root, "pagination")
+                return -1 if capabilities < 0 or nodes[capabilities.usize()].kind != Json::RH_JSON_OBJ or pagination < 0 or nodes[pagination.usize()].kind != Json::RH_JSON_OBJ
+                current_issue: mutable RhFbcCapability = RhFbcCapability{present: false, attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, declared_count: 0}
+                current_proposal: mutable RhFbcCapability = RhFbcCapability{present: false, attempted: 0, normalized: 0, duplicate_replacements: 0, rejected: 0, declared_count: 0}
+                return -1 if not ForgeEventChain::rh_fbc_read_capability(nodes, segment_raw, texts, capabilities, "issues", &current_issue) or not ForgeEventChain::rh_fbc_read_capability(nodes, segment_raw, texts, capabilities, "proposals", &current_proposal)
+                current_issue_cursor: mutable darray[u8] = []
+                current_proposal_cursor: mutable darray[u8] = []
+                current_issue_complete: mutable bool = false
+                current_proposal_complete: mutable bool = false
+                return -1 if not ForgeEventChain::rh_fbc_read_page(nodes, segment_raw, texts, pagination, "issues", repository, "issues", current_issue_cursor, &current_issue_complete) or not ForgeEventChain::rh_fbc_read_page(nodes, segment_raw, texts, pagination, "proposals", repository, "pullrequests", current_proposal_cursor, &current_proposal_complete)
+                if segment_count == 0:
+                    return -1 if not current_issue.present or not current_proposal.present
+                else:
+                    return -1 if issue_complete == current_issue.present or proposal_complete == current_proposal.present
+                    return -1 if issue_complete and not current_issue_complete or proposal_complete and not current_proposal_complete
+
+                auth: i64 = Json::rh_json_obj_get(nodes, texts, root, "authorization")
+                auth_start: mutable i64 = 0
+                auth_end: mutable i64 = 0
+                return -1 if auth < 0 or nodes[auth.usize()].kind != Json::RH_JSON_OBJ or not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, auth, "state"), &auth_start, &auth_end)
+                return -1 if not ForgeEventChain::rh_fbc_eq(texts, auth_start, auth_end, "authorized") and not ForgeEventChain::rh_fbc_eq(texts, auth_start, auth_end, "not_requested") and not ForgeEventChain::rh_fbc_eq(texts, auth_start, auth_end, "unknown")
+                if segment_count == 0:
+                    return -1 if Base::rh_absorb_span(texts, auth_start, auth_end, authorization) < 0
+                elif not authorization_unknown and not ForgeEventChain::rh_fbc_equal_span(authorization, 0, authorization.count.i64(), texts, auth_start, auth_end):
+                    authorization.clear()
+                    Base::rh_push_text(authorization, "unknown")
+                    authorization_unknown <- true
+
+                captured_ok: mutable i64 = 0
+                current_captured: i64 = Json::rh_json_int(nodes, segment_raw, Json::rh_json_obj_get(nodes, texts, root, "captured_at"), &captured_ok)
+                return -1 if captured_ok != 1 or current_captured < 0 or (segment_count > 0 and current_captured < captured_at)
+                captured_at <- current_captured
+                event_array: i64 = Json::rh_json_obj_get(nodes, texts, root, "events")
+                return -1 if event_array < 0 or nodes[event_array.usize()].kind != Json::RH_JSON_ARR
+                segment_counts: mutable darray[i64] = [0, 0]
+                issue_duplicates_before: i64 = duplicate_counts[0]
+                proposal_duplicates_before: i64 = duplicate_counts[1]
+                return -1 if not ForgeEventChain::rh_fbc_add_events(nodes, segment_raw, texts, event_array, keys, rows, events, slots, segment_counts, duplicate_counts)
+                return -1 if segment_counts[0] != current_issue.declared_count or segment_counts[1] != current_proposal.declared_count
+                if current_issue.present:
+                    issue_cap.present <- true
+                    issue_cap.attempted <- issue_cap.attempted + current_issue.attempted
+                    issue_cap.normalized <- issue_cap.normalized + current_issue.normalized
+                    issue_cap.duplicate_replacements <- issue_cap.duplicate_replacements + current_issue.duplicate_replacements
+                    issue_cap.rejected <- issue_cap.rejected + current_issue.rejected
+                if current_proposal.present:
+                    proposal_cap.present <- true
+                    proposal_cap.attempted <- proposal_cap.attempted + current_proposal.attempted
+                    proposal_cap.normalized <- proposal_cap.normalized + current_proposal.normalized
+                    proposal_cap.duplicate_replacements <- proposal_cap.duplicate_replacements + current_proposal.duplicate_replacements
+                    proposal_cap.rejected <- proposal_cap.rejected + current_proposal.rejected
+                issue_cap.duplicate_replacements <- issue_cap.duplicate_replacements + duplicate_counts[0] - issue_duplicates_before
+                proposal_cap.duplicate_replacements <- proposal_cap.duplicate_replacements + duplicate_counts[1] - proposal_duplicates_before
+                issue_complete <- current_issue_complete
+                proposal_complete <- current_proposal_complete
+                issue_cursor <- current_issue_cursor
+                proposal_cursor <- current_proposal_cursor
+                segment_digest: mutable darray[u8] = []
+                Sha256::rh_sha256(segment_raw, segment_digest)
+                previous_digest <- segment_digest
+                segment_digests.extend(bytes_view(segment_digest))
+                segment_count <- segment_count + 1
+                segment_node <- input_nodes[segment_node.usize()].next_sibling
+
+            Base::rh_push_text(out, "{\"schema\":\"rh-forge-events-result/1\",\"provider\":\"bitbucket\",\"captured_at\":")
+            Base::rh_push_decimal_i64(out, captured_at)
+            Base::rh_push_text(out, ",\"authorization\":{\"state\":\"")
+            Base::rh_json_escape(out, authorization, 0, authorization.count)
+            Base::rh_push_text(out, "\"},\"scope\":{\"repository\":\"")
+            Base::rh_json_escape(out, repository, 0, repository.count)
+            Base::rh_push_text(out, "\"},\"capabilities\":{")
+            unique_counts: mutable darray[i64] = [0, 0]
+            for index in 0..<events.count |events, unique_counts|:
+                unique_counts[events[index].kind.usize()] <- unique_counts[events[index].kind.usize()] + 1
+            ForgeEventChain::rh_fbc_push_capability(out, "issues", issue_cap, unique_counts[0])
+            out.push(44)
+            ForgeEventChain::rh_fbc_push_capability(out, "proposals", proposal_cap, unique_counts[1])
+            Base::rh_push_text(out, ",\"reviews\":{\"status\":\"unsupported\",\"attempted\":null,\"normalized\":null,\"duplicate_replacements\":null,\"count\":null,\"rejected\":0},\"releases\":{\"status\":\"unsupported\",\"attempted\":null,\"normalized\":null,\"duplicate_replacements\":null,\"count\":null,\"rejected\":0}},\"pagination\":{\"issues\":")
+            ForgeEventChain::rh_fbc_push_page(out, issue_cursor, issue_complete)
+            Base::rh_push_text(out, ",\"proposals\":")
+            ForgeEventChain::rh_fbc_push_page(out, proposal_cursor, proposal_complete)
+            Base::rh_push_text(out, ",\"reviews\":{\"next\":null,\"complete\":false},\"releases\":{\"next\":null,\"complete\":false}},\"events\":[")
+            for index in 0..<events.count |events, rows, out|:
+                out.push(44) if index > 0
+                event: RhFbcEvent = events[index]
+                row_ptr: u8& = (&rows[event.row_start.usize()]).cast[u8&] can Unsafe.PointerCast
+                Base::rh_push_raw(out, row_ptr, (event.row_end - event.row_start).usize())
+            Base::rh_push_text(out, "],\"segment_chain\":{\"segment_count\":")
+            Base::rh_push_decimal_i64(out, segment_count)
+            complete: bool = issue_complete and proposal_complete
+            Base::rh_push_text(out, ",\"complete\":true,\"segment_sha256\":[") if complete
+            Base::rh_push_text(out, ",\"complete\":false,\"segment_sha256\":[") if not complete
+            for index in 0..<segment_count |segment_digests, out|:
+                out.push(44) if index > 0
+                out.push(34)
+                Base::rh_json_escape(out, segment_digests, (index * 64).usize(), ((index + 1) * 64).usize())
+                out.push(34)
+            Base::rh_push_text(out, "]},\"note\":\"ordered Bitbucket segments are digest-linked and cursor-contiguous; mutable source contents can still change between pages\"}")
+            0

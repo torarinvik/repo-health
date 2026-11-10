@@ -12,15 +12,19 @@ the first binary because the installed Stage1 wrapper rejects its
 fresh, verified Stage1 product is available.
 
 **Current M02 increment (2026-11-10):** Bitbucket Cloud issue and pull-request
-event acquisition is being added to `rh_cli forge events`, with bounded opaque
-cursor following and `--resume-from` scope validation, request/status/body/error
-evidence, and optional host-scoped OAuth bearer auth. Each result is one segment;
-segment merging and acquisition fixtures remain open. Isolated AST parsing passed
-for the fetch and dispatch modules. Semantic checking remains unverified: the
-available stale Stage1 reports mutability, region, and effect diagnostics across
-the current fetch, roles, and hash sources; the root CLI AST also fails on parser
-constructs in unrelated distribution modules. The full CLI gate remains blocked
-by the toolchain provenance issue. No test gate is claimed.
+event acquisition code supports bounded opaque cursor following and
+`--resume-from` scope validation, request/status/body/error evidence, and
+optional host-scoped OAuth bearer auth. Segment metadata now binds exact
+predecessor bytes and consumed cursors. The new `rh_cli forge events-chain`
+module/route validates ordered same-repository continuation and merges event
+observations with last-observation replacement, retaining final opaque cursors
+without an atomic snapshot claim. Acquisition and chain fixtures plus full CLI
+compilation remain open. Isolated AST parsing passed for the chain, fetch, and
+dispatch modules. Semantic checking found no diagnostic in the new chain module
+but exits on existing stale Stage1 errors in `rh_sha256.elisa`; root CLI AST
+parsing still fails on constructs in unrelated distribution modules. The full
+CLI gate remains blocked by the toolchain provenance issue. No test gate is
+claimed.
 
 ## Milestones
 

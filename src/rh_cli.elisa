@@ -116,6 +116,7 @@ include "./rh_project_map.elisa"
 include "./rh_coverage.elisa"
 include "./rh_coverage_continuity.elisa"
 include "./rh_forge_review_chain.elisa"
+include "./rh_forge_event_chain.elisa"
 include "./rh_roles_review_chain.elisa"
 include "./rh_columnar.elisa"
 include "./rh_aggregates.elisa"
@@ -207,6 +208,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
     rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [review options] | --gitlab-project <group/path> [--resume-from <result>] | --bitbucket-repo <workspace/repo> [--resume-from <result>]) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli forge review-chain --input <rh-forge-review-chain-input/1> --out <file>")
+    rh_cli_err("       rh_cli forge events-chain --input <rh-forge-event-chain-input/1> --out <file>")
     rh_cli_err("       rh_cli roles-review-chain --input <rh-forge-review-chain-result/1> --out <rh-roles-input/1>")
     rh_cli_err("       rh_cli staged-normalize --input <provider-specific staged token|rh-postgres-staged-forge-events-input/1> --out <file> [--postgres]")
     rh_cli_err("       rh_cli connector check --instance <file> --out <file>")
@@ -5423,6 +5425,27 @@ def rh_do_forge_review_chain(input_path: cstr, out_path: cstr) -> i32 can[Memory
         rh_cli_err("forge review-chain: cannot write transformation report")
         return 4
     rh_cli_out("forge review-chain: assembled bounded segment chain")
+    0
+
+# Assemble a cursor-contiguous Bitbucket issue/pull-request event result.
+def rh_do_forge_bitbucket_event_chain(input_path: cstr, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Console, Blocking.IO, Memory.Release]:
+    if not Git::rh_arg_safe(input_path) or not Git::rh_arg_safe(out_path):
+        rh_cli_err("rejected forge events-chain argument (allowlist)")
+        return 3
+    raw: mutable darray[u8] = []
+    return 4 if Base::rh_io_read(input_path, raw) < 0
+    body: mutable darray[u8] = []
+    if ForgeEventChain::rh_forge_bitbucket_event_chain(raw, body) != 0:
+        rh_cli_err("forge events-chain: segments are malformed, out of order, cross-scope, or incomplete as a cursor chain")
+        return 4
+    body.push(10)
+    if not Base::rh_io_write(out_path, body):
+        rh_cli_err("forge events-chain: cannot write --out")
+        return 4
+    if not AdapterTransformationCli::rh_write_sidecar(raw, body, "bitbucket-event-chain", "rh-forge-events-result/1", "repo-health/bitbucket-event-chain/1", "[{\"source\":\"same-repository Bitbucket segments\",\"target\":\"digest-linked opaque cursor chain\",\"state\":\"validated\"},{\"source\":\"ordered event observations\",\"target\":\"last-observation replacement by capability and native id\",\"state\":\"transformed\"},{\"source\":\"unfinished final issue or pull-request cursor\",\"target\":\"full-source completeness\",\"state\":\"partial\"},{\"source\":\"source mutation between pages\",\"target\":\"atomic repository snapshot\",\"state\":\"unsupported\"}]", out_path):
+        rh_cli_err("forge events-chain: cannot write transformation report")
+        return 4
+    rh_cli_out("forge events-chain: assembled bounded Bitbucket event chain")
     0
 
 # Turn a cursor-validated GitHub review-chain result into roles action input.

@@ -262,6 +262,34 @@ module ForgeEventsFetch:
                 Base::rh_push_text(out, "\",\"complete\":false}")
             return
 
+        def rh_fef_push_bitbucket_segment_cursor(out: mutable darray[u8]&, cursor: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+            if cursor.count == 0:
+                Base::rh_push_text(out, "null")
+            else:
+                out.push(34)
+                Base::rh_json_escape(out, cursor, 0, cursor.count - 1)
+                out.push(34)
+            return
+
+        def rh_fef_append_bitbucket_segment(out: mutable darray[u8]&, previous: darray[u8]&, has_resume: bool, issues_cursor: darray[u8]&, proposals_cursor: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if out.count == 0 or out[out.count - 1] != 125
+            out.pop()
+            Base::rh_push_text(out, ",\"segment\":{\"resumed_from_sha256\":")
+            if has_resume:
+                digest: mutable darray[u8] = []
+                Sha256::rh_sha256(previous, digest)
+                out.push(34)
+                out.extend(bytes_view(digest))
+                out.push(34)
+            else:
+                Base::rh_push_text(out, "null")
+            Base::rh_push_text(out, ",\"consumed\":{\"issues\":")
+            ForgeEventsFetch::rh_fef_push_bitbucket_segment_cursor(out, issues_cursor)
+            Base::rh_push_text(out, ",\"proposals\":")
+            ForgeEventsFetch::rh_fef_push_bitbucket_segment_cursor(out, proposals_cursor)
+            Base::rh_push_text(out, "}}}")
+            true
+
         def rh_fef_whitespace(byte: u8) -> bool:
             byte == 32 or byte == 9 or byte == 10 or byte == 13
 
@@ -809,7 +837,9 @@ module ForgeEventsFetch:
             Base::rh_push_text(capture, ",\"proposals\":")
             ForgeEventsFetch::rh_fef_push_bitbucket_pagination(capture, proposals_complete == 1, proposals_cursor)
             Base::rh_push_text(capture, ",\"reviews\":{\"next\":null,\"complete\":false},\"releases\":{\"next\":null,\"complete\":false}}}")
-            ForgeEvents::rh_forge_events_report(capture, out)
+            return -1 if ForgeEvents::rh_forge_events_report(capture, out) != 0
+            return -1 if not ForgeEventsFetch::rh_fef_append_bitbucket_segment(out, previous, has_resume, issues_start_cursor, proposals_start_cursor)
+            0
 
         # Fetch GitHub issues, pulls, and published-release pages from fixed API routes.
         # The numeric page sequence and page cap avoid following arbitrary Link
