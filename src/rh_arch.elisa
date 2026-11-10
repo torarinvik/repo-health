@@ -73,9 +73,8 @@ module Arch:
             return -1 if data.count > RH_ARCH_MAX_BYTES
             unknown_out[0] <- 0
             while line_start <= data.count.i64() |line_start: i64 = 0, data, fields, unknown_out|:
-                line_end: i64 =
-                    while j < data.count.i64() and data[j.usize()] != 10 |j: i64 = line_start| -> j:
-                        j <- j + 1
+                newline: i64 = Base::rh_find_byte(data, line_start.usize(), 10)
+                line_end: i64 = data.count.i64() if newline < 0 else newline
                 s: mutable i64 = line_start
                 e: mutable i64 = line_end
                 while e > s and (data[(e - 1).usize()] == 13 or data[(e - 1).usize()] == 32 or data[(e - 1).usize()] == 9) |e, s, data|:
@@ -86,16 +85,11 @@ module Arch:
                     break if Arch::rh_arch_function_line(data, s, e)
                     # Strip a trailing comment only when it is separated by
                     # whitespace; quoted values remain untouched.
-                    eq: mutable i64 = -1
-                    while k < e |k: i64 = s, e, data, eq|:
-                        if data[k.usize()] == 61:
-                            eq <- k
-                            break
-                        k <- k + 1
+                    candidate_eq: i64 = Base::rh_find_byte(data, s.usize(), 61)
+                    eq: i64 = candidate_eq if candidate_eq >= 0 and candidate_eq < e else -1
                     if eq > s:
-                        while k < eq |k: i64 = s, eq, data|:
-                            return -1 if not Arch::rh_arch_key_char(data[k.usize()])
-                            k <- k + 1
+                        for key_index in s..<eq |key_index, data|:
+                            return -1 if not Arch::rh_arch_key_char(data[key_index.usize()])
                         return -1 if fields.count.i64() >= RH_ARCH_MAX_FIELDS
                         value_s: mutable i64 = eq + 1
                         value_e: mutable i64 = e
@@ -111,20 +105,14 @@ module Arch:
             fields.count.i64()
 
         def rh_arch_field(data: darray[u8]&, fields: darray[RhArchField]&, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
-            while i < fields.count.i64() |i: i64 = 0, fields, data, key|:
+            for i in 0..<fields.count.i64() |found: i64 = -1, i, fields, data, key| -> found:
                 field: RhArchField = fields[i.usize()]
-                if Arch::rh_arch_eq(data, field.key_s, field.key_e, key):
-                    return i
-                i <- i + 1
-            -1
+                break i if Arch::rh_arch_eq(data, field.key_s, field.key_e, key)
 
         def rh_arch_singleton(data: darray[u8]&, fields: darray[RhArchField]&, key: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-            seen: mutable i64 = 0
-            while i < fields.count.i64() |i: i64 = 0, fields, data, key, seen|:
+            for i in 0..<fields.count.i64() |seen: i64 = 0, i, fields, data, key| -> seen <= 1:
                 field: RhArchField = fields[i.usize()]
                 seen <- seen + 1 if Arch::rh_arch_eq(data, field.key_s, field.key_e, key)
-                i <- i + 1
-            seen <= 1
 
         def rh_arch_unquote(data: darray[u8]&, s: i64, e: i64, start_out: mutable i64&, end_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic]:
             Arch::rh_arch_trim(data, s, e, &start_out[0], &end_out[0])
@@ -137,9 +125,8 @@ module Arch:
             start_out[0] < end_out[0]
 
         def rh_arch_item_unresolved(data: darray[u8]&, s: i64, e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            while i < e |i: i64 = s, e, data|:
+            for i in s..<e |i, data|:
                 return true if data[i.usize()] == 36 or data[i.usize()] == 37 or data[i.usize()] == 64
-                i <- i + 1
             false
 
         def rh_arch_items(data: darray[u8]&, field: RhArchField, field_id: i64, items: mutable darray[RhArchItem]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -182,8 +169,7 @@ module Arch:
             true
 
         def rh_arch_emit_array(out: mutable darray[u8]&, data: darray[u8]&, items: darray[RhArchItem]&, field_id: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            emitted: mutable i64 = 0
-            while i < items.count.i64() |i: i64 = 0, items, data, out, field_id, emitted|:
+            for i in 0..<items.count.i64() |emitted: i64 = 0, i, items, data, out, field_id| -> emitted:
                 item: RhArchItem = items[i.usize()]
                 if item.field == field_id:
                     out.push(44) if emitted > 0
@@ -191,8 +177,6 @@ module Arch:
                     Base::rh_json_escape(out, data, item.value_s.usize(), item.value_e.usize())
                     out.push(34)
                     emitted <- emitted + 1
-                i <- i + 1
-            emitted
 
         def rh_arch_relation_scope(data: darray[u8]&, s: i64, e: i64) -> u8&:
             return "runtime" if Arch::rh_arch_eq(data, s, e, "depends")
@@ -224,11 +208,10 @@ module Arch:
             rel_e: mutable i64 = fields[rel_field.usize()].value_e
             return -1 if not Arch::rh_arch_unquote(raw, name_s, name_e, &name_s, &name_e) or not Arch::rh_arch_unquote(raw, version_s, version_e, &version_s, &version_e) or not Arch::rh_arch_unquote(raw, rel_s, rel_e, &rel_s, &rel_e)
             items: mutable darray[RhArchItem] = []
-            while i < fields.count.i64() |i: i64 = 0, fields, raw, items|:
+            for i in 0..<fields.count.i64() |i, fields, raw, items|:
                 field: RhArchField = fields[i.usize()]
                 if Arch::rh_arch_relation_field(raw, field):
                     return -1 if Arch::rh_arch_items(raw, field, i, items) < 0
-                i <- i + 1
             Base::rh_push_text(out, "{\"schema\":\"rh-arch-pkgbuild-result/1\",\"format\":\"arch-pkgbuild\",\"name\":\"")
             Base::rh_json_escape(out, raw, name_s.usize(), name_e.usize())
             Base::rh_push_text(out, "\",\"pkgver\":\"")
@@ -249,35 +232,26 @@ module Arch:
             Arch::rh_arch_emit_array(out, raw, license_items, license_field)
             Base::rh_push_text(out, "],\"architectures\":[")
             arch_items: mutable darray[RhArchItem] = []
-            arch_field: mutable i64 = -1
-            while ai < fields.count.i64() |ai: i64 = 0, fields, raw, arch_field|:
-                arch_field <- ai if Arch::rh_arch_eq(raw, fields[ai.usize()].key_s, fields[ai.usize()].key_e, "arch")
-                ai <- ai + 1
+            arch_field: i64 = Arch::rh_arch_field(raw, fields, "arch")
             if arch_field >= 0:
                 return -1 if Arch::rh_arch_items(raw, fields[arch_field.usize()], arch_field, arch_items) < 0
             Arch::rh_arch_emit_array(out, raw, arch_items, arch_field)
             Base::rh_push_text(out, "],\"sources\":[")
             source_items: mutable darray[RhArchItem] = []
-            source_field: mutable i64 = -1
-            while si < fields.count.i64() |si: i64 = 0, fields, raw, source_field|:
-                source_field <- si if Arch::rh_arch_eq(raw, fields[si.usize()].key_s, fields[si.usize()].key_e, "source")
-                si <- si + 1
+            source_field: i64 = Arch::rh_arch_field(raw, fields, "source")
             if source_field >= 0:
                 return -1 if Arch::rh_arch_items(raw, fields[source_field.usize()], source_field, source_items) < 0
             Arch::rh_arch_emit_array(out, raw, source_items, source_field)
             Base::rh_push_text(out, "],\"checksums\":[")
             checksum_items: mutable darray[RhArchItem] = []
-            checksum_field: mutable i64 = -1
-            while ci < fields.count.i64() |ci: i64 = 0, fields, raw, checksum_field|:
-                checksum_field <- ci if Arch::rh_arch_eq(raw, fields[ci.usize()].key_s, fields[ci.usize()].key_e, "sha256sums")
-                ci <- ci + 1
+            checksum_field: i64 = Arch::rh_arch_field(raw, fields, "sha256sums")
             if checksum_field >= 0:
                 return -1 if Arch::rh_arch_items(raw, fields[checksum_field.usize()], checksum_field, checksum_items) < 0
             Arch::rh_arch_emit_array(out, raw, checksum_items, checksum_field)
             Base::rh_push_text(out, "],\"relations\":[")
             emitted: mutable i64 = 0
             unresolved: mutable i64 = 0
-            while i < items.count.i64() |i: i64 = 0, items, raw, fields, out, emitted, unresolved|:
+            for i in 0..<items.count.i64() |i, items, raw, fields, out, emitted, unresolved|:
                 item: RhArchItem = items[i.usize()]
                 field: RhArchField = fields[item.field.usize()]
                 out.push(44) if emitted > 0
@@ -294,7 +268,6 @@ module Arch:
                     Base::rh_push_text(out, "declared")
                 Base::rh_push_text(out, "\"}")
                 emitted <- emitted + 1
-                i <- i + 1
             Base::rh_push_text(out, "],\"unknown_fields\":")
             Base::rh_push_decimal_i64(out, unknown)
             Base::rh_push_text(out, ",\"unresolved_relations\":")
