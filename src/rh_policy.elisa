@@ -113,43 +113,20 @@ module Policy:
 
         # Is an approved, unexpired exception covering rule+subject+digest?
         def rh_exception_applies(excs: darray[RhException]&, rule_id: i64, subject_id: i64, digest_high: u64, digest_low: u64, context_digest: u64, now: i64) -> bool can[Memory.Allocate, Abort.Panic]:
-            while i < excs.count |i: usize = 0, excs, rule_id, subject_id, digest_high, digest_low, context_digest, now|:
+            for i in 0..<excs.count |applies: bool = false, excs, rule_id, subject_id, digest_high, digest_low, context_digest, now| -> applies:
                 x: RhException = excs[i]
-                i <- i + 1
-                continue if x.state != RH_EXC_APPROVED
-                continue if not x.approval_verified
-                continue if x.rule_id != rule_id
-                continue if x.subject_id != subject_id
-                continue if x.expires_at <= now
-                continue if x.digest_high != digest_high or x.digest_low != digest_low
-                continue if x.context_digest != context_digest
-                return true
-            false
+                break true if x.state == RH_EXC_APPROVED and x.approval_verified and x.rule_id == rule_id and x.subject_id == subject_id and x.expires_at > now and x.digest_high == digest_high and x.digest_low == digest_low and x.context_digest == context_digest
 
         # Smallest remaining whole-day lifetime of an exception that actually
         # applied to this evaluation. The same subject/digest/state checks as
         # rh_exception_applies are kept here so the metric cannot describe a
         # different exception population than the decision.
         def rh_exception_expiry_days(excs: darray[RhException]&, applied: darray[i64]&, subject_id: i64, digest_high: u64, digest_low: u64, context_digest: u64, now: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
-            excs_loop: mutable darray[RhException]& = excs
-            applied_loop: mutable darray[i64]& = applied
-            subject_loop: mutable i64 = subject_id
-            high_loop: mutable u64 = digest_high
-            low_loop: mutable u64 = digest_low
-            context_loop: mutable u64 = context_digest
-            now_loop: mutable i64 = now
-            while i < excs_loop.count |best: i64 = -1, i: usize = 0, excs_loop, applied_loop, subject_loop, high_loop, low_loop, context_loop, now_loop| -> best:
-                x: RhException = excs_loop[i]
-                i <- i + 1
-                continue if x.state != RH_EXC_APPROVED
-                continue if x.subject_id != subject_loop
-                continue if x.expires_at <= now_loop
-                continue if x.digest_high != high_loop or x.digest_low != low_loop
-                continue if x.context_digest != context_loop
-                continue if not Graph::rh_contains(applied_loop, x.rule_id)
-                days: i64 = (x.expires_at - now_loop) / 86400
-                if best < 0 or days < best:
-                    best <- days
+            for i in 0..<excs.count |best: i64 = -1, excs, applied, subject_id, digest_high, digest_low, context_digest, now| -> best:
+                x: RhException = excs[i]
+                if x.state == RH_EXC_APPROVED and x.subject_id == subject_id and x.expires_at > now and x.digest_high == digest_high and x.digest_low == digest_low and x.context_digest == context_digest and Graph::rh_contains(applied, x.rule_id):
+                    days: i64 = (x.expires_at - now) / 86400
+                    best <- days if best < 0 or days < best
 
         # One rule's contribution. Returns a decision code; -1 marks "rule
         # skipped" (retired or excepted is handled by the caller).
@@ -174,27 +151,24 @@ module Policy:
         # overall decision is the lattice join, so warn can never override deny
         # and unknown can never be spent as permission.
         def rh_policy_eval(rules: darray[RhRule]&, inputs: darray[RhPolicyInput]&, excs: darray[RhException]&, subject_id: i64, digest_high: u64, digest_low: u64, context_digest: u64, now: i64, fired_out: mutable darray[i64]&, excepted_out: mutable darray[i64]&) -> u8 can[Memory.Allocate, Abort.Panic]:
-            while i < rules.count |decision: u8 = RH_DEC_ALLOW, i: usize = 0, fired_out, excepted_out| -> decision:
+            for i in 0..<rules.count |decision: u8 = RH_DEC_ALLOW, rules, inputs, excs, subject_id, digest_high, digest_low, context_digest, now, fired_out, excepted_out| -> decision:
                 r: RhRule = rules[i]
-                if r.state != RH_RULE_ACTIVE:
-                    i <- i + 1
-                    continue
-                if i < inputs.count:
-                    if rh_exception_applies(excs, r.id, subject_id, digest_high, digest_low, context_digest, now):
-                        excepted_out.push(r.id)
+                if r.state == RH_RULE_ACTIVE:
+                    if i < inputs.count:
+                        if rh_exception_applies(excs, r.id, subject_id, digest_high, digest_low, context_digest, now):
+                            excepted_out.push(r.id)
+                        else:
+                            v: u8 =
+                                inp: RhPolicyInput = inputs[i]
+                                block_result: u8 = rh_rule_verdict(r, inp)
+                                block_result
+                            if v != RH_DEC_ALLOW:
+                                fired_out.push(r.id)
+                            decision <- rh_decision_join(decision, v)
                     else:
-                        v: u8 =
-                            inp: RhPolicyInput = inputs[i]
-                            block_result: u8 = rh_rule_verdict(r, inp)
-                            block_result
-                        if v != RH_DEC_ALLOW:
-                            fired_out.push(r.id)
-                        decision <- rh_decision_join(decision, v)
-                else:
-                    # A rule with no supplied input is unknown, not permission.
-                    fired_out.push(r.id)
-                    decision <- rh_decision_join(decision, RH_DEC_UNKNOWN)
-                i <- i + 1
+                        # A rule with no supplied input is unknown, not permission.
+                        fired_out.push(r.id)
+                        decision <- rh_decision_join(decision, RH_DEC_UNKNOWN)
 
         # Binding digest: subject, context digest, rule ids/ops/thresholds, input
         # digests, and evaluation time. Two evaluations match only when all
@@ -205,9 +179,8 @@ module Policy:
             h <- Evidence::rh_fnv_u64(h, artifact_digest)
             h <- Evidence::rh_fnv_u64(h, context_digest)
             h <- Evidence::rh_fnv_i64(h, rules.count.i64())
-            while i < rules.count |i: usize = 0, rules, h|:
+            for i in 0..<rules.count |rules, h|:
                 r: RhRule = rules[i]
-                i <- i + 1
                 h <- Evidence::rh_fnv_i64(h, r.id)
                 h <- Evidence::rh_fnv_byte(h, r.op)
                 h <- Evidence::rh_fnv_i64(h, r.thr_num)
@@ -223,12 +196,10 @@ module Policy:
             Base::rh_push_text(out, "{\"decision\":\"")
             Base::rh_push_text(out, rh_decision_label(decision))
             Base::rh_push_text(out, "\",\"rules\":[")
-            while i < rules.count |i: usize = 0, first: bool = true, rules, out, fired, excepted|:
+            for i in 0..<rules.count |rules, out, fired, excepted|:
                 r: RhRule = rules[i]
-                i <- i + 1
-                if not first:
+                if i > 0:
                     out.push(44)
-                first <- false
                 Base::rh_push_text(out, "{\"id\":")
                 Base::rh_push_decimal_i64(out, r.id)
                 Base::rh_push_text(out, ",\"excepted\":")
