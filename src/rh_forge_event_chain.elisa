@@ -58,21 +58,26 @@ module ForgeEventChain:
             status
 
         def rh_fbc_bitbucket_cursor(texts: darray[u8]&, start: i64, end: i64, repository: darray[u8]&, capability: u8&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-            return false if end - start < 16 or end - start > 4096
-            route: mutable darray[u8] = []
-            Base::rh_push_text(route, "https://api.bitbucket.org/2.0/repositories/")
-            route.extend(bytes_view(repository))
-            Base::rh_push_text(route, "/")
-            Base::rh_push_text(route, capability)
-            return false if end - start <= route.count.i64() or texts[start.usize() + route.count] != 63
-            for index in 0..<route.count |route, texts, start|:
-                return false if route[index] != texts[start.usize() + index]
+            prefix: u8& = "https://api.bitbucket.org/2.0/repositories/"
+            prefix_length: i64 = Base::rh_cstr_len(prefix).i64()
+            repository_length: i64 = repository.count.i64()
+            capability_length: i64 = Base::rh_cstr_len(capability).i64()
+            route_length: i64 = prefix_length + repository_length + 1 + capability_length
+            return false if start < 0 or end < start or end > texts.count.i64() or end - start <= route_length or end - start > 4096
+            return false if not Base::rh_bytes_equal_literal(texts, start, start + prefix_length, prefix)
+            repository_start: i64 = start + prefix_length
+            repository_end: i64 = repository_start + repository_length
+            return false if not Base::rh_bytes_equal_span(texts, repository_start, repository_end, repository, 0, repository_length)
+            return false if texts[repository_end.usize()] != 47
+            capability_start: i64 = repository_end + 1
+            capability_end: i64 = capability_start + capability_length
+            return false if not Base::rh_bytes_equal_literal(texts, capability_start, capability_end, capability)
+            return false if texts[capability_end.usize()] != 63
             cursor: mutable darray[u8] = []
             return false if not ForgeEventChain::rh_fbc_span_to_cstr(texts, start, end, cursor)
             cursor_ptr: cstr = (&cursor[0]).cast[cstr] can Unsafe.PointerCast
             return false if not Git::rh_fetch_arg_safe(cursor_ptr)
-            for index in (start + route.count.i64() + 1)..<end |texts, start, route|:
-                return false if texts[index.usize()] == 35
+            return false if Base::rh_find_byte(texts, (capability_end + 1).usize(), 35) >= 0
             true
 
         def rh_fbc_bitbucket_native_id(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:

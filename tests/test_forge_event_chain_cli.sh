@@ -85,6 +85,19 @@ unsafe_repository["pagination"]["proposals"] = {"next":None,"complete":True}
 unsafe_repository_path = t / "unsafe-repository.json"
 unsafe_repository_path.write_text(json.dumps(unsafe_repository, separators=(",", ":")) + "\n")
 
+bad_cursors = {}
+for name, cursor in {
+    "wrong-host": "https://example.invalid/2.0/repositories/example/project/issues?page=2",
+    "wrong-resource": "https://api.bitbucket.org/2.0/repositories/example/project/pullrequests?page=2",
+    "repository-prefix-confusion": "https://api.bitbucket.org/2.0/repositories/example/project-extra/issues?page=2",
+    "cursor-fragment": "https://api.bitbucket.org/2.0/repositories/example/project/issues?page=2#fragment",
+}.items():
+    variant = copy.deepcopy(first)
+    variant["pagination"]["issues"]["next"] = cursor
+    path = t / f"{name}.json"
+    path.write_text(json.dumps(variant, separators=(",", ":")) + "\n")
+    bad_cursors[name] = path
+
 cases = {
     "gap.json": [str(second_path)],
     "reordered.json": [str(second_path), str(first_path)],
@@ -96,6 +109,7 @@ cases = {
     "invalid-id-format-input.json": [str(first_path), str(globals()["invalid-id-format"])],
     "over-limit-attempts-input.json": [str(globals()["over-limit-attempts"])],
     "unsafe-repository-input.json": [str(unsafe_repository_path)],
+    **{f"{name}-input.json": [str(path)] for name, path in bad_cursors.items()},
 }
 for name, segments in cases.items():
     write_input(name, segments)
@@ -113,7 +127,7 @@ print("[forge-event-chain] unfinished segment remains partial with opaque cursor
 PY
 
 set +e
-for name in gap reordered wrong-scope cursor-jump digest-mismatch time-reversal invalid-id invalid-id-format over-limit-attempts unsafe-repository; do
+for name in gap reordered wrong-scope cursor-jump digest-mismatch time-reversal invalid-id invalid-id-format over-limit-attempts unsafe-repository wrong-host wrong-resource repository-prefix-confusion cursor-fragment; do
   "${RUN_CHAIN[@]}" --input "$T/$name-input.json" --out "$T/$name-result.json" >/dev/null 2>&1
   status=$?
   [[ "$status" -eq 4 ]] || { echo "[forge-event-chain] FAIL: accepted $name chain (exit $status)" >&2; exit 1; }
