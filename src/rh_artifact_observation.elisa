@@ -18,22 +18,14 @@ module ArtifactObservation:
         const RH_ARTIFACT_OBSERVATION_GO_H1_ZIP: i64 = 5
         def rh_artifact_observation_member(nodes: darray[Json::RhJsonNode]&, texts: darray[u8]&, obj: i64, key: u8&) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if obj < 0 or nodes[obj.usize()].kind != Json::RH_JSON_OBJ
-            width: usize = strlen(key)
             found: mutable i64 = -1
-            while child >= 0 |child: i64 = nodes[obj.usize()].first_child, nodes, texts, key, width, found|:
+            while child >= 0 |child: i64 = nodes[obj.usize()].first_child, nodes, texts, key, found|:
                 key_node: Json::RhJsonNode = nodes[child.usize()]
                 value: i64 = key_node.next_sibling
                 return -2 if value < 0
-                if key_node.kind == Json::RH_JSON_STR and key_node.text_end - key_node.text_start == width.i64():
-                    same: bool =
-                        while k < width |same: bool = true, k: usize = 0, texts, key, child, nodes| -> same:
-                            key_text: Json::RhJsonNode = nodes[child.usize()]
-                            if texts[(key_text.text_start.usize() + k)] != key[k]:
-                                same <- false
-                            k <- k + 1
-                    if same:
-                        return -2 if found >= 0
-                        found <- value
+                if key_node.kind == Json::RH_JSON_STR and Base::rh_bytes_equal_literal(texts, key_node.text_start, key_node.text_end, key):
+                    return -2 if found >= 0
+                    found <- value
                 child <- nodes[value.usize()].next_sibling
             found
 
@@ -43,11 +35,10 @@ module ArtifactObservation:
 
         def rh_artifact_observation_hex(texts: darray[u8]&, start: i64, end: i64) -> bool:
             return false if end - start != 64
-            while i < end |i: i64 = start, texts, end|:
+            for i in start..<end |texts|:
                 b: u8 = texts[i.usize()]
                 valid: bool = (b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102)
                 return false if not valid
-                i <- i + 1
             true
 
         def rh_artifact_observation_sri_space(value: u8) -> bool:
@@ -56,12 +47,11 @@ module ArtifactObservation:
         def rh_artifact_observation_sri_algorithm_prefix(texts: darray[u8]&, start: i64, end: i64, algorithm: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             width: usize = strlen(algorithm)
             return false if end - start < width.i64()
-            while index < width |index: usize = 0, texts, start, algorithm, width|:
+            for index in 0..<width |texts, start, algorithm|:
                 actual: mutable u8 = texts[start.usize() + index]
                 expected: u8 = algorithm[index]
                 actual <- actual + 32 if actual >= 65 and actual <= 90
                 return false if actual != expected
-                index <- index + 1
             true
 
         # SRI associates each ?option with the hash expression before it.
@@ -71,18 +61,11 @@ module ArtifactObservation:
         # integrity metadata.
         def rh_artifact_observation_sri_digest_end(texts: darray[u8]&, start: i64, end: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
             return -1 if start < 0 or end < start or end > texts.count.i64()
-            digest_end: mutable i64 = end
-            while i < end |i: i64 = start, texts, end, digest_end|:
-                if texts[i.usize()] == 63:
-                    digest_end <- i
-                    i <- end
-                else:
-                    i <- i + 1
-            return digest_end if digest_end == end
-            while i < end |i: i64 = digest_end + 1, texts, end|:
+            question_mark: i64 = Base::rh_find_byte(texts, start.usize(), 63)
+            return end if question_mark < 0 or question_mark >= end
+            for i in (question_mark + 1)..<end |texts|:
                 return -1 if texts[i.usize()] < 33 or texts[i.usize()] > 126
-                i <- i + 1
-            digest_end
+            question_mark
 
         def rh_artifact_observation_sri_has_algorithm(texts: darray[u8]&, start: i64, end: i64, algorithm: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             found: mutable bool = false
@@ -170,12 +153,12 @@ module ArtifactObservation:
 
         def rh_artifact_observation_hex_equal(texts: darray[u8]&, start: i64, observed: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if start < 0 or observed.count != 64
-            while i < observed.count |i: usize = 0, texts, observed, start|:
+            return false if start > texts.count.i64() - observed.count.i64()
+            for i in 0..<observed.count |texts, observed, start|:
                 expected: mutable u8 = texts[(start.usize() + i)]
                 actual: u8 = observed[i]
                 expected <- expected + 32 if expected >= 65 and expected <= 90
                 return false if expected != actual
-                i <- i + 1
             true
 
         def rh_artifact_observation_go_h1_valid(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -218,10 +201,9 @@ module ArtifactObservation:
             return -1 if not cargo_graph and not npm_graph and not go_graph
             return -1 if artifact_id >= nodes[artifacts.usize()].child_count.i64()
             item: mutable i64 = nodes[artifacts.usize()].first_child
-            while i < artifact_id |i: i64 = 0, item, nodes|:
+            for _ in 0..<artifact_id |item, nodes|:
                 return -1 if item < 0
                 item <- nodes[item.usize()].next_sibling
-                i <- i + 1
             return -1 if item < 0 or not rh_artifact_observation_fields(nodes, item, 6)
             id: i64 = rh_artifact_observation_member(nodes, texts_out, item, "id")
             package_node: i64 = rh_artifact_observation_member(nodes, texts_out, item, "package_node")
