@@ -206,7 +206,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli postgres monitor --expected-interval <seconds> --out <file> (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli pilot-review --input <file> --out <file>")
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
-    rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [review options] | --gitlab-project <group/path> [--resume-from <result>] | --bitbucket-repo <workspace/repo> [--resume-from <result>] | --instance <approved-instance.json> --repository <owner/repo>) --out <file> [--max-pages N]")
+    rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [review options] | --gitlab-project <group/path> [--resume-from <result>] | --bitbucket-repo <workspace/repo> [--resume-from <result>] | --instance <approved-instance.json> --repository <owner/repo> [--resume-from <result>]) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli forge review-chain --input <rh-forge-review-chain-input/1> --out <file>")
     rh_cli_err("       rh_cli forge events-chain --input <rh-forge-event-chain-input/1> --out <file>")
     rh_cli_err("       rh_cli roles-review-chain --input <rh-forge-review-chain-result/1> --out <rh-roles-input/1>")
@@ -5589,20 +5589,28 @@ def rh_do_forge_events_bitbucket(repository: cstr, out_path: cstr, max_pages: i6
     rh_cli_out("forge events: Bitbucket issues and pull requests collected")
     0
 
-def rh_do_forge_events_selfhosted(instance_path: cstr, repository: cstr, out_path: cstr, max_pages: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
-    if not Git::rh_arg_safe(instance_path) or not Git::rh_arg_safe(repository) or not Git::rh_arg_safe(out_path) or Base::rh_streq(instance_path, out_path):
+def rh_do_forge_events_selfhosted(instance_path: cstr, repository: cstr, out_path: cstr, max_pages: i64, resume_path: cstr, has_resume: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
+    if not Git::rh_arg_safe(instance_path) or not Git::rh_arg_safe(repository) or not Git::rh_arg_safe(out_path) or Base::rh_streq(instance_path, out_path) or (has_resume and (not Git::rh_arg_safe(resume_path) or Base::rh_streq(resume_path, out_path))):
         rh_cli_err("rejected self-hosted forge event argument (allowlist or input/output alias)")
         return 3
     instance_input: mutable darray[u8] = []
-    if Base::rh_io_read(instance_path, instance_input) < 0 or instance_input.count > 65536:
+    if (Base::rh_io_read(instance_path, instance_input) can Global{Read,Write}) < 0 or instance_input.count > 65536:
         rh_cli_err("forge events: cannot read bounded self-hosted connector instance")
         return 4
+    previous: mutable darray[u8] = []
+    if has_resume and ((Base::rh_io_read(resume_path, previous) can Global{Read,Write}) < 0 or previous.count > 8388608):
+        rh_cli_err("forge events: cannot read bounded self-hosted continuation")
+        return 4
     body: mutable darray[u8] = []
-    if (ForgeEventsFetch::rh_forge_events_selfhosted_live(instance_input, repository, max_pages, out_path, body) can Global{Read,Write}) != 0:
+    fetch_status: i64 = ForgeEventsFetch::rh_forge_events_selfhosted_live(instance_input, repository, max_pages, out_path, previous, has_resume, body) can Global{Read,Write}
+    if fetch_status != 0:
+        if fetch_status == -2:
+            rh_cli_err("forge events: self-hosted continuation rejected: result/provider/repository scope or cursor mismatch")
+            return 4
         rh_cli_err("forge events: approved Gitea/Forgejo event collection failed (see page evidence)")
         return 4
     body.push(10)
-    if not Base::rh_io_write(out_path, body):
+    if not (Base::rh_io_write(out_path, body) can Global{Read,Write}):
         rh_cli_err("forge events: cannot write --out")
         return 4
     rh_cli_out("forge events: approved Gitea/Forgejo issues, pull requests, and releases collected")

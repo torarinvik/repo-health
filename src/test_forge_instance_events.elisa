@@ -9,13 +9,16 @@ module ForgeInstanceEventsHarness:
         def rh_fieh_usage() -> i32:
             2
 
-        def rh_fieh_run(instance_path: cstr, repository: cstr, page_limit: i64, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
-            return 3 if not Git::rh_arg_safe(instance_path) or not Git::rh_arg_safe(repository) or not Git::rh_arg_safe(out_path) or Base::rh_streq(instance_path, out_path)
+        def rh_fieh_run(instance_path: cstr, repository: cstr, page_limit: i64, resume_path: cstr, has_resume: bool, out_path: cstr) -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
+            return 3 if not Git::rh_arg_safe(instance_path) or not Git::rh_arg_safe(repository) or not Git::rh_arg_safe(out_path) or Base::rh_streq(instance_path, out_path) or (has_resume and (not Git::rh_arg_safe(resume_path) or Base::rh_streq(resume_path, out_path)))
             instance_input: mutable darray[u8] = []
             read_status: i64 = Base::rh_io_read(instance_path, instance_input) can Global{Read,Write}
             return 4 if read_status < 0 or instance_input.count > 65536
+            previous: mutable darray[u8] = []
+            return 4 if has_resume and (Base::rh_io_read(resume_path, previous) can Global{Read,Write}) < 0
+            return 4 if previous.count > 8388608
             body: mutable darray[u8] = []
-            fetch_status: i64 = ForgeEventsFetch::rh_forge_events_selfhosted_live(instance_input, repository, page_limit, out_path, body) can Global{Read,Write}
+            fetch_status: i64 = ForgeEventsFetch::rh_forge_events_selfhosted_live(instance_input, repository, page_limit, out_path, previous, has_resume, body) can Global{Read,Write}
             return 4 if fetch_status != 0
             body.push(10)
             write_status: bool = Base::rh_io_write(out_path, body) can Global{Read,Write}
@@ -24,12 +27,19 @@ module ForgeInstanceEventsHarness:
 
     public:
         def rh_forge_instance_events_harness_main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
-            return ForgeInstanceEventsHarness::rh_fieh_usage() if argc != 6
+            return ForgeInstanceEventsHarness::rh_fieh_usage() if argc != 6 and argc != 8
             slots: mutable cstr&& = argv.cast[mutable cstr&&]
             return ForgeInstanceEventsHarness::rh_fieh_usage() if not Base::rh_streq(slots[1], "--instance") or not Base::rh_streq(slots[3], "--max-pages")
             page_limit: i64 = 1 if Base::rh_streq(slots[4], "1") else 2 if Base::rh_streq(slots[4], "2") else 0
             return ForgeInstanceEventsHarness::rh_fieh_usage() if page_limit == 0
-            ForgeInstanceEventsHarness::rh_fieh_run(slots[2], "owner/project", page_limit, slots[5]) can Global{Read,Write}
+            has_resume: bool = argc == 8
+            return ForgeInstanceEventsHarness::rh_fieh_usage() if has_resume and not Base::rh_streq(slots[5], "--resume-from")
+            resume_path: mutable cstr = slots[5]
+            out_path: mutable cstr = slots[5]
+            if has_resume:
+                resume_path <- slots[6]
+                out_path <- slots[7]
+            ForgeInstanceEventsHarness::rh_fieh_run(slots[2], "owner/project", page_limit, resume_path, has_resume, out_path) can Global{Read,Write}
 
 def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     ForgeInstanceEventsHarness::rh_forge_instance_events_harness_main(argc, argv) can Global{Read,Write}

@@ -44,6 +44,7 @@ ELISA_STAGE1_BIN="$COMPILER_ROOT/bin/elisac-stage1" \
 tools/build.sh --only test_forge_instance_events >/dev/null
 
 printf '%s\n' '{"max_response_items":2,"default_paging_num":2}' > "$T/settings.json"
+printf '%s\n' '{"max_response_items":3,"default_paging_num":3}' > "$T/settings-3.json"
 printf '%s\n' '[{"number":1,"state":"open","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-15T22:13:20Z","closed_at":null,"html_url":"https://forge.example.org/owner/project/issues/1"},{"number":2,"state":"closed","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-16T22:13:20Z","closed_at":"2023-11-16T22:13:20Z","html_url":"https://forge.example.org/owner/project/issues/2"}]' > "$T/issues-1.json"
 printf '%s\n' '[{"number":3,"state":"open","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-17T22:13:20Z","closed_at":null,"html_url":"https://forge.example.org/owner/project/issues/3"}]' > "$T/issues-2.json"
 printf '%s\n' '[{"number":7,"state":"closed","created_at":"2023-11-13T22:13:20Z","updated_at":"2023-11-16T22:13:20Z","closed_at":"2023-11-17T22:13:20Z","html_url":"https://forge.example.org/owner/project/pulls/7"}]' > "$T/pulls-1.json"
@@ -51,6 +52,7 @@ printf '%s\n' '[{"id":9,"created_at":"2023-11-14T22:13:20Z","published_at":"2023
 printf '%s\n' '[]' > "$T/empty.json"
 printf '%s\n' '{"schema":"rh-connector-instance/1","connector_id":"gitea","base_url":"https://forge.example.org/gitea","approved":true}' > "$T/gitea.json"
 printf '%s\n' '{"schema":"rh-connector-instance/1","connector_id":"forgejo","base_url":"https://forge.example.org/forgejo","approved":true}' > "$T/forgejo.json"
+printf '%s\n' '{"schema":"rh-connector-instance/1","connector_id":"gitea","base_url":"https://forge.example.org/other","approved":true}' > "$T/different-base.json"
 printf '%s\n' '{"schema":"rh-connector-instance/1","connector_id":"gitea","base_url":"https://forge.example.org/gitea","approved":false}' > "$T/unapproved.json"
 printf '%s\n' '{"schema":"rh-connector-instance/1","connector_id":"forgejo","base_url":"https://127.0.0.1/forgejo","approved":true}' > "$T/loopback.json"
 printf '%s\n' '{"default_paging_num":2}' > "$T/bad-settings.json"
@@ -93,6 +95,53 @@ if rg -q 'gitea_fixture_secret|forgejo_fixture_secret' "$T/curl.args"; then
   echo "credential leaked into curl argv" >&2
   exit 1
 fi
+
+echo "[forge-instance-events] numeric page cursors resume with exact predecessor lineage"
+run_capture --instance "$T/gitea.json" --max-pages 1 "$T/gitea-partial.out" || exit 1
+pulls_before="$(python3 - "$T/curl.args" <<'PY'
+import pathlib, sys
+print(sum('/pulls?state=all' in line for line in pathlib.Path(sys.argv[1]).read_text().splitlines()))
+PY
+)"
+run_capture --instance "$T/gitea.json" --max-pages 1 --resume-from "$T/gitea-partial.out" "$T/gitea-resumed.out" || exit 1
+pulls_after="$(python3 - "$T/curl.args" <<'PY'
+import pathlib, sys
+print(sum('/pulls?state=all' in line for line in pathlib.Path(sys.argv[1]).read_text().splitlines()))
+PY
+)"
+[[ "$pulls_before" == "$pulls_after" ]] || { echo "completed proposal capability was unexpectedly fetched during resume" >&2; exit 1; }
+python3 - "$T/gitea-partial.out" "$T/gitea-resumed.out" <<'PY'
+import hashlib, json, pathlib, sys
+previous_path = pathlib.Path(sys.argv[1])
+result = json.load(open(sys.argv[2]))
+previous = previous_path.read_bytes()
+assert result["segment"]["resumed_from_sha256"] == hashlib.sha256(previous).hexdigest(), result["segment"]
+assert result["segment"]["instance_url_sha256"] == hashlib.sha256(b"https://forge.example.org/gitea").hexdigest(), result["segment"]
+assert result["segment"]["page_size"] == 2, result["segment"]
+assert result["segment"]["consumed"] == {"issues":2,"proposals":None,"releases":2}, result["segment"]
+assert [row["native_id"] for row in result["events"]] == ["gitea:3"], result["events"]
+assert result["capabilities"]["proposals"]["status"] == "not_attempted", result["capabilities"]
+assert result["pagination"]["issues"] == {"next":None,"complete":True}, result["pagination"]
+assert result["pagination"]["proposals"] == {"next":None,"complete":True}, result["pagination"]
+PY
+
+before="$(wc -l < "$T/curl.args")"
+if run_capture --instance "$T/different-base.json" --max-pages 1 --resume-from "$T/gitea-partial.out" "$T/wrong-instance.out"; then
+  echo "continuation from another instance was unexpectedly accepted" >&2
+  exit 1
+fi
+after="$(wc -l < "$T/curl.args")"
+[[ "$before" == "$after" ]] || { echo "mismatched instance reached curl" >&2; exit 1; }
+export RH_CURL_SELFHOSTED_SETTINGS="$T/settings-3.json"
+if run_capture --instance "$T/gitea.json" --max-pages 1 --resume-from "$T/gitea-partial.out" "$T/changed-page-size.out"; then
+  echo "continuation under a changed server page size was unexpectedly accepted" >&2
+  exit 1
+fi
+if rg -q 'limit=3&page=' "$T/curl.args"; then
+  echo "changed page size was used to advance an existing cursor" >&2
+  exit 1
+fi
+export RH_CURL_SELFHOSTED_SETTINGS="$T/settings.json"
 
 run_capture --instance "$T/forgejo.json" --max-pages 2 "$T/forgejo.out" || exit 1
 python3 - "$T/forgejo.out" <<'PY'
