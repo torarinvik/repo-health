@@ -161,7 +161,7 @@ module Store:
         # converge on one immutable object; a different object at the same digest
         # fails closed. hex_out is appended to and must be empty on entry.
     private:
-        def rh_store_blob_unlocked(root: cstr, data: mutable darray[u8]&, hex_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_store_blob_unlocked(root: cstr, data: mutable darray[u8]&, hex_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             rh_digest_hex(data, hex_out)
             published_path: mutable darray[u8] =
                 path: mutable darray[u8] = []
@@ -210,7 +210,7 @@ module Store:
                 return -1 if stage_removed != 0 or synced != 0 or closed != 0
                 return 0
             back: mutable darray[u8] = []
-            existing: bool = Base::rh_io_read(published, back) >= 0
+            existing: bool = (Base::rh_io_read(published, back) can Global{Read,Write}) >= 0
             _ = unlink((&stage_path[0]).cast[u8&] can Unsafe.PointerCast)
             same: bool = existing and string_views_eq(bytes_view(back), bytes_view(data)) == 1
             synced_existing: i32 = fsync(directory_fd) if same else 0
@@ -219,10 +219,10 @@ module Store:
             -1
 
     public:
-        def rh_store_blob(root: cstr, data: mutable darray[u8]&, hex_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_store_blob(root: cstr, data: mutable darray[u8]&, hex_out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             guard_fd: mutable i32 = -1
             return -1 if Store::rh_store_guard_acquire(root, &guard_fd) != 0
-            stored: i64 = Store::rh_store_blob_unlocked(root, data, hex_out)
+            stored: i64 = (Store::rh_store_blob_unlocked(root, data, hex_out) can Global{Read,Write})
             released: i64 = Store::rh_store_guard_release(guard_fd)
             return -1 if stored != 0 or released != 0
             stored
@@ -233,11 +233,11 @@ module Store:
         def rh_store_blob_content_matches(hexname: u8&, data: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
             computed: mutable darray[u8] = []
             rh_digest_hex(data, computed)
-            string_view_eq(bytes_view(computed), hexname) == 1
+            Base::rh_bytes_equal_literal(computed, 0, computed.count.i64(), hexname)
 
         # Verify a stored blob recomputes to its name. False when missing or
         # corrupt: publication from it is blocked (M02-02).
-        def rh_store_blob_verify(root: cstr, hexname: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_store_blob_verify(root: cstr, hexname: u8&, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             ok_out[0] <- 0
             path: mutable darray[u8] =
                 path: mutable darray[u8] = []
@@ -248,10 +248,10 @@ module Store:
                 path
             pp: cstr = (&path[0]).cast[cstr] can Unsafe.PointerCast
             back: mutable darray[u8] = []
-            return -1 if Base::rh_io_read(pp, back) < 0
+            return -1 if (Base::rh_io_read(pp, back) can Global{Read,Write}) < 0
             check: mutable darray[u8] = []
             rh_digest_hex(back, check)
-            same: bool = string_view_eq(bytes_view(check), hexname) == 1
+            same: bool = Base::rh_bytes_equal_literal(check, 0, check.count.i64(), hexname)
             if same:
                 ok_out[0] <- 1
                 return 0
@@ -482,9 +482,9 @@ module Store:
             0
 
         # Index lookup: 1 present, 0 absent, -1 unreadable.
-        def rh_index_has(index_path: cstr, id: u8&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_index_has(index_path: cstr, id: u8&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             raw: mutable darray[u8] = []
-            return 0 if Base::rh_io_read(index_path, raw) < 0
+            return 0 if (Base::rh_io_read(index_path, raw) can Global{Read,Write}) < 0
             while start < raw.count |start: usize = 0, raw, id|:
                 stop: i64 = Base::rh_find_byte(raw, start, 10)
                 line_end: usize = stop.usize() if stop >= 0 else raw.count
@@ -499,18 +499,18 @@ module Store:
         # Append one canonical record. 1 appended, 0 duplicate-skipped, -1 error.
         # The record line must already be complete JSON (caller-built); the id is
         # indexed separately so retries converge (S005).
-        def rh_store_event(events_path: cstr, index_path: cstr, id: u8&, line: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-            seen: i64 = rh_index_has(index_path, id)
+        def rh_store_event(events_path: cstr, index_path: cstr, id: u8&, line: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
+            seen: i64 = (rh_index_has(index_path, id) can Global{Read,Write})
             return -1 if seen < 0
             return 0 if seen == 1
             current: mutable darray[u8] = []
-            if Base::rh_io_read(events_path, current) < 0:
+            if (Base::rh_io_read(events_path, current) can Global{Read,Write}) < 0:
                 return -1 if Base::rh_file_size(events_path) >= 0
             current.extend(bytes_view(line))
             current.push(10)
             return -1 if not Base::rh_io_write(events_path, current)
             ids: mutable darray[u8] = []
-            if Base::rh_io_read(index_path, ids) < 0:
+            if (Base::rh_io_read(index_path, ids) can Global{Read,Write}) < 0:
                 return -1 if Base::rh_file_size(index_path) >= 0
             Base::rh_push_text(ids, id)
             ids.push(10)
@@ -518,15 +518,15 @@ module Store:
             1
 
         # Count data lines in a file. -1 when unreadable.
-        def rh_count_file_lines(path: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_count_file_lines(path: cstr) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             raw: mutable darray[u8] = []
-            return -1 if Base::rh_io_read(path, raw) < 0
+            return -1 if (Base::rh_io_read(path, raw) can Global{Read,Write}) < 0
             Base::rh_count_lines(raw)
 
         # Cursor read: page/count/ok. Missing file is ok=0 (fresh job), not error.
-        def rh_cursor_read(path: cstr, page_out: mutable i64&, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_cursor_read(path: cstr, page_out: mutable i64&, count_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             raw: mutable darray[u8] = []
-            if Base::rh_io_read(path, raw) < 0:
+            if (Base::rh_io_read(path, raw) can Global{Read,Write}) < 0:
                 page_out[0] <- 0
                 count_out[0] <- 0
                 return false
@@ -558,9 +558,9 @@ module Store:
             Base::rh_io_write(path, body)
 
         # Append one coverage interval observation "start end status".
-        def rh_coverage_mark(path: cstr, start: i64, end: i64, status: u8) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_coverage_mark(path: cstr, start: i64, end: i64, status: u8) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             current: mutable darray[u8] = []
-            if Base::rh_io_read(path, current) < 0:
+            if (Base::rh_io_read(path, current) can Global{Read,Write}) < 0:
                 return false if Base::rh_file_size(path) >= 0
             Base::rh_push_decimal_i64(current, start)
             current.push(32)
@@ -592,9 +592,9 @@ module Store:
 
         # Read a lease file into token/owner/heartbeat/phase. Returns false when
         # the file is missing or malformed (caller treats as reclaimable).
-        def rh_lease_read(path: cstr, token_out: mutable i64&, owner: mutable darray[u8]&, hb_out: mutable i64&, ttl_out: mutable i64&, phase_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_lease_read(path: cstr, token_out: mutable i64&, owner: mutable darray[u8]&, hb_out: mutable i64&, ttl_out: mutable i64&, phase_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             raw: mutable darray[u8] = []
-            return false if Base::rh_io_read(path, raw) < 0
+            return false if (Base::rh_io_read(path, raw) can Global{Read,Write}) < 0
             l3s: usize = |token_out, owner, hb_out, raw|
                 l2s: usize = |token_out, owner, raw|
                     l1s: usize = |token_out, raw|
@@ -646,9 +646,9 @@ module Store:
                 body
             Base::rh_io_write(path, body)
 
-        def rh_lease_log(log_path: cstr, token: i64, owner: u8&, heartbeat: i64, note: u8&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_lease_log(log_path: cstr, token: i64, owner: u8&, heartbeat: i64, note: u8&) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             current: mutable darray[u8] = []
-            if Base::rh_io_read(log_path, current) < 0:
+            if (Base::rh_io_read(log_path, current) can Global{Read,Write}) < 0:
                 return false if Base::rh_file_size(log_path) >= 0
             Base::rh_push_decimal_i64(current, token)
             current.push(32)
@@ -665,14 +665,14 @@ module Store:
         # Expiry is judged by the RECORDED ttl (stored in the lease itself), so a
         # replacement presenting a different ttl cannot change the verdict; now
         # is caller time so tests inject fixed clocks (deterministic).
-        def rh_lease_acquire(path: cstr, log_path: cstr, owner: u8&, now: i64, ttl: i64) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_lease_acquire(path: cstr, log_path: cstr, owner: u8&, now: i64, ttl: i64) -> i64 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             next: i64 =
                 token: mutable i64 = 0
                 old_owner: mutable darray[u8] = []
                 hb: mutable i64 = 0
                 recorded: mutable i64 = 0
                 phase: mutable i64 = 0
-                have: bool = rh_lease_read(path, &token, old_owner, &hb, &recorded, &phase)
+                have: bool = (rh_lease_read(path, &token, old_owner, &hb, &recorded, &phase) can Global{Read,Write})
                 if have:
                     if phase == RH_LS_AVAILABLE:
                         token + 1
@@ -684,39 +684,39 @@ module Store:
                     token + 1
             return -1 if ttl <= 0
             return -1 if not rh_lease_write(path, next, owner, now, ttl, 1)
-            rh_lease_log(log_path, next, owner, now, "claim")
+            (rh_lease_log(log_path, next, owner, now, "claim") can Global{Read,Write})
             next
 
         # Heartbeat only when the token still matches (expired workers fail).
         # The recorded ttl is preserved, never renegotiated mid-lease.
-        def rh_lease_heartbeat(path: cstr, token: i64, owner: u8&, now: i64) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_lease_heartbeat(path: cstr, token: i64, owner: u8&, now: i64) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             cur: mutable i64 = 0
             drop: mutable darray[u8] = []
             hb: mutable i64 = 0
             kept: mutable i64 = 0
             phase: mutable i64 = 0
-            return false if not rh_lease_read(path, &cur, drop, &hb, &kept, &phase)
+            return false if not (rh_lease_read(path, &cur, drop, &hb, &kept, &phase) can Global{Read,Write})
             return false if cur != token
             return false if phase == 3 or phase == 4 or phase == 5 or phase == RH_LS_AVAILABLE
             rh_lease_write(path, token, owner, now, kept, phase)
 
         # Release to a final phase only when the token still matches: a stale
         # worker cannot publish after losing its fencing token (M02-03).
-        def rh_lease_release(path: cstr, log_path: cstr, token: i64, owner: u8&, now: i64, final_phase: i64) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+        def rh_lease_release(path: cstr, log_path: cstr, token: i64, owner: u8&, now: i64, final_phase: i64) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
             cur: mutable i64 = 0
             drop: mutable darray[u8] = []
             hb: mutable i64 = 0
             kept: mutable i64 = 0
             phase: mutable i64 = 0
-            return false if not rh_lease_read(path, &cur, drop, &hb, &kept, &phase)
+            return false if not (rh_lease_read(path, &cur, drop, &hb, &kept, &phase) can Global{Read,Write})
             if cur != token:
-                rh_lease_log(log_path, token, owner, now, "stale-release-refused")
+                (rh_lease_log(log_path, token, owner, now, "stale-release-refused") can Global{Read,Write})
                 return false
             return false if not rh_lease_write(path, token, owner, now, kept, final_phase)
-            rh_lease_log(log_path, token, owner, now, "release")
+            (rh_lease_log(log_path, token, owner, now, "release") can Global{Read,Write})
             true
 
         # Release a shared resource lock for reuse. A later claim receives the
         # next fencing token; successful job leases should still finish terminally.
-        def rh_lease_release_available(path: cstr, log_path: cstr, token: i64, owner: u8&, now: i64) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
-            Store::rh_lease_release(path, log_path, token, owner, now, RH_LS_AVAILABLE)
+        def rh_lease_release_available(path: cstr, log_path: cstr, token: i64, owner: u8&, now: i64) -> bool can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release, Global{Read,Write}]:
+            (Store::rh_lease_release(path, log_path, token, owner, now, RH_LS_AVAILABLE) can Global{Read,Write})
