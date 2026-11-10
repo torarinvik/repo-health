@@ -127,17 +127,13 @@ module ReleaseFeedReport:
         def rh_rel_supported_line_count(pool: darray[u8]&, releases: darray[ReleaseFeed::RhRelease]&) -> i64 can[Memory.Allocate, Abort.Panic]:
             pool_loop: mutable darray[u8]& = pool
             releases_loop: mutable darray[ReleaseFeed::RhRelease]& = releases
-            while i < releases_loop.count.i64() |total: i64 = 0, i: i64 = 0, pool_loop, releases_loop| -> total:
+            for i in 0..<releases_loop.count.i64() |total: i64 = 0, pool_loop, releases_loop| -> total:
                 release: ReleaseFeed::RhRelease = releases_loop[i.usize()]
-                seen: mutable bool = false
                 if release.supported_line_s >= 0:
-                    while j < i |j: i64 = 0, i, pool_loop, releases_loop, release, seen|:
+                    seen: bool = for j in 0..<i |seen: bool = false, pool_loop, releases_loop, release| -> seen:
                         prior: ReleaseFeed::RhRelease = releases_loop[j.usize()]
-                        if prior.supported_line_s >= 0 and ReleaseFeedReport::rh_rel_span_equal(pool_loop, prior.supported_line_s, prior.supported_line_e, release.supported_line_s, release.supported_line_e):
-                            seen <- true
-                        j <- j + 1
+                        break true if prior.supported_line_s >= 0 and ReleaseFeedReport::rh_rel_span_equal(pool_loop, prior.supported_line_s, prior.supported_line_e, release.supported_line_s, release.supported_line_e)
                     total <- total + 1 if not seen
-                i <- i + 1
 
         def rh_rel_span_equal(pool: darray[u8]&, left_s: i64, left_e: i64, right_s: i64, right_e: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             Base::rh_bytes_equal_span(pool, left_s, left_e, pool, right_s, right_e)
@@ -146,13 +142,13 @@ module ReleaseFeedReport:
             pool_loop: mutable darray[u8]& = pool
             releases_loop: mutable darray[ReleaseFeed::RhRelease]& = releases
             known_out[0] <- 0
-            while i < releases_loop.count.i64() |total: i64 = 0, i: i64 = 0, pool_loop, releases_loop, known_out| -> total:
+            for i in 0..<releases_loop.count.i64() |total: i64 = 0, pool_loop, releases_loop, known_out| -> total:
                 release: ReleaseFeed::RhRelease = releases_loop[i.usize()]
                 if release.target_s >= 0:
                     known_out[0] <- known_out[0] + 1
                     previous: mutable i64 = -1
                     previous_time: mutable i64 = -1
-                    while j < releases_loop.count.i64() |j: i64 = 0, i, pool_loop, releases_loop, release, previous, previous_time|:
+                    for j in 0..<releases_loop.count.i64() |i, pool_loop, releases_loop, release, previous, previous_time|:
                         candidate: ReleaseFeed::RhRelease = releases_loop[j.usize()]
                         same_tag: bool = ReleaseFeedReport::rh_rel_span_equal(pool_loop, release.tag_s, release.tag_e, candidate.tag_s, candidate.tag_e)
                         earlier: bool = candidate.first_seen < release.first_seen or (candidate.first_seen == release.first_seen and j < i)
@@ -160,22 +156,13 @@ module ReleaseFeedReport:
                             if previous < 0 or candidate.first_seen > previous_time or (candidate.first_seen == previous_time and j > previous):
                                 previous <- j
                                 previous_time <- candidate.first_seen
-                        j <- j + 1
                     if previous >= 0:
                         prior: ReleaseFeed::RhRelease = releases_loop[previous.usize()]
                         if not ReleaseFeedReport::rh_rel_span_equal(pool_loop, release.target_s, release.target_e, prior.target_s, prior.target_e):
                             total <- total + 1
-                i <- i + 1
 
-        def rh_rel_sort_times(values: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
-            while i < values.count |i: i64 = 1, values|:
-                value: i64 = values[i.usize()]
-                j: i64 = i
-                while j > 0 and values[(j - 1).usize()] > value |j: i64 = i, value, values|:
-                    values[j.usize()] <- values[(j - 1).usize()]
-                    j <- j - 1
-                values[j.usize()] <- value
-                i <- i + 1
+        def rh_rel_i64_less(left: i64, right: i64) -> bool:
+            left < right
 
     public:
         def rh_rfr_report(raw: darray[u8]&, first_seen: i64, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
@@ -200,7 +187,7 @@ module ReleaseFeedReport:
             source_mapping_known: mutable i64 = 0
             stable_times: mutable darray[i64] = []
             Base::rh_push_text(out, "{\"schema\":\"rh-release-feed-result/1\",\"releases\":[")
-            while i < releases.count.i64() |i: i64 = 0, releases, pool, out, asset_total, digest_total, published_total, stable_total, prerelease_total, stable_times|:
+            for i in 0..<releases.count.i64() |releases, pool, out, asset_total, digest_total, published_total, stable_total, prerelease_total, withdrawn_total, support_end_latest, support_end_known, release_notes_known, release_notes_present, source_mapping_known, source_mapped_total, stable_times|:
                 r: ReleaseFeed::RhRelease = releases[i.usize()]
                 asset_total <- asset_total + r.asset_count
                 digest_total <- digest_total + r.digest_known_count
@@ -289,8 +276,7 @@ module ReleaseFeedReport:
                 Base::rh_push_text(out, ",\"digest_known_count\":")
                 Base::rh_push_decimal_i64(out, r.digest_known_count)
                 Base::rh_push_text(out, "}")
-                i <- i + 1
-            ReleaseFeedReport::rh_rel_sort_times(stable_times)
+            sort[i64](stable_times, ReleaseFeedReport::rh_rel_i64_less)
             latest_stable_age: mutable i64 = -1
             if stable_times.count > 0:
                 latest_stable_age <- (first_seen - stable_times[stable_times.count - 1]) / 86400
@@ -298,23 +284,18 @@ module ReleaseFeedReport:
             interrelease_variance: mutable i64 = -1
             if stable_times.count > 1:
                 gaps: mutable darray[i64] = []
-                while i < stable_times.count |i: i64 = 1, stable_times, gaps|:
+                for i in 1..<stable_times.count |stable_times, gaps|:
                     gaps.push((stable_times[i] - stable_times[i - 1]) / 86400)
-                    i <- i + 1
-                ReleaseFeedReport::rh_rel_sort_times(gaps)
+                sort[i64](gaps, ReleaseFeedReport::rh_rel_i64_less)
                 middle: i64 = gaps.count / 2
                 interrelease_median <- gaps[middle.usize()]
                 interrelease_median <- (gaps[(middle - 1).usize()] + gaps[middle.usize()]) / 2 if gaps.count % 2 == 0
-                mean_gap_sum: i64 =
-                    while i < gaps.count |mean_gap_sum: i64 = 0, i: i64 = 0, gaps| -> mean_gap_sum:
-                        mean_gap_sum <- mean_gap_sum + gaps[i.usize()]
-                        i <- i + 1
+                mean_gap_sum: i64 = for i in 0..<gaps.count |mean_gap_sum: i64 = 0, gaps| -> mean_gap_sum:
+                    mean_gap_sum <- mean_gap_sum + gaps[i]
                 mean_gap: mutable i64 = mean_gap_sum / gaps.count.i64()
-                variance_sum: i64 =
-                    while i < gaps.count |variance_sum: i64 = 0, i: i64 = 0, gaps, mean_gap| -> variance_sum:
-                        delta: i64 = gaps[i.usize()] - mean_gap
-                        variance_sum <- variance_sum + delta * delta
-                        i <- i + 1
+                variance_sum: i64 = for i in 0..<gaps.count |variance_sum: i64 = 0, gaps, mean_gap| -> variance_sum:
+                    delta: i64 = gaps[i] - mean_gap
+                    variance_sum <- variance_sum + delta * delta
                 interrelease_variance <- variance_sum / gaps.count.i64()
             metric_totals: RhReleaseMetricTotals = RhReleaseMetricTotals{
                 release_count: releases.count.i64(),
