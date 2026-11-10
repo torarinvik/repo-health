@@ -87,13 +87,15 @@ module Observation:
         object: RhEvidenceObject
         locator: sview
 
-    # Current report observations need at most two source objects. Inline
-    # capacity keeps current reports allocation-free; larger lineage lists
-    # spill through the standard library's arena-backed vector.
+    # Current report observations need at most two source objects. Keep those
+    # in the value itself; larger lineage lists grow only their overflow array.
     const RH_MAX_EVIDENCE_LINKS: usize = 1024
+    const RH_INLINE_EVIDENCE_LINKS: usize = 2
 
     struct RhEvidenceLinks:
-        items: mutable InlineVec[RhEvidenceStoredLink, 2]
+        inline_items: mutable RhEvidenceStoredLink[RH_INLINE_EVIDENCE_LINKS]
+        inline_count: mutable usize
+        overflow: mutable darray[RhEvidenceStoredLink]
         locators: mutable darray[u8]
 
     struct RhEvidenceStoredLink:
@@ -102,8 +104,7 @@ module Observation:
         length: usize
 
     def rh_evidence_links_empty() -> RhEvidenceLinks:
-        can Global{Read, Write}:
-            return RhEvidenceLinks{items: inline_vec(&perm_arena), locators: []}
+        RhEvidenceLinks{inline_items: zeroed, inline_count: 0, overflow: [], locators: []}
 
     def rh_evidence_object_code(object: RhEvidenceObject) -> u8:
         match object:
@@ -162,22 +163,33 @@ module Observation:
         RhEvidenceObject.GitLog
 
     def rh_evidence_links_push(links: mutable RhEvidenceLinks&, object: RhEvidenceObject) -> void can[Memory.Allocate, Abort.Panic]:
-        inline_vec_push(links.items, RhEvidenceStoredLink{code: rh_evidence_object_code(object), start: 0, length: 0})
+        stored: RhEvidenceStoredLink = RhEvidenceStoredLink{code: rh_evidence_object_code(object), start: 0, length: 0}
+        if links.inline_count < RH_INLINE_EVIDENCE_LINKS:
+            links.inline_items[links.inline_count] <- stored
+            links.inline_count <- links.inline_count + 1
+        else:
+            links.overflow.push(stored)
 
     def rh_evidence_links_push_external(links: mutable RhEvidenceLinks&, locator: sview) -> void can[Memory.Allocate, Abort.Panic]:
         start: usize = links.locators.count
         locator_length: usize = string_view_len(locator).usize()
         links.locators.extend(locator)
-        inline_vec_push(links.items, RhEvidenceStoredLink{code: 5, start: start, length: locator_length})
+        stored: RhEvidenceStoredLink = RhEvidenceStoredLink{code: 5, start: start, length: locator_length}
+        if links.inline_count < RH_INLINE_EVIDENCE_LINKS:
+            links.inline_items[links.inline_count] <- stored
+            links.inline_count <- links.inline_count + 1
+        else:
+            links.overflow.push(stored)
 
     def rh_evidence_links_count(links: RhEvidenceLinks) -> usize:
-        inline_vec_count(links.items)
+        links.inline_count + links.overflow.count
 
     def rh_evidence_links_get(links: RhEvidenceLinks, index: usize) -> RhEvidenceObject:
-        rh_evidence_object_from_code(inline_vec_get(links.items, index).code)
+        stored: RhEvidenceStoredLink = links.inline_items[index] if index < links.inline_count else links.overflow[index - links.inline_count]
+        rh_evidence_object_from_code(stored.code)
 
     def rh_evidence_links_get_link(links: RhEvidenceLinks, index: usize) -> RhEvidenceLink:
-        stored: RhEvidenceStoredLink = inline_vec_get(links.items, index)
+        stored: RhEvidenceStoredLink = links.inline_items[index] if index < links.inline_count else links.overflow[index - links.inline_count]
         locator: sview = string_view_slice(bytes_view(links.locators), stored.start, stored.start + stored.length) if stored.code == 5 else string_view_slice(bytes_view(links.locators), 0, 0)
         RhEvidenceLink{object: rh_evidence_object_from_code(stored.code), locator: locator}
 
@@ -185,13 +197,13 @@ module Observation:
         count: usize = rh_evidence_links_count(links)
         return false if count > RH_MAX_EVIDENCE_LINKS
         for index in 0..<count |index, links|:
-            item: RhEvidenceStoredLink = inline_vec_get(links.items, index)
+            item: RhEvidenceStoredLink = links.inline_items[index] if index < links.inline_count else links.overflow[index - links.inline_count]
             code: u8 = item.code
             return false if code > 16
             return false if code == 5 and (item.length == 0 or item.start + item.length > links.locators.count)
             return false if code != 5 and item.length != 0
             for prior in 0..<index |prior, index, links|:
-                previous: RhEvidenceStoredLink = inline_vec_get(links.items, prior)
+                previous: RhEvidenceStoredLink = links.inline_items[prior] if prior < links.inline_count else links.overflow[prior - links.inline_count]
                 return false if code == previous.code and code != 5
                 return false if code == 5 and item.length == previous.length and string_views_eq(string_view_slice(bytes_view(links.locators), item.start, item.start + item.length), string_view_slice(bytes_view(links.locators), previous.start, previous.start + previous.length)) == 1
         true
@@ -342,10 +354,10 @@ module Observation:
         completeness: RhCompleteness = RhCompleteness.Partial if status == RH_ST_PARTIAL else RhCompleteness.Unknown
         freshness: RhFreshness = RhFreshness.Stale if status == RH_ST_STALE else RhFreshness.Unknown
         quality: RhQualityDimensions = RhQualityDimensions{completeness: completeness, freshness: freshness, validity: RhValidity.Unknown, provenance: RhProvenanceQuality.Unknown}
-        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality, evidence: rh_evidence_links_empty() can Global{Read, Write}}
+        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality, evidence: rh_evidence_links_empty()}
 
     def rh_observation_make_with_quality(status: u8, value: RhMetricValue, has_incompleteness: bool, quality: RhQualityDimensions) -> RhObservation:
-        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality, evidence: rh_evidence_links_empty() can Global{Read, Write}}
+        RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality, evidence: rh_evidence_links_empty()}
 
     def rh_observation_make_with_evidence(status: u8, value: RhMetricValue, has_incompleteness: bool, quality: RhQualityDimensions, evidence: RhEvidenceLinks) -> RhObservation:
         RhObservation{status: status, value: value, has_incompleteness: has_incompleteness, quality: quality, evidence: evidence}

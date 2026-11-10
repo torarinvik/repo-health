@@ -585,18 +585,20 @@ module Git:
 
     private:
         const RH_GITHUB_REST_API_VERSION: u8& = "2026-03-10"
+        const RH_V6_WORD_COUNT: usize = 8
 
         # Parse colon-delimited IPv6 hextets into a bounded word list. Empty
         # parts, non-hex bytes, overlong hextets, and more than eight words fail.
-        def rh_v6_parse_groups(ip: cstr, start: usize, end: usize, words: mutable InlineVec[i64, 8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_v6_parse_groups(ip: cstr, start: usize, end: usize, words: mutable i64[8]&, word_count: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return true if start == end
             value: mutable i64 = 0
             digits: mutable i64 = 0
-            while i < end |i: usize = start, ip, end, words, value, digits|:
+            while i < end |i: usize = start, ip, end, words, word_count, value, digits|:
                 b: u8 = ip[i]
                 if b == 58:
-                    return false if digits == 0 or words.len >= 8
-                    inline_vec_push[i64, 8](words, value)
+                    return false if digits == 0 or word_count[0] >= RH_V6_WORD_COUNT
+                    words[word_count[0]] <- value
+                    word_count[0] <- word_count[0] + 1
                     value <- 0
                     digits <- 0
                 else:
@@ -611,13 +613,14 @@ module Git:
                     digits <- digits + 1
                     return false if digits > 4
                 i <- i + 1
-            return false if digits == 0 or words.len >= 8
-            inline_vec_push[i64, 8](words, value)
+            return false if digits == 0 or word_count[0] >= RH_V6_WORD_COUNT
+            words[word_count[0]] <- value
+            word_count[0] <- word_count[0] + 1
             true
 
         # Validate both compressed and full IPv6 forms. The input bound and
         # eight-word output cap keep parsing constant-sized for attacker input.
-        def rh_v6_parse(ip: cstr, length: usize, words: mutable InlineVec[i64, 8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def rh_v6_parse(ip: cstr, length: usize, words: mutable i64[8]&, word_count: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if length < 2 or length > 39
             compression: mutable i64 = -1
             while i + 1 < length |i: usize = 0, ip, length, compression|:
@@ -628,24 +631,29 @@ module Git:
                 else:
                     i <- i + 1
             if compression < 0:
-                return false if not rh_v6_parse_groups(ip, 0, length, words)
-                return words.len == 8
-            left: mutable InlineVec[i64, 8] = inline_vec[i64, 8](&perm_arena)
-            right: mutable InlineVec[i64, 8] = inline_vec[i64, 8](&perm_arena)
+                return false if not rh_v6_parse_groups(ip, 0, length, words, word_count)
+                return word_count[0] == RH_V6_WORD_COUNT
+            left: mutable i64[8] = zeroed
+            left_count: mutable usize = 0
+            right: mutable i64[8] = zeroed
+            right_count: mutable usize = 0
             left_end: usize = compression.usize()
             right_start: usize = left_end + 2
-            return false if not rh_v6_parse_groups(ip, 0, left_end, left)
-            return false if not rh_v6_parse_groups(ip, right_start, length, right)
-            return false if left.len + right.len >= 8
-            while i < left.len |i: usize = 0, left, words|:
-                inline_vec_push[i64, 8](words, inline_vec_get[i64, 8](left, i))
+            return false if not rh_v6_parse_groups(ip, 0, left_end, left, &left_count)
+            return false if not rh_v6_parse_groups(ip, right_start, length, right, &right_count)
+            return false if left_count + right_count >= RH_V6_WORD_COUNT
+            while i < left_count |i: usize = 0, left, words, word_count|:
+                words[word_count[0]] <- left[i]
+                word_count[0] <- word_count[0] + 1
                 i <- i + 1
-            zero_count: usize = 8 - left.len - right.len
-            while i < zero_count |i: usize = 0, words|:
-                inline_vec_push[i64, 8](words, 0)
+            zero_count: usize = RH_V6_WORD_COUNT - left_count - right_count
+            while i < zero_count |i: usize = 0, words, word_count|:
+                words[word_count[0]] <- 0
+                word_count[0] <- word_count[0] + 1
                 i <- i + 1
-            while i < right.len |i: usize = 0, right, words|:
-                inline_vec_push[i64, 8](words, inline_vec_get[i64, 8](right, i))
+            while i < right_count |i: usize = 0, right, words, word_count|:
+                words[word_count[0]] <- right[i]
+                word_count[0] <- word_count[0] + 1
                 i <- i + 1
             true
 
@@ -669,21 +677,22 @@ module Git:
                 return false if not rh_parse_v4(ip, 0, n, &a0, &a1, &a2, &a3)
                 return false if rh_v4_blocked(a0, a1, a2)
                 return true
-            words: mutable InlineVec[i64, 8] = inline_vec[i64, 8](&perm_arena)
-            return false if not rh_v6_parse(ip, n, words)
-            w0: i64 = inline_vec_get[i64, 8](words, 0)
-            w1: i64 = inline_vec_get[i64, 8](words, 1)
-            w5: i64 = inline_vec_get[i64, 8](words, 5)
-            w7: i64 = inline_vec_get[i64, 8](words, 7)
+            words: mutable i64[8] = zeroed
+            word_count: mutable usize = 0
+            return false if not rh_v6_parse(ip, n, words, &word_count)
+            w0: i64 = words[0]
+            w1: i64 = words[1]
+            w5: i64 = words[5]
+            w7: i64 = words[7]
             zero_prefix: bool =
                 while i < 7 |zero: bool = true, i: usize = 0, words| -> zero:
-                    if inline_vec_get[i64, 8](words, i) != 0:
+                    if words[i] != 0:
                         zero <- false
                     i <- i + 1
             return false if zero_prefix and (w7 == 0 or w7 == 1)
             mapped_prefix: bool =
                 while i < 5 |mapped: bool = true, i: usize = 0, words| -> mapped:
-                    if inline_vec_get[i64, 8](words, i) != 0:
+                    if words[i] != 0:
                         mapped <- false
                     i <- i + 1
             return false if mapped_prefix and w5 == 0xffff
@@ -707,7 +716,7 @@ module Git:
             file_size: i64 = Base::rh_file_size(resolved_file)
             return false if file_size <= 0 or file_size > 2048
             addresses: mutable darray[u8] = []
-            return false if Base::rh_io_read(resolved_file, addresses) != file_size
+            return false if (Base::rh_io_read(resolved_file, addresses) can Global{Read, Write}) != file_size
             Base::rh_push_cstr(pin, host)
             Base::rh_push_text(pin, ":443:")
             address_count: mutable i64 = 0
@@ -793,7 +802,7 @@ module Git:
                 _ = remove_file(resolved_ptr)
                 return false
 
-            pin_valid: bool = rh_append_resolved_addresses(resolved_ptr, host_ptr, pin)
+            pin_valid: bool = rh_append_resolved_addresses(resolved_ptr, host_ptr, pin) can Global{Read, Write}
             _ = remove_file(resolved_ptr)
             pin_valid
 
@@ -892,7 +901,7 @@ module Git:
             api_auth: bool = api_auth_state == 1
             pin: mutable darray[u8] = []
             if Base::rh_cstr_starts_with(url, "https://"):
-                return Process::rh_setup_error(22) if not rh_prepare_https_pin(url, err_file, pin)
+                return Process::rh_setup_error(22) if not (rh_prepare_https_pin(url, err_file, pin) can Global{Read, Write})
             args: mutable darray[u8] = []
             input: mutable darray[u8] = []
             rh_https_get_args(args, input, url, body_file, pin, max_secs, api_kind, api_auth)
@@ -944,7 +953,7 @@ module Git:
             return Process::rh_setup_error(22) if not rh_arg_safe(err_file)
             return Process::rh_setup_error(22) if not rh_fetch_guard(url)
             pin: mutable darray[u8] = []
-            return Process::rh_setup_error(22) if not rh_prepare_https_pin(url, err_file, pin)
+            return Process::rh_setup_error(22) if not (rh_prepare_https_pin(url, err_file, pin) can Global{Read, Write})
             args: mutable darray[u8] = []
             rh_osv_post_args(args, url, request_file, body_file, pin)
             args.push(0)
@@ -970,31 +979,31 @@ module Git:
         const RH_OSV_VULNERABILITY_GET_MAX_SECS: i64 = 10
 
         def rh_run_https_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 0)
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 0) can Global{Read, Write}
 
         # GitHub's REST API requires an explicit supported-version header for
         # stable interpretation. The endpoint remains caller-supplied under the
         # same HTTPS/DNS/redirect/size policy; optional bearer auth is scoped to
         # the exact api.github.com host.
         def rh_run_github_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 1)
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 1) can Global{Read, Write}
 
         # GitLab API authentication uses a distinct header and exact host.
         def rh_run_gitlab_api_get_result(url: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return Process::rh_setup_error(22) if not Base::rh_cstr_starts_with(url, "https://gitlab.com/api/v4/")
-            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 2)
+            rh_run_https_get_with_timeout_result(url, body_file, code_file, err_file, RH_FETCH_MAX_SECS, 2) can Global{Read, Write}
 
         # Run a single bounded JSON package/version query to OSV. The endpoint
         # is fixed here, so this POST cannot be redirected to a caller URL. DNS
         # answers are validated as a complete public set and pinned; curl config,
         # proxies, redirects, oversized bodies, and long hangs are rejected.
         def rh_run_osv_query_result(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_osv_post_result("https://api.osv.dev/v1/query", request_file, body_file, code_file, err_file)
+            rh_run_osv_post_result("https://api.osv.dev/v1/query", request_file, body_file, code_file, err_file) can Global{Read, Write}
 
         # Run a bounded ordered graph batch. Callers cannot choose the endpoint;
         # querybatch is kept separate because its response contains IDs only.
         def rh_run_osv_query_batch_result(request_file: cstr, body_file: cstr, code_file: cstr, err_file: cstr) -> Process::RhProcessResult can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
-            rh_run_osv_post_result("https://api.osv.dev/v1/querybatch", request_file, body_file, code_file, err_file)
+            rh_run_osv_post_result("https://api.osv.dev/v1/querybatch", request_file, body_file, code_file, err_file) can Global{Read, Write}
 
         # Send one bounded JSON webhook request to an operator-configured HTTPS
         # destination. The complete DNS set is checked and pinned, curl config
@@ -1022,7 +1031,7 @@ module Git:
                 return Process::rh_setup_error(22) if payload[i] < 32 or payload[i] > 126
                 i <- i + 1
             pin: mutable darray[u8] = []
-            return Process::rh_setup_error(22) if not rh_prepare_https_pin(url, err_file, pin)
+            return Process::rh_setup_error(22) if not (rh_prepare_https_pin(url, err_file, pin) can Global{Read, Write})
             args: mutable darray[u8] = []
             Process::rh_append_arg(args, "curl")
             Process::rh_append_arg(args, "--disable")
@@ -1089,7 +1098,7 @@ module Git:
             url.extend(bytes_view(advisory_id))
             url.push(0)
             url_ptr: cstr = (&url[0]).cast[cstr] can Unsafe.PointerCast
-            rh_run_https_get_with_timeout_result(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS, 0)
+            rh_run_https_get_with_timeout_result(url_ptr, body_file, code_file, err_file, RH_OSV_VULNERABILITY_GET_MAX_SECS, 0) can Global{Read, Write}
 
         # Run a bounded bare clone for https remotes (M01-03): no worktree, no
         # checkout (so no smudge/clean filters, no hooks execute), blob-less and
@@ -1102,7 +1111,7 @@ module Git:
             return Process::rh_setup_error(22) if not rh_arg_safe(err_file)
             return Process::rh_setup_error(22) if not rh_fetch_arg_safe(url) or not rh_fetch_guard(url)
             pin: mutable darray[u8] = []
-            return Process::rh_setup_error(22) if not rh_prepare_https_pin(url, err_file, pin)
+            return Process::rh_setup_error(22) if not (rh_prepare_https_pin(url, err_file, pin) can Global{Read, Write})
             pin_ptr: cstr = (&pin[0]).cast[cstr] can Unsafe.PointerCast
             resolve_option: mutable darray[u8] =
                 option: mutable darray[u8] = []

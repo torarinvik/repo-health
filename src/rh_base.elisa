@@ -47,7 +47,7 @@ module Base:
 
         # Byte helpers on NUL-terminated cstr.
         def rh_cstr_starts_with(s: cstr, prefix: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
-            while true |matches: bool = false, i: usize = 0, s, prefix| -> matches:
+            while true |matches: bool = false, i: usize = 0| -> matches:
                 prefix_byte: u8 = prefix[i]
                 break true if prefix_byte == 0
                 break false if s[i] != prefix_byte
@@ -59,7 +59,7 @@ module Base:
         # True when a "scheme://" prefix precedes any '/'. Used to reject
         # non-https remotes without parsing URLs.
         def rh_cstr_has_scheme(s: cstr) -> bool can[Memory.Allocate, Abort.Panic]:
-            while true |has_scheme: bool = false, i: usize = 0, s| -> has_scheme:
+            while true |has_scheme: bool = false, i: usize = 0| -> has_scheme:
                 b: u8 = s[i]
                 break false if b == 0
                 has_scheme <- s[i + 1] == 47 and s[i + 2] == 47 if b == 58
@@ -257,29 +257,33 @@ module Base:
             path.pop()
             created
 
+    private:
+        def rh_parse_i64_result(data: darray[u8]&, start: usize, end: usize) -> (value: i64, valid: bool) can[Memory.Allocate, Abort.Panic]:
+            return (0, false) if start >= end or end > data.count
+            negative: bool = data[start] == 45
+            digits_start: usize = start + 1 if negative else start
+            return (0, false) if digits_start >= end
+            magnitude: mutable i64 = 0
+            cursor: mutable usize = digits_start
+            while cursor < end |cursor, magnitude, data, end|:
+                digit: u8 = data[cursor]
+                return (0, false) if digit < 48 or digit > 57
+                place: i64 = (digit - 48).i64()
+                return (0, false) if magnitude > 9223372036854775807 / 10
+                magnitude <- magnitude * 10
+                return (0, false) if magnitude > 9223372036854775807 - place
+                magnitude <- magnitude + place
+                cursor <- cursor + 1
+            parsed: i64 = -magnitude if negative else magnitude
+            (parsed, true)
+
+    public:
         # Parse decimal [start, end) from byte buffer. ok_out: 1 valid, 0 invalid.
         # Optional leading '-'; empty span or any other byte is invalid.
         def rh_parse_i64(data: darray[u8]&, start: usize, end: usize, ok_out: mutable i64&) -> i64 can[Memory.Allocate, Abort.Panic]:
             ok_out[0] <- 0
-            return 0 if start >= end
-            return 0 if end > data.count
-            parsed: i64 =
-                negative: bool = data[start] == 45
-                digits_start: usize = start + 1 if negative else start
-                return 0 if digits_start >= end
-                magnitude: i64 =
-                    while cursor < end |magnitude: i64 = 0, cursor: usize = digits_start| -> magnitude:
-                        place: i64 = |cursor|
-                            digit: u8 = data[cursor]
-                            return 0 if digit < 48 or digit > 57
-                            (digit - 48).i64()
-                        return 0 if magnitude > 9223372036854775807 / 10
-                        magnitude <- magnitude * 10
-                        return 0 if magnitude > 9223372036854775807 - place
-                        magnitude <- magnitude + place
-                        cursor <- cursor + 1
-                ok_out[0] <- 1
-                -magnitude if negative else magnitude
+            parsed, valid = rh_parse_i64_result(data, start, end)
+            ok_out[0] <- 1 if valid
             parsed
 
         # Index of byte value at or after start; -1 when absent.
@@ -299,9 +303,9 @@ module Base:
         # ASCII-only case-insensitive comparison against a NUL-terminated literal.
         def rh_bytes_equal_literal_ascii_ci(data: darray[u8]&, start: i64, end: i64, literal: u8&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if start < 0 or end < start or end > data.count.i64()
-            width: i64 = strlen(literal).i64()
+            width: i64 = rh_cstr_len(literal)
             return false if end - start != width
-            while i < width |matches: bool = true, i: i64 = 0, data, start, literal, width| -> matches:
+            while i < width |matches: bool = true, i: i64 = 0| -> matches:
                 observed: u8 = data[(start + i).usize()]
                 expected: u8 = literal[i.usize()]
                 observed_lower: u8 = observed + 32 if observed >= 65 and observed <= 90 else observed
