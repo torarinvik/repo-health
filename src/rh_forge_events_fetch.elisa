@@ -159,9 +159,60 @@ module ForgeEventsFetch:
             next_out.extend(bytes_view(cursor))
             true
 
-        def rh_fef_fetch_bitbucket_pages(repository: cstr, capability: cstr, max_pages: i64, evidence_base: cstr, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_cursor_out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        def rh_fef_bitbucket_resume_cursor(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, pagination: i64, key: u8&, repository: cstr, capability: cstr, cursor_out: mutable darray[u8]&, complete_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            page: i64 = Json::rh_json_obj_get(nodes, texts, pagination, key)
+            return false if page < 0 or nodes[page.usize()].kind != Json::RH_JSON_OBJ
+            complete_idx: i64 = Json::rh_json_obj_get(nodes, texts, page, "complete")
+            next_idx: i64 = Json::rh_json_obj_get(nodes, texts, page, "next")
+            return false if complete_idx < 0 or nodes[complete_idx.usize()].kind != Json::RH_JSON_BOOL or next_idx < 0
+            if Json::rh_json_is_true(nodes, raw, complete_idx):
+                return false if nodes[next_idx.usize()].kind != Json::RH_JSON_NULL
+                complete_out[0] <- 1
+                return true
+            return false if nodes[next_idx.usize()].kind != Json::RH_JSON_STR
+            cursor_start: mutable i64 = 0
+            cursor_end: mutable i64 = 0
+            return false if not Json::rh_json_str_span(nodes, next_idx, &cursor_start, &cursor_end) or cursor_end <= cursor_start or cursor_end - cursor_start > 4096
+            cursor: mutable darray[u8] = []
+            for index in cursor_start.usize()..<cursor_end.usize() |index, texts, cursor|:
+                cursor.push(texts[index])
+            cursor.push(0)
+            cursor_ptr: cstr = (&cursor[0]).cast[cstr] can Unsafe.PointerCast
+            return false if not ForgeEventsFetch::rh_fef_bitbucket_cursor_valid(cursor_ptr, repository, capability)
+            cursor_out.extend(bytes_view(cursor))
+            complete_out[0] <- 0
+            true
+
+        def rh_fef_bitbucket_resume(previous: darray[u8]&, repository: cstr, issue_cursor_out: mutable darray[u8]&, issue_complete_out: mutable i64&, proposal_cursor_out: mutable darray[u8]&, proposal_complete_out: mutable i64&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            nodes: mutable darray[Json::RhJsonNode] = []
+            texts: mutable darray[u8] = []
+            root: i64 = Json::rh_json_parse(previous, nodes, texts)
+            return false if root < 0 or nodes[root.usize()].kind != Json::RH_JSON_OBJ
+            schema_start: mutable i64 = 0
+            schema_end: mutable i64 = 0
+            return false if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "schema"), &schema_start, &schema_end) or not Base::rh_bytes_equal_literal(texts, schema_start, schema_end, "rh-forge-events-result/1")
+            provider_start: mutable i64 = 0
+            provider_end: mutable i64 = 0
+            return false if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, root, "provider"), &provider_start, &provider_end) or not Base::rh_bytes_equal_literal(texts, provider_start, provider_end, "bitbucket")
+            scope_idx: i64 = Json::rh_json_obj_get(nodes, texts, root, "scope")
+            return false if scope_idx < 0 or nodes[scope_idx.usize()].kind != Json::RH_JSON_OBJ
+            scope_start: mutable i64 = 0
+            scope_end: mutable i64 = 0
+            return false if not Json::rh_json_str_span(nodes, Json::rh_json_obj_get(nodes, texts, scope_idx, "repository"), &scope_start, &scope_end) or not ForgeEventsFetch::rh_fef_span_matches_cstr(texts, scope_start, scope_end, repository)
+            pagination: i64 = Json::rh_json_obj_get(nodes, texts, root, "pagination")
+            return false if pagination < 0 or nodes[pagination.usize()].kind != Json::RH_JSON_OBJ
+            return false if not ForgeEventsFetch::rh_fef_bitbucket_resume_cursor(nodes, previous, texts, pagination, "issues", repository, "issues", issue_cursor_out, &issue_complete_out[0])
+            ForgeEventsFetch::rh_fef_bitbucket_resume_cursor(nodes, previous, texts, pagination, "proposals", repository, "pullrequests", proposal_cursor_out, &proposal_complete_out[0])
+
+        def rh_fef_fetch_bitbucket_pages(repository: cstr, capability: cstr, max_pages: i64, evidence_base: cstr, start_cursor: darray[u8]&, already_complete: bool, records: mutable darray[u8]&, item_total: mutable i64&, byte_total: mutable i64&, complete_out: mutable i64&, next_cursor_out: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return false if max_pages < 1 or max_pages > RH_FEF_MAX_PAGES
+            if already_complete:
+                complete_out[0] <- 1
+                return true
             url: mutable darray[u8] = ForgeEventsFetch::rh_fef_bitbucket_first_url(repository, capability)
+            if start_cursor.count > 0:
+                url.clear()
+                url.extend(bytes_view(start_cursor))
             pages_fetched: mutable i64 = 0
             complete: mutable bool = false
             while pages_fetched < max_pages and not complete |url, pages_fetched, max_pages, complete, repository, capability, evidence_base, records, item_total, byte_total, next_cursor_out|:
@@ -710,8 +761,9 @@ module ForgeEventsFetch:
         # Fetch bounded Bitbucket Cloud issue and pull-request pages. Each
         # opaque next URL is followed only after its host, repository, and
         # resource prefix match the request scope; release and review feeds are
-        # left explicitly unattempted.
-        def rh_forge_events_bitbucket_live(repository: cstr, max_pages: i64, evidence_base: cstr, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
+        # left explicitly unattempted. Resume inputs are scope-checked result
+        # segments; each output contains only newly fetched records.
+        def rh_forge_events_bitbucket_live(repository: cstr, max_pages: i64, evidence_base: cstr, previous: darray[u8]&, has_resume: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Blocking.IO, Memory.Release, Unsafe.PointerCast]:
             return -1 if not ForgeEventsFetch::rh_fef_repository_valid(repository) or max_pages < 1 or max_pages > RH_FEF_MAX_PAGES or not Git::rh_arg_safe(evidence_base)
             issues: mutable darray[u8] = []
             proposals: mutable darray[u8] = []
@@ -720,10 +772,18 @@ module ForgeEventsFetch:
             byte_total: mutable i64 = 0
             issues_complete: mutable i64 = 0
             proposals_complete: mutable i64 = 0
+            issues_start_cursor: mutable darray[u8] = []
+            proposals_start_cursor: mutable darray[u8] = []
             issues_cursor: mutable darray[u8] = []
             proposals_cursor: mutable darray[u8] = []
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_bitbucket_pages(repository, "issues", max_pages, evidence_base, issues, &issues_total, &byte_total, &issues_complete, issues_cursor)
-            return -1 if not ForgeEventsFetch::rh_fef_fetch_bitbucket_pages(repository, "pullrequests", max_pages, evidence_base, proposals, &proposals_total, &byte_total, &proposals_complete, proposals_cursor)
+            if has_resume:
+                return -2 if not ForgeEventsFetch::rh_fef_bitbucket_resume(previous, repository, issues_start_cursor, &issues_complete, proposals_start_cursor, &proposals_complete)
+            issues_already_complete: bool = has_resume and issues_complete == 1
+            proposals_already_complete: bool = has_resume and proposals_complete == 1
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_bitbucket_pages(repository, "issues", max_pages, evidence_base, issues_start_cursor, issues_already_complete, issues, &issues_total, &byte_total, &issues_complete, issues_cursor)
+            return -1 if not ForgeEventsFetch::rh_fef_fetch_bitbucket_pages(repository, "pullrequests", max_pages, evidence_base, proposals_start_cursor, proposals_already_complete, proposals, &proposals_total, &byte_total, &proposals_complete, proposals_cursor)
+            issues_attempted: bool = not issues_already_complete
+            proposals_attempted: bool = not proposals_already_complete
             captured_at: i64 = Base::rh_now()
             return -1 if captured_at < 0
             token: u8&? = getenv("RH_BITBUCKET_TOKEN")
@@ -734,11 +794,17 @@ module ForgeEventsFetch:
             Base::rh_push_text(capture, "authorized" if token != null else "not_requested")
             Base::rh_push_text(capture, "\"},\"scope\":{\"repository\":\"")
             Base::rh_push_cstr(capture, repository)
-            Base::rh_push_text(capture, "\"},\"capability_states\":{\"reviews\":\"not_attempted\"},\"issues\":[")
-            capture.extend(bytes_view(issues))
-            Base::rh_push_text(capture, "],\"proposals\":[")
-            capture.extend(bytes_view(proposals))
-            Base::rh_push_text(capture, "],\"pagination\":{\"issues\":")
+            Base::rh_push_text(capture, "\"},\"capability_states\":{\"reviews\":\"not_attempted\"")
+            Base::rh_push_text(capture, ",\"issues\":\"not_attempted\"") if not issues_attempted
+            Base::rh_push_text(capture, ",\"proposals\":\"not_attempted\"") if not proposals_attempted
+            Base::rh_push_text(capture, "}")
+            Base::rh_push_text(capture, ",\"issues\":[") if issues_attempted
+            capture.extend(bytes_view(issues)) if issues_attempted
+            Base::rh_push_text(capture, "]") if issues_attempted
+            Base::rh_push_text(capture, ",\"proposals\":[") if proposals_attempted
+            capture.extend(bytes_view(proposals)) if proposals_attempted
+            Base::rh_push_text(capture, "]") if proposals_attempted
+            Base::rh_push_text(capture, ",\"pagination\":{\"issues\":")
             ForgeEventsFetch::rh_fef_push_bitbucket_pagination(capture, issues_complete == 1, issues_cursor)
             Base::rh_push_text(capture, ",\"proposals\":")
             ForgeEventsFetch::rh_fef_push_bitbucket_pagination(capture, proposals_complete == 1, proposals_cursor)

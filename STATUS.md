@@ -13,12 +13,14 @@ fresh, verified Stage1 product is available.
 
 **Current M02 increment (2026-11-10):** Bitbucket Cloud issue and pull-request
 event acquisition is being added to `rh_cli forge events`, with bounded opaque
-cursor following, request/status/body/error evidence, and optional host-scoped
-OAuth bearer auth. AST parsing passed for the changed Elisa modules. Semantic
-checking remains unverified: the available stale Stage1 reports known errors in
-the existing forge-fetch dependencies, and the full CLI gate remains blocked by
-the toolchain provenance issue. A continuation command and acquisition fixtures
-remain open; no test gate is claimed.
+cursor following and `--resume-from` scope validation, request/status/body/error
+evidence, and optional host-scoped OAuth bearer auth. Each result is one segment;
+segment merging and acquisition fixtures remain open. Isolated AST parsing passed
+for the fetch and dispatch modules. Semantic checking remains unverified: the
+available stale Stage1 reports mutability, region, and effect diagnostics across
+the current fetch, roles, and hash sources; the root CLI AST also fails on parser
+constructs in unrelated distribution modules. The full CLI gate remains blocked
+by the toolchain provenance issue. No test gate is claimed.
 
 ## Milestones
 

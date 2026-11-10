@@ -205,7 +205,7 @@ def rh_cli_usage(code: i32) -> i32 can[Memory.Allocate, Abort.Panic, Console, Un
     rh_cli_err("       rh_cli postgres monitor --expected-interval <seconds> --out <file> (RH_DATABASE_URL)")
     rh_cli_err("       rh_cli pilot-review --input <file> --out <file>")
     rh_cli_err("       rh_cli forge normalize --connector github|gitlab|gitea|forgejo|bitbucket (--input <file> | --url <https-or-file-url>) --out <file> [--fetched-at N]")
-    rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [review options] | --gitlab-project <group/path> [--resume-from <result>] | --bitbucket-repo <workspace/repo>) --out <file> [--max-pages N]")
+    rh_cli_err("       rh_cli forge events (--input <captured-events.json> | --github-repo <owner/repo> [review options] | --gitlab-project <group/path> [--resume-from <result>] | --bitbucket-repo <workspace/repo> [--resume-from <result>]) --out <file> [--max-pages N]")
     rh_cli_err("       rh_cli forge review-chain --input <rh-forge-review-chain-input/1> --out <file>")
     rh_cli_err("       rh_cli roles-review-chain --input <rh-forge-review-chain-result/1> --out <rh-roles-input/1>")
     rh_cli_err("       rh_cli staged-normalize --input <provider-specific staged token|rh-postgres-staged-forge-events-input/1> --out <file> [--postgres]")
@@ -5536,13 +5536,22 @@ def rh_do_forge_events_gitlab(project: cstr, out_path: cstr, max_pages: i64, res
     rh_cli_out("forge events: GitLab issues, merge requests, and releases collected")
     0
 
-def rh_do_forge_events_bitbucket(repository: cstr, out_path: cstr, max_pages: i64) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
+def rh_do_forge_events_bitbucket(repository: cstr, out_path: cstr, max_pages: i64, resume_path: cstr, has_resume: bool) -> i32 can[Memory.Allocate, Abort.Panic, Console, Unsafe.PointerCast, Blocking.IO, Memory.Release]:
     if not Git::rh_arg_safe(out_path):
         rh_cli_err("rejected forge events output path (allowlist)")
         return 3
+    previous: mutable darray[u8] = []
+    if has_resume:
+        if not Git::rh_arg_safe(resume_path) or Base::rh_io_read(resume_path, previous) < 0 or previous.count > 8388608:
+            rh_cli_err("forge events: cannot read bounded Bitbucket continuation")
+            return 4
     body: mutable darray[u8] = []
-    if ForgeEventsFetch::rh_forge_events_bitbucket_live(repository, max_pages, out_path, body) != 0:
-        rh_cli_err("forge events: Bitbucket issue/pull-request collection failed (see page evidence)")
+    fetch_status: i64 = ForgeEventsFetch::rh_forge_events_bitbucket_live(repository, max_pages, out_path, previous, has_resume, body)
+    if fetch_status != 0:
+        if fetch_status == -2:
+            rh_cli_err("forge events: Bitbucket continuation rejected: result/repository scope or cursor mismatch")
+        else:
+            rh_cli_err("forge events: Bitbucket issue/pull-request collection failed (see page evidence)")
         return 4
     body.push(10)
     if not Base::rh_io_write(out_path, body):
