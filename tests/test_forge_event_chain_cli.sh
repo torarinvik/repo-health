@@ -60,12 +60,21 @@ for name, changed in {
     "digest-mismatch": (lambda d: d["segment"].update(resumed_from_sha256="0" * 64)),
     "time-reversal": (lambda d: d.update(captured_at=1699999999)),
     "invalid-id": (lambda d: d["events"][0].update(native_id="github:301")),
+    "invalid-id-format": (lambda d: d["events"][0].update(native_id="bitbucket:issue-301")),
+    "over-limit-attempts": (lambda d: d["capabilities"]["issues"].update(attempted=10002, normalized=1, rejected=10001)),
 }.items():
     variant = copy.deepcopy(second)
     changed(variant)
     path = t / f"{name}.json"
     path.write_text(json.dumps(variant, separators=(",", ":")) + "\n")
     globals()[name] = path
+
+unsafe_repository = copy.deepcopy(first)
+unsafe_repository["scope"]["repository"] = "example?project"
+unsafe_repository["pagination"]["issues"] = {"next":None,"complete":True}
+unsafe_repository["pagination"]["proposals"] = {"next":None,"complete":True}
+unsafe_repository_path = t / "unsafe-repository.json"
+unsafe_repository_path.write_text(json.dumps(unsafe_repository, separators=(",", ":")) + "\n")
 
 cases = {
     "gap.json": [str(second_path)],
@@ -75,6 +84,9 @@ cases = {
     "digest-mismatch-input.json": [str(first_path), str(globals()["digest-mismatch"])],
     "time-reversal-input.json": [str(first_path), str(globals()["time-reversal"])],
     "invalid-id-input.json": [str(first_path), str(globals()["invalid-id"])],
+    "invalid-id-format-input.json": [str(first_path), str(globals()["invalid-id-format"])],
+    "over-limit-attempts-input.json": [str(globals()["over-limit-attempts"])],
+    "unsafe-repository-input.json": [str(unsafe_repository_path)],
 }
 for name, segments in cases.items():
     write_input(name, segments)
@@ -92,7 +104,7 @@ print("[forge-event-chain] unfinished segment remains partial with opaque cursor
 PY
 
 set +e
-for name in gap reordered wrong-scope cursor-jump digest-mismatch time-reversal invalid-id; do
+for name in gap reordered wrong-scope cursor-jump digest-mismatch time-reversal invalid-id invalid-id-format over-limit-attempts unsafe-repository; do
   "$CLI" forge events-chain --input "$T/$name-input.json" --out "$T/$name-result.json" >/dev/null 2>&1
   status=$?
   [[ "$status" -eq 4 ]] || { echo "[forge-event-chain] FAIL: accepted $name chain (exit $status)" >&2; exit 1; }

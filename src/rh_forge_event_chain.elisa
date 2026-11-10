@@ -75,6 +75,12 @@ module ForgeEventChain:
                 return false if texts[index.usize()] == 35
             true
 
+        def rh_fbc_bitbucket_native_id(texts: darray[u8]&, start: i64, end: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if end - start <= 10 or not ForgeEventChain::rh_fbc_eq(texts, start, start + 10, "bitbucket:")
+            parsed: mutable i64 = 0
+            id: i64 = Base::rh_parse_i64(texts, (start + 10).usize(), end.usize(), &parsed)
+            parsed == 1 and id > 0
+
         def rh_fbc_read_page(nodes: darray[Json::RhJsonNode]&, raw: darray[u8]&, texts: darray[u8]&, pagination: i64, key: u8&, repository: darray[u8]&, capability: u8&, cursor_out: mutable darray[u8]&, complete_out: mutable bool&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             page: i64 = Json::rh_json_obj_get(nodes, texts, pagination, key)
             return false if page < 0 or nodes[page.usize()].kind != Json::RH_JSON_OBJ
@@ -118,7 +124,9 @@ module ForgeEventChain:
                 duplicates: i64 = Json::rh_json_int(nodes, raw, duplicates_idx, &duplicates_ok)
                 count: i64 = Json::rh_json_int(nodes, raw, count_idx, &count_ok)
                 return false if attempted_ok != 1 or normalized_ok != 1 or duplicates_ok != 1 or count_ok != 1
-                return false if attempted < 0 or normalized < 0 or duplicates < 0 or count < 0 or rejected > attempted or normalized + rejected != attempted or duplicates > normalized
+                return false if attempted < 0 or normalized < 0 or duplicates < 0 or count < 0 or attempted > RH_FBC_MAX_EVENTS
+                return false if rejected > attempted or normalized > attempted or duplicates > normalized or normalized != attempted - rejected
+                return false if count != normalized - duplicates
                 out[0] <- RhFbcCapability{present: true, attempted: attempted, normalized: normalized, duplicate_replacements: duplicates, rejected: rejected, declared_count: count}
                 return true
             return false if nodes[attempted_idx.usize()].kind != Json::RH_JSON_NULL
@@ -167,7 +175,7 @@ module ForgeEventChain:
                 id_start: mutable i64 = 0
                 id_end: mutable i64 = 0
                 return false if not Json::rh_json_str_span(nodes, id_idx, &id_start, &id_end) or id_end <= id_start
-                return false if id_end - id_start <= 10 or not ForgeEventChain::rh_fbc_eq(texts, id_start, id_start + 10, "bitbucket:")
+                return false if not ForgeEventChain::rh_fbc_bitbucket_native_id(texts, id_start, id_end)
                 status_idx: i64 = Json::rh_json_obj_get(nodes, texts, child, "status")
                 status_start: mutable i64 = 0
                 status_end: mutable i64 = 0
@@ -300,6 +308,10 @@ module ForgeEventChain:
                 if repository_set:
                     return -1 if not ForgeEventChain::rh_fbc_equal_span(repository, 0, repository.count.i64(), texts, repo_start, repo_end)
                 else:
+                    repository_cstr: mutable darray[u8] = []
+                    return -1 if not ForgeEventChain::rh_fbc_span_to_cstr(texts, repo_start, repo_end, repository_cstr)
+                    repository_ptr: cstr = (&repository_cstr[0]).cast[cstr] can Unsafe.PointerCast
+                    return -1 if not Git::rh_arg_safe(repository_ptr)
                     return -1 if Base::rh_absorb_span(texts, repo_start, repo_end, repository) < 0
                     repository_set <- true
 
